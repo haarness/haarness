@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "请先打开项目，再打开指向其文件的链接。",
   "Links to network locations do not open.": "指向网络位置的链接不会打开。",
   "Only files in this project open from a link.": "只有此项目中的文件可以通过链接打开。",
+  "This file is a link to somewhere outside the project, so it does not open here.": "此文件是指向项目外位置的链接，因此无法在这里打开。",
   "This kind of link does not open in Haarness.": "此类链接无法在 Haarness 中打开。",
   "{path} was not found in this project.": "在此项目中找不到 {path}。",
   "This Haarness link could not be opened.": "无法打开此 Haarness 链接。",

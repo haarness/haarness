@@ -12394,6 +12394,90 @@ async fn auto_approves_once_without_a_prompt_and_review_asks() {
 }
 
 #[tokio::test]
+async fn a_configuration_file_edit_waits_for_a_person_even_in_auto() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-config-edit-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(workspace.join(".haarness"))
+        .await
+        .unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let providers = Arc::new(StaticProviderRegistry::new(vec![
+        Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+    ]));
+    // A person who allows every edit, as `"edit": "allow"` does.
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "edit:*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    let runtime = AgentRuntime::with_config(
+        store,
+        providers,
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(64),
+        workspace.clone(),
+        String::new(),
+        config,
+    );
+    let thread = echo_thread(&runtime).await;
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool write {"path":"notes.txt","content":"ordinary"}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.join("notes.txt").exists());
+
+    // Neither Auto nor a turn that approves its own requests answers this one.
+    let mut request = turn_request(
+        r#"!tool write {"path":".haarness/haarness.json","content":"{\"permission\":\"allow\"}"}"#,
+    );
+    request.auto_approve = true;
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    let permission = wait_permission(&runtime, thread.id).await;
+    let pending = runtime
+        .pending_permissions()
+        .into_iter()
+        .find(|item| item.permission_id == permission)
+        .expect("the request waits");
+    assert_eq!(pending.permission, "edit");
+    assert_eq!(pending.patterns, vec![".haarness/haarness.json"]);
+    assert_eq!(
+        pending.allow_always,
+        Some(false),
+        "no always for a config file"
+    );
+    runtime
+        .reply_permission(
+            &permission,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(!workspace.join(".haarness/haarness.json").exists());
+    tokio::fs::remove_dir_all(workspace).await.unwrap();
+}
+
+#[tokio::test]
 async fn turning_auto_on_answers_requests_already_waiting() {
     let workspace = std::env::temp_dir().join(format!(
         "haarness-approval-release-{}",

@@ -342,6 +342,18 @@ export function Explorer() {
           : open(request.path, request),
     );
   });
+  /** A file in the tree. The server refuses a link that leads out of the
+   * project (it would show any file on the computer to anyone connected), so
+   * that refusal is said in words rather than as the server's error. */
+  async function openEntry(path: string) {
+    try {
+      await open(path);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/escapes the workspace/i.test(message)) throw error;
+      app.notify(t("This file is a link to somewhere outside the project, so it does not open here."), "blocked");
+    }
+  }
   /** A link's target: a file opens (at its line), a folder opens in the tree,
    * and anything else is named as missing rather than shown as a server error. */
   async function openLink(path: string, line?: number) {
@@ -596,7 +608,7 @@ export function Explorer() {
                 version={version()}
                 hidden={true}
                 selected={selected()}
-                open={(path) => app.run(() => open(path))}
+                open={(path) => app.run(() => openEntry(path))}
                 expanded={(path) => expanded().has(path)}
                 toggle={toggle}
               />

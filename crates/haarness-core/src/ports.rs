@@ -572,6 +572,11 @@ pub trait ToolInvoker: Send + Sync {
     fn resolve_name(&self, name: &str) -> String {
         name.to_owned()
     }
+    /// The rules this call's agent reads files under, so a search can leave
+    /// out a file a `read` rule denies instead of returning its lines or name.
+    fn read_rules(&self) -> Option<crate::PermissionEngine> {
+        None
+    }
     async fn invoke(&self, name: &str, arguments: Value) -> CoreResult<ToolOutput>;
     async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {
         self.invoke("bash", serde_json::json!({"command":command}))

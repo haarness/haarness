@@ -256,10 +256,10 @@ pub fn level_command(
     Ok(())
 }
 
-/// Known secret shapes removed from one log line. The one call to the
-/// scrubber, so it can move without touching the export.
+/// Known secret shapes removed from one log line, as Haarness's own log
+/// lines and hook output get them.
 fn scrub(line: &str) -> String {
-    haarness_server::redact_log_text(line)
+    haarness_core::redact::text(line)
 }
 
 /// `haarness logs export [--output PATH] [--full]`.

@@ -159,6 +159,16 @@ pub(crate) fn create_parents(root: &Path, value: &str) -> Result<(), Failure> {
     inside(&root, &existing.canonicalize().map_err(io(FOLDER_GONE))?)?;
     fs::create_dir_all(&parent).map_err(bad)
 }
+/// `resolve` for a read: the real path the check approved, so a link swapped
+/// for one that leads out of the workspace after the check is not followed
+/// by the read. Renames and deletes keep `resolve`, which names the link.
+pub(crate) fn resolve_for_read(root: &Path, value: &str) -> Result<PathBuf, Failure> {
+    let relative = relative(value)?;
+    let root = root.canonicalize().map_err(bad)?;
+    let canonical = root.join(relative).canonicalize().map_err(io(FILE_GONE))?;
+    inside(&root, &canonical)?;
+    Ok(canonical)
+}
 pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
     let relative = relative(value)?;
     let root = root.canonicalize().map_err(bad)?;
@@ -264,11 +274,11 @@ pub async fn read_file(
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileContent>, Failure> {
     tokio::task::spawn_blocking(move || {
-        let path = resolve(&state.workspace, &query.path, false)?;
-        let data = bytes(&path)?;
+        let real = resolve_for_read(&state.workspace, &query.path)?;
+        let data = bytes(&real)?;
         let revision = hash(&data);
         let size = data.len() as u64;
-        let mime = match path
+        let mime = match Path::new(&query.path)
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
@@ -521,6 +531,30 @@ mod tests {
             assert!(resolve(&root, "metadata", false).is_err());
         }
         fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_read_opens_the_file_the_check_approved_even_if_the_link_changes() {
+        let base =
+            std::env::temp_dir().join(format!("haarness-read-race-{}", uuid::Uuid::now_v7()));
+        let root = base.join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("inside.txt"), "INSIDE").unwrap();
+        fs::write(base.join("outside.txt"), "OUTSIDE").unwrap();
+        std::os::unix::fs::symlink("inside.txt", root.join("notes")).unwrap();
+        let checked = resolve_for_read(&root, "notes").unwrap();
+        let named = resolve(&root, "notes", false).unwrap();
+        // The link now leads out of the workspace, after the check passed.
+        fs::remove_file(root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside.txt"), root.join("notes")).unwrap();
+        assert_eq!(bytes(&checked).unwrap(), b"INSIDE");
+        // The link's own name would be followed to wherever it leads now.
+        assert_eq!(bytes(&named).unwrap(), b"OUTSIDE");
+        assert_eq!(
+            resolve_for_read(&root, "notes").unwrap_err(),
+            bad("Path escapes the workspace")
+        );
+        fs::remove_dir_all(base).unwrap();
     }
     #[cfg(unix)]
     #[test]

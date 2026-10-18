@@ -8,10 +8,16 @@
    rule covers, and a Cloud action that asks every time is refused at once.
 4. A workflow's agents get no SessionStart hook; the chats people start do.
 5. A plugin's workflow asked for by its bare name names the invocation to use.
+6. (October 18) A list through a link meets the rules for the folder it lists, and grep and glob
+   leave out a file a read rule denies; an edit of the
+   project's own haarness.json asks a person even under `"edit": "allow"`, `--yolo` and a schedule,
+   unless a rule names the file; `$HOME/...` in a shell command asks for the home folder; code
+   frontmatter (`---js`) is skipped while `---json` keeps an agent's limits.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
-of paths, headless, schedules, session_start and plugin_workflow). No model is called.
+of paths, headless, schedules, session_start, plugin_workflow, config_files, home_variable and
+frontmatter). No model is called.
 """
 import json
 import os
@@ -111,6 +117,14 @@ def case_paths():
     (paths / 'build').mkdir()
     output = haarness(paths, 'run', '!tool list {"path":"build/"}').stdout
     assert "denied by permission rule 'list:build'" in output, output
+    (paths / 'alias').symlink_to('build')
+    output = haarness(paths, 'run', '!tool list {"path":"alias"}').stdout
+    assert "denied by permission rule 'list:build'" in output, output
+    # Searches leave out what a read rule denies, and say how many.
+    output = haarness(paths, 'run', '!tool grep {"pattern":"TOPSECRET"}').stdout
+    assert 'TOPSECRET-VALUE' not in output and '(skipped 1 file a read rule denies)' in output, output
+    output = haarness(paths, 'run', '!tool glob {"pattern":"**/*.txt"}').stdout
+    assert 'secrets/key.txt' not in output and '(skipped 1 file a read rule denies)' in output, output
     (paths / 'src').mkdir()
     (paths / 'src' / 'old.rs').write_text('a\n')
     for patch in ('*** Begin Patch\n*** Add File: src/../generated/b.rs\n+b\n*** End Patch',
@@ -215,7 +229,72 @@ def case_plugin_workflow():
     passed('a bare plugin workflow name points to shipping:audit')
 
 
-CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow']}
+def case_config_files():
+    """The project's own configuration asks a person before the agent changes it."""
+    guarded = project('config-files', {'permission': {'edit': 'allow', 'bash': 'ask'}})
+    original = (guarded / 'haarness.json').read_text()
+    widen = json.dumps({'path': 'haarness.json', 'content': json.dumps({'permission': {'bash': 'allow'}})})
+    for flags in ([], ['--yolo']):
+        result = haarness(guarded, 'run', *flags, f'!tool write {widen}', check=False)
+        assert result.returncode != 0, result.stdout
+        assert 'which always needs an answer, and nobody can give one in this run' in result.stderr, result.stderr
+        assert (guarded / 'haarness.json').read_text() == original, 'the agent rewrote haarness.json'
+    (guarded / 'notes.json').symlink_to('haarness.json')
+    linked = json.dumps({'path': 'notes.json', 'content': '{}'})
+    result = haarness(guarded, 'run', f'!tool write {linked}', check=False)
+    assert result.returncode != 0 and (guarded / 'haarness.json').read_text() == original, result.stdout
+    # Ordinary files still follow `"edit": "allow"`.
+    haarness(guarded, 'run', '!tool write {"path":"src/ok.txt","content":"ok"}')
+    assert (guarded / 'src' / 'ok.txt').read_text() == 'ok'
+    passed('an edit of haarness.json, also through a link and with --yolo, stops for a person under "edit": "allow"')
+    haarness(guarded, 'schedule', 'add', '--name', 'widen', '--every', '1d', '--prompt', f'!tool write {widen}')
+    run = json.loads(haarness(guarded, 'schedule', 'run', 'widen', '--json', timeout=60).stdout)
+    assert run['status'] == 'success', run
+    assert "'edit:haarness.json' needs the user's approval every time, and this scheduled run cannot ask" in run['response'], run
+    assert (guarded / 'haarness.json').read_text() == original
+    assert api(connect(guarded), '/permissions') == [], 'a scheduled run left an approval waiting'
+    passed('a scheduled run is refused the edit at once and leaves nothing waiting')
+    named = project('config-named', {'permission': {'edit': {'*': 'allow', 'pkg/haarness.json': 'allow'}}})
+    nested = json.dumps({'path': 'pkg/haarness.json', 'content': '{"model":"echo/echo-1"}'})
+    haarness(named, 'run', f'!tool write {nested}')
+    assert (named / 'pkg' / 'haarness.json').exists()
+    passed('a rule naming the file lets the edit run')
+
+
+def case_home_variable():
+    """A shell command that writes under $HOME asks for that folder."""
+    home_project = project('home-variable', {'permission': {'bash': 'allow'}})
+    target = home / 'outside-home-variable.txt'
+    for command in ['echo x > $HOME/outside-home-variable.txt', 'touch "${HOME}/outside-home-variable.txt"']:
+        result = haarness(home_project, 'run', '!tool bash ' + json.dumps({'command': command}), check=False)
+        assert result.returncode != 0, result.stdout
+        assert 'outside the project' in result.stderr or 'external' in result.stderr, result.stderr
+        assert str(home) in result.stderr, result.stderr
+        assert not target.exists(), f'{command} wrote outside the project without asking'
+    passed('$HOME and ${HOME} in a shell command ask for the home folder')
+
+
+def case_frontmatter():
+    """Frontmatter is YAML or JSON, never code."""
+    front = project('frontmatter', {})
+    agents = front / '.haarness' / 'agents'
+    agents.mkdir(parents=True)
+    (agents / 'limited.md').write_text('---json\n{"description": "Limited", "permission": {"bash": "deny"}}\n---\nReview only.\n')
+    (agents / 'scripted.md').write_text('---js\nmodule.exports = { description: "Scripted" }\n---\nDo anything.\n')
+    listed = json.loads(haarness(front, 'agents', '--all', '--json').stdout)
+    names = {agent.get('id') or agent.get('name') for agent in listed}
+    assert 'limited' in names, listed
+    assert 'scripted' not in names, listed
+    output = haarness(front, 'run', '--agent', 'limited', '!tool bash {"command":"echo should-not-run"}', check=False)
+    shown = output.stdout + output.stderr
+    assert 'tool bash is disabled' in shown or "is denied by permission rule 'bash:*'" in shown, shown
+    logs = '\n'.join(path.read_text(errors='replace') for path in root.rglob('*.log*') if path.is_file())
+    assert 'skipped agent' in logs and 'JavaScript frontmatter is not supported' in logs, 'no skip notice in the log'
+    passed('a ---json agent keeps its bash deny, and a ---js agent is skipped with a notice')
+
+
+CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow',
+                                                       'config_files', 'home_variable', 'frontmatter']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:
