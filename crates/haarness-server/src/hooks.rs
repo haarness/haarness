@@ -162,27 +162,9 @@ impl ConfiguredHooks {
     async fn run(&self, entry: &HookEntry, payload: &Value) -> HookOutcome {
         use tokio::io::AsyncWriteExt as _;
         use tokio::process::Command;
-        let expand = |value: &str| expand_hook_value(value, entry, &self.workspace);
-        let mut command = if entry.args.is_empty() {
-            let shell = entry.shell.as_deref().unwrap_or("sh");
-            let mut command = Command::new(shell);
-            if shell.eq_ignore_ascii_case("powershell") {
-                command.args(["-NoProfile", "-Command"]);
-                command.arg(expand(&entry.command));
-            } else {
-                // A POSIX shell expands `${CLAUDE_PROJECT_DIR}` and the other
-                // placeholders itself from the environment set below, so a
-                // folder name holding `$(…)`, a quote or a space is never
-                // read as shell syntax, as it would be if pasted in first.
-                command.arg("-lc");
-                command.arg(&entry.command);
-            }
-            command
-        } else {
-            let mut command = Command::new(expand(&entry.command));
-            command.args(entry.args.iter().map(|arg| expand(arg)));
-            command
-        };
+        let (program, arguments) = hook_invocation(entry, &self.workspace);
+        let mut command = Command::new(program);
+        command.args(arguments);
         for name in haarness_core::private_env_names() {
             command.env_remove(name);
         }
@@ -376,6 +358,56 @@ impl ConfiguredHooks {
         }
         combined
     }
+}
+
+/// The program a hook runs and its arguments. A shell reads the placeholders
+/// from the environment the hook gets (a POSIX shell's `${CLAUDE_PROJECT_DIR}`,
+/// PowerShell's `${env:CLAUDE_PROJECT_DIR}`), so a folder name holding `$(…)`,
+/// a quote or a space is never read as shell syntax, as it would be if pasted
+/// into the command text. A hook with an `args` list runs without a shell and
+/// gets the values filled in.
+fn hook_invocation(entry: &HookEntry, workspace: &std::path::Path) -> (String, Vec<String>) {
+    let expand = |value: &str| expand_hook_value(value, entry, workspace);
+    if !entry.args.is_empty() {
+        return (
+            expand(&entry.command),
+            entry.args.iter().map(|arg| expand(arg)).collect(),
+        );
+    }
+    let shell = entry.shell.as_deref().unwrap_or("sh");
+    let arguments = if shell.eq_ignore_ascii_case("powershell") {
+        vec![
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            powershell_placeholders(&entry.command),
+        ]
+    } else {
+        vec!["-lc".to_owned(), entry.command.clone()]
+    };
+    (shell.to_owned(), arguments)
+}
+
+/// The placeholders a hook may use, all set in its environment.
+const HOOK_PLACEHOLDERS: [&str; 8] = [
+    "HAARNESS_PROJECT_DIR",
+    "OPENCODE_PROJECT_DIR",
+    "CLAUDE_PROJECT_DIR",
+    "HAARNESS_PLUGIN_ROOT",
+    "OPENCODE_PLUGIN_ROOT",
+    "CLAUDE_PLUGIN_ROOT",
+    "HAARNESS_PLUGIN_DATA",
+    "CLAUDE_PLUGIN_DATA",
+];
+
+/// A PowerShell command with each `${NAME}` placeholder turned into
+/// `${env:NAME}`, which PowerShell reads from the environment the hook gets.
+/// Pasting the value in would let a folder named `a$(calc)` run `calc`.
+fn powershell_placeholders(command: &str) -> String {
+    HOOK_PLACEHOLDERS
+        .iter()
+        .fold(command.to_owned(), |command, name| {
+            command.replace(&format!("${{{name}}}"), &format!("${{env:{name}}}"))
+        })
 }
 
 fn expand_hook_value(value: &str, entry: &HookEntry, workspace: &std::path::Path) -> String {
@@ -1264,6 +1296,39 @@ mod tests {
             format!("{rendered}|{rendered}")
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn powershell_hooks_read_placeholders_from_the_environment() {
+        let command = r#"& "${CLAUDE_PROJECT_DIR}\hooks\gate.ps1" -Root '${CLAUDE_PLUGIN_ROOT}' ${HAARNESS_PROJECT_DIR} ${HOME}"#;
+        assert_eq!(
+            powershell_placeholders(command),
+            r#"& "${env:CLAUDE_PROJECT_DIR}\hooks\gate.ps1" -Root '${env:CLAUDE_PLUGIN_ROOT}' ${env:HAARNESS_PROJECT_DIR} ${HOME}"#
+        );
+        // Nothing of the folder's name reaches the command text, while an
+        // argument list still gets the value.
+        let mut entry = HookEntry {
+            event: "Stop".into(),
+            matcher: None,
+            command: command.into(),
+            args: Vec::new(),
+            shell: Some("powershell".into()),
+            timeout: Duration::from_secs(1),
+            plugin_root: None,
+            asynchronous: false,
+        };
+        let folder = std::path::Path::new(r"C:\src\a$(calc)");
+        let (program, arguments) = hook_invocation(&entry, folder);
+        assert_eq!(program, "powershell");
+        assert_eq!(arguments[..2], ["-NoProfile", "-Command"]);
+        assert!(!arguments[2].contains("calc"), "{arguments:?}");
+        assert!(
+            arguments[2].contains("${env:CLAUDE_PROJECT_DIR}"),
+            "{arguments:?}"
+        );
+        entry.command = "gate.exe".into();
+        entry.args = vec!["${CLAUDE_PROJECT_DIR}".into()];
+        assert_eq!(hook_invocation(&entry, folder).1, [r"C:\src\a$(calc)"]);
     }
 
     #[cfg(unix)]
