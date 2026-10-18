@@ -1,4 +1,5 @@
 import DOMPurify from "dompurify";
+import { loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
 import { holdRemoteImages, type RemoteImageLabels } from "./remote-images";
 
@@ -17,11 +18,12 @@ const purifier = DOMPurify(window);
 // rules would drop (`javascript:`, `vscode:`) becomes a placeholder that only
 // says it does not open. No other address may name a network path: an image
 // there would reach its host as soon as the reply is drawn, on Windows with
-// the user's sign-in.
+// the user's sign-in. Each is read as the URL parser reads it, which drops
+// tabs and newlines anywhere, so `/<TAB>/host/x.png` names one too.
 purifier.addHook("uponSanitizeAttribute", (node, data) => {
   if (!URL_ATTRIBUTES.has(data.attrName)) return;
   if (node.nodeName === "A" && data.attrName === "href") {
-    const value = data.attrValue;
+    const value = parsedAddress(data.attrValue);
     if (/^(?:(?:file|smb|afp|nfs|cifs|dav|davs|webdav|webdavs):|[a-z]:[\\/])/i.test(value))
       data.forceKeepAttr = true;
     else if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^(?:https?|mailto):/i.test(value)) {
@@ -31,8 +33,7 @@ purifier.addHook("uponSanitizeAttribute", (node, data) => {
     }
     return;
   }
-  if (data.attrValue.split(",").some((part) => /^[\\/]{2}/.test(part.trim())))
-    data.keepAttr = false;
+  if (loadsNetworkPath(data.attrValue)) data.keepAttr = false;
 });
 
 // Patch only the changed interval. Assigning textContent/innerHTML resets

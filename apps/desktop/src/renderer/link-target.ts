@@ -34,12 +34,28 @@ const refused = (reason: "network" | "outside" | "unsupported"): LinkTarget => (
 /** Two leading slashes or backslashes in any mix: `//host/share`, `\\host\share`. */
 const networkPath = (path: string) => /^[\\/]{2}/.test(path);
 
+/**
+ * An address as the URL parser reads it: without leading and trailing spaces
+ * and control characters, or any tab or newline.
+ */
+export function parsedAddress(href: string) {
+  return href.replace(/[\t\n\r]/g, "").replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
+}
+
+/**
+ * Whether an address a page loads by itself (an image's `src` or `srcset`
+ * candidate, an SVG image's `href`, a video's `poster`) names a network path,
+ * `//host/…` or `\\host\…` in any mix of slashes, which this window would
+ * resolve to `file://host/…` and reach as soon as it is drawn: on Windows
+ * with the user's sign-in. Each comma-separated part is read, so a `srcset`
+ * candidate after the first is too.
+ */
+export function loadsNetworkPath(value: string) {
+  return value.split(",").some((part) => networkPath(parsedAddress(part)));
+}
+
 export function linkTarget(href: string, place: LinkPlace): LinkTarget {
-  // Read the link the way the URL parser does: it drops leading and trailing
-  // spaces and control characters, and any tab or newline.
-  const raw = href
-    .replace(/[\t\n\r]/g, "")
-    .replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
+  const raw = parsedAddress(href);
   if (!raw || raw.startsWith("#")) return { kind: "none" };
   if (networkPath(raw)) return refused("network");
   const scheme = /^([a-z][a-z\d+.-]*):/i.exec(raw)?.[1]?.toLowerCase();

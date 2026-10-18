@@ -76,7 +76,10 @@ enum Callback {
     Accepted(CallbackParams),
     /// A request the browser sent that is not the callback (`/favicon.ico`, a probe): answer 404, keep waiting.
     Ignored(&'static str),
-    /// The callback itself failed (`error=…`, wrong state, no code): answer 400 and give up.
+    /// The callback path without this sign-in's `state`, which a web page that found the port can send:
+    /// answer 400 with a fixed page and keep waiting, so it can neither end the sign-in nor word its error.
+    Foreign,
+    /// This sign-in's callback failed (`error=…`, no code): answer 400 and give up.
     Rejected(String),
 }
 
@@ -93,8 +96,8 @@ impl Loopback {
         format!("http://127.0.0.1:{}{CALLBACK_PATH}", self.port)
     }
 
-    /// Accepts connections until one carries a valid callback (or an `error=` redirect, reported as
-    /// [`Error::Other`]); answers every request with [`CLOSE_TAB_HTML`].
+    /// Accepts connections until one carries this sign-in's `state` with a code (or with an `error=`,
+    /// reported as [`Error::Other`]); every other request is answered and the wait goes on.
     pub async fn wait_for_callback(self, expected_state: &str) -> Result<CallbackParams> {
         tokio::time::timeout(CALLBACK_TIMEOUT, self.accept_loop(expected_state))
             .await
@@ -113,16 +116,21 @@ impl Loopback {
                 let _ = stream.shutdown().await;
                 continue;
             };
+            // A browser that closes the tab early loses only its page.
             match classify(&head, expected_state) {
                 Callback::Accepted(params) => {
-                    respond(&mut stream, "200 OK", CLOSE_TAB_HTML).await?;
+                    let _ = respond(&mut stream, "200 OK", CLOSE_TAB_HTML).await;
                     return Ok(params);
                 }
                 Callback::Ignored(_) => {
-                    respond(&mut stream, "404 Not Found", "not found").await?;
+                    let _ = respond(&mut stream, "404 Not Found", "not found").await;
+                }
+                Callback::Foreign => {
+                    let page = error_page("This is not the sign-in Haarness started.");
+                    let _ = respond(&mut stream, "400 Bad Request", &page).await;
                 }
                 Callback::Rejected(reason) => {
-                    respond(&mut stream, "400 Bad Request", &error_page(&reason)).await?;
+                    let _ = respond(&mut stream, "400 Bad Request", &error_page(&reason)).await;
                     return Err(Error::Other(reason));
                 }
             }
@@ -131,8 +139,9 @@ impl Loopback {
 }
 
 /// Sorts one raw HTTP/1.1 request head (`GET /callback?code=…&state=… HTTP/1.1\r\nHost: …\r\n\r\n`).
-/// Any method but GET or any path but [`CALLBACK_PATH`] is ignored; a missing `code`, a `state` that
-/// differs from `expected_state`, or `error=<code>` rejects the sign-in.
+/// Any method but GET or any path but [`CALLBACK_PATH`] is ignored, and a `state` that is missing or
+/// differs from `expected_state` is foreign; with this sign-in's state, `error=<code>` or a missing
+/// `code` rejects the sign-in.
 fn classify(head: &str, expected_state: &str) -> Callback {
     let Some(request_line) = head.split("\r\n").next().filter(|line| !line.is_empty()) else {
         return Callback::Ignored("empty request");
@@ -171,15 +180,12 @@ fn classify(head: &str, expected_state: &str) -> Callback {
         }
     }
 
+    let Some(state) = state.filter(|state| state == expected_state) else {
+        return Callback::Foreign;
+    };
     if let Some(error) = error {
         let detail = description.map_or_else(String::new, |text| format!(": {text}"));
         return Callback::Rejected(format!("authorization failed ({error}){detail}"));
-    }
-    let Some(state) = state else {
-        return Callback::Rejected("the redirect carried no state".to_owned());
-    };
-    if state != expected_state {
-        return Callback::Rejected("the redirect carried a different state".to_owned());
     }
     let Some(code) = code.filter(|code| !code.is_empty()) else {
         return Callback::Rejected("the redirect carried no code".to_owned());
@@ -278,11 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_state_missing_code_and_errors() {
+    fn rejects_this_sign_ins_missing_code_and_errors() {
         for (target, needle) in [
-            ("/callback?code=hcc_abc&state=other", "different state"),
             ("/callback?state=st-1", "no code"),
-            ("/callback?code=hcc_abc", "no state"),
             (
                 "/callback?error=access_denied&error_description=user%20said%20no&state=st-1",
                 "access_denied",
@@ -293,6 +297,53 @@ mod tests {
             };
             assert!(error.contains(needle), "{target}: {error}");
         }
+    }
+
+    /// A web page that finds the port can send the callback path, but not this sign-in's state.
+    #[test]
+    fn a_callback_without_this_sign_ins_state_is_foreign() {
+        for target in [
+            "/callback?code=hcc_abc&state=other",
+            "/callback?code=hcc_abc",
+            "/callback?error=access_denied&error_description=PAGE_TEXT",
+            "/callback?error=access_denied&state=other",
+        ] {
+            assert_eq!(
+                classify(&head(target), "st-1"),
+                Callback::Foreign,
+                "{target}"
+            );
+        }
+    }
+
+    /// Foreign requests and probes are answered while the listener keeps waiting for the real return.
+    #[tokio::test]
+    async fn the_listener_waits_past_foreign_requests() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let loopback = Loopback::bind().await.unwrap();
+        let port = loopback.port;
+        let waiting = tokio::spawn(loopback.wait_for_callback("st-1"));
+        let send = |target: &'static str| async move {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let response = send("/callback?error=access_denied&error_description=PAGE_TEXT").await;
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(!response.contains("PAGE_TEXT"), "{response}");
+        assert!(send("/favicon.ico").await.starts_with("HTTP/1.1 404"));
+        assert!(!waiting.is_finished());
+        assert!(
+            send("/callback?code=hcc_abc&state=st-1")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+        assert_eq!(waiting.await.unwrap().unwrap().code, "hcc_abc");
     }
 
     #[test]

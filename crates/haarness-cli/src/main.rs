@@ -66,7 +66,7 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, IsTerminal as _, Read as _, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -342,6 +342,10 @@ struct ServeArgs {
     /// Internal marker used by the detached launcher.
     #[arg(long, hide = true)]
     background_child: bool,
+    /// Internal: where a detached server writes why it stopped, for the
+    /// launcher to quote (its own stderr goes nowhere).
+    #[arg(long, hide = true, requires = "background_child")]
+    start_log: Option<PathBuf>,
     /// Accept requests without a password or token. A network address needs
     /// this to listen without one: anyone who can reach the port can then run
     /// commands as you.
@@ -1321,6 +1325,14 @@ struct ScheduleUpdateArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let outcome = Box::pin(cli_main()).await;
+    if let Err(error) = &outcome {
+        record_start_failure(&format!("{error:#}"));
+    }
+    outcome
+}
+
+async fn cli_main() -> Result<()> {
     quiet_closed_stdout();
     let args = std::env::args_os().collect::<Vec<_>>();
     // Chrome's bridge: stdout is its message channel, and it must not touch
@@ -1345,6 +1357,13 @@ async fn main() -> Result<()> {
         let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
+    if let Some(Command::Serve(ServeArgs {
+        start_log: Some(path),
+        ..
+    })) = &cli.command
+    {
+        watch_start_failures(path.clone());
+    }
     #[cfg(all(unix, not(target_vendor = "apple")))]
     if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
         require_system_certificates()?;
@@ -1633,6 +1652,15 @@ async fn main() -> Result<()> {
     }
     .instrument(command_span)
     .await;
+    // Returned from main, the error reaches only stderr, which a detached
+    // server does not have and the TUI hides: the log keeps why it ended.
+    if let Err(error) = &outcome {
+        tracing::error!(
+            command = command_name,
+            error = %haarness_core::redact::log_text(&format!("{error:#}"), 2_000),
+            "command failed"
+        );
+    }
     drop(telemetry_guard);
     outcome
 }
@@ -7382,7 +7410,7 @@ async fn mcp_command(
             callback_port,
         } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = read_mcp_entry(&target, &name)?;
+            let entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             let registry = oauth_registry(paths, &name, &entry, true).await?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, callback_port))
                 .await
@@ -7395,14 +7423,16 @@ async fn mcp_command(
             if !no_browser && let Err(error) = open_browser(&session.authorization_url) {
                 eprintln!("Could not open a browser automatically: {error}");
             }
-            let callback_url = receive_oauth_callback(&listener, &redirect_uri).await?;
+            let callback_url =
+                receive_oauth_callback(&listener, &redirect_uri, &session.authorization_url)
+                    .await?;
             session.complete(&callback_url).await?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
         McpCommand::Logout { name, project } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = read_mcp_entry(&target, &name)?;
+            let entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             let registry = oauth_registry(paths, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
             let server = client.configure_mcp(&name, &entry).await?;
@@ -7504,7 +7534,10 @@ async fn mcp_command(
             write_mcp_entry(&target, &name, Some(&entry))?;
             // The entry stays saved when the server cannot start: fixing the
             // program or the URL and reconnecting is the usual next step.
-            match client.configure_mcp(&name, &entry).await {
+            match client
+                .configure_mcp(&name, &loaded_mcp_entry(&target, entry))
+                .await
+            {
                 Ok(server) => println!(
                     "Added MCP server '{name}' to {} ({}).",
                     target.display(),
@@ -7536,7 +7569,7 @@ async fn mcp_command(
         }
         McpCommand::Remove { name, project } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
-            let mut entry = read_mcp_entry(&target, &name)?;
+            let mut entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             entry.enabled = false;
             client.configure_mcp(&name, &entry).await?;
             write_mcp_entry(&target, &name, None)?;
@@ -7568,47 +7601,123 @@ fn mcp_arguments(arguments: &str) -> Result<serde_json::Value> {
     Ok(arguments)
 }
 
-async fn receive_oauth_callback(listener: &TcpListener, redirect_uri: &str) -> Result<String> {
+/// Waits for the browser's return from `authorization_url` (the page Haarness
+/// opened) to `redirect_uri`, and hands back the callback URL. Any web page
+/// can reach the port too: only a request to the callback path carrying the
+/// `state` of that authorization URL ends the wait, with a code or an error
+/// for the session to read. Anything else is answered and the wait goes on,
+/// for five minutes in all.
+async fn receive_oauth_callback(
+    listener: &TcpListener,
+    redirect_uri: &str,
+    authorization_url: &str,
+) -> Result<String> {
+    let state = reqwest::Url::parse(authorization_url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        })
+        .context("the MCP authorization URL carries no state")?;
+    tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            let (mut stream, peer) = listener.accept().await?;
+            if !peer.ip().is_loopback() {
+                continue;
+            }
+            let Ok(Ok(target)) =
+                tokio::time::timeout(Duration::from_secs(10), read_request_target(&mut stream))
+                    .await
+            else {
+                continue;
+            };
+            let (status, body, query) = match mcp_oauth_callback(&target, &state) {
+                McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
+                McpOAuthCallback::Foreign => (
+                    "400 Bad Request",
+                    "This is not the authorization Haarness started.\n",
+                    None,
+                ),
+                McpOAuthCallback::Ours(query) => (
+                    "200 OK",
+                    "Authorization received. You may return to the Haarness CLI.\n",
+                    Some(query),
+                ),
+            };
+            let _ = stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            if let Some(query) = query {
+                return Ok(format!("{redirect_uri}{query}"));
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for the MCP OAuth callback")?
+}
+
+/// The request target of one HTTP request head, read up to 32 KiB.
+async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Result<String> {
     const MAX_REQUEST_BYTES: usize = 32 * 1024;
-    let (mut stream, peer) = tokio::time::timeout(Duration::from_secs(300), listener.accept())
-        .await
-        .context("timed out waiting for the MCP OAuth callback")??;
-    if !peer.ip().is_loopback() {
-        anyhow::bail!("rejected a non-loopback MCP OAuth callback");
-    }
     let mut request = Vec::new();
     let mut chunk = [0_u8; 2048];
     loop {
-        let count = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
-            .await
-            .context("timed out reading the MCP OAuth callback")??;
-        if count == 0 {
-            anyhow::bail!("MCP OAuth callback closed before sending a request");
-        }
+        let count = stream.read(&mut chunk).await?;
+        anyhow::ensure!(count > 0, "the connection closed before sending a request");
         request.extend_from_slice(&chunk[..count]);
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
-        if request.len() > MAX_REQUEST_BYTES {
-            anyhow::bail!("MCP OAuth callback request exceeded 32 KiB");
-        }
+        anyhow::ensure!(
+            request.len() <= MAX_REQUEST_BYTES,
+            "the request exceeded 32 KiB"
+        );
     }
-    let request = std::str::from_utf8(&request).context("MCP OAuth callback was not UTF-8")?;
-    let target = request
+    String::from_utf8_lossy(&request)
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .context("MCP OAuth callback request line was invalid")?;
-    if !target.starts_with("/mcp/oauth/callback?") {
-        anyhow::bail!("MCP OAuth callback used an unexpected path");
+        .map(str::to_owned)
+        .context("the request line was invalid")
+}
+
+/// What one request to the MCP OAuth callback port is.
+#[derive(Debug, PartialEq, Eq)]
+enum McpOAuthCallback {
+    /// Not the callback path.
+    Elsewhere,
+    /// The callback path without the authorization's state.
+    Foreign,
+    /// The callback for the authorization Haarness opened: its `?query`.
+    Ours(String),
+}
+
+fn mcp_oauth_callback(target: &str, state: &str) -> McpOAuthCallback {
+    let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
+        return McpOAuthCallback::Elsewhere;
+    };
+    if url.path() != "/mcp/oauth/callback" {
+        return McpOAuthCallback::Elsewhere;
     }
-    let callback_url = format!("{redirect_uri}{}", &target["/mcp/oauth/callback".len()..]);
-    stream
-        .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 60\r\nConnection: close\r\n\r\nAuthorization received. You may return to the Haarness CLI.\n",
-        )
-        .await?;
-    Ok(callback_url)
+    if !url
+        .query_pairs()
+        .any(|(name, value)| name == "state" && value == state)
+    {
+        return McpOAuthCallback::Foreign;
+    }
+    // The query as the browser sent it, for the session to read.
+    McpOAuthCallback::Ours(
+        target
+            .find('?')
+            .map_or("", |start| &target[start..])
+            .to_owned(),
+    )
 }
 
 fn validate_mcp_name(name: &str) -> Result<()> {
@@ -7650,9 +7759,11 @@ fn set_mcp_enabled(
         if enabled { "Enabled" } else { "Disabled" },
         target.display()
     );
-    Ok(entry)
+    Ok(loaded_mcp_entry(&target, entry))
 }
 
+/// An MCP entry as written in its file, `${VAR}` references included: what
+/// is shown, edited and written back.
 fn read_mcp_entry(path: &Path, name: &str) -> Result<McpConfigureRequest> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::read_json(path)
@@ -7672,6 +7783,17 @@ fn read_mcp_entry(path: &Path, name: &str) -> Result<McpConfigureRequest> {
     value
         .try_into()
         .with_context(|| format!("invalid MCP server '{name}' in {}", path.display()))
+}
+
+/// What a configuration load registers for an entry [`read_mcp_entry`] found
+/// in `path`, for configuring the running server: a JSON file's references
+/// are resolved as at load. The file always gets the entry as read.
+fn loaded_mcp_entry(path: &Path, entry: McpConfigureRequest) -> McpConfigureRequest {
+    if path.extension().is_some_and(|value| value != "toml") {
+        jsonconfig::resolve_mcp_entry(entry)
+    } else {
+        entry
+    }
 }
 
 fn mcp_config_for_display(
@@ -9084,6 +9206,68 @@ impl Drop for TelemetryGuard {
 /// server it starts.
 static REQUESTED_LOG_LEVEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// `serve --start-log`: the file a detached server writes why it stopped to.
+static START_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The file a detached server's launcher reads when the server exits during
+/// startup, in the logs folder. Every server writes only its failure there,
+/// one line each, so it stays small; past 64 KiB a launcher empties it.
+const SERVER_START_LOG: &str = "server-start.log";
+const SERVER_START_LOG_LIMIT: u64 = 64 * 1024;
+
+fn prepare_start_log(data: &Path) -> Option<PathBuf> {
+    let logs = data.join("logs");
+    fs::create_dir_all(&logs).ok()?;
+    let path = logs.join(SERVER_START_LOG);
+    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > SERVER_START_LOG_LIMIT) {
+        fs::write(&path, "").ok()?;
+    }
+    Some(path)
+}
+
+/// Record this server's failures, and its panics (which print only to the
+/// stderr it does not have), in its launcher's start log.
+fn watch_start_failures(path: PathBuf) {
+    if START_LOG.set(path).is_err() {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        record_start_failure(&format!("panicked: {info}"));
+        previous(info);
+    }));
+}
+
+/// One line, `pid <pid>: <text>`, redacted, so concurrent launchers each
+/// find their own server's line.
+fn record_start_failure(text: &str) {
+    let Some(path) = START_LOG.get() else {
+        return;
+    };
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let line = haarness_core::redact::log_text(text, 2_000);
+        let _ = writeln!(file, "pid {}: {line}", std::process::id());
+    }
+}
+
+/// What the server `pid` wrote to the start log before it exited: its last
+/// lines, joined.
+fn start_failure(path: &Path, pid: u32) -> Option<String> {
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(SERVER_START_LOG_LIMIT * 2)
+        .read_to_string(&mut text)
+        .ok()?;
+    let prefix = format!("pid {pid}: ");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .collect();
+    let reason = lines[lines.len().saturating_sub(3)..].join(" ");
+    (!reason.is_empty()).then_some(reason)
+}
+
 /// Each log line's time, then the process that wrote it: every process
 /// (the TUI, each workspace server, one-shot commands) writes the same daily
 /// file.
@@ -10140,6 +10324,7 @@ async fn ensure_workspace_server_at(
 
     let access = access.unwrap_or_default();
     let executable = std::env::current_exe().context("cannot locate the Haarness executable")?;
+    let start_log = prepare_start_log(&paths.data);
     let mut command = ProcessCommand::new(executable);
 
     command
@@ -10165,6 +10350,11 @@ async fn ensure_workspace_server_at(
         .arg("--port")
         .arg(address.port().to_string())
         .arg("--background-child")
+        .args(
+            start_log
+                .iter()
+                .flat_map(|path| [OsStr::new("--start-log"), path.as_os_str()]),
+        )
         .args(matches!(access, haarness_server::auth::ServerAccess::Open).then_some("--anonymous"))
         .env("HAARNESS_SERVER_TOKEN", token)
         .env_remove("HAARNESS_SERVER_USERNAME")
@@ -10196,7 +10386,11 @@ async fn ensure_workspace_server_at(
             if let Some(discovery) = discover_workspace_server(paths, workspace).await? {
                 return Ok(discovery);
             }
-            anyhow::bail!("Haarness server exited during startup ({status})");
+            let reason = start_log
+                .as_deref()
+                .and_then(|path| start_failure(path, child.id()))
+                .map_or_else(String::new, |reason| format!(": {reason}"));
+            anyhow::bail!("Haarness server exited during startup ({status}){reason}");
         }
         if Instant::now() >= deadline {
             anyhow::bail!("Haarness server did not become ready within 8 seconds");
@@ -10755,15 +10949,16 @@ mod tests {
 
     use super::{
         AgentRuntime, AuthCommand, BTreeMap, Cli, Command, Credential, FileConfig,
-        LiveWorkspaceServer, McpCommand, McpConfigureRequest, Paths, ProviderSection, RunFormat,
-        RuntimeDiscovery, SessionCommand, assistant_messages_for_turn, configured_mcp,
-        current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from, load_output_style,
-        local_server_compatibility_error, mcp_config_for_display,
-        migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
-        read_mcp_entry, replace_incompatible_workspace_server, resolved_credentials,
+        LiveWorkspaceServer, McpCommand, McpConfigureRequest, McpOAuthCallback, Paths,
+        ProviderSection, RunFormat, RuntimeDiscovery, SessionCommand, assistant_messages_for_turn,
+        configured_mcp, current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from,
+        load_output_style, loaded_mcp_entry, local_server_compatibility_error,
+        mcp_config_for_display, mcp_oauth_callback, migrate_legacy_workspace_database,
+        normalize_natural_language_args, parse_mcp_key_values, prepare_start_log, read_mcp_entry,
+        receive_oauth_callback, replace_incompatible_workspace_server, resolved_credentials,
         select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
-        valid_provider_url, wait_for_goal_client, write_mcp_entry, write_provider_entry,
-        write_runtime,
+        start_failure, valid_provider_url, wait_for_goal_client, write_mcp_entry,
+        write_provider_entry, write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
@@ -11208,6 +11403,151 @@ mod tests {
                 command: McpCommand::Remove { .. }
             })
         ));
+    }
+
+    #[test]
+    fn only_the_opened_authorizations_callback_ends_an_mcp_sign_in() {
+        for target in [
+            "/",
+            "/favicon.ico",
+            "/mcp/oauth/callbackx?state=st-1",
+            "bad target",
+        ] {
+            assert_eq!(
+                mcp_oauth_callback(target, "st-1"),
+                McpOAuthCallback::Elsewhere,
+                "{target}"
+            );
+        }
+        for target in [
+            "/mcp/oauth/callback?code=page-code",
+            "/mcp/oauth/callback?code=page-code&state=other",
+            "/mcp/oauth/callback?error=access_denied&error_description=PAGE_TEXT",
+        ] {
+            assert_eq!(
+                mcp_oauth_callback(target, "st-1"),
+                McpOAuthCallback::Foreign,
+                "{target}"
+            );
+        }
+        assert_eq!(
+            mcp_oauth_callback("/mcp/oauth/callback?code=c%2B1&state=st-1", "st-1"),
+            McpOAuthCallback::Ours("?code=c%2B1&state=st-1".into())
+        );
+        assert_eq!(
+            mcp_oauth_callback("/mcp/oauth/callback?error=access_denied&state=st-1", "st-1"),
+            McpOAuthCallback::Ours("?error=access_denied&state=st-1".into())
+        );
+    }
+
+    /// A request a web page sends to the port first is answered, and the
+    /// wait goes on to the real return.
+    #[tokio::test]
+    async fn the_mcp_callback_waits_past_requests_without_its_state() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let send = |target: &'static str| async move {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let client = async {
+            assert!(
+                send("/mcp/oauth/callback?code=page&state=nope")
+                    .await
+                    .starts_with("HTTP/1.1 400")
+            );
+            assert!(send("/").await.starts_with("HTTP/1.1 404"));
+            assert!(
+                send("/mcp/oauth/callback?code=real&state=st-1")
+                    .await
+                    .starts_with("HTTP/1.1 200")
+            );
+        };
+        let (callback, ()) = tokio::join!(
+            receive_oauth_callback(
+                &listener,
+                &redirect,
+                "https://auth.example/authorize?client_id=c&state=st-1"
+            ),
+            client
+        );
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
+        );
+        assert!(
+            receive_oauth_callback(&listener, &redirect, "https://auth.example/authorize")
+                .await
+                .is_err()
+        );
+    }
+
+    /// Launchers sharing the start log each quote only their own server's
+    /// last lines, and the log is emptied once it grows past its limit.
+    #[test]
+    fn the_start_log_is_read_per_server_and_kept_small() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-start-log-{}", uuid::Uuid::now_v7()));
+        let path = prepare_start_log(&root).unwrap();
+        assert_eq!(path, root.join("logs/server-start.log"));
+        fs::write(
+            &path,
+            "pid 7: old\npid 8: other server\npid 7: one\npid 7: two\npid 7: three\npid 70: not mine\n",
+        )
+        .unwrap();
+        assert_eq!(start_failure(&path, 7).as_deref(), Some("one two three"));
+        assert_eq!(start_failure(&path, 9), None);
+        fs::write(&path, "x".repeat(70 * 1024)).unwrap();
+        prepare_start_log(&root).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `haarness mcp enable/disable` write back the entry as read, so the
+    /// file keeps `${TOKEN}`; only what is sent to the server is resolved.
+    #[test]
+    fn mcp_json_write_back_keeps_references_and_resolves_only_for_the_server() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("haarness-mcp-json-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("haarness.json");
+        fs::write(
+            &path,
+            r#"{"mcp": {"fixture": {"command": "${HOME}/server", "enabled": false,
+                "env": {"TOKEN": "${HAARNESS_FIXTURE_UNSET_TOKEN}"}}}}"#,
+        )
+        .unwrap();
+        let mut entry = read_mcp_entry(&path, "fixture").unwrap();
+        assert_eq!(entry.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
+        entry.enabled = true;
+        write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["mcp"]["fixture"]["command"], "${HOME}/server");
+        assert_eq!(
+            written["mcp"]["fixture"]["env"]["TOKEN"],
+            "${HAARNESS_FIXTURE_UNSET_TOKEN}"
+        );
+        let loaded = loaded_mcp_entry(&path, entry.clone());
+        assert_eq!(loaded.command, Some(format!("{home}/server")));
+        assert_eq!(loaded.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
+        // A TOML file's entries are not resolved at load, nor here.
+        let toml = root.join("config.toml");
+        assert_eq!(
+            loaded_mcp_entry(&toml, entry).command.as_deref(),
+            Some("${HOME}/server")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
