@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { createPage, lastRef } from "../src/page";
 import { Browser } from "../src/rpc";
@@ -242,34 +242,117 @@ test("a dialog that opens during a click returns the click as dispatched", async
   });
 });
 
-test("a file chooser the page opens during an action is held back, and the action says how to upload instead", async () => {
-  const { page: tab, cdp } = page();
-  await tab.ready;
-  const snapshot = await tab.execute({ action: { type: "snapshot", tabID }, files: [] }, signal());
-  // Reading the page acts on nothing: the person's choosers are left alone.
-  assert.equal(cdp.methods().includes("Page.setInterceptFileChooserDialog"), false);
+/** A page with a clickable button, and the chooser holds it has sent so far. */
+async function chooserPage() {
+  const made = page();
+  await made.page.ready;
+  const snapshot = await made.page.execute({ action: { type: "snapshot", tabID }, files: [] }, signal());
   const ref = Browser.Ref.make(/@(e\d+) \[button\]/.exec((snapshot.value as { content: string }).content)![1]);
-  const holds = () => cdp.sent.filter((entry) => entry.method === "Page.setInterceptFileChooserDialog").map((entry) => entry.params);
-  cdp.handlers["Input.dispatchMouseEvent"] = (params) => {
-    if (params.type === "mouseReleased") {
-      // The page's click handler asked for a chooser while choosers were held.
-      assert.deepEqual(holds(), [{ enabled: true, cancel: true }]);
-      cdp.emit("Page.fileChooserOpened", { frameId: "main", mode: "selectSingle", backendNodeId: 10 });
-    }
-    return {};
-  };
-  const result = await tab.execute({ action: { type: "click", tabID, ref }, files: [] }, signal());
-  assert.match((result.value as { fileChooser?: string }).fileChooser ?? "", /kept from appearing.*browser\.files\.upload/);
-  assert.equal((result.value as { dispatched: boolean }).dispatched, true);
-  // A click that opens nothing says nothing, and holding continues across it without asking twice.
-  cdp.handlers["Input.dispatchMouseEvent"] = () => ({});
-  const plain = await tab.execute({ action: { type: "click", tabID, ref }, files: [] }, signal());
-  assert.equal("fileChooser" in (plain.value as object), false);
-  assert.deepEqual(holds(), [{ enabled: true, cancel: true }]);
-  // A moment after the agent's last action, the person's choosers open again.
-  await new Promise((resolve) => setTimeout(resolve, 700));
-  assert.deepEqual(holds(), [{ enabled: true, cancel: true }, { enabled: false }]);
-  tab.dispose();
+  const holds = () =>
+    made.cdp.sent
+      .filter((entry) => entry.method === "Page.setInterceptFileChooserDialog")
+      .map((entry) => ({ ...entry.params, ...(entry.sessionID ? { sessionID: entry.sessionID } : {}) }));
+  const click = () => made.page.execute({ action: { type: "click", tabID, ref }, files: [] }, signal());
+  const opened = () => made.cdp.emit("Page.fileChooserOpened", { frameId: "main", mode: "selectSingle", backendNodeId: 10 });
+  return { ...made, ref, holds, click, opened };
+}
+const held = { enabled: true, cancel: true };
+const note = (result: { value: unknown }) => (result.value as { fileChooser?: string }).fileChooser;
+
+test("a file chooser the page opens during an action is held back, and the action says how to upload instead", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { page: tab, cdp, holds, click, opened } = await chooserPage();
+    // Reading the page acts on nothing: the person's choosers are left alone.
+    assert.deepEqual(holds(), []);
+    cdp.handlers["Input.dispatchMouseEvent"] = (params) => {
+      if (params.type === "mouseReleased") {
+        // The page's click handler asked for a chooser while choosers were held.
+        assert.deepEqual(holds(), [held]);
+        opened();
+      }
+      return {};
+    };
+    const result = await click();
+    assert.match(note(result) ?? "", /^The page opened a file chooser, which Haarness kept from appearing.*browser\.files\.upload/);
+    assert.equal((result.value as { dispatched: boolean }).dispatched, true);
+    // A click that opens nothing says nothing, and holding continues across it without asking twice.
+    cdp.handlers["Input.dispatchMouseEvent"] = () => ({});
+    assert.equal(note(await click()), undefined);
+    assert.deepEqual(holds(), [held]);
+    // Chromium lets a page open a chooser for seconds after a click: the hold lasts as long.
+    mock.timers.tick(4_000);
+    assert.deepEqual(holds(), [held]);
+    mock.timers.tick(1_000);
+    assert.deepEqual(holds(), [held, { enabled: false }]);
+    tab.dispose();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a chooser the page opens shortly after an action is held too, and the next result says so once", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { page: tab, holds, click, opened } = await chooserPage();
+    assert.equal(note(await click()), undefined);
+    // An upload widget that first awaited a request opens its chooser 2 s later.
+    mock.timers.tick(2_000);
+    opened();
+    assert.deepEqual(holds(), [held]);
+    const next = await tab.execute({ action: { type: "frames", tabID }, files: [] }, signal());
+    assert.match(note(next) ?? "", /^Shortly after your last action, the page opened a file chooser.*browser\.files\.upload/);
+    const after = await tab.execute({ action: { type: "frames", tabID }, files: [] }, signal());
+    assert.equal(note(after), undefined);
+    tab.dispose();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("the person acting in the page ends the hold at once, but input during an agent's action does not", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { page: tab, cdp, holds, click } = await chooserPage();
+    cdp.handlers["Input.dispatchMouseEvent"] = () => {
+      // The agent's own click reaches the host as input too.
+      tab.personActed();
+      return {};
+    };
+    await click();
+    assert.deepEqual(holds(), [held]);
+    tab.personActed();
+    assert.deepEqual(holds(), [held, { enabled: false }]);
+    // The timer that would have ended it changes nothing later.
+    mock.timers.tick(5_000);
+    assert.deepEqual(holds(), [held, { enabled: false }]);
+    tab.dispose();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a frame that attaches while choosers are held is held too", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { page: tab, cdp, holds, click } = await chooserPage();
+    const frame = (sessionId: string, targetId: string) =>
+      cdp.emit("Target.attachedToTarget", { sessionId, targetInfo: { targetId, type: "iframe", title: "", url: "https://pay.test/", attached: true, canAccessOpener: false }, waitingForDebugger: false });
+    frame("before", "frame-before");
+    await click();
+    frame("during", "frame-during");
+    await Promise.resolve();
+    assert.deepEqual(holds(), [held, { ...held, sessionID: "before" }, { ...held, sessionID: "during" }]);
+    mock.timers.tick(5_000);
+    assert.deepEqual(holds().slice(3), [{ enabled: false }, { enabled: false, sessionID: "before" }, { enabled: false, sessionID: "during" }]);
+    // A frame that attaches after the hold ended is left alone.
+    frame("after", "frame-after");
+    await Promise.resolve();
+    assert.equal(holds().length, 6);
+    tab.dispose();
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("the host runs its own tools and their permission targets", async () => {

@@ -16,6 +16,7 @@ import { createCdp } from "./browser/cdp";
 import { createBrowserFiles } from "./browser/files";
 import { createProfiling } from "./browser/profiling";
 import { createCornerImages } from "./browser/corners";
+import { returnKeyboard } from "./browser-keyboard";
 import type { BrowserNetwork } from "./browser/network";
 
 /** Any stable id outside Electron's own worlds, for the agent cursor; one per page document. */
@@ -62,6 +63,7 @@ export function createBrowserPage(
   const detachNetwork = options.network?.attach(contents);
   contents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
+    page.personActed();
     if (
       input.key === "F5" &&
       !input.meta &&
@@ -89,6 +91,11 @@ export function createBrowserPage(
     contents.setZoomLevel(
       input.key === "0" ? 0 : contents.getZoomLevel() + step,
     );
+  });
+  // A press of the person's in the page ends any hold on file choosers the
+  // agent's last action left (an agent's own input arrives during its action).
+  contents.on("before-mouse-event", (_event, mouse) => {
+    if (mouse.type === "mouseDown") page.personActed();
   });
   const cdp = createCdp(contents);
   // Electron reports loadURL's navigation start synchronously, before
@@ -331,16 +338,7 @@ export function createBrowserPage(
     corner.setVisible(false);
     win.contentView.addChildView(corner);
   });
-  /**
-   * A page put away (hidden or closed) while it has the keyboard would leave
-   * the window with no one to type to: the keyboard goes back to the app,
-   * where the element that last had it, such as the message box, keeps its
-   * caret.
-   */
-  const giveBackKeyboard = () => {
-    if (!contents.isDestroyed() && contents.isFocused() && !win.isDestroyed())
-      win.webContents.focus();
-  };
+  const giveBackKeyboard = () => void returnKeyboard(win, contents);
   page = createPage<Browser.File>(surface, cdp, {
     id: options.id,
     publish: () => options.publish(),

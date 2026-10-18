@@ -79,6 +79,8 @@ export class FakeChrome {
   groupsById = new Map<number, { id: number; windowId: number; title?: string; color: string; collapsed: boolean }>();
   windowIds: number[] = [1];
   focused = 1;
+  /** Chrome is the application the user is using (its last focused window has the focus). */
+  chromeFocused = true;
   nextTab = 10;
   nextGroup = 100;
   nextWindow = 2;
@@ -205,10 +207,10 @@ export class FakeChrome {
       WINDOW_ID_NONE: -1,
       onFocusChanged: ev(),
       async getLastFocused() {
-        return { id: self.focused, focused: true, incognito: false, type: "normal" };
+        return { id: self.focused, focused: self.chromeFocused, incognito: false, type: "normal" };
       },
       async getAll() {
-        return self.windowIds.map((id) => ({ id, focused: id === self.focused, incognito: false, type: "normal" }));
+        return self.windowIds.map((id) => ({ id, focused: self.chromeFocused && id === self.focused, incognito: false, type: "normal" }));
       },
       async create(options: { url?: string; focused?: boolean }) {
         const id = self.nextWindow++;

@@ -10,6 +10,7 @@ import {
   decodeCommand,
   encodeOutcome,
 } from "@haarness/browser-driver/rpc";
+import { createAgentActivity } from "./browser-activity";
 import { createBrowserPage, type BrowserPage } from "./browser-chromium";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
@@ -37,6 +38,8 @@ type Entry = {
   focusedTabID: Browser.TabID | null;
   requests: Map<string, AbortController>;
   requestTabs: Map<string, string>;
+  /** The tabs an agent command runs in now, or ended in a moment ago. */
+  activity: ReturnType<typeof createAgentActivity>;
   queue: Promise<unknown>;
   ready: Promise<void>;
   disposed: boolean;
@@ -231,8 +234,9 @@ export function createBrowserHost(
       translate: (key) => translate(data().preferences.language, key),
       popup: (options) => {
         const popup = create(e, false, options);
-        // A popup the page opens while an agent command runs in it is the agent's.
-        focus(e, popup.state().id, [...e.requestTabs.values()].includes(id));
+        // A popup the page opens while an agent command runs in it, or just
+        // after (a click's window.open), is the agent's.
+        focus(e, popup.state().id, e.activity.working(id));
         return popup.contents;
       },
     });
@@ -450,6 +454,7 @@ export function createBrowserHost(
         null,
       requests: new Map(),
       requestTabs: new Map(),
+      activity: createAgentActivity(),
       queue: Promise.resolve(),
       ready,
       disposed: false,
@@ -553,7 +558,11 @@ export function createBrowserHost(
                 policy: command.policy as BrowserPolicy,
                 approved: new Set((command.target?.resources ?? (command.action.type === "tabs.open" ? [normalizeURL(command.action.url ?? "about:blank")] : [])).map(destinationOrigin).filter((origin): origin is string => !!origin)),
               };
-              const result = await execute(entry, command, abort.signal, true);
+              const tab = "tabID" in command.action ? command.action.tabID : undefined;
+              if (tab) entry.activity.begin(tab);
+              const result = await execute(entry, command, abort.signal, true).finally(
+                () => tab && entry.activity.end(tab),
+              );
               if (entry.access?.error) throw new Error(entry.access.error);
               outcome = { type: "success", result };
             } catch (error) {
