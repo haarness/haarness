@@ -1661,6 +1661,7 @@
   "collapse": "свернуть",
   "lines {from}–{to} of {total}": "строки {from}–{to} из {total}",
   "always allows": "всегда разрешает",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness не смог прочитать эту команду целиком; может действовать правило для {rule}.",
   "Leads to {path}": "Ведёт к {path}",
   "every file edit": "любое изменение файлов",
   "every shell command": "любая команда оболочки",

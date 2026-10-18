@@ -7954,6 +7954,29 @@ fn approval_names_the_file_a_linked_path_leads_to() {
 }
 
 #[test]
+fn approval_says_why_a_command_too_long_to_read_asks() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = pending_permission_fixture(&thread, "unread");
+    let command = format!("{}printf hi", "nice ".repeat(17));
+    pending.allow_always = Some(false);
+    pending.operation = format!("bash:{command}");
+    pending.detail = serde_json::json!({"command": command, "__readLimit": "printf *"});
+    pending.patterns = vec![command.clone()];
+    pending.always_patterns = Vec::new();
+    app.pending_permissions.push(pending);
+    app.permission_focus = true;
+    let text = frame_text(&app, (200, 40));
+    assert!(
+        text.contains(
+            "Haarness could not read all of this command; a rule for printf * may apply."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("__readLimit"), "{text}");
+}
+
+#[test]
 fn agent_switch_approval_discloses_destination_model_and_scope() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);

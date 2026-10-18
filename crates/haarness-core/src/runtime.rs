@@ -3834,7 +3834,13 @@ impl AgentRuntime {
                 };
                 match decision {
                     PermissionDecision::Deny => {
-                        allowed = Err(operation);
+                        allowed = Err(match plan.read_limit(pattern) {
+                            Some(rule) => format!(
+                                "{} (Haarness could not read all of it, and permission rule '{rule}' may apply to what it runs)",
+                                clip(&operation)
+                            ),
+                            None => operation,
+                        });
                         break;
                     }
                     // A hook pre-approval never answers what only a person
@@ -3898,6 +3904,7 @@ impl AgentRuntime {
                 continue;
             }
             let always_rules = plan.always_rules();
+            let card = plan.card_detail(&arguments, asked);
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
@@ -3924,7 +3931,7 @@ impl AgentRuntime {
                     permission: plan.permission.clone(),
                     patterns: asked.clone(),
                     always_rules: always_rules.clone(),
-                    detail: arguments.clone(),
+                    detail: card.clone(),
                     thread_id,
                     root_thread_id: root,
                     turn_id: None,
@@ -3949,7 +3956,7 @@ impl AgentRuntime {
                     ItemData::PermissionRequest {
                         permission_id: id.clone(),
                         operation: operation.clone(),
-                        detail: arguments.clone(),
+                        detail: card.clone(),
                         permission: plan.permission.clone(),
                         patterns: asked.clone(),
                         always_patterns: always_rules.clone(),
@@ -3976,7 +3983,7 @@ impl AgentRuntime {
                     "allowAlways": !forced,
                     "explicit": explicit,
                     "operation": operation,
-                    "detail": arguments,
+                    "detail": card,
                     "permission": plan.permission,
                     "patterns": asked,
                     "alwaysPatterns": always_rules,
@@ -8713,11 +8720,7 @@ impl RunnerTask {
                 match decision {
                     PermissionDecision::Deny => {
                         let rule = evaluation.matched.unwrap_or_else(|| "policy".into());
-                        return Err(CoreError::PermissionDenied(format!(
-                            "'{}' is denied by permission rule '{rule}'. This is configured \
-                             policy — do not retry this action.",
-                            plan.operation(pattern)
-                        )));
+                        return Err(CoreError::PermissionDenied(plan.refusal(pattern, &rule)));
                     }
                     // A hook pre-approval skips the prompt (never a deny), but
                     // never answers what only a person may, nor where a path
@@ -8990,6 +8993,7 @@ impl RunnerTask {
                 HookAnswer::Allowed | HookAnswer::Open => {}
             }
         }
+        let detail = &plan.card_detail(detail, &plan.patterns);
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         // A chat in Auto approves eligible requests once, without a prompt.
@@ -11163,6 +11167,9 @@ struct ShellReadings {
     /// written command may be long (a here-document), so each is matched
     /// once per rule.
     covered: Mutex<HashMap<(usize, String), bool>>,
+    /// The rule each written command a limit stopped reading met instead,
+    /// by pattern.
+    limited: Mutex<HashMap<String, String>>,
 }
 
 impl ShellReadings {
@@ -11193,6 +11200,7 @@ impl ShellReadings {
             sources,
             always,
             covered: Mutex::new(HashMap::new()),
+            limited: Mutex::new(HashMap::new()),
         }
     }
 
@@ -11244,18 +11252,59 @@ impl AskPlan {
             });
         }
         let evaluation = engine.evaluate_detailed(&operation);
-        if evaluation.decision == PermissionDecision::Allow
+        if evaluation.decision != PermissionDecision::Deny
             && let Some(&index) = shell.index.get(pattern)
             && shell.written[index].1.incomplete
-            && let Some(rule) = engine.narrower_bash_rule(&|rule| shell.covers(rule, index))
+            && let Some((rule, decision)) =
+                engine.narrower_bash_rule(&|rule| shell.covers(rule, index))
         {
+            shell
+                .limited
+                .lock()
+                .insert(pattern.to_owned(), rule.clone());
+            // A deny may be about what the unread part runs, so it refuses;
+            // an ask is a person's every time, as a configuration edit is:
+            // not Auto, `--yolo`, a hook or a run nobody watches.
             return crate::permissions::Evaluation {
-                decision: PermissionDecision::Ask,
+                decision,
                 matched: Some(rule),
-                protected: false,
+                protected: decision == PermissionDecision::Ask,
             };
         }
         evaluation
+    }
+    /// The rule a written command met because a limit stopped reading it,
+    /// when it did.
+    fn read_limit(&self, pattern: &str) -> Option<String> {
+        self.shell
+            .as_ref()
+            .and_then(|shell| shell.limited.lock().get(pattern).cloned())
+    }
+    /// Why `pattern` is refused under `rule`, for the model.
+    fn refusal(&self, pattern: &str, rule: &str) -> String {
+        match self.read_limit(pattern) {
+            Some(_) => format!(
+                "Haarness could not read all of '{}', and permission rule '{rule}' may apply to what it runs, so it is refused. This is configured policy — do not retry this action; split the command into smaller ones.",
+                clip(&self.operation(pattern))
+            ),
+            None => format!(
+                "'{}' is denied by permission rule '{rule}'. This is configured policy — do not retry this action.",
+                self.operation(pattern)
+            ),
+        }
+    }
+    /// The tool's arguments as a prompt about `patterns` shows them: with
+    /// the rule a command met because a limit stopped reading it
+    /// (`__readLimit`, without its `bash:`), so the card can say why it asks.
+    fn card_detail(&self, detail: &serde_json::Value, patterns: &[String]) -> serde_json::Value {
+        let mut detail = detail.clone();
+        if let Some(rule) = patterns.iter().find_map(|pattern| self.read_limit(pattern))
+            && let Some(fields) = detail.as_object_mut()
+        {
+            let rule = rule.strip_prefix("bash:").unwrap_or(&rule).to_owned();
+            fields.insert("__readLimit".into(), serde_json::Value::String(rule));
+        }
+        detail
     }
     /// What a prompt about `patterns` is called: for shell commands, the
     /// commands as written that they belong to, so logs and messages name
@@ -11276,6 +11325,18 @@ impl AskPlan {
                 named.push(name);
             }
         }
+        // A command can be long (a here-document); the request keeps it
+        // whole in its arguments, and its name stays readable in logs.
+        let named: Vec<String> = named
+            .into_iter()
+            .map(|name| {
+                if self.shell.is_some() {
+                    clip(name)
+                } else {
+                    name.to_owned()
+                }
+            })
+            .collect();
         if named.len() == 1 {
             format!("{}:{}", self.permission, named[0])
         } else {
@@ -11449,6 +11510,14 @@ fn operation_for_log(operation: &str) -> String {
 }
 
 /// Why a scheduled run's request that always asks failed instead of waiting.
+/// Text kept to 200 characters for logs and messages, with `…` when cut.
+fn clip(text: &str) -> String {
+    match text.char_indices().nth(200) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
 fn cannot_ask_forced(operation: &str) -> String {
     format!(
         "'{operation}' needs the user's approval every time, and this scheduled run cannot ask. Do not retry it here; ask the user to do it in an interactive chat."
@@ -12120,13 +12189,40 @@ mod shell_reading_tests {
     }
 
     #[test]
-    fn a_command_whose_reading_a_limit_stopped_asks_when_a_narrower_rule_exists() {
+    fn a_command_a_limit_stopped_reading_is_refused_by_a_deny_and_asked_by_an_ask() {
         use PermissionDecision::{Allow, Ask, Deny};
         let padded = format!("bash -c '{}rm x'", "true; ".repeat(300 * 1024 / 6));
-        assert_eq!(
-            verdicts(&engine(&[("bash:rm *", Deny)]), &padded),
-            vec![(padded.clone(), Ask)]
+        let plan = plan(&padded);
+        // A deny anywhere refuses, before an ask.
+        for rules in [
+            vec![("bash:rm *", Deny)],
+            vec![("bash:rm *", Ask), ("bash:curl *", Deny)],
+        ] {
+            let evaluation = plan.evaluate(&engine(&rules), &padded);
+            assert_eq!(evaluation.decision, Deny, "{rules:?}");
+            assert!(!evaluation.protected);
+        }
+        let refusal = plan.refusal(&padded, "bash:rm *");
+        assert!(
+            refusal.starts_with("Haarness could not read all of 'bash:bash -c 'true; ")
+                && refusal.contains("permission rule 'bash:rm *' may apply")
+                && refusal.len() < 1024,
+            "{}",
+            &refusal[..200]
         );
+        // An ask is a person's every time: protected, so never answered by
+        // Auto, `--yolo`, a hook or a schedule, and no Always.
+        let evaluation = plan.evaluate(&engine(&[("bash:rm *", Ask)]), &padded);
+        assert_eq!(evaluation.decision, Ask);
+        assert!(evaluation.protected);
+        let card = plan.card_detail(&json!({"command": padded}), std::slice::from_ref(&padded));
+        assert_eq!(card["__readLimit"], "rm *");
+        assert_eq!(card["command"], padded.as_str());
+        let name = plan.describe(std::slice::from_ref(&padded));
+        assert!(name.ends_with('…') && name.chars().count() < 260, "{name}");
+        // A skill's deny is a narrower rule too.
+        let skill = PermissionEngine::new(vec![rule("bash:rm *", Deny)]);
+        assert_eq!(plan.evaluate(&skill, &padded).decision, Deny);
         // Without a narrower rule it runs as before.
         assert_eq!(verdicts(&engine(&[]), &padded), Vec::new());
         assert_eq!(

@@ -336,21 +336,159 @@ async fn a_deny_for_a_reading_holds_in_auto_under_yolo_for_direct_calls_and_in_c
     assert!(fixture.0.join("victim").is_dir());
 }
 
-#[tokio::test]
-async fn a_command_too_long_to_read_asks_when_a_rule_could_be_about_what_it_runs() {
-    let fixture = Fixture::new();
-    std::fs::create_dir_all(fixture.0.join("victim")).unwrap();
-    let runtime = runtime(&fixture.0, &[("bash:rm *", D::Deny)]);
-    let thread = echo_thread(&runtime).await;
-    let command = format!("bash -c '{}rm -rf victim'", "true; ".repeat(300 * 1024 / 6));
-    let turn = runtime
-        .start_turn(thread.id, turn_request(&bash(&command)))
+/// More wrappers than are read: what the last one runs stays unread.
+fn stacked(command: &str) -> String {
+    format!("{}{command}", "nice ".repeat(17))
+}
+
+async fn scheduled_thread(runtime: &AgentRuntime) -> Thread {
+    runtime
+        .create_thread(CreateThreadRequest {
+            schedule: Some(haarness_protocol::ScheduleOrigin {
+                id: uuid::Uuid::now_v7(),
+                name: "Nightly".into(),
+            }),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+
+/// The turn a schedule starts: it approves its own requests.
+fn scheduled(text: &str) -> StartTurnRequest {
+    let mut request = turn_request(text);
+    request.auto_approve = true;
+    request
+}
+
+async fn auto(runtime: &AgentRuntime, thread: &Thread) {
+    let mode = runtime.approval_mode(thread.id).await.unwrap();
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: Some(mode.revision),
+            },
+        )
         .await
         .unwrap();
-    wait_pending_permissions(&runtime, 1).await;
-    let pending = runtime.pending_permissions().remove(0);
-    assert_eq!(pending.patterns, vec![command]);
-    reply(&runtime, &pending.permission_id, Reply::Reject).await;
+}
+
+#[tokio::test]
+async fn a_command_too_long_to_read_is_refused_by_a_deny_in_auto_yolo_schedules_and_children() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join("victim")).unwrap();
+    let refused = |errors: &[String]| {
+        errors.iter().any(|error| {
+            error.contains("Haarness could not read all of")
+                && error.contains("permission rule 'bash:rm *' may apply")
+        })
+    };
+    let padded = format!("bash -c '{}rm -rf victim'", "true; ".repeat(300 * 1024 / 6));
+    let runtime = runtime(&fixture.0, &[("bash:rm *", D::Deny)]);
+    // Each in a chat of its own: 300 KiB of history would be compacted
+    // before the next call.
+    for command in [stacked("rm -rf victim"), padded] {
+        let thread = echo_thread(&runtime).await;
+        auto(&runtime, &thread).await;
+        run(&runtime, &thread, &command).await;
+        let errors = tool_errors(&runtime, &thread).await;
+        assert!(refused(&errors), "{errors:?}");
+        // The refusal names the command clipped, not 300 KiB of it.
+        assert!(errors.iter().all(|error| error.len() < 1024));
+    }
+    let schedule = scheduled_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(schedule.id, scheduled(&bash(&stacked("rm -rf victim"))))
+        .await
+        .unwrap();
     wait_done(&runtime, &turn).await;
+    assert!(refused(&tool_errors(&runtime, &schedule).await));
+    // Under yolo, and in a child agent that has only its parent's deny.
+    let yolo = configured(
+        &fixture.0,
+        &[("bash:rm *", D::Deny)],
+        RuntimeConfig {
+            auto_approve: true,
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = echo_thread(&yolo).await;
+    run(&yolo, &thread, &stacked("rm -rf victim")).await;
+    assert!(refused(&tool_errors(&yolo, &thread).await));
+    let turn = yolo
+        .start_turn(
+            thread.id,
+            turn_request(&tasks_prompt(1, &stacked("rm -rf victim"))),
+        )
+        .await
+        .unwrap();
+    wait_done(&yolo, &turn).await;
+    let child = yolo
+        .list_threads(false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.parent_id == Some(thread.id))
+        .unwrap();
+    assert!(refused(&tool_errors(&yolo, &child).await));
     assert!(fixture.0.join("victim").is_dir());
+}
+
+#[tokio::test]
+async fn a_command_too_long_to_read_under_an_ask_waits_for_a_person_in_auto_and_yolo() {
+    let fixture = Fixture::new();
+    let command = stacked("printf hi > hi.txt");
+    for config in [
+        RuntimeConfig::default(),
+        RuntimeConfig {
+            auto_approve: true,
+            ..RuntimeConfig::default()
+        },
+    ] {
+        let yolo = config.auto_approve;
+        let runtime = configured(&fixture.0, &[("bash:printf *", D::Ask)], config);
+        let thread = echo_thread(&runtime).await;
+        auto(&runtime, &thread).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&bash(&command)))
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        // Only a person answers, once: no Always, and the card says why.
+        assert_eq!(pending.allow_always, Some(false), "yolo {yolo}");
+        assert_eq!(pending.detail["__readLimit"], "printf *");
+        assert_eq!(pending.detail["command"], command.as_str());
+        assert_eq!(pending.operation, format!("bash:{command}"));
+        reply(&runtime, &pending.permission_id, Reply::Once).await;
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.0.join("hi.txt")).unwrap(),
+            "hi"
+        );
+        std::fs::remove_file(fixture.0.join("hi.txt")).unwrap();
+    }
+    // A schedule cannot ask, so it is refused at once.
+    let runtime = runtime(&fixture.0, &[("bash:printf *", D::Ask)]);
+    let schedule = scheduled_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(schedule.id, scheduled(&bash(&command)))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(runtime.pending_permissions().is_empty());
+    let errors = tool_errors(&runtime, &schedule).await;
+    assert!(
+        errors.iter().any(|error| error
+            .contains("needs the user's approval every time, and this scheduled run cannot ask")),
+        "{errors:?}"
+    );
+    assert!(!fixture.0.join("hi.txt").exists());
 }

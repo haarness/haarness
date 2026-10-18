@@ -1661,6 +1661,7 @@
   "collapse": "折りたたむ",
   "lines {from}–{to} of {total}": "{total} 行中 {from}–{to} 行",
   "always allows": "常に許可",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness はこのコマンドをすべて読み取れませんでした。{rule} のルールが当てはまる可能性があります。",
   "Leads to {path}": "実際の参照先: {path}",
   "every file edit": "すべてのファイル編集",
   "every shell command": "すべてのシェルコマンド",

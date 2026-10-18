@@ -1661,6 +1661,7 @@
   "collapse": "ยุบ",
   "lines {from}–{to} of {total}": "บรรทัด {from}–{to} จาก {total}",
   "always allows": "อนุญาตเสมอ",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness อ่านคำสั่งนี้ได้ไม่ครบ อาจมีกฎสำหรับ {rule} ที่ใช้ได้",
   "Leads to {path}": "ชี้ไปที่ {path}",
   "every file edit": "การแก้ไขไฟล์ทั้งหมด",
   "every shell command": "คำสั่งเชลล์ทั้งหมด",

@@ -17,7 +17,8 @@
    rm inside `bash -c`, `sh -xc`, `eval`, `env -S`, `xargs`, `find -exec`, wrappers, a here-document
    and other spellings; an ask through an assignment stops a headless run naming the whole
    command; an allowed wrapper and quoted words add no question under `"bash": "ask"`; a path
-   outside the project inside `bash -c` or behind a wrapper asks for its folder.
+   outside the project inside `bash -c` or behind a wrapper asks for its folder; a command too
+   long to read is refused by a deny under `--yolo` and by a skill's, and an ask needs a person.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
@@ -359,6 +360,26 @@ def case_shell_readings():
         assert 'reach outside the project' in result.stderr and str(root) in result.stderr, result.stderr
         assert not target.exists(), f'{command} wrote outside the project without asking'
     passed('a path outside the project inside bash -c, eval or behind a wrapper asks for its folder')
+    # More wrappers than are read: a deny refuses even under --yolo, an ask
+    # needs a person every time, and an active skill's deny counts too.
+    unread = 'nice ' * 17 + 'rm -rf victim'
+    output = haarness(shell, 'run', '--yolo', '!tool bash ' + json.dumps({'command': unread})).stdout
+    assert 'Haarness could not read all of' in output and "permission rule 'bash:rm *' may apply" in output, output
+    assert (shell / 'victim').is_dir(), 'an unread command ran under --yolo'
+    asking = project('shell-unread-ask', {'permission': {'bash': {'*': 'allow', 'printf *': 'ask'}}})
+    result = haarness(asking, 'run', '--yolo', '!tool bash ' + json.dumps({'command': 'nice ' * 17 + 'printf hi > hi.txt'}),
+                      check=False)
+    assert result.returncode != 0 and 'which always needs an answer' in result.stderr, result.stderr
+    assert not (asking / 'hi.txt').exists()
+    guarded = project('shell-unread-skill', {'permission': {'bash': 'allow'}})
+    (guarded / 'victim').mkdir()
+    (guarded / '.haarness' / 'skills' / 'guard').mkdir(parents=True)
+    (guarded / '.haarness' / 'skills' / 'guard' / 'SKILL.md').write_text(
+        '---\nname: guard\ndescription: Guard skill\ndisallowed-tools: Bash(rm:*)\n---\n$ARGUMENTS\n')
+    result = haarness(guarded, 'run', '--command', 'guard', '!tool bash ' + json.dumps({'command': unread}), check=False)
+    assert 'disabled by the active skill' in result.stdout + result.stderr, result.stdout + result.stderr
+    assert (guarded / 'victim').is_dir(), 'an unread command ran past the skill deny'
+    passed('a command too long to read is refused by a deny under --yolo and by a skill, and an ask needs a person')
 
 
 CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow',

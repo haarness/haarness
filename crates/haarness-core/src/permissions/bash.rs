@@ -75,10 +75,17 @@ const MAX_HOPS: u8 = 16;
 const MAX_NESTED_BYTES: usize = 256 * 1024;
 /// How much text one command line has read again, in all.
 const MAX_READ_BYTES: usize = 1024 * 1024;
-/// How many readings one written command has.
+/// How many readings one written command has of itself: its spellings
+/// and what its wrappers run. Commands read in text a shell runs again
+/// count against [`MAX_NESTED_COMMANDS`] instead, so an ordinary script fed
+/// to `sh` is read whole.
 const MAX_READINGS: usize = 64;
 /// How many readings one command line has.
-const MAX_ALL_READINGS: usize = 512;
+const MAX_ALL_READINGS: usize = 16 * 1024;
+/// How many bytes of patterns one command line has, written and read: past
+/// it the line is judged as one command that could not be read (a deeply
+/// nested `$(…)` repeats most of its text in every command).
+const MAX_PATTERN_BYTES: usize = 4 * 1024 * 1024;
 /// How many commands one command line reads in text run again, in all.
 const MAX_NESTED_COMMANDS: usize = 4096;
 
@@ -107,9 +114,17 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         texts: HashSet::new(),
         read_bytes: 0,
         nested_commands: 0,
+        pattern_bytes: 0,
+        overflow: false,
+        text_depth: 0,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
+    }
+    if reader.overflow {
+        let mut analysis = fallback(command);
+        analysis.written[0].incomplete = true;
+        return analysis;
     }
     let Reader {
         mut analysis,
@@ -146,6 +161,33 @@ struct Reader<'w> {
     read_bytes: usize,
     /// Commands read in text run again, in all.
     nested_commands: usize,
+    /// Bytes of patterns, written and read.
+    pattern_bytes: usize,
+    /// The written patterns passed [`MAX_PATTERN_BYTES`].
+    overflow: bool,
+    /// How many strings deep the text being read is.
+    text_depth: u8,
+}
+
+/// The written command whose standard input a program reads.
+#[derive(Clone, Copy)]
+struct Stdin<'a, 't> {
+    node: tree_sitter::Node<'t>,
+    /// Its parent in the tree.
+    parent: Option<tree_sitter::Node<'t>>,
+    /// Each pipeline stage's stage before it, by node id.
+    previous: &'a HashMap<usize, tree_sitter::Node<'t>>,
+}
+
+/// What a command reads on standard input, as far as the command line says.
+enum Input {
+    /// A script spelled out: a here-document, a here-string, or what
+    /// `echo`, `printf` or `cat` of one pipes in.
+    Text(String),
+    /// Nothing the line spells out (a file, another program's output).
+    Unknown,
+    /// More `cat` stages than [`MAX_HOPS`] stood in the way.
+    Unread,
 }
 
 /// How far a reading is from the command as written.
@@ -198,27 +240,44 @@ impl Reader<'_> {
         let Some(tree) = parser.parse(command, None) else {
             return false;
         };
-        let mut stack = vec![tree.root_node()];
+        // Each node with its parent: asking the tree for a node's parent
+        // walks down from the root, which a long or deeply nested line
+        // cannot afford for every command.
+        let mut stack = vec![(tree.root_node(), None)];
         let mut command_nodes = Vec::new();
         let mut redirects = Vec::new();
-        while let Some(node) = stack.pop() {
+        let mut previous = HashMap::new();
+        let mut cursor = tree.walk();
+        while let Some((node, parent)) = stack.pop() {
             if node.kind() == "command" {
-                command_nodes.push(node);
+                command_nodes.push((node, parent));
             }
             if node.kind() == "file_redirect" {
                 redirects.push(node);
             }
-            for index in (0..node.child_count()).rev() {
-                if let Some(child) = node.child(index) {
-                    stack.push(child);
+            let start = stack.len();
+            stack.extend(node.children(&mut cursor).map(|child| (child, Some(node))));
+            if node.kind() == "pipeline" {
+                let stages: Vec<_> = stack[start..]
+                    .iter()
+                    .map(|(child, _)| *child)
+                    .filter(tree_sitter::Node::is_named)
+                    .collect();
+                for pair in stages.windows(2) {
+                    previous.insert(pair[1].id(), pair[0]);
                 }
             }
+            stack[start..].reverse();
         }
         // The traversal above visits parents before children but pops LIFO;
         // sort by position so patterns keep source order.
-        command_nodes.sort_by_key(tree_sitter::Node::start_byte);
+        command_nodes.sort_by_key(|(node, _)| node.start_byte());
+        let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
 
-        for node in command_nodes {
+        for (node, parent) in command_nodes {
+            if self.overflow {
+                break;
+            }
             if depth.text > 0 {
                 self.nested_commands += 1;
                 if self.nested_commands > MAX_NESTED_COMMANDS {
@@ -227,17 +286,14 @@ impl Reader<'_> {
                 }
             }
             // Redirects belong to the command they feed.
-            let command_text = match node.parent() {
+            let command_text = match parent {
                 Some(parent) if parent.kind() == "redirected_statement" => {
                     node_text(parent, command)
                 }
                 _ => node_text(node, command),
             };
             let mut tokens = Vec::new();
-            for index in 0..node.child_count() {
-                let Some(child) = node.child(index) else {
-                    continue;
-                };
+            for child in node.children(&mut cursor) {
                 if matches!(
                     child.kind(),
                     "command_name" | "word" | "number" | "string" | "raw_string" | "concatenation"
@@ -261,12 +317,18 @@ impl Reader<'_> {
                     }
                 }
             }
-            let assigned = (0..node.named_child_count())
-                .filter_map(|index| node.named_child(index))
+            let assigned = node
+                .named_children(&mut cursor)
                 .any(|child| child.kind() == "variable_assignment");
             self.spell(&words, assigned);
-            self.unwrap(&words, Some(node), command, depth);
+            let stdin = Stdin {
+                node,
+                parent,
+                previous: &previous,
+            };
+            self.unwrap(&words, Some(stdin), command, depth);
         }
+        self.text_depth = outer_depth;
         for redirect in redirects {
             let Some(dest) = redirect.child_by_field_name("destination") else {
                 continue;
@@ -303,6 +365,11 @@ impl Reader<'_> {
             self.source = Some(index);
             return;
         }
+        if self.pattern_bytes + pattern.len() > MAX_PATTERN_BYTES {
+            self.overflow = true;
+            return;
+        }
+        self.pattern_bytes += pattern.len();
         let index = self.analysis.written.len();
         self.source = Some(index);
         self.written.insert(pattern.clone(), index);
@@ -329,11 +396,17 @@ impl Reader<'_> {
             return;
         }
         let count = self.counts.entry(source).or_default();
-        if *count >= MAX_READINGS || self.analysis.derived.len() >= MAX_ALL_READINGS {
+        if (self.text_depth == 0 && *count >= MAX_READINGS)
+            || self.analysis.derived.len() >= MAX_ALL_READINGS
+            || self.pattern_bytes + pattern.len() > MAX_PATTERN_BYTES
+        {
             self.stopped();
             return;
         }
-        *count += 1;
+        if self.text_depth == 0 {
+            *count += 1;
+        }
+        self.pattern_bytes += pattern.len();
         self.readings.insert((pattern.clone(), source));
         if self.patterns.insert(pattern.clone()) {
             self.analysis.patterns.push(pattern.clone());
@@ -408,7 +481,7 @@ impl Reader<'_> {
     fn invocation(
         &mut self,
         words: &[Word<'_>],
-        stdin: Option<tree_sitter::Node<'_>>,
+        stdin: Option<Stdin<'_, '_>>,
         source: &str,
         depth: Depth,
     ) {
@@ -459,7 +532,7 @@ impl Reader<'_> {
     fn unwrap(
         &mut self,
         words: &[Word<'_>],
-        stdin: Option<tree_sitter::Node<'_>>,
+        stdin: Option<Stdin<'_, '_>>,
         source: &str,
         depth: Depth,
     ) {
@@ -469,23 +542,21 @@ impl Reader<'_> {
         if !program.literal {
             return;
         }
-        let input = || stdin.and_then(|node| stdin_script(node, source));
+        let input = || stdin.map_or(Input::Unknown, |stdin| stdin_script(stdin, source));
         let name = program_name(&program.value);
         match name.as_str() {
             "eval" => self.nested(&joined(arguments), depth),
             "source" | "." => {
-                let text = arguments.first().and_then(|first| {
-                    if first.node.kind() == "process_substitution" {
-                        substituted(first.node, source)
-                    } else if first.literal && STDIN_PATHS.contains(&first.value.as_str()) {
-                        input()
-                    } else {
-                        None
+                let text = match arguments.first() {
+                    Some(first) if first.node.kind() == "process_substitution" => {
+                        substituted(first.node, source).map_or(Input::Unknown, Input::Text)
                     }
-                });
-                if let Some(text) = text {
-                    self.nested(&text, depth);
-                }
+                    Some(first) if first.literal && STDIN_PATHS.contains(&first.value.as_str()) => {
+                        input()
+                    }
+                    _ => Input::Unknown,
+                };
+                self.script(text, depth);
             }
             "env" => {
                 let options = Options::read(
@@ -531,10 +602,8 @@ impl Reader<'_> {
                 let rest = after_assignments(options.rest);
                 if rest.is_empty() {
                     // A shell that reads its commands from standard input.
-                    if options.flags.contains(['s', 'i'])
-                        && let Some(text) = input()
-                    {
-                        self.nested(&text, depth);
+                    if options.flags.contains(['s', 'i']) {
+                        self.script(input(), depth);
                     }
                     return;
                 }
@@ -626,11 +695,18 @@ impl Reader<'_> {
                 }
             }
             name if SHELLS.contains(&name) => {
-                if let Some(text) = shell_script(arguments, input, source) {
-                    self.nested(&text, depth);
-                }
+                self.script(shell_script(arguments, input, source), depth);
             }
             _ => {}
+        }
+    }
+
+    /// A script a program reads, read as a command of its own.
+    fn script(&mut self, input: Input, depth: Depth) {
+        match input {
+            Input::Text(text) => self.nested(&text, depth),
+            Input::Unread => self.stopped(),
+            Input::Unknown => {}
         }
     }
 
@@ -660,8 +736,7 @@ impl Reader<'_> {
 
 /// A command's words, its assignments and redirects left out.
 fn words<'t>(node: tree_sitter::Node<'t>, source: &str) -> Vec<Word<'t>> {
-    (0..node.named_child_count())
-        .filter_map(|index| node.named_child(index))
+    node.named_children(&mut node.walk())
         .filter(|child| WORD_KINDS.contains(&child.kind()))
         .map(|child| {
             let (value, literal) = unquote(child, source);
@@ -801,11 +876,7 @@ impl<'s, 't> Options<'s, 't> {
 /// The text a shell runs: the word after its options under `-c`, or what
 /// it reads from standard input (`input`) or a process substitution when it
 /// is given no script file.
-fn shell_script(
-    arguments: &[Word<'_>],
-    input: impl FnOnce() -> Option<String>,
-    source: &str,
-) -> Option<String> {
+fn shell_script(arguments: &[Word<'_>], input: impl FnOnce() -> Input, source: &str) -> Input {
     let mut index = 0;
     let mut command = false;
     let mut from_stdin = false;
@@ -821,10 +892,12 @@ fn shell_script(
         if let Some(name) = value.strip_prefix("--") {
             // fish spells `-c` as `--command`.
             if let Some(text) = name.strip_prefix("command=") {
-                return Some(text.to_owned());
+                return Input::Text(text.to_owned());
             }
             if name == "command" {
-                return arguments.get(index + 1).map(|word| word.value.clone());
+                return arguments
+                    .get(index + 1)
+                    .map_or(Input::Unknown, |word| Input::Text(word.value.clone()));
             }
             index += if matches!(name, "rcfile" | "init-file") {
                 2
@@ -850,15 +923,17 @@ fn shell_script(
     }
     let operand = arguments.get(index);
     if command {
-        return operand.map(|word| word.value.clone());
+        return operand.map_or(Input::Unknown, |word| Input::Text(word.value.clone()));
     }
     match operand {
         None => input(),
         Some(_) if from_stdin => input(),
-        Some(word) if word.node.kind() == "process_substitution" => substituted(word.node, source),
+        Some(word) if word.node.kind() == "process_substitution" => {
+            substituted(word.node, source).map_or(Input::Unknown, Input::Text)
+        }
         Some(word) if word.literal && STDIN_PATHS.contains(&word.value.as_str()) => input(),
         // A script file, which is not read.
-        Some(_) => None,
+        Some(_) => Input::Unknown,
     }
 }
 
@@ -881,8 +956,25 @@ fn su_command(arguments: &[Word<'_>]) -> Option<String> {
 
 /// The script a command reads on standard input, when the command line
 /// spells it out: a here-string or here-document of its own, or what an
-/// `echo`, `printf` or `cat` of one writes into a pipe to it.
-fn stdin_script(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+/// `echo`, `printf` or `cat` of one writes into a pipe to it, through any
+/// `cat` stages between them.
+fn stdin_script(stdin: Stdin<'_, '_>, source: &str) -> Input {
+    if let Some(text) = here_input(stdin.node, stdin.parent, source) {
+        return Input::Text(text);
+    }
+    match stdin.parent {
+        Some(pipeline) if pipeline.kind() == "pipeline" => piped_input(stdin, pipeline, source),
+        _ => Input::Unknown,
+    }
+}
+
+/// A here-string of the command's own, or a here-document or here-string
+/// of the statement it is the body of.
+fn here_input(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+) -> Option<String> {
     if let Some(text) = children(node)
         .into_iter()
         .find(|child| child.kind() == "herestring_redirect")
@@ -890,41 +982,60 @@ fn stdin_script(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
     {
         return Some(text);
     }
-    let parent = node.parent()?;
-    match parent.kind() {
-        "redirected_statement" => {
-            children(parent)
-                .into_iter()
-                .find_map(|child| match child.kind() {
-                    "heredoc_redirect" => heredoc_body(child, source),
-                    "herestring_redirect" => here_string(child, source),
-                    _ => None,
-                })
-        }
-        "pipeline" => {
-            if let Some(previous) = node.prev_named_sibling() {
-                return output(previous, source);
-            }
+    let parent = parent.filter(|parent| parent.kind() == "redirected_statement")?;
+    children(parent)
+        .into_iter()
+        .find_map(|child| match child.kind() {
+            "heredoc_redirect" => heredoc_body(child, source),
+            "herestring_redirect" => here_string(child, source),
+            _ => None,
+        })
+}
+
+/// What the stages before the command in `pipeline` write into it, walked
+/// back one stage at a time past `cat` stages that pass their input on.
+fn piped_input(stdin: Stdin<'_, '_>, pipeline: tree_sitter::Node<'_>, source: &str) -> Input {
+    let mut stage = stdin.node;
+    for _ in 0..=MAX_HOPS {
+        let Some(&before) = stdin.previous.get(&stage.id()) else {
             // `cat <<EOF | sh`: the pipe is part of the here-document's
             // redirect, and `cat` writes the document into it.
-            let redirect = parent
+            let mut holder = pipeline.parent();
+            if holder.is_some_and(|holder| holder.kind() == "pipeline") {
+                holder = holder.and_then(|holder| holder.parent());
+            }
+            let Some(redirect) = holder.filter(|holder| holder.kind() == "heredoc_redirect") else {
+                return Input::Unknown;
+            };
+            let writer = redirect
                 .parent()
-                .filter(|redirect| redirect.kind() == "heredoc_redirect")?;
-            let writer = redirect.parent()?.child_by_field_name("body")?;
-            let words = words(writer, source);
-            let (program, arguments) = words.split_first()?;
-            (program.literal && program_name(&program.value) == "cat" && arguments.is_empty())
-                .then(|| heredoc_body(redirect, source))
-                .flatten()
+                .and_then(|statement| statement.child_by_field_name("body"));
+            return match writer.map(|writer| writes(writer, source)) {
+                Some(Writes::Input) => {
+                    heredoc_body(redirect, source).map_or(Input::Unknown, Input::Text)
+                }
+                _ => Input::Unknown,
+            };
+        };
+        match writes(before, source) {
+            Writes::Text(text) => return Input::Text(text),
+            Writes::Input => stage = before,
+            Writes::Nothing => return Input::Unknown,
         }
-        _ => None,
     }
+    Input::Unread
+}
+
+/// What a pipeline stage writes, as far as its words say.
+enum Writes {
+    Text(String),
+    /// A `cat` with no file: what it was given.
+    Input,
+    Nothing,
 }
 
 fn children(node: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
-    (0..node.named_child_count())
-        .filter_map(|index| node.named_child(index))
-        .collect()
+    node.named_children(&mut node.walk()).collect()
 }
 
 fn here_string(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
@@ -943,28 +1054,38 @@ fn heredoc_body(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String>
 
 /// What a process substitution writes, when its words say so.
 fn substituted(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
-    (node.named_child_count() == 1)
-        .then(|| node.named_child(0))
-        .flatten()
-        .and_then(|statement| output(statement, source))
+    match children(node).as_slice() {
+        [statement] => match writes(*statement, source) {
+            Writes::Text(text) => Some(text),
+            Writes::Input | Writes::Nothing => None,
+        },
+        _ => None,
+    }
 }
 
-/// What a command writes, when its words say so: `echo` and `printf` their
-/// arguments, `cat` its here-document or here-string.
-fn output(statement: tree_sitter::Node<'_>, source: &str) -> Option<String> {
-    let command = match statement.kind() {
-        "command" => statement,
-        "redirected_statement" => statement
+/// What a statement writes, when its words say so: `echo` and `printf`
+/// their arguments, `cat` its here-document or here-string, or (with no
+/// file and none of those) what it was given.
+fn writes(statement: tree_sitter::Node<'_>, source: &str) -> Writes {
+    let (command, parent) = match statement.kind() {
+        "command" => (statement, None),
+        "redirected_statement" => match statement
             .child_by_field_name("body")
-            .filter(|body| body.kind() == "command")?,
-        _ => return None,
+            .filter(|body| body.kind() == "command")
+        {
+            Some(body) => (body, Some(statement)),
+            None => return Writes::Nothing,
+        },
+        _ => return Writes::Nothing,
     };
     let words = words(command, source);
-    let (program, arguments) = words.split_first()?;
+    let Some((program, arguments)) = words.split_first() else {
+        return Writes::Nothing;
+    };
     if !program.literal {
-        return None;
+        return Writes::Nothing;
     }
-    match program_name(&program.value).as_str() {
+    let text = match program_name(&program.value).as_str() {
         "echo" => {
             let count = arguments
                 .iter()
@@ -976,12 +1097,15 @@ fn output(statement: tree_sitter::Node<'_>, source: &str) -> Option<String> {
                             .all(|c| matches!(c, 'n' | 'e' | 'E'))
                 })
                 .count();
-            Some(joined(&arguments[count..]))
+            joined(&arguments[count..])
         }
-        "printf" => Some(joined(arguments).replace("\\n", "\n")),
-        "cat" if arguments.is_empty() => stdin_script(command, source),
-        _ => None,
-    }
+        "printf" => joined(arguments).replace("\\n", "\n"),
+        "cat" if arguments.is_empty() => {
+            return here_input(command, parent, source).map_or(Writes::Input, Writes::Text);
+        }
+        _ => return Writes::Nothing,
+    };
+    Writes::Text(text)
 }
 
 /// A word as the program receives it: quotes and escapes removed, with
@@ -2073,7 +2197,7 @@ mod readings {
     /// how long it took.
     fn bounded(command: String) -> (BashAnalysis, std::time::Duration) {
         std::thread::Builder::new()
-            .stack_size(512 * 1024)
+            .stack_size(256 * 1024)
             .spawn(move || {
                 let started = std::time::Instant::now();
                 let analysis = analyze(&command, &workspace());
@@ -2124,13 +2248,70 @@ mod readings {
         assert!(script.len() > 100 * 1024 && script.len() < MAX_NESTED_BYTES);
         let (analysis, took) = bounded(format!("sh <<'EOF'\n{script}EOF"));
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
-        assert!(analysis.derived.len() <= MAX_READINGS);
+        // Past 4,096 commands the script stops being read.
+        assert!(analysis.derived.len() <= 2 * MAX_NESTED_COMMANDS);
         let bytes: usize = analysis
             .derived
             .iter()
             .map(|derived| derived.pattern.len() + derived.always.len())
             .sum();
-        assert!(bytes < 16 * 1024, "{bytes}");
+        assert!(bytes < 512 * 1024, "{bytes}");
+        assert!(analysis.written[0].incomplete);
+    }
+
+    #[test]
+    fn an_ordinary_script_fed_to_a_shell_is_read_whole() {
+        use std::fmt::Write as _;
+        let mut script = String::new();
+        for line in 0..300 {
+            let _ = writeln!(script, "printf 'step {line}'");
+        }
+        script.push_str("rm -rf build\n");
+        let analysis = analyze(&format!("sh <<'EOF'\n{script}EOF"), &workspace());
+        assert!(!analysis.written[0].incomplete);
+        assert!(
+            analysis
+                .derived
+                .iter()
+                .any(|derived| derived.pattern == "rm -rf build")
+        );
+    }
+
+    #[test]
+    fn long_pipes_and_deep_substitutions_finish_quickly_on_a_small_stack() {
+        let cats = format!("echo 'rm x' | {}sh", "cat | ".repeat(3000));
+        let shells = format!("{}true", "sh | ".repeat(3000));
+        let nested = format!("{}rm x{}", "echo $(".repeat(3000), ")".repeat(3000));
+        for command in [cats, shells, nested] {
+            let (analysis, took) = bounded(command.clone());
+            assert!(
+                took < std::time::Duration::from_secs(2),
+                "{took:?}: {}",
+                &command[..30]
+            );
+            assert!(!analysis.patterns.is_empty());
+        }
+        // A few cat stages are walked back; too many stop the reading.
+        for command in [
+            "echo 'rm x' | cat | cat | sh",
+            "cat <<EOF | cat | sh\nrm x\nEOF",
+        ] {
+            assert!(
+                derived(command).iter().any(|pattern| pattern == "rm x"),
+                "{command}"
+            );
+        }
+        let many = format!(
+            "echo 'rm x' | {}sh",
+            "cat | ".repeat(usize::from(MAX_HOPS) + 2)
+        );
+        let analysis = analyze(&many, &workspace());
+        assert!(analysis.written.iter().any(|written| written.incomplete));
+        // A line whose patterns would pass the size limit is one command
+        // that could not be read.
+        let nested = format!("{}rm x{}", "echo $(".repeat(3000), ")".repeat(3000));
+        let analysis = analyze(&nested, &workspace());
+        assert_eq!(analysis.patterns, vec![nested]);
         assert!(analysis.written[0].incomplete);
     }
 
