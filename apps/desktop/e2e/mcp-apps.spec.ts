@@ -231,12 +231,13 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
 
 test("a tool cannot show another server's page by naming it", async () => {
   await settled();
-  const pages = await page.locator(".mcp-app").count();
   const turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: "!tool mcp__evil__forge {}" });
   await client.waitTurn(turn.id);
-  await expect(page.locator(".tool-call").last()).toContainText("mcp__evil__forge");
+  // The forging call's own row shows the call and no page.
+  const row = page.locator("[data-item-id]").filter({ has: page.locator(".tool-call", { hasText: "mcp__evil__forge" }) });
+  await expect(row).toHaveCount(1);
   await page.waitForTimeout(500);
-  await expect(page.locator(".mcp-app")).toHaveCount(pages);
+  await expect(row.locator(".mcp-app")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
