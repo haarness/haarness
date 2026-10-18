@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { listScreenshots, readListedScreenshots } from "../src/main/screenshot-files";
 import {
   SCREENSHOT_LIMIT,
-  activatingInput,
-  createActivations,
+  createScreenshotIntents,
+  inputKind,
   createScreenshotListings,
   displayFolder,
   imageName,
@@ -132,42 +132,83 @@ test("a screenshot swapped for a link or another file after it was listed is ref
   }
 });
 
-test("the folder is listed once per click or key press, and only shortly after it", () => {
-  for (const input of [
-    { type: "mouseDown" },
-    { type: "keyDown", key: "Enter" },
-    { type: "rawKeyDown", key: " " },
-    { type: "touchEnd" },
-    { type: "gestureTap" },
-  ])
-    assert.ok(activatingInput(input), JSON.stringify(input));
-  for (const input of [
-    { type: "mouseMove" },
-    { type: "mouseUp" },
-    { type: "mouseWheel" },
-    { type: "keyDown", key: "a" },
-    { type: "keyDown", key: "Escape" },
-    { type: "keyUp", key: "Enter" },
-    { type: "char", key: "Enter" },
-  ])
-    assert.ok(!activatingInput(input), JSON.stringify(input));
+test("the folder is listed for a choice in the Attach menu, not after any press in the window", () => {
+  const kinds: [object, string | undefined][] = [
+    [{ type: "mouseDown" }, "press"],
+    [{ type: "keyDown", key: "Enter" }, "press"],
+    [{ type: "rawKeyDown", key: " " }, "press"],
+    [{ type: "touchEnd" }, "press"],
+    [{ type: "gestureTap" }, "press"],
+    [{ type: "keyDown", key: "ArrowDown" }, "arrow"],
+    [{ type: "keyDown", key: "a" }, "typing"],
+    [{ type: "keyDown", key: "é" }, "typing"],
+    [{ type: "mouseMove" }, undefined],
+    [{ type: "mouseUp" }, undefined],
+    [{ type: "keyDown", key: "Escape" }, undefined],
+    [{ type: "keyDown", key: "ArrowUp" }, undefined],
+    [{ type: "keyUp", key: "Enter" }, undefined],
+    [{ type: "char", key: "a" }, undefined],
+  ];
+  for (const [input, kind] of kinds) assert.equal(inputKind(input as { type: string }), kind, JSON.stringify(input));
   let now = 1000;
-  const activations = createActivations(5000, () => now);
-  // Nothing yet: a page asking on its own gets nothing.
-  assert.equal(activations.take(1), false);
-  activations.note(1);
-  now += 4000;
-  // Another window's click lists nothing here.
-  assert.equal(activations.take(2), false);
-  assert.equal(activations.take(1), true);
-  // Used up.
-  assert.equal(activations.take(1), false);
-  activations.note(1);
-  now += 5001;
-  assert.equal(activations.take(1), false);
-  activations.note(1);
-  activations.forget(1);
-  assert.equal(activations.take(1), false);
+  const intents = createScreenshotIntents(() => now);
+  // Nothing pressed: no menu token, and a listing without one is not a choice.
+  assert.equal(intents.menu(1), null);
+  assert.equal(intents.chosen(1, undefined), false);
+  // A click opens the menu, a second chooses Attach screenshots: listed once.
+  intents.input(1, "press");
+  const token = intents.menu(1)!;
+  assert.ok(token);
+  now += 3000;
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, token), true);
+  assert.equal(intents.chosen(1, token), false);
+  // From the keyboard: Enter or ArrowDown opens it, ArrowDown moves, Enter chooses.
+  intents.input(1, "arrow");
+  const keyboard = intents.menu(1)!;
+  intents.input(1, "arrow");
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, keyboard), true);
+  // The press that sends a message, and a page asking for a menu right after
+  // it: no later press, so nothing is chosen.
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, intents.menu(1)), false);
+  // Something typed between the menu and the press.
+  intents.input(1, "press");
+  const typed = intents.menu(1);
+  intents.input(1, "typing");
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, typed), false);
+  // A menu not opened by a press, or opened too long after one.
+  intents.input(1, "typing");
+  assert.equal(intents.menu(1), null);
+  intents.input(1, "press");
+  now += 2001;
+  assert.equal(intents.menu(1), null);
+  // A choice too long after its press, or after the menu.
+  intents.input(1, "press");
+  const slow = intents.menu(1);
+  intents.input(1, "press");
+  now += 2001;
+  assert.equal(intents.chosen(1, slow), false);
+  intents.input(1, "press");
+  const stale = intents.menu(1);
+  now += 15_001;
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, stale), false);
+  // Another window's menu or token, a made-up token, or a closed window.
+  intents.input(1, "press");
+  const first = intents.menu(1);
+  intents.input(2, "press");
+  intents.input(2, "press");
+  assert.equal(intents.chosen(2, first), false);
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, "made-up"), false);
+  intents.input(1, "press");
+  const closed = intents.menu(1);
+  intents.forget(1);
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, closed), false);
 });
 
 test("picked screenshots are numbered in the order they were clicked", () => {
