@@ -125,7 +125,8 @@ pub fn is_definition_path(path: &Path) -> bool {
     if name == "skill.md" {
         return true;
     }
-    name.ends_with(".md")
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
         && path.parent().is_some_and(|parent| {
             parent.components().any(|component| {
                 matches!(
