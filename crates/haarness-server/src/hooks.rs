@@ -368,23 +368,83 @@ impl ConfiguredHooks {
 /// gets the values filled in.
 fn hook_invocation(entry: &HookEntry, workspace: &std::path::Path) -> (String, Vec<String>) {
     let expand = |value: &str| expand_hook_value(value, entry, workspace);
+    let value = |name: &str| placeholder_value(name, entry, workspace);
     if !entry.args.is_empty() {
-        return (
-            expand(&entry.command),
-            entry.args.iter().map(|arg| expand(arg)).collect(),
-        );
+        // A program that is itself a shell reads its script argument as
+        // shell text, which gets the shell form's treatment; any other
+        // argument, and any other program's, gets the value filled in.
+        let program = expand(&entry.command);
+        let kind = shell_kind(&program);
+        let script = kind.and_then(|kind| script_index(kind, &entry.args));
+        let arguments = entry
+            .args
+            .iter()
+            .enumerate()
+            .map(
+                |(index, arg)| match kind.filter(|_| Some(index) == script) {
+                    Some(ShellKind::Posix) => quoted_placeholders(ShellKind::Posix, arg, &value),
+                    Some(ShellKind::PowerShell) => powershell_command(arg, &value),
+                    _ => expand(arg),
+                },
+            )
+            .collect();
+        return (program, arguments);
     }
     let shell = entry.shell.as_deref().unwrap_or("sh");
-    let arguments = if shell.eq_ignore_ascii_case("powershell") {
+    let arguments = if shell_kind(shell) == Some(ShellKind::PowerShell) {
         vec![
             "-NoProfile".to_owned(),
             "-Command".to_owned(),
-            powershell_placeholders(&entry.command),
+            powershell_command(&entry.command, &value),
         ]
     } else {
-        vec!["-lc".to_owned(), entry.command.clone()]
+        vec![
+            "-lc".to_owned(),
+            quoted_placeholders(ShellKind::Posix, &entry.command, &value),
+        ]
     };
     (shell.to_owned(), arguments)
+}
+
+/// The shells whose script text a hook's placeholders must not be pasted
+/// into. `cmd` is not one: it expands `%NAME%` before it parses, so a value
+/// holding `&` splits the command either way, and its scripts keep the
+/// value filled in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    Posix,
+    PowerShell,
+}
+
+fn shell_kind(program: &str) -> Option<ShellKind> {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" => Some(ShellKind::Posix),
+        "powershell" | "pwsh" => Some(ShellKind::PowerShell),
+        _ => None,
+    }
+}
+
+/// Which argument a shell reads as its script: the one after `-c` (also
+/// `-lc`, `-ec`, …) for a POSIX shell, after `-Command` or `-c` for
+/// PowerShell.
+fn script_index(kind: ShellKind, args: &[String]) -> Option<usize> {
+    let flag = args.iter().position(|arg| match kind {
+        ShellKind::Posix => {
+            arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+                && arg.contains('c')
+        }
+        ShellKind::PowerShell => {
+            arg.eq_ignore_ascii_case("-command") || arg.eq_ignore_ascii_case("-c")
+        }
+    })?;
+    (flag + 1 < args.len()).then_some(flag + 1)
 }
 
 /// The placeholders a hook may use, all set in its environment.
@@ -399,35 +459,120 @@ const HOOK_PLACEHOLDERS: [&str; 8] = [
     "CLAUDE_PLUGIN_DATA",
 ];
 
-/// A PowerShell command with each `${NAME}` placeholder turned into
-/// `${env:NAME}`, which PowerShell reads from the environment the hook gets.
-/// Pasting the value in would let a folder named `a$(calc)` run `calc`.
-fn powershell_placeholders(command: &str) -> String {
-    HOOK_PLACEHOLDERS
+/// A PowerShell command whose placeholders PowerShell itself resolves, so a
+/// folder named `a$(calc)` never runs `calc`: outside single quotes each
+/// `${NAME}` becomes `${env:NAME}`, read from the environment the hook gets;
+/// inside single quotes, where nothing expands, the value goes in with its
+/// `'` doubled. A command that starts with a placeholder is a path to run,
+/// so its first word is quoted and called with `&`.
+fn powershell_command(command: &str, value: &dyn Fn(&str) -> String) -> String {
+    let trimmed = command.trim_start();
+    if HOOK_PLACEHOLDERS
         .iter()
-        .fold(command.to_owned(), |command, name| {
-            command.replace(&format!("${{{name}}}"), &format!("${{env:{name}}}"))
-        })
+        .any(|name| trimmed.starts_with(&format!("${{{name}}}")))
+    {
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let (program, rest) = trimmed.split_at(end);
+        return format!(
+            "& \"{}\"{}",
+            powershell_text(program, value),
+            powershell_text(rest, value)
+        );
+    }
+    powershell_text(command, value)
+}
+
+/// [`powershell_command`]'s placeholders, without the leading-path rule.
+fn powershell_text(command: &str, value: &dyn Fn(&str) -> String) -> String {
+    quoted_placeholders(ShellKind::PowerShell, command, value)
+}
+
+/// `command` with each placeholder left for the shell where the shell
+/// expands it (a POSIX shell's `${NAME}`, PowerShell's `${env:NAME}`), read
+/// as the shell reads quotes: inside single quotes nothing expands, so the
+/// value goes in there, its `'` written as `'\''` (POSIX) or `''`
+/// (PowerShell). A `'` inside double quotes, or escaped, is just a character.
+fn quoted_placeholders(kind: ShellKind, command: &str, value: &dyn Fn(&str) -> String) -> String {
+    use std::fmt::Write as _;
+    #[derive(PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+    let escape = if kind == ShellKind::Posix { '\\' } else { '`' };
+    let mut out = String::with_capacity(command.len());
+    let mut quote = Quote::None;
+    let mut rest = command;
+    while let Some(character) = rest.chars().next() {
+        if let Some(name) = HOOK_PLACEHOLDERS
+            .iter()
+            .find(|name| rest.starts_with(&format!("${{{name}}}")))
+        {
+            match (&quote, kind) {
+                (Quote::Single, ShellKind::Posix) => {
+                    out.push_str(&value(name).replace('\'', "'\\''"));
+                }
+                (Quote::Single, ShellKind::PowerShell) => {
+                    out.push_str(&value(name).replace('\'', "''"));
+                }
+                (_, ShellKind::Posix) => {
+                    let _ = write!(out, "${{{name}}}");
+                }
+                (_, ShellKind::PowerShell) => {
+                    let _ = write!(out, "${{env:{name}}}");
+                }
+            }
+            rest = &rest[name.len() + 3..];
+            continue;
+        }
+        let mut length = character.len_utf8();
+        match (&quote, character) {
+            (Quote::None, '\'') => quote = Quote::Single,
+            (Quote::Single, '\'') | (Quote::Double, '"') => quote = Quote::None,
+            (Quote::None, '"') => quote = Quote::Double,
+            (Quote::None | Quote::Double, _) if character == escape => {
+                // The escaped character goes with it, whatever it is.
+                length += rest[length..].chars().next().map_or(0, char::len_utf8);
+            }
+            _ => {}
+        }
+        out.push_str(&rest[..length]);
+        rest = &rest[length..];
+    }
+    out
+}
+
+/// What `${name}` stands for in a hook of `entry` run for `workspace`.
+fn placeholder_value(name: &str, entry: &HookEntry, workspace: &std::path::Path) -> String {
+    let root = || {
+        entry
+            .plugin_root
+            .as_deref()
+            .map_or_else(String::new, |root| root.display().to_string())
+    };
+    match name {
+        "HAARNESS_PROJECT_DIR" | "OPENCODE_PROJECT_DIR" | "CLAUDE_PROJECT_DIR" => {
+            workspace.display().to_string()
+        }
+        "HAARNESS_PLUGIN_ROOT" | "OPENCODE_PLUGIN_ROOT" | "CLAUDE_PLUGIN_ROOT" => root(),
+        "HAARNESS_PLUGIN_DATA" | "CLAUDE_PLUGIN_DATA" => entry
+            .plugin_root
+            .as_deref()
+            .map_or_else(String::new, |root| root.join(".data").display().to_string()),
+        _ => String::new(),
+    }
 }
 
 fn expand_hook_value(value: &str, entry: &HookEntry, workspace: &std::path::Path) -> String {
-    let root = entry
-        .plugin_root
-        .as_deref()
-        .map_or_else(String::new, |root| root.display().to_string());
-    let data = entry
-        .plugin_root
-        .as_deref()
-        .map_or_else(String::new, |root| root.join(".data").display().to_string());
-    value
-        .replace("${HAARNESS_PROJECT_DIR}", &workspace.display().to_string())
-        .replace("${OPENCODE_PROJECT_DIR}", &workspace.display().to_string())
-        .replace("${CLAUDE_PROJECT_DIR}", &workspace.display().to_string())
-        .replace("${HAARNESS_PLUGIN_ROOT}", &root)
-        .replace("${OPENCODE_PLUGIN_ROOT}", &root)
-        .replace("${CLAUDE_PLUGIN_ROOT}", &root)
-        .replace("${HAARNESS_PLUGIN_DATA}", &data)
-        .replace("${CLAUDE_PLUGIN_DATA}", &data)
+    HOOK_PLACEHOLDERS
+        .iter()
+        .fold(value.to_owned(), |text, name| {
+            text.replace(
+                &format!("${{{name}}}"),
+                &placeholder_value(name, entry, workspace),
+            )
+        })
 }
 
 #[derive(Default)]
@@ -1300,35 +1445,89 @@ mod tests {
 
     #[test]
     fn powershell_hooks_read_placeholders_from_the_environment() {
-        let command = r#"& "${CLAUDE_PROJECT_DIR}\hooks\gate.ps1" -Root '${CLAUDE_PLUGIN_ROOT}' ${HAARNESS_PROJECT_DIR} ${HOME}"#;
-        assert_eq!(
-            powershell_placeholders(command),
-            r#"& "${env:CLAUDE_PROJECT_DIR}\hooks\gate.ps1" -Root '${env:CLAUDE_PLUGIN_ROOT}' ${env:HAARNESS_PROJECT_DIR} ${HOME}"#
-        );
-        // Nothing of the folder's name reaches the command text, while an
-        // argument list still gets the value.
-        let mut entry = HookEntry {
+        let entry = |command: &str, args: &[&str], shell: Option<&str>| HookEntry {
             event: "Stop".into(),
             matcher: None,
             command: command.into(),
-            args: Vec::new(),
-            shell: Some("powershell".into()),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            shell: shell.map(str::to_owned),
             timeout: Duration::from_secs(1),
-            plugin_root: None,
+            plugin_root: Some(PathBuf::from(r"C:\plugins\it's")),
             asynchronous: false,
         };
         let folder = std::path::Path::new(r"C:\src\a$(calc)");
-        let (program, arguments) = hook_invocation(&entry, folder);
+        let script = |hook: &HookEntry| {
+            let (program, arguments) = hook_invocation(hook, folder);
+            (program, arguments.last().cloned().unwrap_or_default())
+        };
+        // Double quotes and bare words read the environment; single quotes,
+        // where nothing expands, get the value with its quote doubled.
+        let (program, command) = script(&entry(
+            r#"Get-Item "${CLAUDE_PROJECT_DIR}\x"; & '${CLAUDE_PLUGIN_ROOT}\gate.ps1' ${HAARNESS_PROJECT_DIR} ${HOME}"#,
+            &[],
+            Some("powershell"),
+        ));
         assert_eq!(program, "powershell");
-        assert_eq!(arguments[..2], ["-NoProfile", "-Command"]);
-        assert!(!arguments[2].contains("calc"), "{arguments:?}");
-        assert!(
-            arguments[2].contains("${env:CLAUDE_PROJECT_DIR}"),
-            "{arguments:?}"
+        assert_eq!(
+            command,
+            r#"Get-Item "${env:CLAUDE_PROJECT_DIR}\x"; & 'C:\plugins\it''s\gate.ps1' ${env:HAARNESS_PROJECT_DIR} ${HOME}"#
         );
-        entry.command = "gate.exe".into();
-        entry.args = vec!["${CLAUDE_PROJECT_DIR}".into()];
-        assert_eq!(hook_invocation(&entry, folder).1, [r"C:\src\a$(calc)"]);
+        assert!(!command.contains("calc"));
+        // A quote inside double quotes, or escaped, does not open a string.
+        assert_eq!(
+            script(&entry(
+                r#"Write-Output "it's ${CLAUDE_PROJECT_DIR}" `'${CLAUDE_PROJECT_DIR}"#,
+                &[],
+                Some("powershell")
+            ))
+            .1,
+            r#"Write-Output "it's ${env:CLAUDE_PROJECT_DIR}" `'${env:CLAUDE_PROJECT_DIR}"#
+        );
+        // A command that starts with a placeholder is a path to call.
+        assert_eq!(
+            script(&entry(
+                r"${CLAUDE_PLUGIN_ROOT}\hooks\gate.ps1 -Strict",
+                &[],
+                Some("pwsh")
+            ))
+            .1,
+            r#"& "${env:CLAUDE_PLUGIN_ROOT}\hooks\gate.ps1" -Strict"#
+        );
+        // An argument list whose program is a shell: its script argument is
+        // shell text; other arguments, and other programs, get the value.
+        let (program, arguments) = hook_invocation(
+            &entry(
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "& \"${CLAUDE_PROJECT_DIR}\\x.ps1\"",
+                ],
+                None,
+            ),
+            folder,
+        );
+        assert_eq!(program, "powershell.exe");
+        assert_eq!(arguments[2], "& \"${env:CLAUDE_PROJECT_DIR}\\x.ps1\"");
+        let (_, arguments) = hook_invocation(
+            &entry(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "cat \"${CLAUDE_PROJECT_DIR}/x\" \"$1\"",
+                    "sh",
+                    "${CLAUDE_PROJECT_DIR}",
+                ],
+                None,
+            ),
+            folder,
+        );
+        assert_eq!(arguments[1], "cat \"${CLAUDE_PROJECT_DIR}/x\" \"$1\"");
+        assert_eq!(arguments[3], r"C:\src\a$(calc)");
+        assert_eq!(
+            hook_invocation(&entry("gate.exe", &["${CLAUDE_PROJECT_DIR}"], None), folder).1,
+            [r"C:\src\a$(calc)"]
+        );
     }
 
     #[cfg(unix)]
@@ -1343,7 +1542,7 @@ mod tests {
             ConfiguredHooks::parse_block(&json!({
                 "PostToolUseFailure": [{"hooks": [{
                     "command": format!(
-                        "printf '%s|%s|%s' \"${{CLAUDE_PROJECT_DIR}}\" \"${{OPENCODE_PROJECT_DIR}}\" \"$HAARNESS_PROJECT_DIR\" > '{}'",
+                        "printf '%s|%s|%s|%s' \"${{CLAUDE_PROJECT_DIR}}\" \"${{OPENCODE_PROJECT_DIR}}\" \"$HAARNESS_PROJECT_DIR\" '${{CLAUDE_PROJECT_DIR}}' > '{}'",
                         marker.display()
                     )
                 }]}]
@@ -1362,7 +1561,7 @@ mod tests {
         let rendered = workspace.display().to_string();
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap(),
-            format!("{rendered}|{rendered}|{rendered}")
+            format!("{rendered}|{rendered}|{rendered}|{rendered}")
         );
         assert!(!workspace.join("INJECTED").exists());
         assert!(!root.join("INJECTED").exists());

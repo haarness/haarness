@@ -38,6 +38,7 @@ pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only
 pub use permissions::{
     CONFIG_EDIT_RULE, EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule,
     explicit_decision, explicit_granted, is_config_path, is_secret_path, resolve_permission_path,
+    set_global_config_dir,
 };
 pub use ports::*;
 pub use runtime::{

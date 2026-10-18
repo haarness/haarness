@@ -120,12 +120,29 @@ fn file_name_key(name: &str) -> String {
     name.trim_end_matches(['.', ' ']).to_ascii_lowercase()
 }
 
-/// The global configuration folder, as the CLI's layout finds it:
-/// `$HAARNESS_HOME/config`, else `$XDG_CONFIG_HOME/haarness`, else
-/// `~/.config/haarness`.
+static GLOBAL_CONFIG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Record the folder this process reads its global configuration from (the
+/// CLI's resolved layout), so [`is_config_path`] protects exactly that one.
+/// The first call wins.
+pub fn set_global_config_dir(dir: PathBuf) {
+    let _ = GLOBAL_CONFIG_DIR.set(dir);
+}
+
+/// The global configuration folder: the one the CLI recorded, else the same
+/// resolution it uses: `$HAARNESS_DATA_DIR/config`, `$HAARNESS_HOME/config`,
+/// `$XDG_CONFIG_HOME/haarness`, then `.config/haarness` in the home folder
+/// (`HOME`, or `USERPROFILE` on Windows).
 fn global_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = GLOBAL_CONFIG_DIR.get() {
+        return Some(dir.clone());
+    }
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if let Some(root) = set("HAARNESS_DATA_DIR") {
+        return Some(PathBuf::from(root).join("config"));
+    }
     let absolute = |name: &str| {
-        std::env::var_os(name)
+        set(name)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
@@ -133,7 +150,11 @@ fn global_config_dir() -> Option<PathBuf> {
         return Some(root.join("config"));
     }
     absolute("XDG_CONFIG_HOME")
-        .or_else(|| absolute("HOME").map(|home| home.join(".config")))
+        .or_else(|| {
+            absolute("HOME")
+                .or_else(|| absolute("USERPROFILE"))
+                .map(|home| home.join(".config"))
+        })
         .map(|base| base.join("haarness"))
 }
 
@@ -1523,6 +1544,9 @@ mod tests {
         for name in ["AGENTS.md", "commands/x.md", "extensions"] {
             assert!(!is_config_path(&global.join(name)), "{name}");
         }
+        // The folder the CLI recorded is the one protected.
+        set_global_config_dir(global.clone());
+        assert_eq!(global_config_dir().as_deref(), Some(global.as_path()));
         for path in [
             "config.toml",
             "src/config.toml",
