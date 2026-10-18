@@ -8,7 +8,8 @@
    rule covers, and a Cloud action that asks every time is refused at once.
 4. A workflow's agents get no SessionStart hook; the chats people start do.
 5. A plugin's workflow asked for by its bare name names the invocation to use.
-6. (October 18) A list through a link meets the rules for the folder it lists; an edit of the
+6. (October 18) A list through a link meets the rules for the folder it lists, and grep and glob
+   leave out a file a read rule denies; an edit of the
    project's own haarness.json asks a person even under `"edit": "allow"`, `--yolo` and a schedule,
    unless a rule names the file; `$HOME/...` in a shell command asks for the home folder; code
    frontmatter (`---js`) is skipped while `---json` keeps an agent's limits.
@@ -119,6 +120,11 @@ def case_paths():
     (paths / 'alias').symlink_to('build')
     output = haarness(paths, 'run', '!tool list {"path":"alias"}').stdout
     assert "denied by permission rule 'list:build'" in output, output
+    # Searches leave out what a read rule denies, and say how many.
+    output = haarness(paths, 'run', '!tool grep {"pattern":"TOPSECRET"}').stdout
+    assert 'TOPSECRET-VALUE' not in output and '(skipped 1 file a read rule denies)' in output, output
+    output = haarness(paths, 'run', '!tool glob {"pattern":"**/*.txt"}').stdout
+    assert 'secrets/key.txt' not in output and '(skipped 1 file a read rule denies)' in output, output
     (paths / 'src').mkdir()
     (paths / 'src' / 'old.rs').write_text('a\n')
     for patch in ('*** Begin Patch\n*** Add File: src/../generated/b.rs\n+b\n*** End Patch',

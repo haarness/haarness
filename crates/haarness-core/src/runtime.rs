@@ -5548,6 +5548,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
     fn workspace(&self) -> Option<String> {
         Some(self.runner.workspace.to_string_lossy().into_owned())
     }
+    fn read_rules(&self) -> Option<PermissionEngine> {
+        Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
     fn delegable_agents(&self) -> Vec<String> {
         self.runner
             .live_agents
