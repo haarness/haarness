@@ -32,11 +32,63 @@ const USER_BLOCK_ROWS: usize = 12;
 const USER_PREVIEW_ROWS: usize = 8;
 const TOOL_BLOCK_ROWS: usize = 12;
 /// The argument worth showing beside an ordinary tool name (path, command, …).
-fn primary_argument(arguments: &serde_json::Value) -> Option<String> {
-    ["path", "command", "pattern", "url", "name", "prompt"]
-        .iter()
-        .find_map(|key| arguments.get(key).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
+/// A search names what it looks for and where, as Desktop's rows do: two
+/// greps in `src` must not both read `grep src`.
+fn primary_argument(
+    language: crate::locale::Language,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<String> {
+    let text = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    if matches!(name, "grep" | "glob")
+        && let Some(pattern) = text("pattern")
+    {
+        return Some(text("path").map_or_else(
+            || pattern.to_owned(),
+            |path| {
+                language.format(
+                    "{pattern} in {path}",
+                    &[("pattern", pattern), ("path", path)],
+                )
+            },
+        ));
+    }
+    [
+        "path",
+        "file_path",
+        "filePath",
+        "command",
+        "pattern",
+        "query",
+        "url",
+        "name",
+        "prompt",
+    ]
+    .iter()
+    .find_map(|key| text(key))
+    .map(str::to_owned)
+}
+
+/// What a tool row names after the tool: [`primary_argument`], or the files
+/// of a patch, or a workflow's action and run.
+fn tool_target(
+    language: crate::locale::Language,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<String> {
+    if name == "workflow" {
+        return Some(workflow_argument(arguments));
+    }
+    primary_argument(language, name, arguments).or_else(|| {
+        (name == "apply_patch")
+            .then(|| patch_argument(arguments))
+            .flatten()
+    })
 }
 
 /// Workflow calls otherwise collapse to the unhelpful word `workflow`. Keep
@@ -143,6 +195,93 @@ fn batch_task_label(arguments: &serde_json::Value, index: usize) -> String {
         (Some(agent), None) => format!("{agent} agent"),
         (None, None) => format!("delegation {index}"),
     }
+}
+
+/// Steps a collapsed batch lists before the rest fold into `… +N more`.
+const BATCH_STEP_ROWS: usize = 6;
+
+/// One step of a `batch` call as the model asked for it: its position
+/// (1-based, as in the child call ids `<batch>:N`), tool, parameters and,
+/// once the batch returned, whether it failed.
+struct BatchStep<'a> {
+    index: usize,
+    tool: &'a str,
+    parameters: &'a serde_json::Value,
+    failed: Option<bool>,
+}
+
+/// The steps of a `batch` call, matched to its result by position. The
+/// server returns results in input order; an entry counts only when it names
+/// the step's tool, as Desktop's `batchSteps` matches them.
+fn batch_steps<'a>(arguments: &'a serde_json::Value, result: Option<&Item>) -> Vec<BatchStep<'a>> {
+    let bare = |tool: &'a str| tool.strip_prefix("functions.").unwrap_or(tool);
+    let Some(calls) = arguments
+        .get("tool_calls")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let payload = result.and_then(|item| match &item.data {
+        ItemData::ToolResult {
+            output, metadata, ..
+        } => metadata
+            .get("results")
+            .map(|_| metadata.clone())
+            .or_else(|| serde_json::from_str::<serde_json::Value>(output).ok()),
+        _ => None,
+    });
+    let results = payload
+        .as_ref()
+        .and_then(|payload| payload.get("results"))
+        .and_then(serde_json::Value::as_array);
+    calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            let tool = bare(call.get("tool")?.as_str()?);
+            let failed = results
+                .and_then(|results| results.get(index))
+                .filter(|entry| {
+                    entry
+                        .get("tool")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|name| name.strip_prefix("functions.").unwrap_or(name))
+                        == Some(tool)
+                })
+                .map(|entry| entry.get("error").is_some());
+            Some(BatchStep {
+                index: index + 1,
+                tool,
+                parameters: call.get("parameters").unwrap_or(&serde_json::Value::Null),
+                failed,
+            })
+        })
+        .collect()
+}
+
+/// How many steps of a finished batch failed. The batch call itself
+/// succeeds and reports its failed steps in `failures`.
+fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usize {
+    if name != "batch" {
+        return 0;
+    }
+    let reported = result.and_then(|item| match &item.data {
+        ItemData::ToolResult {
+            is_error: false,
+            metadata,
+            ..
+        } => metadata.get("failures").and_then(serde_json::Value::as_u64),
+        _ => None,
+    });
+    reported.map_or_else(
+        || {
+            steps
+                .iter()
+                .filter(|step| step.failed == Some(true))
+                .count()
+        },
+        |count| usize::try_from(count).unwrap_or(usize::MAX),
+    )
 }
 
 /// The line under a delegation row: `↳` what the child is doing while it
@@ -1192,6 +1331,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } => failed_exit(name, metadata),
                     _ => None,
                 });
+                // A batch succeeds as a call and reports its failed steps
+                // in its metadata; any failed step fails the row.
+                let steps = if name == "batch" {
+                    batch_steps(arguments, result)
+                } else {
+                    Vec::new()
+                };
+                let failed_steps = batch_failures(name, result, &steps);
                 let result_status = result.and_then(|item| match &item.data {
                     ItemData::ToolResult {
                         output, is_error, ..
@@ -1199,7 +1346,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         "cancelled"
                     } else if *is_error && rejected_by_user(output) {
                         "rejected"
-                    } else if *is_error || exit_code.is_some() {
+                    } else if *is_error || exit_code.is_some() || failed_steps > 0 {
                         "failed"
                     } else {
                         "done"
@@ -1235,16 +1382,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     result_status
                 };
                 // A batch whose children are running is live work, never a
-                // call waiting its turn behind another tool.
+                // call waiting its turn behind another tool; nor is one
+                // whose own step (`<call id>:N`) is the running tool.
                 let queued = name != "task"
                     && !batch_active
                     && status.is_none()
                     && app.phase.as_ref().is_some_and(|phase| {
                         phase.state == "tool"
-                            && phase
-                                .call_id
-                                .as_deref()
-                                .is_some_and(|active| active != call_id)
+                            && phase.call_id.as_deref().is_some_and(|active| {
+                                active != call_id
+                                    && crate::state::batch_parent_call(active) != Some(call_id)
+                            })
                     });
                 let color = child_state.map_or_else(
                     || match status {
@@ -1269,6 +1417,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // A request the user turned down is their decision, not a
                 // failure: it reads as quietly as a cancel.
                 let suffix = match status {
+                    Some("failed") if failed_steps > 0 => format!(
+                        "  {}",
+                        app.language
+                            .format("{count} failed", &[("count", &failed_steps.to_string())])
+                    ),
                     Some("failed") => exit_code.map_or_else(
                         || format!("  {}", app.language.text("failed")),
                         |code| format!("  exit {code}"),
@@ -1376,12 +1529,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 let argument = if name == "workflow" {
                     format!(" {}", workflow_argument(arguments))
                 } else {
-                    primary_argument(arguments)
-                        .or_else(|| {
-                            (name == "apply_patch")
-                                .then(|| patch_argument(arguments))
-                                .flatten()
-                        })
+                    tool_target(app.language, name, arguments)
                         .map(|value| format!(" {}", single_line(&value, argument_budget)))
                         .unwrap_or_default()
                 };
@@ -1431,6 +1579,62 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         "      ",
                         theme.muted,
                     ));
+                }
+                // Every other step of a batch gets a line of its own, so the
+                // row says what it is doing and which step failed.
+                if !wrapper_hidden && !steps.is_empty() {
+                    let delegated: Vec<usize> =
+                        batch_children.iter().map(|(index, _, _)| *index).collect();
+                    let listed: Vec<&BatchStep> = steps
+                        .iter()
+                        .filter(|step| !(step.tool == "task" && delegated.contains(&step.index)))
+                        .collect();
+                    let expanded = result.is_some_and(|item| app.expanded.contains(&item.id));
+                    let shown = if expanded {
+                        listed.len()
+                    } else if listed.len() > BATCH_STEP_ROWS {
+                        BATCH_STEP_ROWS - 1
+                    } else {
+                        listed.len()
+                    };
+                    let mut push = |row: Line| match result {
+                        Some(result) => block.push_tagged(row, HitTarget::ToolToggle(result.id)),
+                        None => block.push(row),
+                    };
+                    for step in &listed[..shown] {
+                        let (glyph, tone) = match (step.failed, status) {
+                            (Some(true), _) => ("✗".to_owned(), theme.danger),
+                            (Some(false), _) | (None, Some("done")) => {
+                                ("●".to_owned(), theme.muted)
+                            }
+                            (None, Some(_)) => ("⊘".to_owned(), theme.muted),
+                            (None, None) if queued => ("○".to_owned(), theme.muted),
+                            (None, None) => (spinner(app.tick).to_string(), theme.accent),
+                        };
+                        let target = if step.tool == "task" {
+                            Some(batch_task_label(arguments, step.index))
+                        } else {
+                            tool_target(app.language, step.tool, step.parameters)
+                        };
+                        let budget = width.saturating_sub(7 + step.tool.chars().count()).max(12);
+                        push(Line::new(vec![
+                            Span::new(format!("    {glyph} "), tone),
+                            Span::new(step.tool.to_owned(), theme.text),
+                            Span::new(
+                                target.map_or_else(String::new, |target| {
+                                    format!(" {}", single_line(&target, budget))
+                                }),
+                                tone,
+                            ),
+                        ]));
+                    }
+                    if listed.len() > shown {
+                        let more = app.language.format(
+                            "+{count} more",
+                            &[("count", &(listed.len() - shown).to_string())],
+                        );
+                        push(line(format!("    … {more}"), theme.muted));
+                    }
                 }
                 for (index, child_call_id, task) in &batch_children {
                     let (glyph, tone) = task_state_style(&task.state, app.tick, theme);

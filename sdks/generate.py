@@ -738,4 +738,9 @@ if __name__ == "__main__":
                 path.write_text(content)
     if args.check and dirty:
         raise SystemExit("Generated SDK drift: " + ", ".join(dirty))
+    # The hand-written README says what the SDKs cover in words: a number of
+    # operations goes stale with the next route, and nothing regenerates it.
+    counts = re.findall(r"\b\d+ (?:[\w-]+ ){0,3}operations\b", (BASE / "README.md").read_text())
+    if counts:
+        raise SystemExit("sdks/README.md states operation counts that go stale: " + "; ".join(counts))
     print("SDK generation " + ("verified" if args.check else "complete"))

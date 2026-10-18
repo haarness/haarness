@@ -2519,5 +2519,10 @@
   "Comment on selection": "علّق على التحديد",
   "Comment on these lines…": "علّق على هذه الأسطر…",
   "Comment added to your message": "تمت إضافة التعليق إلى رسالتك",
-  "Preview comment": "تعليق على المعاينة"
+  "Preview comment": "تعليق على المعاينة",
+  "{count} failed": "فشل {count}",
+  "+{count} more": "{count} أخرى",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "حاول هذا التطبيق فتح رابط لا يفتحه Haarness. يمكن للتطبيقات فتح روابط http وhttps وmailto فقط.",
+  "Load image from {host}": "تحميل الصورة من {host}",
+  "The image from {host} could not be loaded.": "تعذّر تحميل الصورة من {host}."
 }

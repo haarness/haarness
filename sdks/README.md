@@ -9,7 +9,7 @@ included. Both packages can be built, packed and installed locally.
   AbortSignal cancellation, SSE async iterators, authenticated PTY WebSockets.
 - **Python:** Python 3.10+, synchronous `Haarness` and asynchronous
   `AsyncHaarness`, generated TypedDicts/unions, HTTPX, SSE iterators, PTYs.
-- **All 123 registered native operations:** chats/turns, commands, goals, loops,
+- **Every registered native operation:** chats/turns, commands, goals, loops,
   background work, permissions/questions, MCP, plugins, skills,
   workspaces, Git review, PTYs, workflows, profile archives, analytics and shutdown.
 - Explicit owned local-server helpers, remote-safe attachments, and `chat()`.
@@ -254,8 +254,8 @@ URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 
 ## Cloud accounts, sessions and chats
 
-`HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
-176 documented Cloud operations, including account events, host relay sockets, and scoped runtime adapters.
+`HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose every
+documented Cloud operation, including account events, host relay sockets, and scoped runtime adapters.
 This includes identity/OAuth, plans and wallets, billing, API keys and model usage,
 marketplace, devices, reusable agents, session lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
@@ -485,7 +485,7 @@ operation inventory, TypeScript types/methods, and Python types/sync/async
 methods. `--check` detects source/generated drift without modifying files.
 
 The shared E2E scenario runs through each actual SDK and requires successful
-coverage of all 119 non-account native operations in each client; the four account adapters are covered by the live Cloud-tool scenario. Every JSON response is checked
+coverage of every native operation outside the account adapters in each client; the account adapters are covered by the live Cloud-tool scenario. Every JSON response is checked
 against its declared schema. Assertions check resulting files, history,
 idempotency, approvals, questions, workflow/background lifecycles, MCP
 stdio tools/resources/prompts, PTY IO/replay, binary profile round-trips,
@@ -498,7 +498,7 @@ fixture; these tests do not contact paid model services.
 Cloud generation imports the versioned sibling `haarness-cloud/docs/openapi.json`
 and includes every operation without a route allowlist. Copy the updated document
 to `sdks/cloud-openapi.json` before regeneration; the check catches sibling drift.
-Contract tests cover all 125 HTTP operations in TypeScript and Python sync/async,
+Contract tests cover every Cloud HTTP operation in TypeScript and Python sync/async,
 including form encoding, manual redirects and binary responses. Live fixture
 journeys in `sdks/tests/cloud_e2e.py` (sync/async) and `cloud_ts_e2e.mjs` exercise
 real account API, gateway, runtimes, two chats, uploads, all schedule operations,

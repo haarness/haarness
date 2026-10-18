@@ -202,6 +202,23 @@ test("one click lets the page open one link; a second waits for the person", asy
   expect(errors).toEqual([]);
 });
 
+test("a link the app may not open is refused with a notice under the page, never opened", async () => {
+  const view = page.locator(".mcp-app").last();
+  const before = (await calls()).shell.length;
+  await content(view).getByRole("button", { name: "Open a file link" }).click();
+  await expect(content(view).locator("#status")).toHaveText(
+    "file link error Haarness opens only http, https and mailto links from an app.",
+  );
+  // The person who clicked sees why nothing opened.
+  const notice = view.locator(".mcp-app-refused");
+  await expect(notice).toContainText("This app tried to open a link Haarness does not open.");
+  await expect(notice.locator(".mcp-app-url")).toHaveText("file:///etc/hosts");
+  await notice.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(notice).toHaveCount(0);
+  expect((await calls()).shell.slice(before)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test("a theme change outside the colours, such as the font, reaches the page", async () => {
   const view = page.locator(".mcp-app").last();
   await page.evaluate(() => document.documentElement.style.setProperty("--sans", "Georgia, serif"));

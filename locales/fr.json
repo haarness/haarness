@@ -2519,5 +2519,10 @@
   "Comment on selection": "Commenter la sélection",
   "Comment on these lines…": "Commenter ces lignes…",
   "Comment added to your message": "Commentaire ajouté à votre message",
-  "Preview comment": "Commentaire sur l’aperçu"
+  "Preview comment": "Commentaire sur l’aperçu",
+  "{count} failed": "{count} en échec",
+  "+{count} more": "{count} de plus",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Cette app a tenté d’ouvrir un lien que Haarness n’ouvre pas. Les apps ne peuvent ouvrir que des liens http, https et mailto.",
+  "Load image from {host}": "Charger l’image depuis {host}",
+  "The image from {host} could not be loaded.": "L’image de {host} n’a pas pu être chargée."
 }

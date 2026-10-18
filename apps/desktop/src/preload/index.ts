@@ -17,6 +17,7 @@ const bridge: Bridge = {
   account: (input) => invoke("account", input),
   globalShortcut: (action) => invoke("globalShortcut", action),
   openLink: (connection, thread, url) => invoke("openLink", connection, thread, url),
+  remoteImage: (url) => invoke("remoteImage", url),
   browserData: (connection, input) => invoke("browserData", connection, input),
   browserAttach:(connection,thread)=>invoke("browserAttach",connection,thread),
   browserAdopt:(connection,thread)=>invoke("browserAdopt",connection,thread),
