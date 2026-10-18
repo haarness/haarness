@@ -27,6 +27,9 @@ interface Data {
   credentials: Record<string, string>;
   /** Set once the old Tab agent keys have moved to the current defaults. */
   agentKeysMigrated?: boolean;
+  /** The screenshots folder chosen on Linux, where the picker opens next
+   * time. Kept outside `values`, which the renderer may write. */
+  screenshotFolder?: string;
 }
 let state: Data = {
   preferences: { ...defaults },

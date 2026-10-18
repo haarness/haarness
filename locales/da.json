@@ -2439,5 +2439,17 @@
   "Click and press the keys, including a modifier key.": "Klik, og tryk på tasterne, inklusive en modifikatortast.",
   "Use a modifier key and one more key, such as {keys}.": "Brug en modifikatortast og én tast mere, f.eks. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} hører til systemet. Vælg en anden genvej.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "En anden app eller systemet bruger allerede {keys}. Vælg en anden genvej."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "En anden app eller systemet bruger allerede {keys}. Vælg en anden genvej.",
+  "Attach": "Vedhæft",
+  "Attach screenshots": "Vedhæft skærmbilleder",
+  "Screenshots": "Skærmbilleder",
+  "Choose the folder your screenshots are saved in.": "Vælg mappen, som dine skærmbilleder gemmes i.",
+  "No screenshots in this folder yet.": "Der er endnu ingen skærmbilleder i denne mappe.",
+  "Choose folder…": "Vælg mappe…",
+  "Add {count} screenshots": "Tilføj {count} skærmbilleder",
+  "Add 1 screenshot": "Tilføj 1 skærmbillede",
+  "Add screenshots": "Tilføj skærmbilleder",
+  "Choose your screenshots folder": "Vælg mappen med dine skærmbilleder",
+  "The screenshots changed. Open Screenshots again.": "Skærmbillederne har ændret sig. Åbn Skærmbilleder igen.",
+  "Choose up to 20 screenshots from the list.": "Vælg op til 20 skærmbilleder på listen."
 }

@@ -44,6 +44,7 @@ export function MenuButton(props: {
   content?: JSX.Element;
   class?: string;
   title?: string;
+  disabled?: boolean;
   items: MenuAction[];
   /** A menu that replaces its trigger's value is at least as wide as it. */
   matchWidth?: boolean;
@@ -136,6 +137,7 @@ export function MenuButton(props: {
           props.class ?? (props.text || props.content ? "" : "icon-button")
         }
         aria-label={props.label}
+        disabled={props.disabled}
         aria-haspopup="menu"
         aria-expanded={open()}
         aria-controls={open() ? id : undefined}

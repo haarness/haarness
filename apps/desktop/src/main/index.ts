@@ -5,6 +5,8 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
+import { defaultScreenshotFolder, listScreenshots, screenshotThumbnails } from "./screenshot-folder";
+import { createScreenshotListings, displayFolder } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
@@ -28,6 +30,7 @@ import {
   globalShortcut,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve, basename, sep, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -129,6 +132,8 @@ function socketOpen(socket: PtyConnection) {
   return state === undefined || state === 1;
 }
 const projectTransaction = createProjectQueue();
+/** Each window's last screenshot listing; the renderer picks by place in it. */
+const screenshotListings = createScreenshotListings();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
   launchVoice(
@@ -1109,6 +1114,52 @@ function installHandlers() {
       name: basename(result.filePaths[i]),
     }));
   });
+  // The Screenshots dialog: the newest images of the screenshots folder, with
+  // thumbnails. The renderer gets names, times and thumbnails, never paths,
+  // and attaches by place in this listing.
+  handle("screenshots", async (win, raw: unknown) => {
+    const input = z.object({ choose: z.boolean().optional() }).strict().parse(raw ?? {});
+    let folder: string | undefined;
+    if (input.choose) {
+      const result = await dialog.showOpenDialog(win, {
+        title: say("Choose your screenshots folder"),
+        properties: ["openDirectory"],
+      });
+      if (result.canceled || !result.filePaths[0]) return { canceled: true };
+      folder = result.filePaths[0];
+      // Linux has no screenshots folder of its own: the picker opens the
+      // chosen one next time. Elsewhere it opens the system's folder again.
+      if (process.platform === "linux") {
+        data().screenshotFolder = folder;
+        await persist();
+      }
+    } else folder = await defaultScreenshotFolder(data().screenshotFolder);
+    if (!folder) {
+      screenshotListings.forget(win.id);
+      return { needsFolder: true };
+    }
+    const images = await listScreenshots(folder);
+    const thumbnails = await screenshotThumbnails(images.map((image) => image.path));
+    return {
+      folder: displayFolder(folder, homedir()),
+      listing: screenshotListings.remember(win.id, images.map((image) => image.path)),
+      items: images.map((image, index) => ({
+        name: image.name,
+        modified: image.modified,
+        thumbnail: thumbnails[index],
+      })),
+    };
+  });
+  handle("screenshotAttach", async (win, listing: unknown, indexes: unknown) => {
+    let paths: string[];
+    try {
+      paths = screenshotListings.resolve(win.id, listing, indexes);
+    } catch (error) {
+      throw new Error(say(error instanceof Error ? error.message : String(error)));
+    }
+    const values = await attachments(paths);
+    return values.map((data, index) => ({ data, name: basename(paths[index]) }));
+  });
   handle("save", async (win, name: string, content: string) => {
     bounded(content);
     const result = await dialog.showSaveDialog(win, {
@@ -1385,6 +1436,7 @@ function createWindow() {
     resumeShortcut(win.id);
   });
   win.on("closed", () => {
+    screenshotListings.forget(win.id);
     resumeShortcut(win.id);
     voice.stop(win.id);
     windows.delete(win);

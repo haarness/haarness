@@ -2439,5 +2439,17 @@
   "Click and press the keys, including a modifier key.": "Kliknite i pritisnite tipke, uključujući modifikatorsku tipku.",
   "Use a modifier key and one more key, such as {keys}.": "Koristite modifikatorsku tipku i još jednu tipku, npr. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} pripada sistemu. Odaberite drugu prečicu.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu.",
+  "Attach": "Priloži",
+  "Attach screenshots": "Priloži snimke ekrana",
+  "Screenshots": "Snimci ekrana",
+  "Choose the folder your screenshots are saved in.": "Odaberi folder u koji se spremaju tvoji snimci ekrana.",
+  "No screenshots in this folder yet.": "U ovom folderu još nema snimaka ekrana.",
+  "Choose folder…": "Odaberi folder…",
+  "Add {count} screenshots": "Dodaj snimke ekrana ({count})",
+  "Add 1 screenshot": "Dodaj 1 snimak ekrana",
+  "Add screenshots": "Dodaj snimke ekrana",
+  "Choose your screenshots folder": "Odaberi folder sa svojim snimcima ekrana",
+  "The screenshots changed. Open Screenshots again.": "Snimci ekrana su se promijenili. Ponovo otvori Snimke ekrana.",
+  "Choose up to 20 screenshots from the list.": "Odaberi do 20 snimaka ekrana sa liste."
 }

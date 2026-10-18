@@ -122,6 +122,116 @@
 .mcp-dialog {
   width: min(740px, calc(100vw - 32px));
 }
+
+/* The Screenshots dialog: newest first, picked ones numbered in order. */
+.screenshot-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+/* Only an open dialog may be shown; the grid then scrolls between header and footer. */
+.screenshot-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.screenshot-folder-name {
+  margin: var(--s1) 0 0;
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
+  /* A path keeps its own direction in a right-to-left interface. */
+  unicode-bidi: plaintext;
+}
+.screenshot-empty {
+  margin: var(--s4) 0;
+  font-size: var(--ui-lg);
+}
+.screenshot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--s3);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s1);
+  margin-inline: calc(-1 * var(--s1));
+}
+.screenshot-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s1);
+  padding: var(--s1);
+  height: auto;
+  min-width: 0;
+  text-align: start;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  color: var(--text);
+}
+.screenshot-tile:hover {
+  background: var(--hover);
+}
+.screenshot-tile[aria-pressed="true"] {
+  border-color: var(--primary-edge);
+  background: var(--primary-soft);
+}
+.screenshot-thumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  color: var(--faint);
+}
+.screenshot-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.screenshot-order {
+  position: absolute;
+  inset-block-start: var(--s1);
+  inset-inline-end: var(--s1);
+  min-width: 22px;
+  height: 22px;
+  padding-inline: var(--s0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+  color: var(--page);
+  font-size: var(--ui-sm);
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+.screenshot-name,
+.screenshot-time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-sm);
+}
+.screenshot-name {
+  unicode-bidi: plaintext;
+}
+.screenshot-time {
+  color: var(--muted);
+}
+.screenshot-error {
+  margin: var(--s3) 0 0;
+}
+.screenshot-dialog footer {
+  flex-wrap: wrap;
+}
+.screenshot-choose {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-inline-end: auto;
+}
 /* One header rhythm for every dialog that carries a title over a subtitle,
    whether its header sits inside the form or directly in the dialog. */
 .mcp-dialog > form > header,
