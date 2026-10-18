@@ -12,6 +12,8 @@ import {
   messageText,
   payload,
   payloadFor,
+  recall,
+  remember,
   policy,
   resource,
   sources,
@@ -324,4 +326,17 @@ test("the frame's host page is a separate document whose policy keeps the page i
   const view = await readFile(new URL("../src/renderer/McpAppView.tsx", import.meta.url), "utf8");
   assert.match(view, /sandbox="allow-scripts allow-forms"/);
   assert.ok(!view.includes("allow-same-origin"));
+});
+
+test("the page and height caches keep only their most recent entries", () => {
+  const map = new Map<string, number>();
+  for (let index = 0; index < 5; index++) remember(map, `page ${index}`, index, 3);
+  assert.deepEqual([...map.keys()], ["page 2", "page 3", "page 4"]);
+  // Reading an entry keeps it; the oldest unread one goes next.
+  assert.equal(recall(map, "page 2"), 2);
+  remember(map, "page 5", 5, 3);
+  assert.deepEqual([...map.keys()], ["page 4", "page 2", "page 5"]);
+  remember(map, "page 4", 40, 3);
+  assert.deepEqual([...map.entries()], [["page 2", 2], ["page 5", 5], ["page 4", 40]]);
+  assert.equal(recall(map, "gone"), undefined);
 });

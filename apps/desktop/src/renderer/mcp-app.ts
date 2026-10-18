@@ -295,6 +295,22 @@ export function variables(read: (token: string) => string, color: (token: string
   return values;
 }
 
+/** Keeps `value` as the newest entry of `map`, dropping the oldest past `limit`. */
+export function remember<K, V>(map: Map<K, V>, key: K, value: V, limit: number) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) map.delete(map.keys().next().value as K);
+}
+
+/** An entry of a map kept by `remember`, which reading makes the newest. */
+export function recall<K, V>(map: Map<K, V>, key: K): V | undefined {
+  if (!map.has(key)) return undefined;
+  const value = map.get(key) as V;
+  map.delete(key);
+  map.set(key, value);
+  return value;
+}
+
 /** A link a page may open: http, https and mailto only. */
 export function webLink(url: unknown): string | undefined {
   if (typeof url !== "string" || url.length > 8192) return undefined;
