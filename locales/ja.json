@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "別のアプリまたはシステムがすでに {keys} を使用しています。別のショートカットを選んでください。",
   "Reconnecting…": "再接続中…",
   "Terminal disconnected": "ターミナルが切断されました",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness はこのターミナルに接続できません。シェルはまだ実行中の可能性があります。"
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness はこのターミナルに接続できません。シェルはまだ実行中の可能性があります。",
+  "Option as Meta key": "Option を Meta キーとして使う",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "ターミナルで Option キーを押したときに、特殊文字を入力する代わりに Meta（Esc）ショートカットを送信します。",
+  "Left Option": "左の Option",
+  "Both Option keys": "両方の Option キー"
 }

@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} başka bir uygulama veya sistem tarafından kullanılıyor. Başka bir kısayol seçin.",
   "Reconnecting…": "Yeniden bağlanıyor…",
   "Terminal disconnected": "Terminal bağlantısı kesildi",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness bu terminale ulaşamıyor. Kabuğu hâlâ çalışıyor olabilir."
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness bu terminale ulaşamıyor. Kabuğu hâlâ çalışıyor olabilir.",
+  "Option as Meta key": "Meta tuşu olarak Option",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "Option tuşu terminalde özel karakter yazmak yerine Meta (Esc) kısayolları göndersin.",
+  "Left Option": "Sol Option",
+  "Both Option keys": "İki Option tuşu da"
 }

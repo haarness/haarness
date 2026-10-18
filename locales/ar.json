@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "يستخدم تطبيق آخر أو النظام {keys} بالفعل. اختر اختصارًا آخر.",
   "Reconnecting…": "جارٍ إعادة الاتصال…",
   "Terminal disconnected": "انقطع اتصال المحطة الطرفية",
-  "Haarness can't reach this terminal. Its shell may still be running.": "يتعذّر على Haarness الوصول إلى هذه المحطة الطرفية. قد تظل الصدفة الخاصة بها قيد التشغيل."
+  "Haarness can't reach this terminal. Its shell may still be running.": "يتعذّر على Haarness الوصول إلى هذه المحطة الطرفية. قد تظل الصدفة الخاصة بها قيد التشغيل.",
+  "Option as Meta key": "مفتاح Option كمفتاح Meta",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "اجعل مفتاح Option يرسل اختصارات Meta (Esc) في المحطة الطرفية بدلًا من كتابة أحرف خاصة.",
+  "Left Option": "مفتاح Option الأيسر",
+  "Both Option keys": "مفتاحا Option كلاهما"
 }

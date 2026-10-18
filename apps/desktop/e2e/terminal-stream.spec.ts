@@ -286,6 +286,50 @@ test("a terminal shown again past two megabytes of output keeps a program's curs
   expect(errors).toEqual([]);
 });
 
+test("Option types what the layout composes until Settings makes it a Meta key", async () => {
+  test.skip(process.platform !== "darwin", "only macOS composes characters with Option");
+  await run(`stty -icanon -echo; cat -u > ${join(temporary, "option.txt")}`, "option.txt");
+  const cdp = await page.context().newCDPSession(page);
+  // As macOS reports Option+B on a US layout: the key's own code, and the
+  // composed character as its text.
+  const option = async (side: "AltLeft" | "AltRight") => {
+    const location = side === "AltLeft" ? 1 : 2;
+    const alt = { key: "Alt", code: side, windowsVirtualKeyCode: 18, location };
+    const b = { key: "∫", code: "KeyB", windowsVirtualKeyCode: 66 };
+    await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", modifiers: 1, ...alt });
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", modifiers: 1, text: "∫", unmodifiedText: "b", ...b });
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", modifiers: 1, ...b });
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", modifiers: 0, ...alt });
+  };
+  const settings = () => page.getByRole("dialog", { name: "Settings", exact: true });
+  const choose = async (value: string) => {
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await settings().getByRole("textbox", { name: "Filter settings" }).fill("Option as Meta");
+    await settings().getByRole("button", { name: "Option as Meta key Settings › General", exact: true }).click();
+    await settings().getByRole("combobox", { name: "Option as Meta key", exact: true }).click();
+    await page.getByRole("option", { name: value, exact: true }).click();
+    await expect(settings().getByRole("combobox", { name: "Option as Meta key", exact: true })).toContainText(value);
+    await settings().getByRole("button", { name: "Close settings", exact: true }).click();
+    await input().focus();
+  };
+  await input().focus();
+  await option("AltLeft");
+  await expect.poll(() => read("option.txt")).toBe("∫");
+  await choose("Left Option");
+  await option("AltLeft");
+  await option("AltRight");
+  await expect.poll(() => read("option.txt")).toBe("∫\u001bb∫");
+  await choose("Both Option keys");
+  await option("AltRight");
+  await expect.poll(() => read("option.txt")).toBe("∫\u001bb∫\u001bb");
+  await choose("Off");
+  await cdp.detach();
+  await input().press("Control+c");
+  await input().pressSequentially("stty sane");
+  await input().press("Enter");
+  expect(errors).toEqual([]);
+});
+
 // Last: it replaces the server the other tests use.
 test("after the server is replaced, the terminal it no longer has gives way to a new shell", async () => {
   test.setTimeout(240_000);

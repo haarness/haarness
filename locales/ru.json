@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} уже использует другое приложение или система. Выберите другое сочетание.",
   "Reconnecting…": "Переподключение…",
   "Terminal disconnected": "Терминал отключён",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness не может связаться с этим терминалом. Его оболочка, возможно, всё ещё работает."
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness не может связаться с этим терминалом. Его оболочка, возможно, всё ещё работает.",
+  "Option as Meta key": "Option как клавиша Meta",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "Option отправляет в терминале сочетания Meta (Esc) вместо ввода специальных символов.",
+  "Left Option": "Левая Option",
+  "Both Option keys": "Обе клавиши Option"
 }

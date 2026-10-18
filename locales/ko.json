@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요.",
   "Reconnecting…": "다시 연결하는 중…",
   "Terminal disconnected": "터미널 연결이 끊어짐",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness가 이 터미널에 연결할 수 없습니다. 셸은 아직 실행 중일 수 있습니다."
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness가 이 터미널에 연결할 수 없습니다. 셸은 아직 실행 중일 수 있습니다.",
+  "Option as Meta key": "Option을 Meta 키로 사용",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "터미널에서 Option 키가 특수 문자를 입력하는 대신 Meta(Esc) 단축키를 보내도록 합니다.",
+  "Left Option": "왼쪽 Option",
+  "Both Option keys": "양쪽 Option 키"
 }

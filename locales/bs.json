@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu.",
   "Reconnecting…": "Ponovno povezivanje…",
   "Terminal disconnected": "Terminal je prekinut",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness ne može doći do ovog terminala. Njegova ljuska možda još radi."
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness ne može doći do ovog terminala. Njegova ljuska možda još radi.",
+  "Option as Meta key": "Option kao tipka Meta",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "Neka Option u terminalu šalje Meta (Esc) prečice umjesto upisivanja posebnih znakova.",
+  "Left Option": "Lijevi Option",
+  "Both Option keys": "Obje tipke Option"
 }

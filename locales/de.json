@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "Eine andere App oder das System verwendet {keys} bereits. Wähle ein anderes Tastenkürzel.",
   "Reconnecting…": "Verbindung wird wiederhergestellt…",
   "Terminal disconnected": "Terminal getrennt",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness erreicht dieses Terminal nicht. Seine Shell läuft möglicherweise noch."
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness erreicht dieses Terminal nicht. Seine Shell läuft möglicherweise noch.",
+  "Option as Meta key": "Option als Meta-Taste",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "Option sendet im Terminal Meta-Kürzel (Esc), statt Sonderzeichen einzugeben.",
+  "Left Option": "Linke Option-Taste",
+  "Both Option keys": "Beide Option-Tasten"
 }

@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "แอปอื่นหรือระบบใช้ {keys} อยู่แล้ว โปรดเลือกทางลัดอื่น",
   "Reconnecting…": "กำลังเชื่อมต่อใหม่…",
   "Terminal disconnected": "เทอร์มินัลขาดการเชื่อมต่อ",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness เข้าถึงเทอร์มินัลนี้ไม่ได้ เชลล์ของเทอร์มินัลอาจยังทำงานอยู่"
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness เข้าถึงเทอร์มินัลนี้ไม่ได้ เชลล์ของเทอร์มินัลอาจยังทำงานอยู่",
+  "Option as Meta key": "ใช้ Option เป็นปุ่ม Meta",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "ให้ปุ่ม Option ส่งคีย์ลัด Meta (Esc) ในเทอร์มินัลแทนการพิมพ์อักขระพิเศษ",
+  "Left Option": "Option ด้านซ้าย",
+  "Both Option keys": "ปุ่ม Option ทั้งสองข้าง"
 }
