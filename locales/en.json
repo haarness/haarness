@@ -1661,6 +1661,7 @@
   "collapse": "collapse",
   "lines {from}–{to} of {total}": "lines {from}–{to} of {total}",
   "always allows": "always allows",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness could not read all of this command; a rule for {rule} may apply.",
   "Leads to {path}": "Leads to {path}",
   "every file edit": "every file edit",
   "every shell command": "every shell command",
