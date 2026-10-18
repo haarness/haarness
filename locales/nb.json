@@ -2446,5 +2446,14 @@
   "First token": "Første token",
   "Output speed": "Utdatahastighet",
   "{count} tokens/s": "{count} tokens/s",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Første token er ventetiden fra forespørselen sendes til det første strømmede innholdet. Utdatahastighet er utdata-tokens per sekund mens de ble strømmet, og vises når strømmen varte minst et halvt sekund."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Første token er ventetiden fra forespørselen sendes til det første strømmede innholdet. Utdatahastighet er utdata-tokens per sekund mens de ble strømmet, og vises når strømmen varte minst et halvt sekund.",
+  "Previous chat": "Forrige chat",
+  "Next chat": "Neste chat",
+  "Focus sidebar": "Fokuser på sidefeltet",
+  "Previous prompt": "Forrige ledetekst",
+  "Next prompt": "Neste ledetekst",
+  "First prompt": "Første ledetekst",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Blant chattene sidefeltet viser, fra hvor som helst unntatt filredigeringen eller en terminal",
+  "Shows the sidebar and puts the keyboard on the open chat": "Viser sidefeltet og flytter tastaturet til den åpne chatten",
+  "In the open chat; in the message box only while it is empty": "I den åpne chatten; i meldingsfeltet bare mens det er tomt"
 }

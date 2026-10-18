@@ -2446,5 +2446,14 @@
   "First token": "首个 token",
   "Output speed": "输出速度",
   "{count} tokens/s": "{count} token/秒",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "首个 token 是从发送请求到收到第一段流式内容的等待时间。输出速度是流式传输期间每秒的输出 token 数，仅在流持续至少半秒时显示。"
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "首个 token 是从发送请求到收到第一段流式内容的等待时间。输出速度是流式传输期间每秒的输出 token 数，仅在流持续至少半秒时显示。",
+  "Previous chat": "上一个对话",
+  "Next chat": "下一个对话",
+  "Focus sidebar": "聚焦侧边栏",
+  "Previous prompt": "上一条提示",
+  "Next prompt": "下一条提示",
+  "First prompt": "第一条提示",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "在侧边栏显示的对话之间切换，文件编辑器和终端中除外",
+  "Shows the sidebar and puts the keyboard on the open chat": "显示侧边栏，并将键盘焦点移到当前对话",
+  "In the open chat; in the message box only while it is empty": "在当前对话中；在消息框中仅当其为空时可用"
 }

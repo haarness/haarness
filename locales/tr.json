@@ -2446,5 +2446,14 @@
   "First token": "İlk token",
   "Output speed": "Çıkış hızı",
   "{count} tokens/s": "{count} token/sn",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "İlk token, isteğin gönderilmesinden ilk akış içeriğinin gelmesine kadar geçen bekleme süresidir. Çıkış hızı, akış sırasında saniyedeki çıkış token sayısıdır ve akış en az yarım saniye sürdüğünde gösterilir."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "İlk token, isteğin gönderilmesinden ilk akış içeriğinin gelmesine kadar geçen bekleme süresidir. Çıkış hızı, akış sırasında saniyedeki çıkış token sayısıdır ve akış en az yarım saniye sürdüğünde gösterilir.",
+  "Previous chat": "Önceki sohbet",
+  "Next chat": "Sonraki sohbet",
+  "Focus sidebar": "Kenar çubuğuna odaklan",
+  "Previous prompt": "Önceki istem",
+  "Next prompt": "Sonraki istem",
+  "First prompt": "İlk istem",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Kenar çubuğunun gösterdiği sohbetler arasında, dosya düzenleyici ve terminal dışında her yerden",
+  "Shows the sidebar and puts the keyboard on the open chat": "Kenar çubuğunu gösterir ve klavyeyi açık sohbete taşır",
+  "In the open chat; in the message box only while it is empty": "Açık sohbette; mesaj kutusunda yalnızca boşken"
 }

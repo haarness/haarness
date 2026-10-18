@@ -2446,5 +2446,14 @@
   "First token": "첫 토큰",
   "Output speed": "출력 속도",
   "{count} tokens/s": "{count} 토큰/초",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "첫 토큰은 요청을 보낸 뒤 첫 스트리밍 콘텐츠가 도착할 때까지의 대기 시간입니다. 출력 속도는 스트리밍되는 동안 초당 출력 토큰 수이며, 스트림이 0.5초 이상 이어졌을 때만 표시됩니다."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "첫 토큰은 요청을 보낸 뒤 첫 스트리밍 콘텐츠가 도착할 때까지의 대기 시간입니다. 출력 속도는 스트리밍되는 동안 초당 출력 토큰 수이며, 스트림이 0.5초 이상 이어졌을 때만 표시됩니다.",
+  "Previous chat": "이전 대화",
+  "Next chat": "다음 대화",
+  "Focus sidebar": "사이드바로 이동",
+  "Previous prompt": "이전 프롬프트",
+  "Next prompt": "다음 프롬프트",
+  "First prompt": "첫 프롬프트",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "사이드바에 표시된 대화 사이에서 이동합니다. 파일 편집기와 터미널에서는 작동하지 않습니다",
+  "Shows the sidebar and puts the keyboard on the open chat": "사이드바를 표시하고 키보드 포커스를 열린 대화로 옮깁니다",
+  "In the open chat; in the message box only while it is empty": "열린 대화에서 작동하며, 메시지 상자에서는 비어 있을 때만 작동합니다"
 }

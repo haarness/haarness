@@ -2446,5 +2446,14 @@
   "First token": "أول رمز",
   "Output speed": "سرعة المخرجات",
   "{count} tokens/s": "{count} رمز/ث",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "أول رمز هو مدة الانتظار من إرسال الطلب حتى وصول أول محتوى متدفق. سرعة المخرجات هي عدد رموز المخرجات في الثانية أثناء تدفقها، وتظهر عندما يستمر التدفق نصف ثانية على الأقل."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "أول رمز هو مدة الانتظار من إرسال الطلب حتى وصول أول محتوى متدفق. سرعة المخرجات هي عدد رموز المخرجات في الثانية أثناء تدفقها، وتظهر عندما يستمر التدفق نصف ثانية على الأقل.",
+  "Previous chat": "المحادثة السابقة",
+  "Next chat": "المحادثة التالية",
+  "Focus sidebar": "التركيز على الشريط الجانبي",
+  "Previous prompt": "الطلب السابق",
+  "Next prompt": "الطلب التالي",
+  "First prompt": "الطلب الأول",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "بين المحادثات التي يعرضها الشريط الجانبي، من أي مكان عدا محرر الملفات أو الطرفية",
+  "Shows the sidebar and puts the keyboard on the open chat": "يعرض الشريط الجانبي وينقل لوحة المفاتيح إلى المحادثة المفتوحة",
+  "In the open chat; in the message box only while it is empty": "في المحادثة المفتوحة؛ وفي مربع الرسالة فقط عندما يكون فارغًا"
 }

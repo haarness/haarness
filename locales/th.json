@@ -2446,5 +2446,14 @@
   "First token": "โทเค็นแรก",
   "Output speed": "ความเร็วเอาต์พุต",
   "{count} tokens/s": "{count} โทเค็น/วินาที",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "โทเค็นแรกคือเวลาที่รอตั้งแต่ส่งคำขอจนได้รับเนื้อหาแบบสตรีมชิ้นแรก ความเร็วเอาต์พุตคือจำนวนโทเค็นเอาต์พุตต่อวินาทีระหว่างการสตรีม และจะแสดงเมื่อสตรีมนานอย่างน้อยครึ่งวินาที"
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "โทเค็นแรกคือเวลาที่รอตั้งแต่ส่งคำขอจนได้รับเนื้อหาแบบสตรีมชิ้นแรก ความเร็วเอาต์พุตคือจำนวนโทเค็นเอาต์พุตต่อวินาทีระหว่างการสตรีม และจะแสดงเมื่อสตรีมนานอย่างน้อยครึ่งวินาที",
+  "Previous chat": "แชทก่อนหน้า",
+  "Next chat": "แชทถัดไป",
+  "Focus sidebar": "โฟกัสแถบด้านข้าง",
+  "Previous prompt": "พรอมต์ก่อนหน้า",
+  "Next prompt": "พรอมต์ถัดไป",
+  "First prompt": "พรอมต์แรก",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "สลับระหว่างแชทที่แถบด้านข้างแสดง จากทุกที่ ยกเว้นตัวแก้ไขไฟล์หรือเทอร์มินัล",
+  "Shows the sidebar and puts the keyboard on the open chat": "แสดงแถบด้านข้างและย้ายแป้นพิมพ์ไปที่แชทที่เปิดอยู่",
+  "In the open chat; in the message box only while it is empty": "ในแชทที่เปิดอยู่ และในช่องข้อความเฉพาะเมื่อว่างอยู่"
 }

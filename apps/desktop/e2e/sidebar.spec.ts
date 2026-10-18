@@ -744,3 +744,83 @@ for (const gesture of ["keyboard", "drag"] as const) {
     await expect(page.locator("[data-drop-position]")).toHaveCount(0);
   });
 }
+
+test("sidebar Alt and an arrow step the chats the sidebar shows; on a focused row they still move it", async () => {
+  const alpha = await open("alpha");
+  for (const title of ["One", "Two", "Three"])
+    await alpha.createThread({ title, provider: "echo", model: "echo-1" });
+  const row = (title: string) => project("alpha").getByRole("button", { name: title, exact: true });
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Three", "Two", "One"]);
+  await row("Two").click();
+  await expect(row("Two")).toHaveAttribute("aria-current", "true");
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.focus();
+  await composer.press("Alt+ArrowDown");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await expect(composer).toBeFocused();
+  // A draft does not stop the step, and past the last row it wraps.
+  await composer.fill("draft stays");
+  await composer.press("Alt+ArrowDown");
+  await expect(row("Three")).toHaveAttribute("aria-current", "true");
+  await expect(composer).toBeFocused();
+  await composer.press("Alt+ArrowUp");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await expect(composer).toHaveValue("draft stays");
+  // A sidebar row with the keyboard moves itself and leaves the open chat alone.
+  await row("One").press("Alt+ArrowUp");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Three", "One", "Two"]);
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  // The palette offers the same steps.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Next chat");
+  await page.getByRole("option", { name: "Next chat", exact: true }).click();
+  await expect(row("Two")).toHaveAttribute("aria-current", "true");
+});
+
+test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the open chat", async () => {
+  const alpha = await open("alpha");
+  await alpha.createThread({ title: "Focus me", provider: "echo", model: "echo-1" });
+  await alpha.createThread({ title: "Other chat", provider: "echo", model: "echo-1" });
+  await project("alpha").getByRole("button", { name: "Focus me", exact: true }).click();
+  await collapse("alpha");
+  await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
+  await expect(page.locator(".sidebar")).toBeHidden();
+  await page.getByRole("textbox", { name: "Message", exact: true }).focus();
+  // Control+Shift+L on macOS; elsewhere that is the file editor's Add
+  // selection to context, so Focus sidebar is Alt+Shift+L there.
+  await page.keyboard.press(process.platform === "darwin" ? "Control+Shift+L" : "Alt+Shift+L");
+  await expect(page.locator(".sidebar")).toBeVisible();
+  const row = project("alpha").getByRole("button", { name: "Focus me", exact: true });
+  await expect(row).toBeFocused();
+  await expect(row).toHaveAttribute("aria-current", "true");
+});
+
+test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {
+  const alpha = await open("alpha");
+  const thread = await alpha.createThread({ title: "Long talk", provider: "echo", model: "echo-1" });
+  for (let index = 0; index < 3; index++)
+    await alpha.waitTurn((await alpha.startTurn(thread.id, { text: "::long 60", requestId: crypto.randomUUID() })).id);
+  await project("alpha").getByRole("button", { name: "Long talk", exact: true }).click();
+  await expect(page.locator(".transcript")).toContainText("60");
+  const reading = page.locator('.outline-dash[aria-current="location"]');
+  const latest = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const mod = process.platform === "darwin" ? "Meta" : "Control";
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.focus();
+  await composer.press(`${mod}+Shift+ArrowUp`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 1");
+  await expect(latest).toBeVisible();
+  await composer.press(`${mod}+ArrowDown`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 2");
+  // In a draft the keys move the caret instead.
+  await composer.fill("x");
+  await composer.press(`${mod}+ArrowDown`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 2");
+  await composer.fill("");
+  await composer.press(`${mod}+Shift+ArrowDown`);
+  await expect(latest).toHaveCount(0);
+  // From the newest output, Previous goes back to the last prompt.
+  await composer.press(`${mod}+ArrowUp`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 3");
+  await expect(latest).toBeVisible();
+});

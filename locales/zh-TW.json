@@ -2446,5 +2446,14 @@
   "First token": "首個 token",
   "Output speed": "輸出速度",
   "{count} tokens/s": "{count} token/秒",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "首個 token 是從送出請求到收到第一段串流內容的等待時間。輸出速度是串流期間每秒的輸出 token 數，僅在串流持續至少半秒時顯示。"
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "首個 token 是從送出請求到收到第一段串流內容的等待時間。輸出速度是串流期間每秒的輸出 token 數，僅在串流持續至少半秒時顯示。",
+  "Previous chat": "上一個對話",
+  "Next chat": "下一個對話",
+  "Focus sidebar": "聚焦側邊欄",
+  "Previous prompt": "上一則提示",
+  "Next prompt": "下一則提示",
+  "First prompt": "第一則提示",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "在側邊欄顯示的對話之間切換，檔案編輯器和終端機中除外",
+  "Shows the sidebar and puts the keyboard on the open chat": "顯示側邊欄，並將鍵盤焦點移到目前的對話",
+  "In the open chat; in the message box only while it is empty": "在目前的對話中；在訊息框中僅於其為空時可用"
 }

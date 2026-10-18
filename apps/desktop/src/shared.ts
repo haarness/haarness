@@ -89,6 +89,18 @@ export const defaults: Preferences = {
     // Matched wherever the keyboard is: the tabs of the panel that has it.
     tabNext: "Ctrl+Tab",
     tabPrev: "Ctrl+Shift+Tab",
+    // The chat rows the sidebar draws, from anywhere but a code editor or a
+    // terminal. On a focused sidebar row Alt and an arrow still move the row.
+    chatPrev: "Alt+ArrowUp",
+    chatNext: "Alt+ArrowDown",
+    // Control on macOS too; off macOS see `defaultShortcuts`.
+    focusSidebar: "Ctrl+Shift+L",
+    // The prompts of the open chat. In the message box they act only while
+    // it is empty, so the caret keys keep working on a draft.
+    promptPrev: "Mod+ArrowUp",
+    promptNext: "Mod+ArrowDown",
+    promptFirst: "Mod+Shift+ArrowUp",
+    promptLast: "Mod+Shift+ArrowDown",
   },
   globalShortcut: defaultGlobalShortcut,
   language: "en",
@@ -127,13 +139,36 @@ export function shortcutsClash(shortcuts: Record<string, string>, platform: stri
   const keys = Object.values(shortcuts).filter(Boolean).map((value) => shortcutKeys(value, platform));
   return new Set(keys).size !== keys.length;
 }
-/** Shortcuts that may be left unset. */
-export const optionalShortcuts = new Set(["tabNext", "tabPrev"]);
 /**
- * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab) came after people chose their own
- * keys. A tab default that is already another action's key in `saved` (a
- * `Mod+Tab` agent key off macOS, say) is left unset, so that action keeps
- * it and Settings still saves; a tab key saved before is kept as it is.
+ * The default keys on `platform`. Off macOS Control is Mod, and
+ * Control+Shift+L is the file editor's "Add selection to context", so Focus
+ * sidebar takes Alt+Shift+L there. (Control+Alt would be AltGr on many
+ * keyboards, where Control+Alt+Shift+L types a letter such as Ł.)
+ */
+export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
+  return platform === "darwin"
+    ? defaults.shortcuts
+    : { ...defaults.shortcuts, focusSidebar: "Alt+Shift+L" };
+}
+/** Shortcuts that may be left unset: the ones added after people could
+ * choose their own keys. */
+export const optionalShortcuts = new Set([
+  "tabNext",
+  "tabPrev",
+  "chatPrev",
+  "chatNext",
+  "focusSidebar",
+  "promptPrev",
+  "promptNext",
+  "promptFirst",
+  "promptLast",
+]);
+/**
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar and
+ * prompt keys, came after people chose their own keys. A new default that is
+ * already another action's key in `saved` (a `Mod+Tab` agent key off macOS,
+ * say) is left unset, so that action keeps it and Settings still saves; a key
+ * saved before is kept as it is.
  */
 export function migrateTabKeys(
   saved: Record<string, string> | undefined,

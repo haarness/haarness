@@ -2446,5 +2446,14 @@
   "First token": "First token",
   "Output speed": "Output speed",
   "{count} tokens/s": "{count} tokens/s",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.",
+  "Previous chat": "Previous chat",
+  "Next chat": "Next chat",
+  "Focus sidebar": "Focus sidebar",
+  "Previous prompt": "Previous prompt",
+  "Next prompt": "Next prompt",
+  "First prompt": "First prompt",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Among the chats the sidebar shows, from anywhere but the file editor or a terminal",
+  "Shows the sidebar and puts the keyboard on the open chat": "Shows the sidebar and puts the keyboard on the open chat",
+  "In the open chat; in the message box only while it is empty": "In the open chat; in the message box only while it is empty"
 }

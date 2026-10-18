@@ -2446,5 +2446,14 @@
   "First token": "Первый токен",
   "Output speed": "Скорость вывода",
   "{count} tokens/s": "{count} токенов/с",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Первый токен — время ожидания от отправки запроса до первого потокового содержимого. Скорость вывода — выходные токены в секунду во время потоковой передачи; она показывается, если поток длился не меньше полсекунды."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Первый токен — время ожидания от отправки запроса до первого потокового содержимого. Скорость вывода — выходные токены в секунду во время потоковой передачи; она показывается, если поток длился не меньше полсекунды.",
+  "Previous chat": "Предыдущий чат",
+  "Next chat": "Следующий чат",
+  "Focus sidebar": "Перейти к боковой панели",
+  "Previous prompt": "Предыдущий запрос",
+  "Next prompt": "Следующий запрос",
+  "First prompt": "Первый запрос",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "По чатам, которые видны на боковой панели, откуда угодно, кроме редактора файлов и терминала",
+  "Shows the sidebar and puts the keyboard on the open chat": "Показывает боковую панель и переводит клавиатуру на открытый чат",
+  "In the open chat; in the message box only while it is empty": "В открытом чате; в поле сообщения — только пока оно пустое"
 }

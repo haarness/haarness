@@ -112,6 +112,13 @@ export const shortcutTitles: Record<string, string> = {
   agentPrev: "Previous agent",
   tabNext: "Next tab",
   tabPrev: "Previous tab",
+  chatPrev: "Previous chat",
+  chatNext: "Next chat",
+  focusSidebar: "Focus sidebar",
+  promptPrev: "Previous prompt",
+  promptNext: "Next prompt",
+  promptFirst: "First prompt",
+  promptLast: "Jump to latest",
 };
 /** Composer keys work only in the message box; Tab elsewhere moves focus. */
 export const shortcutDescriptions: Record<string, string> = {
@@ -119,4 +126,11 @@ export const shortcutDescriptions: Record<string, string> = {
   agentPrev: "While the message box has focus",
   tabNext: "In the chats, terminal, files, browser or side panel that has the keyboard",
   tabPrev: "In the chats, terminal, files, browser or side panel that has the keyboard",
+  chatPrev: "Among the chats the sidebar shows, from anywhere but the file editor or a terminal",
+  chatNext: "Among the chats the sidebar shows, from anywhere but the file editor or a terminal",
+  focusSidebar: "Shows the sidebar and puts the keyboard on the open chat",
+  promptPrev: "In the open chat; in the message box only while it is empty",
+  promptNext: "In the open chat; in the message box only while it is empty",
+  promptFirst: "In the open chat; in the message box only while it is empty",
+  promptLast: "In the open chat; in the message box only while it is empty",
 };
