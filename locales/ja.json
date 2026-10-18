@@ -2446,5 +2446,14 @@
   "First token": "最初のトークン",
   "Output speed": "出力速度",
   "{count} tokens/s": "{count} トークン/秒",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "最初のトークンは、リクエストを送信してから最初のストリーミング内容が届くまでの待ち時間です。出力速度はストリーミング中の 1 秒あたりの出力トークン数で、ストリームが 0.5 秒以上続いたときに表示されます。"
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "最初のトークンは、リクエストを送信してから最初のストリーミング内容が届くまでの待ち時間です。出力速度はストリーミング中の 1 秒あたりの出力トークン数で、ストリームが 0.5 秒以上続いたときに表示されます。",
+  "Previous chat": "前のチャット",
+  "Next chat": "次のチャット",
+  "Focus sidebar": "サイドバーにフォーカス",
+  "Previous prompt": "前のプロンプト",
+  "Next prompt": "次のプロンプト",
+  "First prompt": "最初のプロンプト",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "サイドバーに表示されているチャット間を移動します。ファイルエディターとターミナルでは使えません",
+  "Shows the sidebar and puts the keyboard on the open chat": "サイドバーを表示し、開いているチャットにキーボードを移します",
+  "In the open chat; in the message box only while it is empty": "開いているチャットで使えます。メッセージ欄では空のときだけ使えます"
 }

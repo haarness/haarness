@@ -138,12 +138,19 @@ export function physicalKey(code = "") {
   return /^(?:Key|Digit)(.)$/.exec(code)?.[1] ?? punctuation[code];
 }
 
+const arrows: Record<string, string> = {
+  ArrowUp: "↑",
+  ArrowDown: "↓",
+  ArrowLeft: "←",
+  ArrowRight: "→",
+};
 /**
  * A shortcut the way the platform writes it: key glyphs on macOS (⌘ ⇧ B), key
  * names joined by "+" elsewhere (Ctrl+Shift+B). Show it in a `<kbd dir="ltr">`
  * or through `shortcutText`: a right-to-left line would reorder the glyphs.
  */
 export function shortcutLabel(value: string, platform: string) {
+  value = value.replace(/\bArrow(Up|Down|Left|Right)\b/g, (name) => arrows[name]);
   if (platform !== "darwin") return value.replace(/\bMod\b/g, "Ctrl");
   return value
     .replace(/\bMod\b/g, "⌘")

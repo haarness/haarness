@@ -2446,5 +2446,14 @@
   "First token": "Primeiro token",
   "Output speed": "Velocidade de saída",
   "{count} tokens/s": "{count} tokens/s",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Primeiro token é a espera entre o envio da solicitação e o primeiro conteúdo transmitido. A velocidade de saída são os tokens de saída por segundo durante a transmissão; ela aparece quando a transmissão durou pelo menos meio segundo."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Primeiro token é a espera entre o envio da solicitação e o primeiro conteúdo transmitido. A velocidade de saída são os tokens de saída por segundo durante a transmissão; ela aparece quando a transmissão durou pelo menos meio segundo.",
+  "Previous chat": "Chat anterior",
+  "Next chat": "Próximo chat",
+  "Focus sidebar": "Focar a barra lateral",
+  "Previous prompt": "Prompt anterior",
+  "Next prompt": "Próximo prompt",
+  "First prompt": "Primeiro prompt",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Entre os chats que a barra lateral mostra, de qualquer lugar exceto o editor de arquivos ou um terminal",
+  "Shows the sidebar and puts the keyboard on the open chat": "Mostra a barra lateral e leva o teclado ao chat aberto",
+  "In the open chat; in the message box only while it is empty": "No chat aberto; na caixa de mensagem só enquanto estiver vazia"
 }

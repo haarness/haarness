@@ -2446,5 +2446,14 @@
   "First token": "Prvi token",
   "Output speed": "Brzina izlaza",
   "{count} tokens/s": "{count} tokena/s",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Prvi token je čekanje od slanja zahtjeva do prvog strimovanog sadržaja. Brzina izlaza je broj izlaznih tokena u sekundi dok su se strimovali, a prikazuje se kada je strim trajao najmanje pola sekunde."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Prvi token je čekanje od slanja zahtjeva do prvog strimovanog sadržaja. Brzina izlaza je broj izlaznih tokena u sekundi dok su se strimovali, a prikazuje se kada je strim trajao najmanje pola sekunde.",
+  "Previous chat": "Prethodni chat",
+  "Next chat": "Sljedeći chat",
+  "Focus sidebar": "Fokusiraj bočnu traku",
+  "Previous prompt": "Prethodni upit",
+  "Next prompt": "Sljedeći upit",
+  "First prompt": "Prvi upit",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Među chatovima koje prikazuje bočna traka, s bilo kojeg mjesta osim uređivača datoteka ili terminala",
+  "Shows the sidebar and puts the keyboard on the open chat": "Prikazuje bočnu traku i postavlja tastaturu na otvoreni chat",
+  "In the open chat; in the message box only while it is empty": "U otvorenom chatu; u polju za poruku samo dok je prazno"
 }

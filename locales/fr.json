@@ -2446,5 +2446,14 @@
   "First token": "Premier jeton",
   "Output speed": "Vitesse de sortie",
   "{count} tokens/s": "{count} jetons/s",
-  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Premier jeton est l’attente entre l’envoi de la requête et le premier contenu diffusé. La vitesse de sortie correspond aux jetons de sortie par seconde pendant la diffusion ; elle s’affiche quand le flux a duré au moins une demi-seconde."
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Premier jeton est l’attente entre l’envoi de la requête et le premier contenu diffusé. La vitesse de sortie correspond aux jetons de sortie par seconde pendant la diffusion ; elle s’affiche quand le flux a duré au moins une demi-seconde.",
+  "Previous chat": "Discussion précédente",
+  "Next chat": "Discussion suivante",
+  "Focus sidebar": "Activer la barre latérale",
+  "Previous prompt": "Invite précédente",
+  "Next prompt": "Invite suivante",
+  "First prompt": "Première invite",
+  "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Parmi les discussions affichées dans la barre latérale, partout sauf dans l’éditeur de fichiers ou un terminal",
+  "Shows the sidebar and puts the keyboard on the open chat": "Affiche la barre latérale et place le clavier sur la discussion ouverte",
+  "In the open chat; in the message box only while it is empty": "Dans la discussion ouverte ; dans la zone de message seulement quand elle est vide"
 }
