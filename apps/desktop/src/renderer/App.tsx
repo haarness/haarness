@@ -40,6 +40,8 @@ import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
 import { keyPlace, overlayOpen, stepIndex, stepsChats } from "./keyboard-nav";
+import { SelectionBar } from "./SelectionBar";
+import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
 type Dock = "files" | "diff" | "context" | "browser";
@@ -333,6 +335,8 @@ export function App() {
   /** Opens the chat `offset` rows from the open one, wrapping. The keyboard
    * goes back to the message box when the step started there. */
   function stepChat(offset: number, from: Element | null) {
+    // In Select chats a row click picks it instead of opening it.
+    if (selection()) return;
     const rows = chatRows();
     const at = rows.findIndex((row) => row.getAttribute("aria-current") === "true");
     const target = rows[stepIndex(rows.length, at, offset) ?? -1];
@@ -1017,6 +1021,7 @@ export function App() {
               </Show>
             </div>
           </div>
+          <SelectionBar />
           <footer class="sidebar-footer">
             <AccountMenu />
             <button
