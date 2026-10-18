@@ -15,12 +15,14 @@ import { terminalTheme, type ThemeId } from "../themes";
 import {
   inputQueue,
   linkWatch,
-  reconnectDelay,
+  reconnects,
+  restoredLine,
   scrollPlaces,
   shownOutput,
   terminalStream,
   writeChunks,
   type Link,
+  type ScrollPlace,
 } from "./terminal-stream";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
@@ -291,6 +293,8 @@ export function TerminalPanel() {
     </section>
   );
 }
+/** Lines a terminal view keeps above its screen. */
+const SCROLLBACK = 5000;
 function TerminalView(props: { id: string; onGone: () => void; onNew: () => void }) {
   const app = useApp();
   const [link, setLink] = createSignal<Link>("connected");
@@ -307,7 +311,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       fontFamily: "SFMono-Regular, Menlo, Consolas, monospace",
       fontSize: app.state.preferences.terminalFontSize,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: SCROLLBACK,
       allowProposedApi: false,
     });
     fit = new FitAddon();
@@ -415,20 +419,30 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         stream.replay(Math.min(Math.max(requested, data.start), data.end));
         if (replayStart === undefined) {
           replayStart = data.start;
-          place = scrollPlaces.take(key, data.start);
+          place = scrollPlaces.take(key);
         }
       }
       if (data.bytes) stream.bytes(new Uint8Array(data.bytes));
       if (data.type === "cursor" && typeof data.end === "number") {
         stream.cursor(data.end);
         cursor = data.end;
-        attempt = 0;
-        // The replay is in: open where the view was scrolled to before.
-        if (place !== undefined) {
-          const line = place;
-          place = undefined;
+        loop.reset();
+        // Once xterm has drawn the replay, open where the view was
+        // scrolled to before, if that line still holds the same text.
+        if (place !== undefined && !restoring) {
+          restoring = true;
+          const end = data.end;
           terminal.write(new Uint8Array(), () => {
-            if (!disposed) terminal.scrollToLine(line);
+            if (disposed) return;
+            const line = restoredLine(place, {
+              start: replayStart!,
+              end,
+              cols: terminal.cols,
+              rows: terminal.rows,
+              trimmed: terminal.buffer.active.length >= terminal.rows + SCROLLBACK,
+            });
+            place = undefined;
+            if (line !== undefined) terminal.scrollToLine(line);
           });
         }
       }
@@ -446,7 +460,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       if (data.type === "closed") {
         live = false;
         watch.lost();
-        reconnect();
+        loop.after();
       }
     });
     // The output this view has, as the server counts it. When the socket
@@ -455,64 +469,60 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     // keeps its keys and the missed output is replayed once.
     let cursor = 0;
     let requested = 0;
-    // Where this view's first replay started, and the line to open at once
-    // it is in (see scrollPlaces).
+    // Where this view's first replay started, and where the view was before,
+    // to open at once xterm has drawn it (see scrollPlaces).
     let replayStart: number | undefined;
-    let place: number | undefined;
-    let attempt = 0;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    let place: ScrollPlace | undefined;
+    let restoring = false;
     let focused = false;
     // What the view says while the connection is down; reconnects go on
     // whatever it says.
     const watch = linkWatch({ onState: setLink });
-    const connect = () => {
-      requested = cursor;
-      void window.haarness
-        .terminal(connection, "connect", props.id, { cursor, view })
-        .then(() => {
-          if (disposed) return;
-          if (!focused) terminal.focus();
-          focused = true;
-          live = true;
-          watch.connected();
-          for (const bytes of waiting.take()) send(bytes);
-          sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
-        })
-        .catch(() => {
-          if (disposed) return;
-          watch.lost();
-          reconnect();
-        });
-    };
-    function reconnect(delay = reconnectDelay(attempt++)) {
-      if (disposed) return;
-      clearTimeout(retry);
-      retry = setTimeout(async () => {
-        // While the server cannot say, keep trying. A shell that exited
-        // sends nothing more, and its tab says so; a terminal the server no
-        // longer has (it was replaced meanwhile) gives way to what it has.
-        const tabs = await window.haarness
-          .api<PtyInfo[]>(connection, "listPtys", [])
-          .catch(() => undefined);
-        if (disposed) return;
-        if (!tabs) return reconnect();
-        const tab = tabs.find((tab) => tab.id === props.id);
-        if (tab?.status === "running") return connect();
+    // One attempt at a time (see reconnects). The first connects at once;
+    // later ones ask the server first, which keeps them trying while it
+    // cannot say. A shell that exited sends nothing more, and its tab says
+    // so; a terminal the server no longer has (it was replaced meanwhile)
+    // gives way to what it has.
+    let first = true;
+    const loop = reconnects({
+      attempt: async () => {
+        if (!first) {
+          const tabs = await window.haarness.api<PtyInfo[]>(connection, "listPtys", []);
+          if (disposed) return true;
+          const tab = tabs.find((tab) => tab.id === props.id);
+          if (tab?.status !== "running") {
+            watch.connected();
+            if (!tab) props.onGone();
+            return true;
+          }
+        }
+        first = false;
+        requested = cursor;
+        try {
+          await window.haarness.terminal(connection, "connect", props.id, { cursor, view });
+        } catch {
+          if (!disposed) watch.lost();
+          return disposed;
+        }
+        if (disposed) return true;
+        if (!focused) terminal.focus();
+        focused = true;
+        live = true;
         watch.connected();
-        if (!tab) props.onGone();
-      }, delay);
-    }
-    // Retry tries at once, and backs off from the start again.
+        for (const bytes of waiting.take()) send(bytes);
+        sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
+        return true;
+      },
+    });
     retryNow = () => {
-      attempt = 0;
       watch.retry();
-      reconnect(0);
+      loop.now();
     };
-    connect();
+    loop.now();
     onCleanup(() => {
       disposed = true;
       watch.dispose();
-      clearTimeout(retry);
+      loop.dispose();
       clearTimeout(timer);
       sizes.dispose();
       sized.dispose();
@@ -524,8 +534,16 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         const buffer = terminal.buffer.active;
         scrollPlaces.save(
           key,
-          replayStart,
-          place ?? (buffer.viewportY < buffer.baseY ? buffer.viewportY : undefined),
+          place ??
+            (buffer.viewportY < buffer.baseY
+              ? {
+                  start: replayStart,
+                  end: cursor,
+                  line: buffer.viewportY,
+                  cols: terminal.cols,
+                  rows: terminal.rows,
+                }
+              : undefined),
         );
       }
       terminal.dispose();

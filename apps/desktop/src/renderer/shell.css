@@ -1043,7 +1043,7 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 }
 /* Cut off from its shell: what the terminal still shows is out of date. */
 .terminal-stage[data-link="disconnected"] .terminal-view {
-  opacity: 0.4;
+  opacity: 0.6;
 }
 .terminal-reconnecting {
   position: absolute;
@@ -1063,54 +1063,48 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   font-size: var(--ui-sm);
   pointer-events: none;
 }
+/* A banner over the top of the terminal: the output stays visible and
+   selectable around it, so it can still be copied. */
 .terminal-disconnected {
   position: absolute;
-  inset: 0;
+  top: var(--s2);
+  inset-inline: var(--s3);
   z-index: 1;
   display: flex;
-  align-items: center;
   justify-content: center;
-  padding: var(--s4);
+  pointer-events: none;
 }
 .terminal-disconnected > div {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: var(--s2);
-  max-width: 340px;
-  padding: var(--s4) var(--s5);
+  column-gap: var(--s3);
+  max-width: 620px;
+  padding: var(--s2) var(--s3);
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--raised);
   box-shadow: var(--shadow-1);
-  text-align: center;
   font-size: var(--ui);
+  pointer-events: auto;
 }
 .terminal-disconnected .icon {
+  grid-row: span 2;
   color: var(--danger);
 }
 .terminal-disconnected strong {
   color: var(--text);
-  font-size: var(--ui-lg);
 }
 .terminal-disconnected p {
+  grid-column: 2;
   margin: 0;
   color: var(--muted);
 }
 .terminal-disconnected > div > div {
+  grid-column: 3;
+  grid-row: 1 / span 2;
   display: flex;
   gap: var(--s2);
-  padding-top: var(--s1);
-}
-.terminal-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--s3);
-  flex-direction: column;
-  color: var(--muted);
-  font-size: var(--ui);
 }
 
 /* --------------------------------------------------------------- narrow UI */

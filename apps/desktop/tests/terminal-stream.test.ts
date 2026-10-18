@@ -6,6 +6,8 @@ import {
   inputQueue,
   linkWatch,
   reconnectDelay,
+  reconnects,
+  restoredLine,
   scrollPlaces,
   shownOutput,
   terminalStream,
@@ -202,20 +204,79 @@ test("a dropped terminal says nothing for a quick reconnect, then that it reconn
   watch.dispose();
 });
 
-test("a terminal shown again opens where it was scrolled to, unless its replay holds other lines", () => {
-  scrollPlaces.save("c:a", 0, 120);
-  assert.equal(scrollPlaces.take("c:a", 0), 120);
+test("a terminal shown again opens where it was scrolled to, while that line holds the same text", () => {
+  const saved = { start: 0, end: 9000, line: 120, cols: 80, rows: 24 };
+  const now = { start: 0, end: 9000, cols: 80, rows: 24, trimmed: false };
+  // The same output at the same size, even past xterm's scrollback.
+  assert.equal(restoredLine(saved, now), 120);
+  assert.equal(restoredLine(saved, { ...now, trimmed: true }), 120);
+  // More output while hidden: the lines stay put until xterm drops some.
+  assert.equal(restoredLine(saved, { ...now, end: 12000 }), 120);
+  assert.equal(restoredLine(saved, { ...now, end: 12000, trimmed: true }), undefined);
+  // Another height: the same, since xterm keeps rows plus its scrollback.
+  assert.equal(restoredLine(saved, { ...now, rows: 30 }), 120);
+  assert.equal(restoredLine(saved, { ...now, rows: 30, trimmed: true }), undefined);
+  // Another width wraps other lines; a replay that starts later holds others.
+  assert.equal(restoredLine(saved, { ...now, cols: 100 }), undefined);
+  assert.equal(restoredLine(saved, { ...now, start: 4096 }), undefined);
+  assert.equal(restoredLine(undefined, now), undefined);
+
+  scrollPlaces.save("c:a", saved);
+  assert.deepEqual(scrollPlaces.take("c:a"), saved);
   // Taken once: a reconnect's replay does not scroll the view back.
-  assert.equal(scrollPlaces.take("c:a", 0), undefined);
+  assert.equal(scrollPlaces.take("c:a"), undefined);
   // At the bottom, nothing is kept.
-  scrollPlaces.save("c:a", 0, 120);
-  scrollPlaces.save("c:a", 0, undefined);
-  assert.equal(scrollPlaces.take("c:a", 0), undefined);
-  // Older output was dropped meanwhile: the replay starts later.
-  scrollPlaces.save("c:a", 0, 120);
-  assert.equal(scrollPlaces.take("c:a", 4096), undefined);
+  scrollPlaces.save("c:a", saved);
+  scrollPlaces.save("c:a", undefined);
+  assert.equal(scrollPlaces.take("c:a"), undefined);
   // A terminal that is gone is forgotten.
-  scrollPlaces.save("c:b", 0, 7);
+  scrollPlaces.save("c:b", saved);
   shownOutput.keep("c:", ["a"]);
-  assert.equal(scrollPlaces.take("c:b", 0), undefined);
+  assert.equal(scrollPlaces.take("c:b"), undefined);
+});
+
+test("a terminal never has two reconnect attempts under way, and Retry during one backs off from the start", async () => {
+  const time = clock();
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  const attempts: ((done: boolean) => void)[] = [];
+  const loop = reconnects({
+    attempt: () => new Promise<boolean>((resolve) => attempts.push(resolve)),
+    ...time,
+  });
+  loop.now();
+  time.advance(0);
+  assert.equal(attempts.length, 1);
+  // Retry, and a drop reported meanwhile, while the attempt is out.
+  loop.now();
+  loop.after();
+  time.advance(10_000);
+  assert.equal(attempts.length, 1);
+  // It fails: the next comes after the shortest delay, then longer ones.
+  attempts[0](false);
+  await settled();
+  time.advance(249);
+  assert.equal(attempts.length, 1);
+  time.advance(1);
+  assert.equal(attempts.length, 2);
+  attempts[1](false);
+  await settled();
+  time.advance(499);
+  assert.equal(attempts.length, 2);
+  time.advance(1);
+  assert.equal(attempts.length, 3);
+  // Retry while waiting goes at once.
+  attempts[2](false);
+  await settled();
+  loop.now();
+  time.advance(0);
+  assert.equal(attempts.length, 4);
+  // Connected: nothing more until the connection ends again.
+  attempts[3](true);
+  await settled();
+  time.advance(10_000);
+  assert.equal(attempts.length, 4);
+  loop.after();
+  loop.dispose();
+  time.advance(10_000);
+  assert.equal(attempts.length, 4);
 });
