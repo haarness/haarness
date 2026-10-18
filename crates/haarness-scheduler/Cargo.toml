@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+dunce.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 directories.workspace = true

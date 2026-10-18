@@ -776,6 +776,9 @@ impl WorkspaceManager {
             file.write_all(&bytes)?;
             file.sync_all()?;
             fs::rename(&temporary, &self.registry_path)?;
+            // Windows cannot open a directory as a file (access denied), so
+            // this failed every command there; NTFS journals the rename.
+            #[cfg(unix)]
             File::open(parent)?.sync_all()?;
             Ok(())
         })();
@@ -1175,7 +1178,13 @@ fn git_optional<'a>(
     path: &Path,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<Option<String>> {
-    let output = git_output(path, args)?;
+    let output = match git_command(path, args).output() {
+        Ok(output) => output,
+        // Without Git installed no folder is a repository, so plain folders
+        // still open (minimal Linux servers and containers often lack Git).
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(git_start_error(error)),
+    };
     if output.status.success() {
         Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
     } else {
@@ -1201,12 +1210,21 @@ fn git_checked<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Resu
 }
 
 fn git_output<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<Output> {
-    Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .output()
-        .map_err(|error| WorkspaceError::Git(error.to_string()))
+    git_command(path, args).output().map_err(git_start_error)
+}
+
+fn git_command<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(path).args(args);
+    command
+}
+
+fn git_start_error(error: std::io::Error) -> WorkspaceError {
+    WorkspaceError::Git(if error.kind() == std::io::ErrorKind::NotFound {
+        "Git is not installed; install it to use worktrees and branches".to_owned()
+    } else {
+        error.to_string()
+    })
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf> {

@@ -316,6 +316,7 @@ fn env_guard_hooks(workspace: &Path, event: &str, log: &Path) -> Arc<dyn haarnes
     ))
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn parity_hooks_judge_the_file_a_link_really_opens() {
     for event in ["PreToolUse", "PermissionRequest"] {
@@ -400,6 +401,7 @@ async fn parity_hooks_judge_the_file_a_link_really_opens() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn parity_a_link_out_of_the_project_asks_although_a_hook_allowed_its_name() {
     let fixture = Fixture::new();
@@ -456,6 +458,7 @@ async fn parity_a_link_out_of_the_project_asks_although_a_hook_allowed_its_name(
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn parity_a_hook_that_sees_the_opened_file_can_still_answer() {
     let fixture = Fixture::new();

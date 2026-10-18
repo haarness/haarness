@@ -141,7 +141,12 @@ const voice = createVoiceInput((locale) =>
     locale,
   ),
 );
-let pendingLink: string | undefined;
+// Windows and Linux start the app with a clicked haarness:// link as an
+// argument (macOS sends open-url instead); hold it until a window can open it.
+let pendingLink: string | undefined =
+  process.platform === "darwin"
+    ? undefined
+    : process.argv.find((arg) => arg.startsWith("haarness://"));
 let updateReady = false,
   updateAvailable = false,
   updateListeners = false;
@@ -1308,7 +1313,10 @@ function createWindow() {
   const theme = data().preferences.theme;
   const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
   const win = new BrowserWindow({
-    show: process.env.HAARNESS_DESKTOP_TEST !== "1",
+    // Test runs keep windows hidden, except on Linux: X11 (and Xvfb in CI)
+    // draws no frames for a window that was never shown, so every screenshot
+    // and visual check would wait forever.
+    show: process.env.HAARNESS_DESKTOP_TEST !== "1" || process.platform === "linux",
     width: state?.width ?? 1420,
     height: state?.height ?? 940,
     minWidth: 900,

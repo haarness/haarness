@@ -43,6 +43,9 @@ def main():
         # Only the copied executable is shipped. No adjacent rg, vendor folder,
         # package manager, home configuration, or network download is available.
         fixture.env["HAARNESS_HOME"] = str(fixture.root / "private home with spaces")
+        # HAARNESS_DATA_DIR outranks HAARNESS_HOME for the cache; drop it so the
+        # private home is the only root the copied CLI can extract into.
+        fixture.env.pop("HAARNESS_DATA_DIR", None)
         fixture.env["PATH"] = (str(Path(os.environ["SystemRoot"]) / "System32")
                                if os.name == "nt" else "/usr/bin:/bin")
         fixture.env["SHELL"] = "cmd.exe" if os.name == "nt" else "/bin/sh"
@@ -128,7 +131,8 @@ def main():
 
         output_file = fixture.root / "cli-output.txt"
         with output_file.open("w", encoding="utf-8") as output:
-            process = subprocess.Popen([*args, "run", "--attach", fixture.url, "--provider", "echo", "--model", "echo-1", "--format", "json",
+            # `run` stops rather than wait on an approval it cannot give, so it approves its own call.
+            process = subprocess.Popen([*args, "run", "--yolo", "--attach", fixture.url, "--provider", "echo", "--model", "echo-1", "--format", "json",
                 '!tool bash {"command":"rg --version"}'], env=fixture.env, stdout=output, stderr=subprocess.STDOUT)
             try:
                 def cli_done():

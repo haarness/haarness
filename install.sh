@@ -55,14 +55,72 @@ else
   chmod 755 "$stage/payload"
   clear_quarantine "$stage/payload"
   if [ "$product" = cli ]; then
-    actual_version=$("$stage/payload" --version)
+    if ! actual_version=$("$stage/payload" --version 2>"$stage/error"); then
+      echo 'The downloaded Haarness does not run on this system; installation left unchanged.' >&2
+      cat "$stage/error" >&2
+      [ "$os" != linux ] || echo 'Haarness for Linux needs glibc 2.17 or newer; musl systems such as Alpine are not supported yet.' >&2
+      exit 1
+    fi
     [ "$actual_version" = "haarness $released" ] || { echo "Binary version mismatch: $actual_version" >&2; exit 1; }
   fi
   mv -f "$stage/payload" "$destination/$name"
 fi
+# FUSE 2 mounts an AppImage; Ubuntu has not installed it by default since 22.04.
+has_fuse2() {
+  { ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null | grep -q 'libfuse\.so\.2'
+}
+# The AppImage gets what the .deb gives: a haarness-desktop command, a menu
+# entry with its icon, and the haarness:// link handler. Without FUSE 2 the
+# command has the AppImage unpack itself to run, which starts more slowly.
+install_linux_launcher() {
+  data=${XDG_DATA_HOME:-$HOME/.local/share}
+  launcher="$destination/haarness-desktop"
+  quoted=$(printf '%s' "$destination/$name" | sed "s/'/'\\\\''/g")
+  cat > "$stage/launcher" <<LAUNCHER
+#!/bin/sh
+if ! { { ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null | grep -q 'libfuse\.so\.2'; }; then
+  export APPIMAGE_EXTRACT_AND_RUN=1
+fi
+exec '$quoted' "\$@"
+LAUNCHER
+  chmod 755 "$stage/launcher"
+  mv -f "$stage/launcher" "$launcher"
+  icon=haarness-desktop
+  # Extracting files from an AppImage needs no FUSE.
+  if (cd "$stage" && "$destination/$name" --appimage-extract 'usr/share/icons/*' >/dev/null 2>&1); then
+    found=$(find "$stage/squashfs-root/usr/share/icons" -name haarness-desktop.png 2>/dev/null | sort -V | tail -n 1)
+    if [ -n "$found" ]; then
+      mkdir -p "$data/icons"
+      cp "$found" "$data/icons/haarness-desktop.png"
+      icon="$data/icons/haarness-desktop.png"
+    fi
+  fi
+  exec_path=$(printf '%s' "$launcher" | sed 's/[\\"`$]/\\&/g')
+  mkdir -p "$data/applications"
+  cat > "$stage/haarness-desktop.desktop" <<ENTRY
+[Desktop Entry]
+Type=Application
+Name=Haarness
+Comment=Desktop app for Haarness, a coding agent that works in your project folders.
+Exec="$exec_path" %U
+Icon=$icon
+Terminal=false
+Categories=Development;
+MimeType=x-scheme-handler/haarness;
+StartupWMClass=haarness-desktop
+ENTRY
+  mv -f "$stage/haarness-desktop.desktop" "$data/applications/haarness-desktop.desktop"
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+  fi
+}
+[ "$product:$os" != desktop:linux ] || install_linux_launcher
 printf 'Installed Haarness %s: %s/%s\n' "$released" "$destination" "$name"
 if [ "$product" = cli ]; then
   case ":$PATH:" in *":$destination:"*) ;; *) printf 'Add to your shell profile: export PATH="%s:$PATH"\n' "$destination";; esac
+elif [ "$os" = linux ]; then
+  printf 'Start Haarness from your applications menu, or run %s/haarness-desktop.\n' "$destination"
+  has_fuse2 || echo 'Installing FUSE 2 (libfuse2; libfuse2t64 on Ubuntu 24.04 and later) lets it start faster.'
 else
   printf 'Open %s/%s to launch Desktop.\n' "$destination" "$name"
 fi

@@ -22,7 +22,7 @@ pub(super) fn resolve(program: &str, config: &McpConfigureRequest) -> Option<(Pa
         .env
         .get("HOME")
         .map(|value| OsString::from(super::expand_env_reference(value)))
-        .or_else(|| std::env::var_os("HOME"));
+        .or_else(|| haarness_protocol::home_dir().map(OsString::from));
     let extra = config
         .env
         .get("HAARNESS_MCP_PATH")

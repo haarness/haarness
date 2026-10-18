@@ -54,8 +54,10 @@ cell_column() (
   cell_label=$2
   cell_prefix=${cell_line%%"$cell_label"*}
   [ "$cell_prefix" != "$cell_line" ] || return 1
-  # Select the label's second cell so the click is deliberately inside it.
-  printf '%s\n' "$(( ${#cell_prefix} + 2 ))"
+  # Count characters, not bytes: dash (Debian's sh) gives ${#var} in bytes,
+  # and the rows hold arrows. Select the label's second cell so the click is
+  # deliberately inside it.
+  printf '%s\n' "$(( $(printf '%s' "$cell_prefix" | wc -m) + 2 ))"
 )
 
 workspace_runtime_path() (

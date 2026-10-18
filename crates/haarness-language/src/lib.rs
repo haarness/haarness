@@ -698,7 +698,7 @@ impl LanguageService {
             command.arg(file);
         }
         command
-            .current_dir(&self.workspace)
+            .current_dir(dunce::simplified(&self.workspace))
             .envs(&formatter.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -857,7 +857,7 @@ impl Client {
         let mut command = Command::new(&config.command[0]);
         command
             .args(config.command.iter().skip(1))
-            .current_dir(&workspace)
+            .current_dir(dunce::simplified(&workspace))
             .envs(&config.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

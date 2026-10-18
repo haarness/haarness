@@ -24,7 +24,7 @@ assert (binary.parent.parent/'browser-extension'/'chrome'/'background.js').is_fi
 # The standalone CLI (what release.py collect publishes) carries Haarness for Chrome
 # itself: copied away from the checkout and any Desktop bundle, setup must find the
 # built-in copy and write it out, touching only throwaway folders.
-cli=root/'target'/'release'/name
+cli=Path(os.environ.get('HAARNESS_BIN') or root/'target'/'release'/name)
 with tempfile.TemporaryDirectory(prefix='haarness-cli-chrome-') as scratch:
     scratch=Path(scratch)
     alone=scratch/'bin'/name;alone.parent.mkdir();shutil.copy2(cli,alone)
