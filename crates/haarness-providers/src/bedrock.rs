@@ -228,10 +228,18 @@ impl ModelProvider for BedrockProvider {
     }
 }
 
+/// The text sent with a document attached without any, which Converse needs.
+const ATTACHED_DOCUMENT: &str = "(document attached)";
+/// What a tool result that printed nothing reads as.
+const NO_OUTPUT: &str = "(no output)";
+
 fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
     let mut messages = Vec::new();
     for message in request.messages {
         match message {
+            // Converse refuses a blank text block, so blank text is left out
+            // wherever it would stand alone.
+            ProviderMessage::Text { content, .. } if content.trim().is_empty() => {}
             ProviderMessage::Text { role, content } => {
                 messages.push(json!({"role":role,"content":[{"text":content}]}));
             }
@@ -241,7 +249,16 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
                 attachments,
             } => {
                 let media = crate::media::load_all(&attachments)?;
-                let mut blocks = vec![json!({"text":content})];
+                // A document must come with text; an image needs none.
+                let content = if !content.trim().is_empty() {
+                    Some(content)
+                } else if media.iter().any(|item| item.is_pdf()) {
+                    Some(ATTACHED_DOCUMENT.to_owned())
+                } else {
+                    None
+                };
+                let mut blocks: Vec<Value> =
+                    content.into_iter().map(|text| json!({"text":text})).collect();
                 for item in media {
                     if item.is_image() {
                         let format = item.mime_type.strip_prefix("image/").unwrap_or("png");
@@ -274,8 +291,16 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
                 attachments,
                 ..
             } => {
-                let mut content = vec![json!({"text":output})];
-                for item in crate::media::load_all(&attachments)? {
+                let media = crate::media::load_all(&attachments)?;
+                let mut content = if !output.trim().is_empty() {
+                    vec![json!({"text":output})]
+                } else if media.is_empty() {
+                    // A tool result needs a block of some kind.
+                    vec![json!({"text":NO_OUTPUT})]
+                } else {
+                    Vec::new()
+                };
+                for item in media {
                     if item.is_image() {
                         let format = item.mime_type.strip_prefix("image/").unwrap_or("png");
                         content.push(json!({"image":{"format":format,"source":{"bytes":item.base64}}}));
@@ -772,6 +797,88 @@ mod tests {
             body["messages"][2]["content"][0]["toolResult"]["content"][1]["document"]["format"],
             "pdf"
         );
+    }
+
+    #[test]
+    fn converse_never_sends_a_blank_text_block() {
+        let image = || "data:image/png;base64,iVBORw0KGgo=".to_owned();
+        let call = |id: &str| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "screenshot".into(),
+            arguments: json!({}),
+            provider_metadata: Value::Null,
+        };
+        let result = |id: &str, attachments: Vec<String>| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "screenshot".into(),
+            output: String::new(),
+            is_error: false,
+            attachments,
+        };
+        let body = bedrock_request(ProviderRequest {
+            model: "test-model".into(),
+            system: "test".into(),
+            messages: vec![
+                // An image sent without a word.
+                ProviderMessage::Media {
+                    role: "user".into(),
+                    content: String::new(),
+                    attachments: vec![image()],
+                },
+                ProviderMessage::Text {
+                    role: "assistant".into(),
+                    content: "\n\n".into(),
+                },
+                call("a"),
+                call("b"),
+                result("a", vec![image()]),
+                result("b", Vec::new()),
+                ProviderMessage::Media {
+                    role: "user".into(),
+                    content: "  ".into(),
+                    attachments: vec![
+                        "data:application/pdf;name=spec.pdf;base64,JVBERi0xLjQK".into(),
+                    ],
+                },
+            ],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        })
+        .unwrap();
+        fn texts(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(text) = map.get("text").and_then(Value::as_str) {
+                        found.push(text.to_owned());
+                    }
+                    map.values().for_each(|value| texts(value, found));
+                }
+                Value::Array(items) => items.iter().for_each(|value| texts(value, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        texts(&body["messages"], &mut found);
+        assert!(
+            found.iter().all(|text| !text.trim().is_empty()),
+            "{found:?}"
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert!(messages[0]["content"][0].get("image").is_some());
+        assert!(
+            messages[2]["content"][0]["toolResult"]["content"][0]
+                .get("image")
+                .is_some()
+        );
+        assert_eq!(
+            messages[2]["content"][1]["toolResult"]["content"][0]["text"],
+            NO_OUTPUT
+        );
+        // A document goes with text, as Converse requires.
+        assert_eq!(messages[2]["content"][2]["text"], ATTACHED_DOCUMENT);
+        assert!(messages[2]["content"][3].get("document").is_some());
     }
 
     #[test]
