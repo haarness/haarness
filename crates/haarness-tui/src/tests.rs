@@ -7974,6 +7974,14 @@ fn approval_says_why_a_command_too_long_to_read_asks() {
         "{text}"
     );
     assert!(!text.contains("__readLimit"), "{text}");
+    // A line too large to read, with no rule to name.
+    app.pending_permissions[0].detail["__readLimit"] = serde_json::json!("");
+    let text = frame_text(&app, (200, 40));
+    assert!(
+        text.contains("Haarness could not read all of this command."),
+        "{text}"
+    );
+    assert!(!text.contains("a rule for"), "{text}");
 }
 
 #[test]
