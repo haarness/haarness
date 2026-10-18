@@ -11,6 +11,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
 import { optionKeys } from "./terminal-keys";
+import { terminalTheme, type ThemeId } from "../themes";
 import {
   inputQueue,
   linkWatch,
@@ -313,31 +314,11 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     terminal.loadAddon(fit);
     terminal.open(host);
     const applyTheme = () => {
-      const style = getComputedStyle(document.documentElement);
-      const color = (name: string) =>
-        style.getPropertyValue("--" + name).trim();
-      terminal.options.theme = {
-        background: color("page"),
-        foreground: color("text"),
-        cursor: color("primary"),
-        selectionBackground: color("selected"),
-        black: color("page"),
-        brightBlack: color("muted"),
-        red: color("danger"),
-        green: color("green"),
-        yellow: color("syntax-number"),
-        blue: color("syntax-property"),
-        magenta: color("syntax-keyword"),
-        cyan: color("primary"),
-        white: color("text"),
-        brightRed: color("danger"),
-        brightGreen: color("green"),
-        brightYellow: color("syntax-number"),
-        brightBlue: color("syntax-property"),
-        brightMagenta: color("syntax-keyword"),
-        brightCyan: color("primary"),
-        brightWhite: color("text"),
-      };
+      const root = document.documentElement;
+      terminal.options.theme = terminalTheme(
+        (root.dataset.palette ?? "haarness") as ThemeId,
+        root.dataset.theme === "light" ? "light" : "dark",
+      );
     };
     applyTheme();
     const themeObserver = new MutationObserver(applyTheme);
