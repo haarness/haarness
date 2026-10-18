@@ -18,20 +18,26 @@ import {
   createBridge,
   document as pageDocument,
   granted,
+  recall,
+  remember,
   resource,
   variables,
   type Meta,
   type Payload,
 } from "./mcp-app";
 
-/** A page's HTML, read once a minute at most per server and page. */
+/** A page's HTML, read once a minute at most per server and page; the most recent few are kept. */
 const pages = new Map<string, { at: number; value: Promise<{ html: string; meta: Meta }> }>();
-/** The last height each page reported, so a row that remounts keeps its size. */
+const PAGE_LIMIT = 32;
+/** The last height each page reported, so a row that remounts keeps its size; the most recent kept. */
 const heights = new Map<string, number>();
+const HEIGHT_LIMIT = 512;
+/** Tokens that change whenever the theme or palette does. */
+const THEME_PROBES = ["--page", "--surface", "--text", "--primary", "--accent", "--font-size"];
 
 function readPage(connection: string, server: string, uri: string) {
   const key = [connection, server, uri].join("\u0000");
-  const cached = pages.get(key);
+  const cached = recall(pages, key);
   if (cached && Date.now() - cached.at < 60_000) return cached.value;
   const value = window.haarness
     .api<unknown>(connection, "readMcpResource", [server, { uri }])
@@ -40,7 +46,7 @@ function readPage(connection: string, server: string, uri: string) {
       if (!page) throw new Error(t("The server sent no page for this app."));
       return page;
     });
-  pages.set(key, { at: Date.now(), value });
+  remember(pages, key, { at: Date.now(), value }, PAGE_LIMIT);
   value.catch(() => pages.get(key)?.value === value && pages.delete(key));
   return value;
 }
@@ -71,8 +77,9 @@ export function McpAppView(props: {
   const [hostReady, setHostReady] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
   const [left, setLeft] = createSignal(false);
-  const [height, setHeight] = createSignal(heights.get(props.callKey) ?? 0);
+  const [height, setHeight] = createSignal(recall(heights, props.callKey) ?? 0);
   const [request, setRequest] = createSignal<{ url: string; answer: (open: boolean) => void }>();
+  const [message, setMessage] = createSignal<{ text: string; answer: (insert: boolean) => void }>();
   const [render, setRender] = createSignal(0);
   let root!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
@@ -150,15 +157,11 @@ export function McpAppView(props: {
       resize: ({ height }) => {
         if (height === undefined) return;
         const next = Math.max(48, Math.min(MAX_HEIGHT, Math.ceil(height)));
-        heights.set(props.callKey, next);
+        remember(heights, props.callKey, next, HEIGHT_LIMIT);
         setHeight(next);
       },
       openLink: (url) => {
-        // Right after a click or key press inside the page, the person asked for it.
-        const gesture =
-          globalThis.document.activeElement === frame &&
-          !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive;
-        if (gesture) return open(url);
+        if (gesture()) return open(url);
         return new Promise<boolean>((resolve) => {
           request()?.answer(false);
           setRequest({
@@ -170,12 +173,21 @@ export function McpAppView(props: {
           });
         });
       },
+      // A message goes into the message box, and the keyboard with it, only
+      // when the person just acted in the page or picks "Insert app message":
+      // a page writing on its own must not change a draft or take the focus.
       compose: (text) => {
-        const detail = { text, accepted: false };
-        root.dispatchEvent(new CustomEvent("mcp-app-message", { bubbles: true, detail }));
-        if (detail.accepted) app.notify(t("The app's message is in the message box. Send it when you are ready."));
-        else app.notify(t("This chat cannot take a message from the app."), "blocked");
-        return detail.accepted;
+        if (gesture()) return insert(text);
+        return new Promise<boolean>((resolve) => {
+          message()?.answer(false);
+          setMessage({
+            text,
+            answer: (accepted) => {
+              setMessage(undefined);
+              resolve(accepted ? insert(text) : false);
+            },
+          });
+        });
       },
       readResource: (uri) =>
         window.haarness.api(connection, "readMcpResource", [props.payload.server, { uri }]),
@@ -183,6 +195,20 @@ export function McpAppView(props: {
     },
     send,
   );
+  /** Right after a click or key press inside the page: the person asked for it. */
+  function gesture() {
+    return (
+      globalThis.document.activeElement === frame &&
+      !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive
+    );
+  }
+  function insert(text: string) {
+    const detail = { text, accepted: false };
+    root.dispatchEvent(new CustomEvent("mcp-app-message", { bubbles: true, detail }));
+    if (detail.accepted) app.notify(t("The app's message is in the message box. Send it when you are ready."));
+    else app.notify(t("This chat cannot take a message from the app."), "blocked");
+    return detail.accepted;
+  }
   async function open(url: string) {
     try {
       await window.haarness.openLink(connection || undefined, thread, url);
@@ -243,14 +269,25 @@ export function McpAppView(props: {
       void bridge.receive(message);
     };
     window.addEventListener("message", listen);
-    // The root's style also carries layout variables; only a changed theme is news to the page.
+    // The root's style also carries layout variables, which change often:
+    // changes are taken once a frame, and a few colour tokens tell whether
+    // the theme moved before every token is resolved again.
+    let themeFrame = 0;
+    let lastSignature = "";
     const themeObserver = new MutationObserver(() => {
-      if (!initialized) return;
-      const next = { theme: theme(), styles: styles() };
-      const text = JSON.stringify(next);
-      if (text === lastTheme) return;
-      lastTheme = text;
-      bridge.notify("ui/notifications/host-context-changed", next);
+      if (!initialized || themeFrame) return;
+      themeFrame = requestAnimationFrame(() => {
+        themeFrame = 0;
+        const root = getComputedStyle(globalThis.document.documentElement);
+        const signature = [theme(), ...THEME_PROBES.map((token) => root.getPropertyValue(token))].join("\n");
+        if (signature === lastSignature) return;
+        lastSignature = signature;
+        const next = { theme: theme(), styles: styles() };
+        const text = JSON.stringify(next);
+        if (text === lastTheme) return;
+        lastTheme = text;
+        bridge.notify("ui/notifications/host-context-changed", next);
+      });
     });
     themeObserver.observe(globalThis.document.documentElement, {
       attributes: true,
@@ -268,8 +305,10 @@ export function McpAppView(props: {
     onCleanup(() => {
       window.removeEventListener("message", listen);
       themeObserver.disconnect();
+      cancelAnimationFrame(themeFrame);
       resize.disconnect();
       request()?.answer(false);
+      message()?.answer(false);
       if (initialized) void bridge.request("ui/resource-teardown");
     });
   });
@@ -344,6 +383,23 @@ export function McpAppView(props: {
           <Icon name="alert" size="sm" />
           <span>{t("This result is too large to show in the app.")}</span>
         </div>
+      </Show>
+      <Show when={message()}>
+        {(pending) => (
+          <div class="notice-inline mcp-app-request" role="group" aria-label={t("Message from the app")}>
+            <Icon name="chat" size="sm" />
+            <span>
+              {t("This app wants to write a message for you.")}
+              <span class="notice-detail mcp-app-message">{pending().text}</span>
+            </span>
+            <button class="mcp-app-action" onClick={() => pending().answer(true)}>
+              {t("Insert app message")}
+            </button>
+            <button class="mcp-app-action" onClick={() => pending().answer(false)}>
+              {t("Dismiss")}
+            </button>
+          </div>
+        )}
       </Show>
       <Show when={request()}>
         {(pending) => (

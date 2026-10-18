@@ -2510,6 +2510,9 @@
   "Link from the app": "Link iz aplikacije",
   "This app wants to open a link.": "Ova aplikacija želi otvoriti link.",
   "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Ovaj alat dolazi s aplikacijom; otvori chat u Haarness Desktopu da bi je koristio.",
+  "Message from the app": "Poruka iz aplikacije",
+  "This app wants to write a message for you.": "Ova aplikacija želi napisati poruku umjesto tebe.",
+  "Insert app message": "Umetni poruku aplikacije",
   "Comment on selection": "Komentiraj odabir",
   "Comment on these lines…": "Komentiraj ove retke…",
   "Comment added to your message": "Komentar dodan vašoj poruci"

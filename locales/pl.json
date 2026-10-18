@@ -2510,6 +2510,9 @@
   "Link from the app": "Link z aplikacji",
   "This app wants to open a link.": "Ta aplikacja chce otworzyć link.",
   "This tool comes with an app; open the chat in Haarness Desktop to use it.": "To narzędzie ma aplikację; otwórz czat w Haarness Desktop, aby z niej skorzystać.",
+  "Message from the app": "Wiadomość z aplikacji",
+  "This app wants to write a message for you.": "Ta aplikacja chce napisać za ciebie wiadomość.",
+  "Insert app message": "Wstaw wiadomość aplikacji",
   "Comment on selection": "Skomentuj zaznaczenie",
   "Comment on these lines…": "Skomentuj te wiersze…",
   "Comment added to your message": "Komentarz dodany do wiadomości"

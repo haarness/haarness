@@ -2510,6 +2510,9 @@
   "Link from the app": "앱에서 온 링크",
   "This app wants to open a link.": "이 앱이 링크를 열려고 합니다.",
   "This tool comes with an app; open the chat in Haarness Desktop to use it.": "이 도구에는 앱이 있습니다. 사용하려면 Haarness Desktop에서 채팅을 여세요.",
+  "Message from the app": "앱에서 온 메시지",
+  "This app wants to write a message for you.": "이 앱이 대신 메시지를 쓰려고 합니다.",
+  "Insert app message": "앱 메시지 넣기",
   "Comment on selection": "선택 영역에 댓글 달기",
   "Comment on these lines…": "이 줄들에 댓글 달기…",
   "Comment added to your message": "메시지에 댓글이 추가되었습니다"

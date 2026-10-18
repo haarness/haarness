@@ -76,6 +76,23 @@ export function payload(metadata: unknown): Payload | undefined {
   };
 }
 
+/**
+ * The page for a call to the tool named `name`: only the payload's own tool
+ * on the payload's own server may name a page, so one tool's result cannot
+ * make Desktop read and show another server's page. Names are compared as
+ * written and with the characters a tool name cannot hold replaced.
+ */
+export function payloadFor(name: string, metadata: unknown): Payload | undefined {
+  const value = payload(metadata);
+  if (!value?.tool.name) return undefined;
+  const clean = (text: string) => text.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const own = [
+    `mcp__${value.server}__${value.tool.name}`,
+    `mcp__${clean(value.server)}__${clean(value.tool.name)}`,
+  ];
+  return own.includes(name) ? value : undefined;
+}
+
 /** The HTML and metadata a page renders, from a `resources/read` result. */
 export function resource(result: unknown, uri: string): { html: string; meta: Meta } | undefined {
   const contents = record(result)?.contents;
@@ -107,16 +124,44 @@ function decode(blob: string) {
 }
 
 /**
- * A CSP source list takes host sources only: anything else (a keyword, a quote, a semicolon)
- * could widen or end the directive it is pasted into.
+ * Whether a declared host is a site on the internet: not every host (`*`, or
+ * a wildcard over a whole top-level domain), and not this computer or its
+ * network (`localhost`, `.local` names, loopback, private and link-local
+ * addresses), which a page must never reach.
+ */
+function publicHost(host: string) {
+  const name = host.toLowerCase().replace(/\.$/, "");
+  const fixed = name.startsWith("*.") ? name.slice(2) : name;
+  if (fixed.includes("*") || !fixed.includes(".")) return false;
+  if (/(^|\.)(localhost|local|internal|home\.arpa)$/.test(fixed)) return false;
+  const address = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(fixed);
+  if (!address) return true;
+  const [a, b] = [Number(address[1]), Number(address[2])];
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
+}
+
+/**
+ * A CSP source list takes https and wss host sources of public sites only:
+ * anything else (a keyword, a quote, a semicolon) could widen or end the
+ * directive it is pasted into, and plain http, every host, or this computer's
+ * network is not something a page may reach. IPv6 literals are not taken.
  */
 export function sources(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
-  return list.filter(
-    (item): item is string =>
-      typeof item === "string" &&
-      /^(https?|wss?):\/\/[a-z0-9*.-]+(:\d+)?(\/[^\s;,'"]*)?$/i.test(item),
-  );
+  return list.filter((item): item is string => {
+    if (typeof item !== "string") return false;
+    const match = /^(https|wss):\/\/([a-z0-9*.-]+)(:\d+)?(\/[^\s;,'"]*)?$/i.exec(item);
+    return !!match && publicHost(match[2]);
+  });
 }
 
 /**
@@ -250,6 +295,22 @@ export function variables(read: (token: string) => string, color: (token: string
   return values;
 }
 
+/** Keeps `value` as the newest entry of `map`, dropping the oldest past `limit`. */
+export function remember<K, V>(map: Map<K, V>, key: K, value: V, limit: number) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) map.delete(map.keys().next().value as K);
+}
+
+/** An entry of a map kept by `remember`, which reading makes the newest. */
+export function recall<K, V>(map: Map<K, V>, key: K): V | undefined {
+  if (!map.has(key)) return undefined;
+  const value = map.get(key) as V;
+  map.delete(key);
+  map.set(key, value);
+  return value;
+}
+
 /** A link a page may open: http, https and mailto only. */
 export function webLink(url: unknown): string | undefined {
   if (typeof url !== "string" || url.length > 8192) return undefined;
@@ -289,8 +350,8 @@ export interface Host {
   resize(size: { width?: number; height?: number }): void;
   /** Opens a link the bridge allowed; false when the person declined or it failed. */
   openLink(url: string): Promise<boolean>;
-  /** Puts text in the message box; false when this chat cannot take it. */
-  compose(text: string): boolean;
+  /** Puts text in the message box; false when the person declined or this chat cannot take it. */
+  compose(text: string): boolean | Promise<boolean>;
   /** Reads a `ui://` resource of the page's own server. */
   readResource(uri: string): Promise<unknown>;
   log?(params: unknown): void;
@@ -335,7 +396,7 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
       case "ui/message": {
         const text = messageText(params);
         if (!text) throw new RpcError(-32602, REFUSED.message);
-        return host.compose(text) ? {} : { isError: true };
+        return (await host.compose(text)) ? {} : { isError: true };
       }
       case "resources/read": {
         const uri = params.uri;

@@ -28,7 +28,9 @@ test.beforeAll(async () => {
   await writeFile(
     join(workspace, ".haarness/config.toml"),
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n\n' +
-      `[mcp.app]\ntransport = "stdio"\ncommand = "python3"\nargs = [${JSON.stringify(fixture)}]\nenabled = true\n`,
+      `[mcp.app]\ntransport = "stdio"\ncommand = "python3"\nargs = [${JSON.stringify(fixture)}]\nenabled = true\n\n` +
+      // The same fixture again: its tools name pages of the first one.
+      `[mcp.evil]\ntransport = "stdio"\ncommand = "python3"\nargs = [${JSON.stringify(fixture)}]\nenabled = true\n`,
   );
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
@@ -65,8 +67,8 @@ test.beforeAll(async () => {
   );
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect
-    .poll(async () => (await client.mcpServers()).find((server) => server.name === "app")?.status, { timeout: 30000 })
-    .toBe("connected");
+    .poll(async () => (await client.mcpServers()).filter((server) => server.status === "connected").map((server) => server.name).sort(), { timeout: 30000 })
+    .toEqual(["app", "evil"]);
   thread = (await client.createThread({ title: "App fixture", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "App fixture", exact: true }).click();
 });
@@ -170,6 +172,32 @@ test("a message from the page goes into the message box and is never sent by its
   await box.fill("");
 });
 
+test("a message the page writes by itself waits for the person and leaves the draft and focus alone", async () => {
+  const box = page.getByRole("textbox", { name: "Message" });
+  await box.fill("Keep this draft");
+  await box.focus();
+  const view = await show('{"city":"Evora","automessage":true}');
+  const request = view.getByRole("group", { name: "Message from the app" });
+  await expect(request).toContainText("This app wants to write a message for you.");
+  await expect(request).toContainText("Automatic message from the page.");
+  await page.waitForTimeout(300);
+  await expect(box).toHaveValue("Keep this draft");
+  await expect(box).toBeFocused();
+  await request.getByRole("button", { name: "Insert app message", exact: true }).click();
+  await expect(content(view).locator("#status")).toHaveText("automessage {}");
+  await expect(box).toHaveValue("Keep this draft\n\nAutomatic message from the page.");
+  await expect(request).toHaveCount(0);
+  expect((await client.activeTurns()).length).toBe(0);
+
+  // Dismiss refuses it and changes nothing.
+  await box.fill("");
+  const again = await show('{"city":"Beja","automessage":true}');
+  await again.getByRole("group", { name: "Message from the app" }).getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(content(again).locator("#status")).toHaveText('automessage {"isError":true}');
+  await expect(box).toHaveValue("");
+  expect(errors).toEqual([]);
+});
+
 test("the page cannot call tools, read other resources, reach undeclared hosts or leave its frame", async () => {
   const view = page.locator(".mcp-app").last();
   const frame = content(view);
@@ -184,16 +212,32 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await frame.getByRole("button", { name: "Fetch undeclared" }).click();
   await expect(frame.locator("#status")).toHaveText("blocked connect-src");
   // The page-only tool never reached the model's tool list either.
-  expect((await client.mcpTools("app")).map((tool) => tool.name).sort()).toEqual(["mcp__app__plain", "mcp__app__show_weather"]);
+  expect((await client.mcpTools("app")).map((tool) => tool.name).sort()).toEqual([
+    "mcp__app__forge",
+    "mcp__app__plain",
+    "mcp__app__show_weather",
+  ]);
 
   await frame.getByRole("button", { name: "Leave the page" }).click();
   await expect(view).toHaveAttribute("data-state", "left");
   await expect(view.locator(".mcp-app-notice")).toContainText("This app tried to leave its page, so Haarness closed it.");
   await view.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(view).toHaveAttribute("data-state", "ready", { timeout: 30000 });
-  await expect(content(view).locator("#input")).toHaveText('input {"city":"Faro","autolink":true}');
+  await expect(content(view).locator("#input")).toHaveText('input {"city":"Beja","automessage":true}');
   // Only the two links the person allowed ever reached the system.
   expect((await calls()).shell).toHaveLength(2);
+  expect(errors).toEqual([]);
+});
+
+test("a tool cannot show another server's page by naming it", async () => {
+  await settled();
+  const turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: "!tool mcp__evil__forge {}" });
+  await client.waitTurn(turn.id);
+  // The forging call's own row shows the call and no page.
+  const row = page.locator("[data-item-id]").filter({ has: page.locator(".tool-call", { hasText: "mcp__evil__forge" }) });
+  await expect(row).toHaveCount(1);
+  await page.waitForTimeout(500);
+  await expect(row.locator(".mcp-app")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
