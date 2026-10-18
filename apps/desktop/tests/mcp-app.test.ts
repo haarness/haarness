@@ -96,7 +96,7 @@ test("only host sources reach the page's policy, and no network is the default",
       "https://cdn.example.com",
       "https://*.example.com",
       "wss://live.example.com:8443/socket",
-      "http://localhost:3000",
+      "https://8.8.8.8",
       "'unsafe-eval'",
       "*",
       "https://x.example; script-src *",
@@ -104,8 +104,19 @@ test("only host sources reach the page's policy, and no network is the default",
       "javascript:alert(1)",
       42,
     ]),
-    ["https://cdn.example.com", "https://*.example.com", "wss://live.example.com:8443/socket", "http://localhost:3000"],
+    ["https://cdn.example.com", "https://*.example.com", "wss://live.example.com:8443/socket", "https://8.8.8.8"],
   );
+  // Every host, plain http, and this computer or its network are refused.
+  for (const host of [
+    "https://*", "http://*", "wss://*", "https://*.com", "https://*.*", "https://cdn.*.example.com", "https://intranet",
+    "http://cdn.example.com", "ws://live.example.com",
+    "https://localhost", "https://localhost:3000", "https://app.localhost", "https://printer.local", "https://box.home.arpa",
+    "https://127.0.0.1", "http://127.0.0.1:8080", "https://127.1.2.3", "https://0.0.0.0", "https://[::1]", "https://[fe80::1]",
+    "https://10.0.0.5", "https://172.16.0.1", "https://172.31.255.255", "https://192.168.1.10", "https://169.254.169.254",
+    "https://100.64.0.1", "https://224.0.0.1", "https://localhost.",
+  ])
+    assert.deepEqual(sources([host]), [], host);
+  assert.deepEqual(sources(["https://172.32.0.1", "https://11.0.0.1"]), ["https://172.32.0.1", "https://11.0.0.1"]);
   assert.deepEqual(sources("https://cdn.example.com"), []);
   const closed = policy();
   for (const directive of [
@@ -303,8 +314,10 @@ test("a failing host answers with an error, and the host's own requests get thei
 test("the frame's host page is a separate document whose policy keeps the page in its frame", async () => {
   const page = await readFile(new URL("../src/renderer/public/mcp-app.html", import.meta.url), "utf8");
   const csp = page.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1] ?? "";
-  for (const directive of ["default-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'"])
+  for (const directive of ["default-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'", "connect-src https: wss:"])
     assert.ok(csp.split("; ").includes(directive), directive);
+  // Secure origins only, even before the page's own policy narrows them.
+  assert.ok(!/\b(http|ws):/.test(csp), csp);
   // The page frame runs scripts and forms only: an opaque origin, no popups, no top navigation.
   assert.match(page, /setAttribute\('sandbox', 'allow-scripts allow-forms'\)/);
   assert.ok(!page.includes("allow-same-origin"));
