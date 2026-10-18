@@ -2518,5 +2518,6 @@
   "Insert app message": "アプリのメッセージを挿入",
   "Comment on selection": "選択範囲にコメント",
   "Comment on these lines…": "これらの行にコメント…",
-  "Comment added to your message": "コメントをメッセージに追加しました"
+  "Comment added to your message": "コメントをメッセージに追加しました",
+  "Preview comment": "プレビューへのコメント"
 }
