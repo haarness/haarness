@@ -1661,6 +1661,7 @@
   "collapse": "skupi",
   "lines {from}–{to} of {total}": "redovi {from}–{to} od {total}",
   "always allows": "uvijek dozvoljava",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness nije mogao pročitati cijelu ovu naredbu; možda vrijedi pravilo za {rule}.",
   "Leads to {path}": "Vodi do {path}",
   "every file edit": "svako uređivanje datoteke",
   "every shell command": "svaka shell naredba",

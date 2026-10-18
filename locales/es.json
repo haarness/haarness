@@ -1661,6 +1661,7 @@
   "collapse": "contraer",
   "lines {from}–{to} of {total}": "líneas {from}–{to} de {total}",
   "always allows": "siempre permite",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness no pudo leer todo este comando; puede aplicarse una regla para {rule}.",
   "Leads to {path}": "Lleva a {path}",
   "every file edit": "cada edición de archivo",
   "every shell command": "cada comando de shell",
