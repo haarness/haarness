@@ -25,6 +25,7 @@ const focusPage = `<!doctype html><html lang="en"><head><title>Focus fixture</ti
 <a href="/focus?next">Next page</a>
 <label>Pick a file <input type="file" id="file"></label>
 <button onclick="file.click()">Choose file</button>
+<button onclick="setTimeout(() => file.click(), 1500)">Choose file later</button>
 <p id="picked">none</p>
 <script>window.focus(); field.focus(); file.oncancel = () => picked.textContent = "cancelled"; file.onchange = () => picked.textContent = "picked";</script>
 </body></html>`;
@@ -112,7 +113,7 @@ test.afterAll(async () => {
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
-/** Where the keyboard is: the app's own page or a browser page, and the message box's caret. */
+/** Where the keyboard is: the app's own page or a browser page, and whether the message box has it there. */
 const keyboard = async () => ({
   ...(await app.evaluate(({ BrowserWindow, webContents }) => {
     const win = BrowserWindow.getAllWindows()[0];
@@ -127,7 +128,10 @@ const keyboard = async () => ({
   })),
   ...(await page.evaluate(() => {
     const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
-    return { composer: document.activeElement === box, caret: box?.selectionStart };
+    const active = document.activeElement;
+    // Named for a failure message only.
+    const element = active ? [active.tagName, active.getAttribute("aria-label") ?? active.className].join(" ") : "";
+    return { composer: active === box, element };
   })),
 });
 /** Makes the window the one the system types into: only then does a page holding the keyboard show. */
@@ -138,13 +142,14 @@ async function activate() {
   });
   await expect.poll(async () => (await keyboard()).window).toBe(true);
 }
-/** Where the keyboard is once a step has settled, with the window active again if another app took it. */
+/** Where the keyboard is once a step has settled, with the window active again whenever another app took it. */
 async function settled() {
   await page.waitForTimeout(400);
-  const value = await keyboard();
-  if (value.window) return value;
-  await activate();
-  return keyboard();
+  for (let attempt = 0; ; attempt++) {
+    const value = await keyboard();
+    if (value.window || attempt === 5) return value;
+    await activate();
+  }
 }
 /** Gives a page the keyboard, as a click in it does. */
 const typeInPage = (search: string) =>
@@ -152,7 +157,8 @@ const typeInPage = (search: string) =>
     webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/focus" + search))!.focus();
   }, search);
 
-const inMessageBox = { app: true, pages: [], composer: true, caret: 4 };
+// The caret is not compared: the person may type while the window is active.
+const inMessageBox = { app: true, pages: [], composer: true };
 
 test("the message box keeps the keyboard while the agent loads, clicks and types in pages that ask for it", async () => {
   const box = page.getByRole("textbox", { name: "Message" });
@@ -195,7 +201,9 @@ test("the message box keeps the keyboard while the agent loads, clicks and types
 
 test("a page put away while it has the keyboard gives it back to the message box", async () => {
   const box = page.getByRole("textbox", { name: "Message" });
-  const [first] = (await tool("tabs_list")).tabs.map((tab: { id: string }) => tab.id);
+  const first =
+    (await tool("tabs_list")).tabs.find((tab: { url: string }) => tab.url.endsWith("/focus?first"))?.id ??
+    (await tool("tabs_open", { url: siteURL + "/focus?first" })).id;
   await box.evaluate((element: HTMLTextAreaElement) => {
     element.focus();
     element.setSelectionRange(4, 4);
@@ -213,32 +221,52 @@ test("a page put away while it has the keyboard gives it back to the message box
   expect(await settled()).toMatchObject({ app: false, pages: ["?other"] });
   await tool("tabs_close", { tabID: other });
   expect(await settled()).toMatchObject(inMessageBox);
+  // A control other than the message box, left with the window's keyboard,
+  // does not get keys meant for the page.
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).focus();
+  await typeInPage("?first");
+  expect(await settled()).toMatchObject({ app: false, pages: ["?first"] });
+  const another = (await tool("tabs_open", { url: siteURL + "/focus?another" })).id;
+  expect(await settled()).toMatchObject({ app: false, pages: [] });
+  await tool("tabs_close", { tabID: another });
+  await tool("tabs_focus", { tabID: first });
   expect(errors).toEqual([]);
 });
 
-test("a file chooser a page opens during the agent's click never appears, and the agent is told to upload instead", async () => {
+test("a file chooser a page opens during or just after the agent's click never appears, and the agent is told to upload instead", async () => {
+  // While a native chooser is open the page hears nothing; a held one is
+  // cancelled for the page at once. (The window's own focus is no witness
+  // here: other apps on the machine take it at any time.)
+  const picked = async () => (await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" })).value;
+  const reset = () => tool("evaluate", { tabID, script: "document.getElementById('picked').textContent = 'none'" });
   const tabID = (await tool("tabs_open", { url: siteURL + "/focus?files" })).id;
-  await activate();
-  const snapshot = (await tool("snapshot", { tabID })).content;
+  let snapshot = (await tool("snapshot", { tabID })).content;
   const clicked = await tool("click", { tabID, ref: ref(snapshot, "Choose file") });
-  expect(clicked.fileChooser).toMatch(/kept from appearing.*browser_files_upload|kept from appearing.*browser\.files\.upload/);
-  // The page hears that its chooser closed, and the window keeps its place.
-  await expect
-    .poll(async () => (await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" })).value)
-    .toBe("cancelled");
-  expect((await settled()).window).toBe(true);
-  // A click of the person's own, once the agent is done, opens the system's chooser as usual.
+  expect(clicked.fileChooser).toMatch(/^The page opened a file chooser, which Haarness kept from appearing.*browser\.files\.upload/);
+  await expect.poll(picked).toBe("cancelled");
+  // A widget that opens its chooser a moment after the click (once a request
+  // returns, say) is held too, and the agent's next result says so.
+  await reset();
+  snapshot = (await tool("snapshot", { tabID })).content;
+  const later = await tool("click", { tabID, ref: ref(snapshot, "Choose file later") });
+  expect(later.fileChooser).toBeUndefined();
+  await page.waitForTimeout(2500);
+  const after = await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" });
+  expect(after.value).toBe("cancelled");
+  expect(after.fileChooser).toMatch(/^Shortly after your last action, the page opened a file chooser/);
+  // A press of the person's own ends the hold at once: the system's chooser
+  // opens as usual, so the page hears no cancel.
   const box = (await tool("evaluate", {
     tabID,
-    script: "(() => { const r = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Choose file').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+    script: "(() => { document.getElementById('picked').textContent = 'none'; const r = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Choose file').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
   })).value as { x: number; y: number };
-  // Choosers stay held for a moment after the agent's last action (that evaluate).
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(500);
   await app.evaluate(({ webContents }, { x, y }) => {
     const contents = webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/focus?files"))!;
     contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
     contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
   }, box);
-  await expect.poll(async () => (await keyboard()).window, { timeout: 5000 }).toBe(false);
+  await page.waitForTimeout(1500);
+  expect(await picked()).toBe("none");
   expect(errors).toEqual([]);
 });
