@@ -20,12 +20,16 @@ export function terminalSockets<Socket extends { close(): void }>() {
       previous?.socket.close();
     },
     /** A connect finished: false, and the socket is closed, when a newer
-     * view asked since or this one let go meanwhile. */
+     * view asked since or this one let go meanwhile. Two connects of one
+     * view that overlap leave the later socket: the earlier one closes, so
+     * the view never gets the output twice. */
     accept(key: string, view: string, owner: number, socket: Socket) {
       if (views.get(key) !== view) {
         socket.close();
         return false;
       }
+      const previous = sockets.get(key);
+      if (previous && previous.socket !== socket) previous.socket.close();
       sockets.set(key, { owner, socket, view });
       return true;
     },
