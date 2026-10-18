@@ -2439,5 +2439,8 @@
   "Click and press the keys, including a modifier key.": "Kliknite i pritisnite tipke, uključujući modifikatorsku tipku.",
   "Use a modifier key and one more key, such as {keys}.": "Koristite modifikatorsku tipku i još jednu tipku, npr. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} pripada sistemu. Odaberite drugu prečicu.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu.",
+  "Reconnecting…": "Ponovno povezivanje…",
+  "Terminal disconnected": "Terminal je prekinut",
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness ne može doći do ovog terminala. Njegova ljuska možda još radi."
 }

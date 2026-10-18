@@ -2439,5 +2439,8 @@
   "Click and press the keys, including a modifier key.": "Klik, og tryk på tasterne, inklusive en modifikatortast.",
   "Use a modifier key and one more key, such as {keys}.": "Brug en modifikatortast og én tast mere, f.eks. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} hører til systemet. Vælg en anden genvej.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "En anden app eller systemet bruger allerede {keys}. Vælg en anden genvej."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "En anden app eller systemet bruger allerede {keys}. Vælg en anden genvej.",
+  "Reconnecting…": "Genopretter forbindelse…",
+  "Terminal disconnected": "Terminalen er afbrudt",
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness kan ikke nå denne terminal. Dens shell kører muligvis stadig."
 }
