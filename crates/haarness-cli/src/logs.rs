@@ -74,31 +74,83 @@ fn write_control(data: &Path, control: &Control) -> Result<()> {
     Ok(())
 }
 
-/// Whether `level` logs more than a process whose own filter logs at most
-/// `own`: a raised level never lowers a process started more verbose (with
-/// `--log-level debug`, say).
-fn louder(level: &str, own: Option<LevelFilter>) -> bool {
-    level
-        .parse::<LevelFilter>()
-        .is_ok_and(|level| own.is_none_or(|own| level > own))
+/// The level `directives` (an `EnvFilter` string) give events of `target`:
+/// the directive with the longest target that `target` starts with, else
+/// the bare level, else `error` (`EnvFilter`'s default). Span filters are
+/// not read.
+fn level_for(directives: &[(Option<&str>, LevelFilter)], target: &str) -> LevelFilter {
+    directives
+        .iter()
+        .filter_map(|(name, level)| {
+            name.filter(|name| target.starts_with(name))
+                .map(|name| (name.len(), *level))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, level)| level)
+        .or_else(|| {
+            directives
+                .iter()
+                .rev()
+                .find_map(|(name, level)| name.is_none().then_some(*level))
+        })
+        .unwrap_or(LevelFilter::ERROR)
+}
+
+/// A process's filter raised to `level` for Haarness's own `targets`: its
+/// own directives, with each target that logs less than `level` raised. A
+/// target the process already logs at that level or more keeps its level,
+/// as do directives for other crates (`hyper=trace`). None when no target
+/// would log more: a raised level never quiets a process.
+fn raised_directives(base: &str, level: &str, targets: &[&str]) -> Option<String> {
+    use std::fmt::Write as _;
+    let level = level.parse::<LevelFilter>().ok()?;
+    let directives = base
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty() && !directive.contains('['))
+        .filter_map(|directive| match directive.split_once('=') {
+            Some((name, value)) => value
+                .trim()
+                .parse()
+                .ok()
+                .map(|value| (Some(name.trim()), value)),
+            None => Some(
+                directive
+                    .parse()
+                    .map_or((Some(directive), LevelFilter::TRACE), |value| (None, value)),
+            ),
+        })
+        .collect::<Vec<_>>();
+    let mut raised = base.trim().trim_end_matches(',').to_owned();
+    let mut louder = false;
+    for target in targets {
+        if level_for(&directives, target) < level {
+            louder = true;
+            if !raised.is_empty() {
+                raised.push(',');
+            }
+            let _ = write!(raised, "{target}={level}");
+        }
+    }
+    louder.then_some(raised)
 }
 
 /// Swaps the log filters of this process whenever the control file asks for
-/// a level louder than its own, and back to `base` (the level the process
-/// started with) once no such window is in force. Runs for the life of the
-/// process.
+/// a level louder than its own for Haarness's `targets`, and back to `base`
+/// (the filter the process started with, from `directives`) once no such
+/// window is in force. Runs for the life of the process.
 pub fn watch(
     data: PathBuf,
     base: EnvFilter,
+    directives: String,
     handles: Vec<reload::Handle<EnvFilter, Registry>>,
-    raised: fn(&str) -> String,
+    targets: &'static [&'static str],
 ) {
     if handles.is_empty() {
         return;
     }
-    let own = base.max_level_hint();
-    let apply = move |level: Option<&str>| {
-        let filter = level.map_or_else(|| base.clone(), |level| EnvFilter::new(raised(level)));
+    let apply = move |raised: Option<&str>| {
+        let filter = raised.map_or_else(|| base.clone(), EnvFilter::new);
         for handle in &handles {
             let _ = handle.reload(filter.clone());
         }
@@ -109,12 +161,17 @@ pub fn watch(
         let wanted = control
             .as_ref()
             .and_then(|control| control.level_at(Utc::now()))
-            .filter(|level| louder(level, own))
+            .filter(|level| raised_directives(&directives, level, targets).is_some())
             .map(str::to_owned);
         if wanted == current {
             return;
         }
-        apply(wanted.as_deref());
+        apply(
+            wanted
+                .as_deref()
+                .and_then(|level| raised_directives(&directives, level, targets))
+                .as_deref(),
+        );
         match (&wanted, control.and_then(|control| control.until)) {
             (Some(level), Some(until)) => {
                 tracing::info!(level, until = %until, "log level raised for a while");
@@ -279,14 +336,13 @@ fn scrub(line: &str) -> String {
 /// escaped error, `-----BEGIN … PRIVATE KEY-----` to `-----END … PRIVATE
 /// KEY-----`) replaced.
 fn without_private_keys(line: &str) -> String {
-    const LABEL: &str = "PRIVATE KEY-----";
     let mut shown = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(start) = rest.find("-----BEGIN ") {
         let block = &rest[start..];
-        let Some(end) = block.find(LABEL).and_then(|header| {
+        let Some(end) = key_label_end(block).and_then(|header| {
             let footer = header + block[header..].find("-----END ")?;
-            Some(footer + block[footer..].find(LABEL)? + LABEL.len())
+            Some(footer + key_label_end(&block[footer..])?)
         }) else {
             break;
         };
@@ -298,15 +354,43 @@ fn without_private_keys(line: &str) -> String {
     shown
 }
 
+/// Where the first private key label in `text` ends: `PRIVATE KEY-----`
+/// (PEM) or `PRIVATE KEY BLOCK-----` (PGP).
+fn key_label_end(text: &str) -> Option<usize> {
+    ["PRIVATE KEY-----", "PRIVATE KEY BLOCK-----"]
+        .into_iter()
+        .filter_map(|label| text.find(label).map(|index| index + label.len()))
+        .min()
+}
+
 /// Whether a line opens a private key block that goes on below it.
 fn opens_private_key(line: &str) -> bool {
-    line.contains("-----BEGIN ") && line.contains("PRIVATE KEY-----") && !line.contains("-----END ")
+    line.find("-----BEGIN ")
+        .is_some_and(|start| key_label_end(&line[start..]).is_some())
+        && !line.contains("-----END ")
 }
 
 /// Whether a line closes a private key block.
 fn closes_private_key(line: &str) -> bool {
-    line.contains("-----END ") && line.contains("PRIVATE KEY-----")
+    line.find("-----END ")
+        .is_some_and(|start| key_label_end(&line[start..]).is_some())
 }
+
+/// Whether a line starts a new log line (`2026-10-18T…`): a private key
+/// block whose end was cut off never swallows the lines after it.
+fn starts_log_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > 11
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes[10] == b'T'
+}
+
+/// The most lines a private key block whose end is missing swallows.
+const KEY_LINES: usize = 100;
 
 /// `haarness logs export [--output PATH] [--full]`.
 pub fn export_command(data: &Path, output: Option<PathBuf>, full: bool) -> Result<()> {
@@ -372,16 +456,31 @@ fn export(files: &[(PathBuf, u64)], output: &Path, full: bool) -> Result<(usize,
         } else {
             let mut reader = BufReader::new(fs::File::open(path)?);
             let mut line = Vec::new();
-            // Inside a private key that spans lines: they are left out.
-            let mut key = false;
+            // Lines left out inside a private key that spans lines, if in one.
+            let mut key: Option<usize> = None;
             while reader.read_until(b'\n', &mut line)? > 0 {
                 let text = String::from_utf8_lossy(&line);
                 let ending = if text.ends_with('\n') { "\n" } else { "" };
                 let text = text.trim_end_matches('\n');
-                if key {
-                    key = !closes_private_key(text);
-                } else if opens_private_key(text) {
-                    key = true;
+                if let Some(swallowed) = key {
+                    if closes_private_key(text) {
+                        key = None;
+                        line.clear();
+                        continue;
+                    }
+                    // A key cut off before its end stops at the next log line,
+                    // or after `KEY_LINES`, and says so.
+                    if starts_log_line(text) || swallowed >= KEY_LINES {
+                        zip.write_all(b"[the redacted private key had no end line]\n")?;
+                        key = None;
+                    } else {
+                        key = Some(swallowed + 1);
+                        line.clear();
+                        continue;
+                    }
+                }
+                if opens_private_key(text) {
+                    key = Some(0);
                     let before = &text[..text.find("-----BEGIN ").unwrap_or(0)];
                     zip.write_all(scrub(before).as_bytes())?;
                     zip.write_all(b"[redacted private key]\n")?;
@@ -390,6 +489,9 @@ fn export(files: &[(PathBuf, u64)], output: &Path, full: bool) -> Result<(usize,
                     zip.write_all(ending.as_bytes())?;
                 }
                 line.clear();
+            }
+            if key.is_some() {
+                zip.write_all(b"[the redacted private key had no end line]\n")?;
             }
         }
         packed.push(name);
@@ -490,8 +592,9 @@ mod tests {
         watch(
             data.clone(),
             EnvFilter::new("warn"),
+            "warn".into(),
             vec![handle],
-            str::to_owned,
+            TEST_TARGETS,
         );
         tracing::debug!("DEBUG_WHILE_RAISED");
         assert!(
@@ -525,8 +628,9 @@ mod tests {
         watch(
             data.clone(),
             EnvFilter::new("debug"),
+            "debug".into(),
             vec![handle],
-            str::to_owned,
+            TEST_TARGETS,
         );
         tracing::debug!("DEBUG_KEPT");
         assert!(
@@ -535,10 +639,73 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("DEBUG_KEPT"))
         );
-        assert!(louder("trace", Some(LevelFilter::DEBUG)));
-        assert!(!louder("info", Some(LevelFilter::DEBUG)));
-        assert!(!louder("debug", Some(LevelFilter::DEBUG)));
         fs::remove_dir_all(data).unwrap();
+    }
+
+    /// The targets these tests' events have.
+    const TEST_TARGETS: &[&str] = &["haarness"];
+
+    #[test]
+    fn a_raised_level_reaches_haarness_past_a_louder_directive_for_another_crate() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let data = scratch("other-crate");
+        let base = "info,hyper=trace";
+        let (filter, handle) = reload::Layer::new(EnvFilter::new(base));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let writer = {
+            let seen = seen.clone();
+            move || Line(seen.clone())
+        };
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_subscriber::Layer::with_filter(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer)
+                    .with_ansi(false),
+                filter,
+            ));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        level_command(&data, Some("debug"), None, true).unwrap();
+        watch(
+            data.clone(),
+            EnvFilter::new(base),
+            base.into(),
+            vec![handle],
+            TEST_TARGETS,
+        );
+        tracing::debug!("DEBUG_RAISED");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("DEBUG_RAISED"))
+        );
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn a_raised_filter_keeps_every_louder_directive_of_the_process() {
+        let targets = &["haarness", "haarness_cli", "haarness_core"];
+        assert_eq!(
+            raised_directives("info,hyper=trace", "debug", targets).as_deref(),
+            Some("info,hyper=trace,haarness=debug,haarness_cli=debug,haarness_core=debug")
+        );
+        assert_eq!(
+            raised_directives("warn,haarness_core=trace", "debug", targets).as_deref(),
+            Some("warn,haarness_core=trace,haarness=debug,haarness_cli=debug"),
+            "a target already louder keeps its level"
+        );
+        let started = "warn,haarness=debug,haarness_cli=debug,haarness_core=debug";
+        assert_eq!(raised_directives(started, "info", targets), None);
+        assert_eq!(raised_directives(started, "debug", targets), None);
+        assert!(raised_directives(started, "trace", targets).is_some());
+        assert!(
+            raised_directives("haarness", "debug", targets).is_none(),
+            "a bare target logs everything"
+        );
+        assert_eq!(
+            raised_directives("", "info", &["haarness"]).as_deref(),
+            Some("haarness=info")
+        );
     }
 
     struct Line(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
@@ -568,7 +735,13 @@ mod tests {
              MIIBLOCKLINEONE\n\
              MIIBLOCKLINETWO\n\
              -----END PRIVATE KEY-----\n\
-             INFO plain line\n",
+             INFO plain line\n\
+             WARN gpg said -----BEGIN PGP PRIVATE KEY BLOCK-----\n\
+             lQPGBPGPLINE\n\
+             -----END PGP PRIVATE KEY BLOCK-----\n\
+             ERROR cut off -----BEGIN EC PRIVATE KEY-----\n\
+             MHcCUTOFFLINE\n\
+             2026-10-18T07:00:00Z 1 serve  INFO AFTER_THE_CUT\n",
         )
         .unwrap();
         let output = data.join("out.zip");
@@ -586,6 +759,8 @@ mod tests {
             "MIIEINLINEKEY",
             "MIIBLOCKLINEONE",
             "MIIBLOCKLINETWO",
+            "lQPGBPGPLINE",
+            "MHcCUTOFFLINE",
         ] {
             assert!(!log.contains(secret), "{secret} in {log}");
         }
@@ -600,6 +775,16 @@ mod tests {
         assert!(
             log.contains("DEBUG loaded [redacted private key]\nINFO plain line"),
             "{log}"
+        );
+        assert!(
+            log.contains("WARN gpg said [redacted private key]\nERROR cut off"),
+            "{log}"
+        );
+        assert!(
+            log.contains(
+                "[the redacted private key had no end line]\n2026-10-18T07:00:00Z 1 serve  INFO AFTER_THE_CUT\n"
+            ),
+            "a key cut off stops at the next log line: {log}"
         );
         assert!(
             log.contains("[redacted]") && log.contains("INFO plain line\n"),
