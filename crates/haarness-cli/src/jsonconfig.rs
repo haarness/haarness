@@ -2369,6 +2369,101 @@ mod tests {
     }
 
     #[test]
+    fn json_frontmatter_keeps_its_limits_and_code_frontmatter_is_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-frontmatter-languages-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        for directory in [
+            config.clone(),
+            workspace.join(".git"),
+            workspace.join(".haarness/agents"),
+            workspace.join(".haarness/commands"),
+            workspace.join(".haarness/skills/scripted"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        fs::write(
+            workspace.join(".haarness/agents/limited.md"),
+            "---json\n{\"description\": \"Limited\", \"permission\": {\"bash\": \"deny\"}}\n---\nReview only.",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".haarness/agents/yaml-limited.md"),
+            "---yaml\ndescription: Yaml limited\npermission:\n  edit: deny\n---\nRead only.",
+        )
+        .unwrap();
+        let skipped = [
+            (
+                "agent",
+                workspace.join(".haarness/agents/scripted.md"),
+                "---js\nmodule.exports = { permission: {} }\n---\nDo anything.",
+                "JavaScript frontmatter is not supported",
+            ),
+            (
+                "command",
+                workspace.join(".haarness/commands/scripted.md"),
+                "---coffee\ndescription: 'x'\n---\nRun it.",
+                "frontmatter language \"coffee\" is not supported",
+            ),
+            (
+                "skill",
+                workspace.join(".haarness/skills/scripted/SKILL.md"),
+                "---javascript\n({ name: 'scripted' })\n---\nSteps.",
+                "JavaScript frontmatter is not supported",
+            ),
+        ];
+        for (_, path, text, _) in &skipped {
+            fs::write(path, text).unwrap();
+        }
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        let limited = layers
+            .agents
+            .iter()
+            .find(|agent| agent.id == "limited")
+            .expect("the JSON agent loads");
+        assert_eq!(limited.description, "Limited");
+        assert_eq!(limited.prompt, "Review only.");
+        assert!(
+            limited
+                .permissions
+                .iter()
+                .any(|rule| rule.pattern == "bash:*"
+                    && rule.decision == haarness_core::PermissionDecision::Deny),
+            "{:?}",
+            limited.permissions
+        );
+        let yaml = layers
+            .agents
+            .iter()
+            .find(|agent| agent.id == "yaml-limited")
+            .expect("the ---yaml agent loads");
+        assert_eq!(yaml.prompt, "Read only.");
+        assert!(!yaml.permissions.is_empty());
+        assert!(!layers.agents.iter().any(|agent| agent.id == "scripted"));
+        assert!(
+            !layers
+                .commands
+                .iter()
+                .any(|command| command.name == "scripted")
+        );
+        for (kind, path, _, reason) in skipped {
+            let expected = format!("skipped {kind} {}: {reason}", path.display());
+            assert!(
+                layers
+                    .notices
+                    .iter()
+                    .any(|notice| notice.starts_with(&expected)),
+                "{expected}\n{:?}",
+                layers.notices
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn agent_frontmatter_and_json_entries_carry_presentation_limits_and_disable() {
         let root =
             std::env::temp_dir().join(format!("haarness-agent-fields-{}", uuid::Uuid::now_v7()));
