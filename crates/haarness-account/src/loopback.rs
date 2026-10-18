@@ -118,7 +118,14 @@ impl Loopback {
                     }
                     connections.spawn(answer(stream, expected_state.to_owned()));
                 }
-                Some(Ok(Some(outcome))) = connections.join_next() => return outcome,
+                // Every finished connection is taken, so one that ended the sign-in is never left
+                // behind one that did not (a pattern that fails disables its branch for the rest
+                // of the `select!`).
+                Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                    if let Ok(Some(outcome)) = joined {
+                        return outcome;
+                    }
+                }
             }
         }
     }
@@ -402,6 +409,43 @@ mod tests {
         let params = tokio::time::timeout(Duration::from_secs(3), waiting)
             .await
             .expect("the sign-in ends while idle connections wait")
+            .unwrap()
+            .unwrap();
+        assert_eq!(params.code, "hcc_abc");
+    }
+
+    /// Two connections that end without the callback, finishing together, leave the real return
+    /// to be taken at once rather than when some later connection arrives.
+    #[tokio::test]
+    async fn the_callback_is_taken_after_connections_that_ended_without_one() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let loopback = Loopback::bind().await.unwrap();
+        let port = loopback.port;
+        let waiting = tokio::spawn(loopback.wait_for_callback("st-1"));
+        let mut probes = [
+            TcpStream::connect(("127.0.0.1", port)).await.unwrap(),
+            TcpStream::connect(("127.0.0.1", port)).await.unwrap(),
+        ];
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for probe in &mut probes {
+            probe
+                .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+        }
+        for probe in &mut probes {
+            let mut response = String::new();
+            probe.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        }
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"GET /callback?code=hcc_abc&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let params = tokio::time::timeout(Duration::from_secs(3), waiting)
+            .await
+            .expect("the callback is taken without waiting for another connection")
             .unwrap()
             .unwrap();
         assert_eq!(params.code, "hcc_abc");
