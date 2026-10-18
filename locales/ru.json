@@ -2449,5 +2449,6 @@
   "This app's page could not be loaded.": "Не удалось загрузить страницу этого приложения.",
   "This result is too large to show in the app.": "Этот результат слишком велик, чтобы показать его в приложении.",
   "Link from the app": "Ссылка из приложения",
-  "This app wants to open a link.": "Это приложение хочет открыть ссылку."
+  "This app wants to open a link.": "Это приложение хочет открыть ссылку.",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "У этого инструмента есть приложение; откройте чат в Haarness Desktop, чтобы им воспользоваться."
 }

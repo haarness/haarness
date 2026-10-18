@@ -2449,5 +2449,6 @@
   "This app's page could not be loaded.": "无法加载此应用的页面。",
   "This result is too large to show in the app.": "此结果太大，无法在应用中显示。",
   "Link from the app": "来自应用的链接",
-  "This app wants to open a link.": "此应用想要打开一个链接。"
+  "This app wants to open a link.": "此应用想要打开一个链接。",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "此工具附带一个应用；在 Haarness Desktop 中打开此对话即可使用。"
 }
