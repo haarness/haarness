@@ -50,22 +50,53 @@ export function rememberImage(scope: string, src: string, data: string, limit = 
 }
 
 const pending = new Map<string, Promise<string>>();
+type Settled = (scope: string, src: string, data: string | undefined) => void;
+const listeners = new Set<Settled>();
+
+/**
+ * Calls `listener` whenever a fetch settles, with the image or undefined when
+ * it failed. Every mounted reply listens, so each swaps in, or turns back on,
+ * its own placeholders: a reply drawn anew while the fetch ran (scrolled back
+ * into view, or another reply with the same image) is not left waiting.
+ */
+export function onImageSettled(listener: Settled): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function settle(scope: string, src: string, data: string | undefined) {
+  for (const listener of [...listeners]) {
+    try {
+      listener(scope, src, data);
+    } catch {
+      /* One reply's trouble never keeps the others waiting. */
+    }
+  }
+}
 
 /**
  * Loads an image for a chat once at a time: a second click, or another reply
  * showing it, waits for the fetch already running. The loaded image is
- * remembered for the chat.
+ * remembered for the chat, and the fetch is over (imageLoading is false)
+ * before listeners hear of it.
  */
 export function loadImage(scope: string, src: string, fetch: (src: string) => Promise<string>): Promise<string> {
   const entry = key(scope, src);
   let running = pending.get(entry);
   if (!running) {
-    running = fetch(src)
-      .then((data) => {
+    running = fetch(src).then(
+      (data) => {
         rememberImage(scope, src, data);
+        pending.delete(entry);
+        settle(scope, src, data);
         return data;
-      })
-      .finally(() => pending.delete(entry));
+      },
+      (error: unknown) => {
+        pending.delete(entry);
+        settle(scope, src, undefined);
+        throw error;
+      },
+    );
     pending.set(entry, running);
   }
   return running;
