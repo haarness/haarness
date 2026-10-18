@@ -29,6 +29,13 @@ test.beforeAll(async () => {
   test.setTimeout(240000);
   server = createServer((request, response) => {
     requests.push({ url: request.url ?? "", headers: request.headers });
+    if (request.url?.startsWith("/slow.png")) {
+      // Slow enough for a reply to be drawn again while it loads.
+      return void setTimeout(() => {
+        response.writeHead(200, { "content-type": "image/png" });
+        response.end(PNG);
+      }, 4000);
+    }
     if (request.url?.startsWith("/chart.png") || request.url === "/badge.png") {
       response.writeHead(200, { "content-type": "image/png", "set-cookie": "track=1" });
       return response.end(PNG);
@@ -201,6 +208,32 @@ test("markup that copies a placeholder loads nothing, alone or beside a real one
   await page.waitForTimeout(300);
   expect(requests.slice(before).map((request) => request.url)).toEqual(["/chart.png?ride=1"]);
   await expect(message.getByRole("button", { name: "Riding copy", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("a reply drawn again while its image loads shows the image once it arrives", async () => {
+  await client.createThread({ title: "Other chat", provider: "echo", model: "echo-1" });
+  const load = (message: ReturnType<Page["locator"]>) =>
+    message.getByRole("button", { name: "Load image from images.test", exact: true });
+  const first = await reply(`![Slow](http://images.test:${port}/slow.png?n=1)`);
+  const before = requests.length;
+  await load(first).click();
+  // Another reply with the same image is drawn while the fetch runs: its button waits, off.
+  const second = await reply(`Same: ![Slow](http://images.test:${port}/slow.png?n=1)`);
+  await expect(load(second)).toBeDisabled();
+  // Every reply shows the image when it arrives, from one request.
+  await expect(first.locator("img.remote-image-loaded")).toHaveCount(1, { timeout: 15000 });
+  await expect(second.locator("img.remote-image-loaded")).toHaveCount(1);
+  expect(requests.slice(before).map((request) => request.url)).toEqual(["/slow.png?n=1"]);
+
+  // Leaving the chat and coming back while a fetch runs draws the reply anew; it still ends with its image.
+  const third = await reply(`![Slow](http://images.test:${port}/slow.png?n=2)`);
+  await load(third).click();
+  await page.locator(".sessions").getByRole("button", { name: "Other chat", exact: true }).click();
+  await page.locator(".sessions").getByRole("button", { name: "Remote images", exact: true }).click();
+  const back = page.locator(".message.assistant").last();
+  await expect(back.locator("img.remote-image-loaded")).toHaveCount(1, { timeout: 15000 });
+  await expect(load(back)).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
