@@ -9090,9 +9090,9 @@ struct RedactedUrls<W>(W);
 impl<W: Write> Write for RedactedUrls<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
-            Ok(text) if text.contains("://") => self
-                .0
-                .write_all(haarness_core::redact::urls_in(text).as_bytes())?,
+            Ok(text) if text.contains("://") => {
+                self.0.write_all(urls_between_escapes(text).as_bytes())?;
+            }
             _ => self.0.write_all(buf)?,
         }
         Ok(buf.len())
@@ -9100,6 +9100,37 @@ impl<W: Write> Write for RedactedUrls<W> {
     fn flush(&mut self) -> io::Result<()> {
         self.0.flush()
     }
+}
+
+/// `text` with its URLs shown as `haarness_core::redact::urls_in` shows them,
+/// looked for between terminal colour sequences: on a coloured terminal a URL
+/// right after `ESC[0m` would otherwise read as `0mhttps://…`, which is not a
+/// URL, and pass unredacted. The sequences are kept as they are.
+fn urls_between_escapes(text: &str) -> String {
+    if !text.contains('\u{1b}') {
+        return haarness_core::redact::urls_in(text).into_owned();
+    }
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('\u{1b}') {
+        shown.push_str(&haarness_core::redact::urls_in(&rest[..start]));
+        let sequence = &rest[start..];
+        // CSI: ESC [ parameters, then one final byte in @..~.
+        let end = if sequence.as_bytes().get(1) == Some(&b'[') {
+            sequence[2..]
+                .find(|character: char| ('@'..='~').contains(&character))
+                .map_or(sequence.len(), |index| index + 3)
+        } else {
+            sequence
+                .chars()
+                .nth(1)
+                .map_or(1, |next| 1 + next.len_utf8())
+        };
+        shown.push_str(&sequence[..end]);
+        rest = &sequence[end..];
+    }
+    shown.push_str(&haarness_core::redact::urls_in(rest));
+    shown
 }
 
 /// Rotating file logging (daily, under `<data>/logs/`), optional stderr
@@ -10319,6 +10350,24 @@ mod tests {
             "{written}"
         );
         assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
+    #[test]
+    fn a_coloured_log_line_hides_a_url_right_after_a_colour_reset() {
+        // How the stderr formatter colours a field: the URL follows `ESC[0m`.
+        let line = "\u{1b}[2mERROR\u{1b}[0m url=\u{1b}[3m\u{1b}[0mhttps://u:PRIVATE_SUFFIX@host/x?api_key=PRIVATE_SUFFIX \u{1b}[1mdone\u{1b}[0m\n";
+        let shown = super::urls_between_escapes(line);
+        assert!(!shown.contains("PRIVATE_SUFFIX"), "{shown:?}");
+        assert!(
+            shown.contains(
+                "\u{1b}[0mhttps://<redacted>@host/x?api_key=<redacted> \u{1b}[1mdone\u{1b}[0m\n"
+            ),
+            "the colours stay: {shown:?}"
+        );
+        assert_eq!(
+            super::urls_between_escapes("no colour, no URL"),
+            "no colour, no URL"
+        );
     }
 
     #[test]
