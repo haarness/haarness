@@ -29,7 +29,9 @@ their private runtime token also lets a password-protected host route internally
 
 Every mode retains Host/Origin validation, judged before credentials (a browser
 sends a saved password, and an open server needs none). Loopback listeners require
-loopback Host and Origin hosts. A request with no Origin that a page started (an
+a loopback Host, and a browser Origin on a loopback name with the server's own port:
+a page on another local port (a dev server at `http://localhost:3000`) is another web
+site. A request with no Origin that a page started (an
 image, link, frame or `no-cors` fetch, which browsers mark with a `Sec-Fetch-Site`
 of `same-site` or `cross-site`) gets `403`; only an absent `Sec-Fetch-Site`, `none`
 (the user's own navigation) or `same-origin` passes. On network listeners a browser
@@ -38,7 +40,11 @@ by IP address or `localhost` in Host, so a web site whose DNS name was re-pointe
 the server (DNS rebinding) is refused, and its Origin must match that Host, port
 included. The CLI, TUI, Desktop (its main process makes the requests), SDKs and the
 Cloud relay send neither header, so a reverse proxy may name the server however it
-likes for them.
+likes for them. Not covered: a browser that sends no `Sec-Fetch-Site` (Safari before
+16.4, Firefox before 90) makes a same-origin GET without an Origin, so after DNS
+rebinding a page in it can still read GET responses from a `--anonymous` network
+server. Requiring an IP address in Host for every request would close that, but would
+break `haarness attach` to a LAN host by name; use a password on network listeners.
 `/healthz` and `/openapi.json` remain public diagnostics. Use HTTPS or an SSH tunnel
 when connecting Desktop to a remote host. Passwords are optional configuration,
 not a login/account service, and the server never accepts a password as a bearer token.

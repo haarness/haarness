@@ -314,16 +314,34 @@ fn is_loopback_name(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
+/// A browser's Origin on a loopback listener: a loopback name on the
+/// server's own port. Another local port is another web site (a dev server, a
+/// page some program serves), which must not drive this one.
 fn valid_loopback_origin(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|origin| {
-            url::Url::parse(origin)
-                .ok()
-                .and_then(|url| url.host_str().map(ToOwned::to_owned))
-                .is_some_and(|host| is_loopback_name(host.trim_matches(['[', ']'])))
-        })
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| url::Url::parse(origin).ok())
+    else {
+        return false;
+    };
+    let port = request_host(headers).and_then(|(_, port)| port);
+    origin
+        .host_str()
+        .is_some_and(|host| is_loopback_name(host.trim_matches(['[', ']'])))
+        && same_port(&origin, port)
+}
+
+/// Whether an Origin's port is the one the Host header names, a missing one
+/// being the Origin scheme's default.
+fn same_port(origin: &url::Url, port: Option<u16>) -> bool {
+    let default = url::Url::parse(&format!("{}://h", origin.scheme()))
+        .ok()
+        .and_then(|url| url.port_or_known_default());
+    origin.port_or_known_default() == port.or(default)
 }
 
 /// Terminal clients send no browser headers, and any Host they name is
@@ -362,10 +380,7 @@ fn valid_network_origin(headers: &HeaderMap) -> bool {
     let named = origin
         .host_str()
         .is_some_and(|name| name.trim_matches(['[', ']']).eq_ignore_ascii_case(&host));
-    let default = url::Url::parse(&format!("{}://h", origin.scheme()))
-        .ok()
-        .and_then(|url| url.port_or_known_default());
-    named && origin.port_or_known_default() == port.or(default)
+    named && same_port(&origin, port)
 }
 
 /// What a refused browser request names as its site, for the log: the Origin's
@@ -538,6 +553,31 @@ mod access_tests {
             StatusCode::FORBIDDEN
         );
     }
+    /// A page on another local port (`http://localhost:3000`) is another web
+    /// site: on a plain open `haarness serve` it could otherwise POST
+    /// `/v1/shutdown` with `mode: "no-cors"`.
+    #[tokio::test]
+    async fn loopback_server_refuses_an_origin_on_another_local_port() {
+        let host = ("host", "127.0.0.1:4096");
+        for (origin, expected) in [
+            ("http://localhost:3000", StatusCode::FORBIDDEN),
+            ("http://127.0.0.1:3000", StatusCode::FORBIDDEN),
+            ("http://[::1]:4097", StatusCode::FORBIDDEN),
+            ("http://127.0.0.1", StatusCode::FORBIDDEN),
+            ("null", StatusCode::FORBIDDEN),
+            ("http://127.0.0.1:4096", StatusCode::OK),
+            ("http://localhost:4096", StatusCode::OK),
+        ] {
+            let status = status_on(ServerAccess::Open, true, &[host, ("origin", origin)]).await;
+            assert_eq!(status, expected, "{origin}");
+        }
+        // Terminal clients, Desktop's main process and the SDKs send no Origin.
+        for host in ["127.0.0.1:4096", "localhost:4096"] {
+            let status = status_on(ServerAccess::Open, true, &[("host", host)]).await;
+            assert_eq!(status, StatusCode::OK, "{host}");
+        }
+    }
+
     /// An image, link or no-cors fetch from a web page carries no Origin, and
     /// on an open server, or with a saved password, it would be admitted.
     #[tokio::test]
