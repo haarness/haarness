@@ -17,6 +17,7 @@ import { markSelection, selectedByClick, type SelectionMark } from "./selection-
 import {
   batchLabel,
   batchSteps,
+  batchTarget,
   describeTool,
   toolChanges,
   toolInput,
@@ -57,6 +58,7 @@ export function ToolActivity(props: {
   );
   // A grouped row names what happened, not how many calls it took: a count
   // invites the reader to wonder about it, and the disclosure lists them.
+  // Its target names what the steps acted on, since rows start collapsed.
   const shape = createMemo(() =>
     batch().length
       ? {
@@ -64,7 +66,7 @@ export function ToolActivity(props: {
           verb: batchLabel(batch()),
           doing: batchLabel(batch()),
           attempt: batchLabel(batch()),
-          target: "",
+          target: batchTarget(batch()),
         }
       : describeTool(props.name, props.args),
   );
