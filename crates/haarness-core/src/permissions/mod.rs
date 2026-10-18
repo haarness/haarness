@@ -417,23 +417,30 @@ impl PermissionEngine {
         self.evaluate_passing_over(operation, covers, PermissionDecision::Allow)
     }
 
-    /// Bash rules that deny or ask without covering the command as written
-    /// (`covers`): the first one, when there is any. A command whose
-    /// readings a limit stopped is asked about when one exists.
+    /// A bash rule that denies or asks without covering the command as
+    /// written (`covers`), with its decision: a deny when there is one, in
+    /// any layer, else an ask. A command whose readings a limit stopped is
+    /// refused or asked about when one exists.
     #[must_use]
-    pub fn narrower_bash_rule(&self, covers: &dyn Fn(&str) -> bool) -> Option<String> {
-        std::iter::once(&self.ceilings)
-            .chain(&self.inherited)
-            .chain(std::iter::once(&self.rules))
-            .flatten()
-            .filter(|rule| rule.decision != PermissionDecision::Allow)
-            .filter(|rule| {
-                rule.pattern
-                    .split_once(':')
-                    .is_some_and(|(permission, _)| wildcard_match(permission, "bash"))
-            })
-            .find(|rule| !covers(&rule.pattern))
-            .map(|rule| rule.pattern.clone())
+    pub fn narrower_bash_rule(
+        &self,
+        covers: &dyn Fn(&str) -> bool,
+    ) -> Option<(String, PermissionDecision)> {
+        let narrower = |decision: PermissionDecision| {
+            std::iter::once(&self.ceilings)
+                .chain(&self.inherited)
+                .chain(std::iter::once(&self.rules))
+                .flatten()
+                .filter(|rule| rule.decision == decision)
+                .filter(|rule| {
+                    rule.pattern
+                        .split_once(':')
+                        .is_some_and(|(permission, _)| wildcard_match(permission, "bash"))
+                })
+                .find(|rule| !covers(&rule.pattern))
+                .map(|rule| (rule.pattern.clone(), decision))
+        };
+        narrower(PermissionDecision::Deny).or_else(|| narrower(PermissionDecision::Ask))
     }
 
     fn evaluate_passing_over(
