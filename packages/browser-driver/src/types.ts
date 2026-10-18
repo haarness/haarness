@@ -311,6 +311,12 @@ export interface Page<F extends Browser.HostFile = Browser.HostFile> {
    * their origins the same way.
    */
   sources(): string[];
+  /**
+   * The person pressed a key or a mouse button in the page: file choosers the
+   * driver holds back after an agent's action open again at once. Input that
+   * arrives while an agent's action runs is the agent's and changes nothing.
+   */
+  personActed(): void;
   /** Refuses further commands and drops its listeners and refs; the host disposes the transport, views and files. */
   dispose(): void;
 }

@@ -61,10 +61,15 @@ const actingOperations = new Set<Browser.Method>([
   "press",
   "scroll",
 ]);
-/** How long choosers stay held after an action, for a page that opens one a moment later. */
-const CHOOSER_GRACE_MS = 500;
+/**
+ * How long choosers stay held after an action: as long as Chromium lets a
+ * page open one after a click, for a widget that first awaits a request.
+ */
+const CHOOSER_HOLD_MS = 5_000;
 const FILE_CHOOSER =
   "The page opened a file chooser, which Haarness kept from appearing: the person's screen stays theirs while an agent works. To choose a file, take a fresh browser.snapshot and call browser.files.upload with the file input's ref. Do not click the control again to open the chooser.";
+const LATE_FILE_CHOOSER =
+  "Shortly after your last action, the page opened a file chooser, which Haarness kept from appearing: the person's screen stays theirs while an agent works. To choose a file, take a fresh browser.snapshot and call browser.files.upload with the file input's ref. Do not click the control again to open the chooser.";
 
 /**
  * A document's permission resource when targets use origins: its HTTP(S)
@@ -189,6 +194,41 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
       });
     },
   );
+  // While an agent's action runs, and for a few seconds after, a file chooser
+  // the page opens is not shown (and is cancelled for the page); the action's
+  // result, or the next one, says so. Between actions, and as soon as the
+  // person acts in the page, the person's own choosers open as usual.
+  let holding = false;
+  /** The action now running, and whether the page opened a chooser during it. */
+  let acting: { opened: boolean } | undefined;
+  /** A chooser held after the last action ended, not yet reported. */
+  let lateChooser = false;
+  let chooserRelease: ReturnType<typeof setTimeout> | undefined;
+  events.on("Page.fileChooserOpened", () => {
+    if (acting) acting.opened = true;
+    else if (holding) lateChooser = true;
+  });
+  const holdIn = (sessionID: string | undefined, enabled: boolean) =>
+    cdp
+      .send(
+        "Page.setInterceptFileChooserDialog",
+        enabled ? { enabled, cancel: true } : { enabled },
+        sessionID,
+      )
+      .catch(() => undefined);
+  const holdChoosers = (enabled: boolean) => {
+    holding = enabled;
+    return Promise.all(
+      [undefined, ...sessions.values()].map((sessionID) =>
+        holdIn(sessionID, enabled),
+      ),
+    );
+  };
+  const releaseChoosers = () => {
+    clearTimeout(chooserRelease);
+    chooserRelease = undefined;
+    if (holding && !closed) void holdChoosers(false);
+  };
   events.on(
     "Target.attachedToTarget",
     ({ sessionId, targetInfo }, parentSessionID) => {
@@ -201,6 +241,8 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
       void Promise.all([
         diagnostics.enable(sessionId),
         cdp.send("Page.enable", {}, sessionId),
+        // A frame that attaches while choosers are held is held too.
+        holding ? holdIn(sessionId, true) : undefined,
         cdp.send(
           "Target.setAutoAttach",
           {
@@ -238,34 +280,6 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
     dialog = null;
     publish();
   });
-  // While an agent's action runs, and for a moment after, a file chooser the
-  // page opens is not shown (and is cancelled for the page); the action's
-  // result says so. Between actions the person's own choosers open as usual.
-  let chooser: { opened: boolean } | undefined;
-  let chooserRelease: ReturnType<typeof setTimeout> | undefined;
-  events.on("Page.fileChooserOpened", () => {
-    if (chooser) chooser.opened = true;
-  });
-  const holdChoosers = (enabled: boolean) =>
-    Promise.all(
-      [undefined, ...sessions.values()].map((sessionID) =>
-        cdp
-          .send(
-            "Page.setInterceptFileChooserDialog",
-            enabled ? { enabled, cancel: true } : { enabled },
-            sessionID,
-          )
-          .catch(() => undefined),
-      ),
-    );
-  const releaseChoosers = (watch: { opened: boolean }) => {
-    clearTimeout(chooserRelease);
-    chooserRelease = setTimeout(() => {
-      if (chooser !== watch || closed) return;
-      chooser = undefined;
-      void holdChoosers(false);
-    }, CHOOSER_GRACE_MS);
-  };
   // The page exists before its first load starts: a browser can report that
   // navigation's start synchronously, and the host's handler needs the page.
   let ready = Promise.resolve();
@@ -363,27 +377,40 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
       const watch = actingOperations.has(command.action.type)
         ? { opened: false }
         : undefined;
-      const held = !!chooser;
       if (watch) {
         clearTimeout(chooserRelease);
-        chooser = watch;
+        acting = watch;
       }
       try {
-        if (watch && !held) await holdChoosers(true);
+        if (watch && !holding) await holdChoosers(true);
         const outcome = await Promise.race([
           execute(command.action, command.files, run.signal, command.target),
           modal.promise,
           cancelled.promise,
         ]);
         const value = outcome.value;
-        return watch?.opened && value && typeof value === "object" && !Array.isArray(value)
-          ? { ...outcome, value: { ...value, fileChooser: FILE_CHOOSER } }
-          : outcome;
+        const note = watch?.opened
+          ? FILE_CHOOSER
+          : lateChooser
+            ? LATE_FILE_CHOOSER
+            : undefined;
+        if (!note || !value || typeof value !== "object" || Array.isArray(value))
+          return outcome;
+        lateChooser = false;
+        return { ...outcome, value: { ...value, fileChooser: note } };
       } finally {
         signal.removeEventListener("abort", cancel);
         dialogs.delete(reject);
-        if (watch) releaseChoosers(watch);
+        if (watch) {
+          acting = undefined;
+          clearTimeout(chooserRelease);
+          chooserRelease = setTimeout(releaseChoosers, CHOOSER_HOLD_MS);
+        }
       }
+    },
+    personActed() {
+      // Input during an agent's action is the agent's own.
+      if (!acting) releaseChoosers();
     },
     dispose() {
       if (closed) return;
