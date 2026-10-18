@@ -11168,8 +11168,10 @@ struct ShellReadings {
     /// once per rule.
     covered: Mutex<HashMap<(usize, String), bool>>,
     /// The rule each written command a limit stopped reading met instead,
-    /// by pattern.
+    /// by pattern (empty when the line is unreadable and no rule applies).
     limited: Mutex<HashMap<String, String>>,
+    /// The line is too large to read: see [`AskPlan::evaluate`].
+    unreadable: bool,
 }
 
 impl ShellReadings {
@@ -11201,6 +11203,7 @@ impl ShellReadings {
             always,
             covered: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashMap::new()),
+            unreadable: analysis.unreadable,
         }
     }
 
@@ -11252,6 +11255,29 @@ impl AskPlan {
             });
         }
         let evaluation = engine.evaluate_detailed(&operation);
+        // A line too large to read, judged by its first command: no allow,
+        // remembered answer or Always settles it, since what it runs is
+        // unknown. Any bash deny refuses it; otherwise only a person
+        // answers, every time.
+        if shell.unreadable
+            && evaluation.decision != PermissionDecision::Deny
+            && shell.index.get(pattern) == Some(&0)
+        {
+            let (rule, decision) = engine
+                .narrower_bash_rule(&|_| false)
+                .map_or((None, PermissionDecision::Ask), |(rule, decision)| {
+                    (Some(rule), decision)
+                });
+            shell
+                .limited
+                .lock()
+                .insert(pattern.to_owned(), rule.clone().unwrap_or_default());
+            return crate::permissions::Evaluation {
+                decision,
+                matched: rule,
+                protected: decision == PermissionDecision::Ask,
+            };
+        }
         if evaluation.decision != PermissionDecision::Deny
             && let Some(&index) = shell.index.get(pattern)
             && shell.written[index].1.incomplete
@@ -11509,7 +11535,6 @@ fn operation_for_log(operation: &str) -> String {
     crate::redact::log_text(operation, 300)
 }
 
-/// Why a scheduled run's request that always asks failed instead of waiting.
 /// Text kept to 200 characters for logs and messages, with `…` when cut.
 fn clip(text: &str) -> String {
     match text.char_indices().nth(200) {
@@ -11518,6 +11543,7 @@ fn clip(text: &str) -> String {
     }
 }
 
+/// Why a scheduled run's request that always asks failed instead of waiting.
 fn cannot_ask_forced(operation: &str) -> String {
     format!(
         "'{operation}' needs the user's approval every time, and this scheduled run cannot ask. Do not retry it here; ask the user to do it in an interactive chat."
@@ -12229,6 +12255,30 @@ mod shell_reading_tests {
             verdicts(&engine(&[("bash:*", Ask), ("bash:bash *", Allow)]), &padded),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn a_line_too_large_to_read_is_never_allowed_by_a_rule_or_an_always() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let line = format!(
+            "echo {}x{}; printf done",
+            "$(echo ".repeat(1500),
+            ")".repeat(1500)
+        );
+        let plan = plan(&line);
+        let first = plan.patterns[0].clone();
+        // An Always on its first word does not settle it: a person answers.
+        let mut always = engine(&[]);
+        always.add_grant(rule("bash:echo *", Allow));
+        let evaluation = plan.evaluate(&always, &first);
+        assert_eq!(evaluation.decision, Ask);
+        assert!(evaluation.protected);
+        let card = plan.card_detail(&json!({"command": line}), std::slice::from_ref(&first));
+        assert_eq!(card["__readLimit"], "");
+        // Any bash deny refuses it, with a short reason.
+        let evaluation = plan.evaluate(&engine(&[("bash:git push *", Deny)]), &first);
+        assert_eq!(evaluation.decision, Deny);
+        assert!(plan.refusal(&first, "bash:git push *").len() < 1024);
     }
 
     #[test]

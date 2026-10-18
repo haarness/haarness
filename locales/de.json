@@ -1661,6 +1661,7 @@
   "collapse": "einklappen",
   "lines {from}–{to} of {total}": "Zeilen {from}–{to} von {total}",
   "always allows": "erlaubt immer",
+  "Haarness could not read all of this command.": "Haarness konnte diesen Befehl nicht ganz lesen.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness konnte diesen Befehl nicht ganz lesen; eine Regel für {rule} könnte gelten.",
   "Leads to {path}": "Führt zu {path}",
   "every file edit": "jede Dateibearbeitung",

@@ -1661,6 +1661,7 @@
   "collapse": "fold sammen",
   "lines {from}–{to} of {total}": "linjer {from}–{to} av {total}",
   "always allows": "tillater alltid",
+  "Haarness could not read all of this command.": "Haarness kunne ikke lese hele denne kommandoen.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness kunne ikke lese hele denne kommandoen; en regel for {rule} kan gjelde.",
   "Leads to {path}": "Fører til {path}",
   "every file edit": "hver filredigering",

@@ -1661,6 +1661,7 @@
   "collapse": "daralt",
   "lines {from}–{to} of {total}": "satır {from}–{to} / {total}",
   "always allows": "her zaman izin verir",
+  "Haarness could not read all of this command.": "Haarness bu komutun tamamını okuyamadı.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness bu komutun tamamını okuyamadı; {rule} için bir kural geçerli olabilir.",
   "Leads to {path}": "Hedefi: {path}",
   "every file edit": "her dosya düzenlemesi",
