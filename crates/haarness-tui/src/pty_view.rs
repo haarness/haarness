@@ -142,6 +142,25 @@ impl TerminalWorkspace {
         }
     }
 
+    /// The bytes `key` sends to the active terminal. A program that turned on
+    /// application cursor keys (vim, less, htop and other full-screen
+    /// programs do) reads the arrows, Home and End as `ESC O x`, which is what
+    /// the `xterm-256color` entry its `TERM` names says they send.
+    #[must_use]
+    pub fn input_bytes(&self, key: KeyEvent) -> Option<Vec<u8>> {
+        let mut bytes = key_bytes(key)?;
+        let application = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.parser.screen().application_cursor());
+        if application
+            && let [0x1b, prefix @ b'[', b'A'..=b'D' | b'H' | b'F'] = bytes.as_mut_slice()
+        {
+            *prefix = b'O';
+        }
+        Some(bytes)
+    }
+
     #[must_use]
     pub fn paste_bytes(&self, text: &str) -> Option<Vec<u8>> {
         let tab = self.tabs.get(self.active)?;
@@ -535,6 +554,51 @@ mod tests {
         }]);
         let id = terminal.active_id().unwrap();
         (terminal, id)
+    }
+
+    #[test]
+    fn arrows_follow_the_programs_cursor_key_mode() {
+        let (mut terminal, id) = workspace();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::Up)),
+            Some(b"\x1b[A".to_vec())
+        );
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"\x1b[?1h\x1b=".to_vec(),
+        });
+        for (code, sent) in [
+            (KeyCode::Up, b"\x1bOA"),
+            (KeyCode::Down, b"\x1bOB"),
+            (KeyCode::Right, b"\x1bOC"),
+            (KeyCode::Left, b"\x1bOD"),
+            (KeyCode::Home, b"\x1bOH"),
+            (KeyCode::End, b"\x1bOF"),
+        ] {
+            assert_eq!(
+                terminal.input_bytes(key(code)),
+                Some(sent.to_vec()),
+                "{code:?}"
+            );
+        }
+        // Other keys are as before.
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::PageUp)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::Char('x'))),
+            Some(b"x".to_vec())
+        );
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"\x1b[?1l".to_vec(),
+        });
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::Up)),
+            Some(b"\x1b[A".to_vec())
+        );
     }
 
     #[test]

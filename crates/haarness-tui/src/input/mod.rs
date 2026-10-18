@@ -1129,11 +1129,10 @@ async fn handle_terminal_key(
         }
         return Ok(AppAction::Continue);
     }
-    if let Some(bytes) = crate::pty_view::key_bytes(key)
-        && let Some(id) = app
-            .terminal
-            .as_ref()
-            .and_then(crate::pty_view::TerminalWorkspace::active_id)
+    if let Some((id, bytes)) = app
+        .terminal
+        .as_ref()
+        .and_then(|terminal| Some((terminal.active_id()?, terminal.input_bytes(key)?)))
     {
         if let Some(terminal) = &mut app.terminal {
             terminal.follow_output();
