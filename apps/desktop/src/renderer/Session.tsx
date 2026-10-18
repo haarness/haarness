@@ -222,8 +222,10 @@ export function Session() {
     [effort, setEffort] = createSignal(""),
     [follow, setFollow] = createSignal(true);
   const attachments = () => app.attachmentDraft(app.draftKey());
-  /** The draft the open Screenshots dialog adds to, chosen when it opened. */
-  const [screenshotsFor, setScreenshotsFor] = createSignal<string>();
+  /** The draft the open Screenshots dialog adds to, chosen when it opened,
+   * and the token main gave the Attach menu it was chosen in. */
+  const [screenshotsFor, setScreenshotsFor] = createSignal<{ key: string; token: Promise<string | null> }>();
+  let screenshotMenu: Promise<string | null> | undefined;
   const setAttachments = (value: Attachment[] | ((items: Attachment[]) => Attachment[])) =>
     app.setAttachmentDraft(app.draftKey(), value);
   const fileDrop = createFileDrop(
@@ -2152,6 +2154,10 @@ export function Session() {
                     label={t("Attach")}
                     icon="plus"
                     disabled={!project()}
+                    // Main lists screenshots for a choice in this menu only.
+                    onOpen={() => {
+                      screenshotMenu = window.haarness.screenshotMenu().catch(() => null);
+                    }}
                     items={[
                       {
                         label: t("Attach files"),
@@ -2166,18 +2172,22 @@ export function Session() {
                       {
                         label: t("Attach screenshots"),
                         icon: "image",
-                        run: () => setScreenshotsFor(app.draftKey()),
+                        run: () => {
+                          setScreenshotsFor({ key: app.draftKey(), token: screenshotMenu ?? Promise.resolve(null) });
+                          screenshotMenu = undefined;
+                        },
                       },
                     ]}
                   />
                   {/* In the body, so the composer's own styles stay off the dialog. */}
                   <Show when={screenshotsFor()}>
-                    {(key) => (
+                    {(open) => (
                       <Portal>
                         <ScreenshotPicker
+                          token={open().token}
                           close={(values) => {
                             // Read before closing: the dialog's draft key goes with it.
-                            const target = key();
+                            const target = open().key;
                             setScreenshotsFor(undefined);
                             if (values?.length)
                               void app.run(() => app.addAttachments(target, relabelAttachments(values)));

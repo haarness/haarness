@@ -356,8 +356,10 @@ export interface Bridge {
   review(input: import("./review-drafts").ReviewRequest): Promise<import("./review-drafts").ReviewResponse>;
   attachmentDraft(key: string, value?: Attachment[]): Promise<Attachment[]>;
   attachments(): Promise<Attachment[]>;
-  /** The newest images of the screenshots folder, or another folder the person chooses. */
-  screenshots(input?: { choose?: boolean }): Promise<ScreenshotListing>;
+  /** The composer's Attach menu opened: a token for listing screenshots from it, or null. */
+  screenshotMenu(): Promise<string | null>;
+  /** The newest images of the screenshots folder (`token` from the Attach menu), or another folder the person chooses. */
+  screenshots(input?: { choose?: boolean; token?: string }): Promise<ScreenshotListing>;
   /** Reads the screenshots at these places in the window's last listing, in this order. */
   screenshotAttach(listing: string, indexes: number[]): Promise<Attachment[]>;
   save(name: string, content: string): Promise<boolean>;

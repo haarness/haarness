@@ -21,7 +21,7 @@ const dialog = () => page.getByRole("dialog", { name: "Screenshots" });
 const calls = () => app.evaluate(() => (globalThis as unknown as { calls: Calls }).calls);
 const answer = (response: number) =>
   app.evaluate((_, response) => (globalThis as unknown as { calls: Calls }).calls.answers.push(response), response);
-/** A click that does nothing, just before a call the person would make with one. */
+/** A press elsewhere in the window: in the message box, which it leaves as it was. */
 const click = () => page.getByRole("textbox", { name: "Message", exact: true }).click();
 const tile = (name: string) => dialog().getByRole("button", { name, exact: true });
 const chips = () => page.locator(".composer-attachments .attachment-name");
@@ -184,13 +184,21 @@ test("another folder can be picked from once, and Escape adds nothing", async ()
   expect(errors).toEqual([]);
 });
 
-test("the folder is listed right after a click or key press, or when the person agrees, and a pick names only places in that listing", async () => {
-  // Opening the dialog from the menu asks nothing, and uses up that click.
+test("the folder is listed for a choice in the Attach menu, or when the person agrees, and a pick names only places in that listing", async () => {
+  // Choosing Attach screenshots in the Attach menu asks nothing, from the keyboard or with clicks.
+  await page.getByRole("button", { name: "Attach", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("menuitem", { name: "Attach files", exact: true })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(tile("Screenshot 2.png")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog()).toHaveCount(0);
   await page.getByRole("button", { name: "Attach", exact: true }).click();
   await page.getByRole("menuitem", { name: "Attach screenshots", exact: true }).click();
   await expect(tile("Screenshot 2.png")).toBeVisible();
   expect((await calls()).questions).toEqual([]);
-  // A page asking without one gets a question first, and nothing when it is declined.
+  // A page asking on its own gets a question first, and nothing when it is declined.
   expect(await page.evaluate(() => window.haarness.screenshots({}))).toEqual({ canceled: true });
   expect((await calls()).questions).toEqual(["Show your newest screenshots?"]);
   // Agreed to, the renderer gets names, times and thumbnails, never paths.
@@ -205,18 +213,33 @@ test("the folder is listed right after a click or key press, or when the person 
   await expect(dialog().getByRole("alert")).toHaveText("The screenshots changed. Open Screenshots again.");
   await dialog().getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(chips()).toHaveCount(3);
-  // That click lets a page list once, without a question.
-  expect(await page.evaluate(() => window.haarness.screenshots({}))).toHaveProperty("listing");
-  expect((await calls()).questions).toHaveLength(2);
-  // Opened without a click Desktop can see (as VoiceOver and Voice Control
+  // A press elsewhere (the Enter that sends a message, say) lists nothing
+  // without the question, even with a menu token asked for right after it.
+  await click();
+  expect(
+    await page.evaluate(async () =>
+      window.haarness.screenshots({ token: (await window.haarness.screenshotMenu()) ?? undefined }),
+    ),
+  ).toEqual({ canceled: true });
+  expect((await calls()).questions).toHaveLength(3);
+  // Nor does a token whose menu saw typing before the next press.
+  await click();
+  const token = await page.evaluate(() => window.haarness.screenshotMenu());
+  expect(token).toBeTruthy();
+  await page.keyboard.type("x");
+  await click();
+  expect(await page.evaluate((token) => window.haarness.screenshots({ token: token! }), token)).toEqual({ canceled: true });
+  expect((await calls()).questions).toHaveLength(4);
+  await page.keyboard.press("Backspace");
+  // Chosen without a press Desktop can see (as VoiceOver and Voice Control
   // press), the dialog asks, and declining closes it.
   await page.evaluate(() => {
     document.querySelector<HTMLButtonElement>('.composer-leading button[aria-label="Attach"]')!.click();
     document.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="Attach screenshots"]')!.click();
   });
-  await expect.poll(async () => (await calls()).questions.length).toBe(3);
+  await expect.poll(async () => (await calls()).questions.length).toBe(5);
   await expect(dialog()).toHaveCount(0);
-  await click();
+  await answer(0);
   const result = await page.evaluate(async () => {
     const listing = (await window.haarness.screenshots({})) as { listing: string };
     const outcome = async (run: () => Promise<unknown>) =>
@@ -231,8 +254,8 @@ test("the folder is listed right after a click or key press, or when the person 
       again: await outcome(() => window.haarness.screenshotAttach(listing.listing, [0])),
     };
   });
-  // The click just before listed without a question; a listing attaches once.
-  expect((await calls()).questions).toHaveLength(3);
+  // A listing attaches once.
+  expect((await calls()).questions).toHaveLength(6);
   expect(result.again).toEqual({ error: "The screenshots changed. Open Screenshots again." });
   expect(result.stale).toEqual({ error: "The screenshots changed. Open Screenshots again." });
   expect(result.outside).toEqual({ error: "Choose up to 20 screenshots from the list." });
@@ -243,7 +266,7 @@ test("the folder is listed right after a click or key press, or when the person 
   // A screenshot swapped for a link to another file since it was listed is refused, not followed.
   const path = join(shots, "Screenshot 1.png");
   const original = await readFile(path);
-  await click();
+  await answer(0);
   const latest = await page.evaluate(async () => ((await window.haarness.screenshots({})) as { listing: string }).listing);
   await rm(path);
   await symlink(join(other, "Elsewhere.png"), path);

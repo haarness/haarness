@@ -12,19 +12,21 @@ import { randomUUID } from "node:crypto";
 export const SCREENSHOT_LIMIT = 48;
 /** Images one message can take, as the composer's own attachment limit. */
 export const SCREENSHOT_PICK_LIMIT = 20;
-/** Image types the attachment reader takes. */
-export const SCREENSHOT_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".heic",
-  ".heif",
-  ".bmp",
-  ".tif",
-  ".tiff",
-]);
+/** Image types the attachment reader takes, by extension, named as it names them. */
+export const SCREENSHOT_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  // The server converts these to PNG or JPEG.
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+};
+export const SCREENSHOT_EXTENSIONS = new Set(Object.keys(SCREENSHOT_TYPES));
 
 /**
  * The folder macOS saves screenshots to, from `defaults read
@@ -115,36 +117,82 @@ export function createScreenshotListings<T>() {
   };
 }
 
-/** How long a click or key press lets its window list screenshots: Chromium's own span for user activation. */
-export const ACTIVATION_SPAN = 5000;
+/** How soon main must hear of a menu opening, or a choice in it, after the press that did it. */
+export const PRESS_SPAN = 2000;
+/** How long an open Attach menu waits for its choice. */
+export const MENU_SPAN = 15_000;
 
 /**
- * Whether an input event Electron reports for a window (`input-event`) is the
- * person choosing something: a click, a tap, Enter or Space. Main sees it on
- * its way to the page, so a page cannot make one up.
+ * What an input event Electron reports for a window (`input-event`) is to the
+ * screenshot picker: a press that chooses (a click, a tap, Enter or Space),
+ * ArrowDown (which opens a menu from the keyboard), or a typed character.
+ * Main sees these on their way to the page, so a page cannot make one up.
  */
-export function activatingInput(input: { type: string; key?: string }) {
-  if (input.type === "mouseDown" || input.type === "touchEnd" || input.type === "gestureTap") return true;
-  return (input.type === "keyDown" || input.type === "rawKeyDown") && (input.key === "Enter" || input.key === " ");
+export function inputKind(input: { type: string; key?: string }): "press" | "arrow" | "typing" | undefined {
+  if (input.type === "mouseDown" || input.type === "touchEnd" || input.type === "gestureTap") return "press";
+  if (input.type !== "keyDown" && input.type !== "rawKeyDown") return undefined;
+  if (input.key === "Enter" || input.key === " ") return "press";
+  if (input.key === "ArrowDown") return "arrow";
+  return input.key && [...input.key].length === 1 ? "typing" : undefined;
 }
 
 /**
- * When each window last had such an input. Listing screenshots takes it:
- * one click or key press lists the folder once, and only shortly after.
+ * Lists the screenshots folder for the Attach menu only. Opening the menu
+ * right after a press gets a token; Attach screenshots then lists once with
+ * it, but only right after a later press, within a short time of the menu
+ * opening and with nothing typed in between. So the press that sends a
+ * message, or any other single press, lists nothing. Main cannot see which
+ * element a press lands on: a page that has been taken over can still play
+ * the menu's two presses, which is why anything else gets a native question.
  */
-export function createActivations(span = ACTIVATION_SPAN, now = () => Date.now()) {
-  const last = new Map<number, number>();
+export function createScreenshotIntents(now = () => Date.now()) {
+  type Kind = NonNullable<ReturnType<typeof inputKind>>;
+  type Window = {
+    count: number;
+    last?: { index: number; at: number; kind: Kind };
+    /** The last typed character's place among the window's inputs. */
+    typed: number;
+    menu?: { token: string; index: number; at: number };
+  };
+  const windows = new Map<number, Window>();
+  const state = (owner: number) => {
+    let value = windows.get(owner);
+    if (!value) windows.set(owner, (value = { count: 0, typed: 0 }));
+    return value;
+  };
   return {
-    note(owner: number) {
-      last.set(owner, now());
+    input(owner: number, kind: Kind) {
+      const value = state(owner);
+      value.last = { index: ++value.count, at: now(), kind };
+      if (kind === "typing") value.typed = value.count;
     },
-    take(owner: number) {
-      const at = last.get(owner);
-      last.delete(owner);
-      return at !== undefined && now() - at <= span;
+    /** The Attach menu opened: a token for its choice, when a press (or ArrowDown) just opened it. */
+    menu(owner: number): string | null {
+      const value = state(owner);
+      const last = value.last;
+      value.menu = undefined;
+      if (!last || last.kind === "typing" || now() - last.at > PRESS_SPAN) return null;
+      value.menu = { token: randomUUID(), index: last.index, at: now() };
+      return value.menu.token;
+    },
+    /** Whether Attach screenshots was just chosen in the menu `token` came from. Uses the token up. */
+    chosen(owner: number, token: unknown) {
+      const value = state(owner);
+      const { menu, last } = value;
+      value.menu = undefined;
+      return (
+        !!menu &&
+        !!last &&
+        token === menu.token &&
+        now() - menu.at <= MENU_SPAN &&
+        last.kind === "press" &&
+        last.index > menu.index &&
+        now() - last.at <= PRESS_SPAN &&
+        value.typed <= menu.index
+      );
     },
     forget(owner: number) {
-      last.delete(owner);
+      windows.delete(owner);
     },
   };
 }
