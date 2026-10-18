@@ -17,3 +17,25 @@ export function capturePlan(tab: { active: boolean; windowId: number }, focusedW
   if (tab.active) return "ready";
   return focusedWindow === tab.windowId ? "refuse" : "activate";
 }
+
+/**
+ * What `browser_tabs_focus` does to a tab. The tab always becomes the chat's
+ * focused tab; it comes forward only where that takes nothing from the user:
+ * in a window the user is not using, or over another of the chat's own tabs.
+ */
+export type FocusPlan =
+  /** The tab is already the one its window shows. */
+  | "ready"
+  /** Show the tab in its window. */
+  | "activate"
+  /** The user is using that window: leave the tab in the background. */
+  | "keep";
+
+export function focusPlan(
+  tab: { active: boolean; windowId: number },
+  focusedWindow: number | undefined,
+  overOwnTab: boolean,
+): FocusPlan {
+  if (tab.active) return "ready";
+  return focusedWindow !== tab.windowId || overOwnTab ? "activate" : "keep";
+}
