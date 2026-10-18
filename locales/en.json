@@ -2521,5 +2521,6 @@
   "Comment added to your message": "Comment added to your message",
   "Preview comment": "Preview comment",
   "{count} failed": "{count} failed",
-  "+{count} more": "+{count} more"
+  "+{count} more": "+{count} more",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links."
 }

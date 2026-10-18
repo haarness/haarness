@@ -2521,5 +2521,6 @@
   "Comment added to your message": "메시지에 댓글이 추가되었습니다",
   "Preview comment": "미리보기 댓글",
   "{count} failed": "{count}개 실패",
-  "+{count} more": "{count}개 더"
+  "+{count} more": "{count}개 더",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "이 앱이 Haarness가 열지 않는 링크를 열려고 했습니다. 앱은 http, https, mailto 링크만 열 수 있습니다."
 }

@@ -82,6 +82,8 @@ export function McpAppView(props: {
   const [height, setHeight] = createSignal(recall(heights, props.callKey) ?? 0);
   const [request, setRequest] = createSignal<{ url: string; answer: (open: boolean) => void }>();
   const [message, setMessage] = createSignal<{ text: string; answer: (insert: boolean) => void }>();
+  /** The last link the page asked for that Haarness refused, as the page wrote it. */
+  const [refused, setRefused] = createSignal<string>();
   const [render, setRender] = createSignal(0);
   let root!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
@@ -164,6 +166,8 @@ export function McpAppView(props: {
         remember(heights, props.callKey, next, HEIGHT_LIMIT);
         setHeight(next);
       },
+      // The page hears why; the person, who may have clicked it, sees it under the page.
+      refusedLink: (url) => setRefused(url.slice(0, 300)),
       openLink: (url, active) => {
         if (take(active)) return open(url);
         return new Promise<boolean>((resolve) => {
@@ -395,6 +399,20 @@ export function McpAppView(props: {
         <div class="notice-inline mcp-app-notice" role="status">
           <Icon name="alert" size="sm" />
           <span>{t("This result is too large to show in the app.")}</span>
+        </div>
+      </Show>
+      <Show when={refused() !== undefined}>
+        <div class="notice-inline mcp-app-notice mcp-app-refused" role="status">
+          <Icon name="alert" size="sm" />
+          <span>
+            {t("This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.")}
+            <Show when={refused()}>
+              <span class="notice-detail mcp-app-url">{refused()}</span>
+            </Show>
+          </span>
+          <button class="mcp-app-action" onClick={() => setRefused(undefined)}>
+            {t("Dismiss")}
+          </button>
         </div>
       </Show>
       <Show when={message()}>

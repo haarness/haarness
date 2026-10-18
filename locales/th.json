@@ -2521,5 +2521,6 @@
   "Comment added to your message": "เพิ่มความคิดเห็นไปยังข้อความของคุณแล้ว",
   "Preview comment": "ความคิดเห็นในตัวอย่าง",
   "{count} failed": "ล้มเหลว {count} รายการ",
-  "+{count} more": "อีก {count} รายการ"
+  "+{count} more": "อีก {count} รายการ",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "แอปนี้พยายามเปิดลิงก์ที่ Haarness ไม่เปิด แอปเปิดได้เฉพาะลิงก์ http, https และ mailto เท่านั้น"
 }

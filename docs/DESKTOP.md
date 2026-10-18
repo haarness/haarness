@@ -210,7 +210,7 @@ An MCP server may pair a tool with an interactive page ([MCP Apps](https://model
 What a page can do:
 
 - **Show the tool's input and result** in its own layout. A result too large to keep for the page (over 512 KB without its media) shows a notice instead.
-- **Open a link** (http, https or mailto only) through the same check as any other link. Each click or key press inside the page lets one link open at once (or one message go in, below); otherwise the page's request waits under it with **Open** and **Dismiss**.
+- **Open a link** (http, https or mailto only) through the same check as any other link. Each click or key press inside the page lets one link open at once (or one message go in, below); otherwise the page's request waits under it with **Open** and **Dismiss**. A link with any other scheme (`file:`, `javascript:`, an app's own scheme) never opens: the page is told why, and a notice under the page shows the person the refused address with **Dismiss**.
 - **Write a message for you**: right after a click or key press inside the page that no link or message has used yet, the text goes into the message box after anything already there; otherwise the page's request waits under it with **Insert app message** and **Dismiss**, and the draft and the keyboard stay where they were. It is never sent on its own.
 - **Read its own `ui://` resources** from its own server.
 

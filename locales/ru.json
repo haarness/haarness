@@ -2521,5 +2521,6 @@
   "Comment added to your message": "Комментарий добавлен к вашему сообщению",
   "Preview comment": "Комментарий к предпросмотру",
   "{count} failed": "с ошибкой: {count}",
-  "+{count} more": "ещё {count}"
+  "+{count} more": "ещё {count}",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Это приложение попыталось открыть ссылку, которую Haarness не открывает. Приложения могут открывать только ссылки http, https и mailto."
 }
