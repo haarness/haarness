@@ -172,6 +172,45 @@ test("a message from the page goes into the message box and is never sent by its
   await box.fill("");
 });
 
+test("one click lets the page send one message; a second waits for the person", async () => {
+  const view = page.locator(".mcp-app").last();
+  const box = page.getByRole("textbox", { name: "Message" });
+  await box.fill("");
+  await content(view).getByRole("button", { name: "Ask twice" }).click();
+  await expect(content(view).locator("#status")).toHaveText("first {}");
+  await expect(box).toHaveValue("First of two.");
+  const request = view.getByRole("group", { name: "Message from the app" });
+  await expect(request).toContainText("Second of two.");
+  await request.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(content(view).locator("#result")).toHaveText('second {"isError":true}');
+  await expect(box).toHaveValue("First of two.");
+  await box.fill("");
+  expect(errors).toEqual([]);
+});
+
+test("one click lets the page open one link; a second waits for the person", async () => {
+  const view = page.locator(".mcp-app").last();
+  const before = (await calls()).shell.length;
+  await content(view).getByRole("button", { name: "Open twice" }).click();
+  await expect(content(view).locator("#status")).toHaveText("first link {}");
+  const request = view.getByRole("group", { name: "Link from the app" });
+  await expect(request).toContainText("https://example.com/second");
+  expect((await calls()).shell.slice(before)).toEqual([["openExternal", "https://example.com/first"]]);
+  await request.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(content(view).locator("#result")).toHaveText('second link {"isError":true}');
+  expect((await calls()).shell.slice(before)).toEqual([["openExternal", "https://example.com/first"]]);
+  expect(errors).toEqual([]);
+});
+
+test("a theme change outside the colours, such as the font, reaches the page", async () => {
+  const view = page.locator(".mcp-app").last();
+  await page.evaluate(() => document.documentElement.style.setProperty("--sans", "Georgia, serif"));
+  await expect(content(view).locator("#font")).toHaveText("font Georgia, serif");
+  await page.evaluate(() => document.documentElement.style.removeProperty("--sans"));
+  await expect(content(view).locator("#font")).not.toHaveText("font Georgia, serif");
+  expect(errors).toEqual([]);
+});
+
 test("a message the page writes by itself waits for the person and leaves the draft and focus alone", async () => {
   const box = page.getByRole("textbox", { name: "Message" });
   await box.fill("Keep this draft");
@@ -201,10 +240,15 @@ test("a message the page writes by itself waits for the person and leaves the dr
 test("the page cannot call tools, read other resources, reach undeclared hosts or leave its frame", async () => {
   const view = page.locator(".mcp-app").last();
   const frame = content(view);
-  await frame.getByRole("button", { name: "Refresh" }).click();
-  await expect(frame.locator("#status")).toHaveText(
-    "call error Haarness does not let apps call tools yet. Ask in the chat instead.",
-  );
+  // The bar the previous test dismissed can still be leaving: the conversation
+  // may move under the first click, so the click is repeated until it lands.
+  await expect(async () => {
+    await frame.getByRole("button", { name: "Refresh" }).click();
+    await expect(frame.locator("#status")).toHaveText(
+      "call error Haarness does not let apps call tools yet. Ask in the chat instead.",
+      { timeout: 2000 },
+    );
+  }).toPass({ timeout: 15000 });
   await frame.getByRole("button", { name: "Read own page" }).click();
   await expect(frame.locator("#status")).toHaveText("read 1 contents");
   await frame.getByRole("button", { name: "Read another resource" }).click();
@@ -224,8 +268,8 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await view.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(view).toHaveAttribute("data-state", "ready", { timeout: 30000 });
   await expect(content(view).locator("#input")).toHaveText('input {"city":"Beja","automessage":true}');
-  // Only the two links the person allowed ever reached the system.
-  expect((await calls()).shell).toHaveLength(2);
+  // Only the three links the person allowed ever reached the system.
+  expect((await calls()).shell).toHaveLength(3);
   expect(errors).toEqual([]);
 });
 

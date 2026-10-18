@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
+  INPUT,
   LEFT,
   REFUSED,
   STYLE_VARIABLES,
+  themeTokens,
   WHEEL,
   createBridge,
   document,
@@ -119,6 +121,17 @@ test("only host sources reach the page's policy, and no network is the default",
   ])
     assert.deepEqual(sources([host]), [], host);
   assert.deepEqual(sources(["https://172.32.0.1", "https://11.0.0.1"]), ["https://172.32.0.1", "https://11.0.0.1"]);
+  // Hosts are compared as a browser reads them, and a wildcard may not cover a shared suffix.
+  for (const host of [
+    "https://0x7f.1", "https://127.1", "https://2130706433", "https://0177.0.0.1", "https://127.0.0.1.nip.io",
+    "https://app.10.0.0.5.sslip.io", "https://192-168-1-10.sslip.io", "https://*.co.uk", "https://*.github.io",
+    "https://*.vercel.app", "https://user:secret@cdn.example.com", "https://cdn.example.com/?key=1", "https://cdn.example.com/#x",
+  ])
+    assert.deepEqual(sources([host]), [], host);
+  assert.deepEqual(
+    sources(["https://CDN.Example.com/", "https://cdn.example.com:443/lib/", "https://*.example.co.uk", "https://my-app.github.io"]),
+    ["https://cdn.example.com", "https://cdn.example.com/lib/", "https://*.example.co.uk", "https://my-app.github.io"],
+  );
   assert.deepEqual(sources("https://cdn.example.com"), []);
   const closed = policy();
   for (const directive of [
@@ -159,6 +172,10 @@ test("the page document starts with its policy and the host script, after its do
   assert.ok(html.indexOf("Content-Security-Policy") < html.indexOf("<title>"));
   assert.ok(html.indexOf(WHEEL) < html.indexOf("run()"));
   assert.ok(html.includes(LEFT));
+  // The person's presses are reported with the token: trusted events only, and the script leaves the page first.
+  assert.ok(html.includes(INPUT) && html.includes("e.isTrusted&&!e.repeat"));
+  assert.ok(html.includes('addEventListener("pointerdown",press,true);addEventListener("keydown",press,true)'));
+  assert.ok(html.includes("document.currentScript.remove()"));
   // Neither a declared domain nor the token can end the tags they are written into.
   assert.ok(!html.includes('"><script>alert(1)'));
   assert.ok(!html.includes('token"</script>'));
@@ -176,6 +193,15 @@ test("theme variables come from Haarness tokens, with colours resolved", () => {
   // Tokens that read as empty are left out rather than sent blank.
   assert.equal(values["--font-mono"], undefined);
   for (const name of Object.keys(STYLE_VARIABLES)) assert.match(name, /^--(color|font|border|shadow)-/);
+});
+
+test("every Haarness token a theme variable comes from tells whether the theme moved", () => {
+  const tokens = themeTokens();
+  assert.equal(new Set(tokens).size, tokens.length);
+  const sources = Object.values(STYLE_VARIABLES).flatMap((source) => ("token" in source ? [source.token] : []));
+  assert.deepEqual([...new Set(sources)].sort(), [...tokens].sort());
+  // Fonts and borders, not only colours.
+  for (const token of ["--sans", "--mono", "--r-md", "--line", "--shadow-1", "--font-size"]) assert.ok(tokens.includes(token), token);
 });
 
 test("a page may open http, https and mailto links and send text messages only", () => {
@@ -204,8 +230,8 @@ function host(overrides: Partial<Host> = {}) {
     initialize: (params) => (calls.push(["initialize", params]), { protocolVersion: "2026-01-26" }),
     initialized: () => void calls.push(["initialized"]),
     resize: (size) => void calls.push(["resize", size]),
-    openLink: async (url) => (calls.push(["openLink", url]), true),
-    compose: (text) => (calls.push(["compose", text]), true),
+    openLink: async (url, gesture) => (calls.push(gesture ? ["openLink", url, "gesture"] : ["openLink", url]), true),
+    compose: (text, gesture) => (calls.push(gesture ? ["compose", text, "gesture"] : ["compose", text]), true),
     readResource: async (uri) => (calls.push(["readResource", uri]), { contents: [] }),
     ...overrides,
   };
@@ -250,6 +276,20 @@ test("the bridge answers the page's requests and passes its notifications to the
     { jsonrpc: "2.0", id: "four", result: { contents: [] } },
     { jsonrpc: "2.0", id: 5, result: { mode: "inline" } },
     { jsonrpc: "2.0", id: 6, result: {} },
+  ]);
+});
+
+test("the bridge says whether the person had just acted in the page with each link and message", async () => {
+  const { value, calls } = host();
+  const posted: Record<string, unknown>[] = [];
+  const bridge = createBridge(value, (message) => posted.push(message));
+  await bridge.receive({ jsonrpc: "2.0", id: 1, method: "ui/open-link", params: { url: "https://example.com/a" } }, true);
+  await bridge.receive({ jsonrpc: "2.0", id: 2, method: "ui/open-link", params: { url: "https://example.com/b" } });
+  await bridge.receive({ jsonrpc: "2.0", id: 3, method: "ui/message", params: { content: [{ type: "text", text: "hi" }] } }, true);
+  assert.deepEqual(calls, [
+    ["openLink", "https://example.com/a", "gesture"],
+    ["openLink", "https://example.com/b"],
+    ["compose", "hi", "gesture"],
   ]);
 });
 
@@ -322,6 +362,9 @@ test("the frame's host page is a separate document whose policy keeps the page i
   assert.ok(!/\b(http|ws):/.test(csp), csp);
   // The page frame runs scripts and forms only: an opaque origin, no popups, no top navigation.
   assert.match(page, /setAttribute\('sandbox', 'allow-scripts allow-forms'\)/);
+  // Each relayed message says whether the person had just acted in the page, read as it arrives.
+  assert.match(page, /navigator\.userActivation\.isActive\) && document\.activeElement === frame/);
+  assert.match(page, /type: 'receive', message: data, active \}/);
   assert.ok(!page.includes("allow-same-origin"));
   const view = await readFile(new URL("../src/renderer/McpAppView.tsx", import.meta.url), "utf8");
   assert.match(view, /sandbox="allow-scripts allow-forms"/);
