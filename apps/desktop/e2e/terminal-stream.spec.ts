@@ -233,6 +233,35 @@ test("a terminal cut off from its server says so, offers Retry and New terminal,
   expect(errors).toEqual([]);
 });
 
+test("a terminal scrolled up opens where it was when shown again", async () => {
+  await prompt();
+  await input().fill("seq -f 'row %04g' 1 400");
+  await input().press("Enter");
+  await expect(rows()).toContainText("row 0400");
+  const top = () => page.locator(".terminal-view .xterm-rows > div").first().textContent();
+  await page.locator(".terminal-view").hover();
+  await page.mouse.wheel(0, -2400);
+  await expect.poll(top).toMatch(/^row 0[0-3]\d\d/);
+  // Let the scroll settle before reading where it is.
+  await page.waitForTimeout(300);
+  const place = await top();
+  // The panel hidden and shown again.
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(input()).toBeFocused();
+  await expect.poll(top).toBe(place);
+  // Another tab and back.
+  await page.keyboard.press("Control+Tab");
+  await expect.poll(top).not.toBe(place);
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect.poll(top).toBe(place);
+  // Typing goes to the shell and takes the view back to its prompt.
+  await input().pressSequentially("x");
+  await expect.poll(top).not.toBe(place);
+  await input().press("Backspace");
+  expect(errors).toEqual([]);
+});
+
 test("a terminal shown again past two megabytes of output keeps a program's cursor keys and bracketed paste", async () => {
   test.setTimeout(240_000);
   // The program turns both on, then writes more than the server keeps.
