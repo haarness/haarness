@@ -880,6 +880,72 @@ html[dir="rtl"] .tool-target {
   background: var(--page);
 }
 
+/* ------------------------------------------------------------- MCP App pages */
+/*
+ * A page an MCP server pairs with its tool, under the tool's row on the same
+ * rail (McpAppView). The page is its own document in a sandboxed frame; only
+ * the frame, its spacing and the notices around it are ours.
+ */
+.mcp-app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  border-inline-start: 1.5px solid var(--hairline);
+  padding-block: var(--s1) var(--s2);
+  padding-inline-start: var(--s4);
+}
+.mcp-app-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.mcp-app.bordered .mcp-app-frame {
+  border: 1px solid var(--line);
+}
+.mcp-app-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+.mcp-app-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--ui);
+}
+.mcp-app-probe {
+  display: none;
+}
+.mcp-app-notice,
+.mcp-app-request {
+  align-items: flex-start;
+}
+.mcp-app-notice > svg,
+.mcp-app-request > svg {
+  flex: none;
+  margin-top: 3px;
+}
+.mcp-app-notice > span,
+.mcp-app-request > span {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-app-action {
+  flex: none;
+  min-height: var(--control-sm);
+  font-size: var(--ui-sm);
+  color: var(--text);
+  border-color: var(--accent-edge);
+  background: var(--page);
+}
+
 /* -------------------------------------------------------- live turn status */
 /*
  * One honest line about what is happening right now, derived from the tool that

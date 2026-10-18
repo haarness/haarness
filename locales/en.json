@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "Click and press the keys, including a modifier key.",
   "Use a modifier key and one more key, such as {keys}.": "Use a modifier key and one more key, such as {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} belongs to the system. Choose another shortcut.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Another app or the system already uses {keys}. Choose another shortcut."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Another app or the system already uses {keys}. Choose another shortcut.",
+  "The server sent no page for this app.": "The server sent no page for this app.",
+  "The app's message is in the message box. Send it when you are ready.": "The app's message is in the message box. Send it when you are ready.",
+  "This chat cannot take a message from the app.": "This chat cannot take a message from the app.",
+  "{name} app": "{name} app",
+  "Loading the app…": "Loading the app…",
+  "This app tried to leave its page, so Haarness closed it.": "This app tried to leave its page, so Haarness closed it.",
+  "This app's page could not be loaded.": "This app's page could not be loaded.",
+  "This result is too large to show in the app.": "This result is too large to show in the app.",
+  "Link from the app": "Link from the app",
+  "This app wants to open a link.": "This app wants to open a link."
 }

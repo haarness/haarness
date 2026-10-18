@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "按一下後按下按鍵，需包含一個輔助鍵。",
   "Use a modifier key and one more key, such as {keys}.": "請使用一個輔助鍵加另一個鍵，例如 {keys}。",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} 已由系統使用。請選擇其他快捷鍵。",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "其他 App 或系統已在使用 {keys}。請選擇其他快捷鍵。"
+  "Another app or the system already uses {keys}. Choose another shortcut.": "其他 App 或系統已在使用 {keys}。請選擇其他快捷鍵。",
+  "The server sent no page for this app.": "伺服器沒有傳送此應用程式的頁面。",
+  "The app's message is in the message box. Send it when you are ready.": "應用程式的訊息已放入訊息框。準備好後再傳送。",
+  "This chat cannot take a message from the app.": "此對話無法接收來自應用程式的訊息。",
+  "{name} app": "{name} 應用程式",
+  "Loading the app…": "正在載入應用程式…",
+  "This app tried to leave its page, so Haarness closed it.": "此應用程式試圖離開其頁面，因此 Haarness 已將其關閉。",
+  "This app's page could not be loaded.": "無法載入此應用程式的頁面。",
+  "This result is too large to show in the app.": "此結果太大，無法在應用程式中顯示。",
+  "Link from the app": "來自應用程式的連結",
+  "This app wants to open a link.": "此應用程式想要開啟一個連結。"
 }

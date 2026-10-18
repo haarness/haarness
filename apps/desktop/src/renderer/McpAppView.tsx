@@ -1,0 +1,367 @@
+import { t, language } from "./i18n";
+import { useApp } from "./state";
+import { Icon } from "./ui";
+import {
+  Show,
+  createEffect,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+} from "solid-js";
+import {
+  DEFAULT_HEIGHT,
+  LEFT,
+  MAX_HEIGHT,
+  PROTOCOL_VERSION,
+  WHEEL,
+  createBridge,
+  document as pageDocument,
+  granted,
+  resource,
+  variables,
+  type Meta,
+  type Payload,
+} from "./mcp-app";
+
+/** A page's HTML, read once a minute at most per server and page. */
+const pages = new Map<string, { at: number; value: Promise<{ html: string; meta: Meta }> }>();
+/** The last height each page reported, so a row that remounts keeps its size. */
+const heights = new Map<string, number>();
+
+function readPage(connection: string, server: string, uri: string) {
+  const key = [connection, server, uri].join("\u0000");
+  const cached = pages.get(key);
+  if (cached && Date.now() - cached.at < 60_000) return cached.value;
+  const value = window.haarness
+    .api<unknown>(connection, "readMcpResource", [server, { uri }])
+    .then((result) => {
+      const page = resource(result, uri);
+      if (!page) throw new Error(t("The server sent no page for this app."));
+      return page;
+    });
+  pages.set(key, { at: Date.now(), value });
+  value.catch(() => pages.get(key)?.value === value && pages.delete(key));
+  return value;
+}
+
+/** Colour tokens resolved to plain colours: several are `color-mix()` of other tokens. */
+function resolveColor(probe: HTMLElement, token: string) {
+  probe.style.color = `var(${token})`;
+  return getComputedStyle(probe).color;
+}
+
+/**
+ * An MCP App page under its tool's row: the server's `ui://` page in a sandboxed frame with the
+ * policy its server declared, answered through the bridge in mcp-app.ts.
+ */
+export function McpAppView(props: {
+  payload: Payload;
+  arguments: unknown;
+  /** Identifies the call, for the page's remembered height. */
+  callKey: string;
+}) {
+  const app = useApp();
+  const connection = app.state.connection?.id ?? "";
+  const thread = app.state.selected || undefined;
+  const id = crypto.randomUUID();
+  const label = () => props.payload.tool.title || props.payload.tool.name || props.payload.server;
+  const [page, setPage] = createSignal<{ html: string; meta: Meta }>();
+  const [failure, setFailure] = createSignal("");
+  const [hostReady, setHostReady] = createSignal(false);
+  const [loaded, setLoaded] = createSignal(false);
+  const [left, setLeft] = createSignal(false);
+  const [height, setHeight] = createSignal(heights.get(props.callKey) ?? 0);
+  const [request, setRequest] = createSignal<{ url: string; answer: (open: boolean) => void }>();
+  const [render, setRender] = createSignal(0);
+  let root!: HTMLDivElement;
+  let frame!: HTMLIFrameElement;
+  let probe!: HTMLSpanElement;
+  let token = "";
+  let initialized = false;
+  /** The theme the page last heard about. */
+  let lastTheme = "";
+
+  const load = () => {
+    setFailure("");
+    readPage(connection, props.payload.server, props.payload.uri).then(
+      (value) => setPage(value),
+      (error: unknown) => setFailure(error instanceof Error ? error.message : String(error)),
+    );
+  };
+  const width = () => Math.round(root?.clientWidth ?? 0);
+  const theme = () => (globalThis.document.documentElement.dataset.theme === "light" ? "light" : "dark");
+  const styles = () => {
+    const root = getComputedStyle(globalThis.document.documentElement);
+    return {
+      variables: variables(
+        (token) => root.getPropertyValue(token),
+        (token) => resolveColor(probe, token),
+      ),
+    };
+  };
+  const context = () => ({
+    theme: theme(),
+    styles: styles(),
+    displayMode: "inline",
+    availableDisplayModes: ["inline"],
+    containerDimensions: { width: width(), maxHeight: MAX_HEIGHT },
+    locale: language(),
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    userAgent: "Haarness Desktop",
+    platform: "desktop",
+    deviceCapabilities: { touch: false, hover: true },
+    toolInfo: { tool: { inputSchema: { type: "object" }, ...props.payload.tool } },
+  });
+  // Results and arguments come from the app's store, whose proxies cannot cross postMessage:
+  // the page gets plain JSON copies.
+  const send = (message: Record<string, unknown>) =>
+    frame?.contentWindow?.postMessage({ mcpApp: id, type: "send", message: JSON.parse(JSON.stringify(message)) }, "*");
+  const bridge = createBridge(
+    {
+      initialize: () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        hostInfo: { name: "Haarness Desktop", version: "1" },
+        hostCapabilities: {
+          openLinks: {},
+          serverResources: {},
+          message: { text: {} },
+          logging: {},
+          sandbox: {
+            csp: granted(page()?.meta),
+            permissions: page()?.meta.permissions?.clipboardWrite ? { clipboardWrite: {} } : {},
+          },
+        },
+        hostContext: context(),
+      }),
+      initialized: () => {
+        if (initialized) return;
+        initialized = true;
+        lastTheme = JSON.stringify({ theme: theme(), styles: styles() });
+        bridge.notify("ui/notifications/tool-input", {
+          arguments:
+            props.arguments && typeof props.arguments === "object" && !Array.isArray(props.arguments)
+              ? props.arguments
+              : {},
+        });
+        if (props.payload.result) bridge.notify("ui/notifications/tool-result", props.payload.result);
+        else bridge.notify("ui/notifications/tool-cancelled", { reason: "The result is too large to show in the app." });
+      },
+      resize: ({ height }) => {
+        if (height === undefined) return;
+        const next = Math.max(48, Math.min(MAX_HEIGHT, Math.ceil(height)));
+        heights.set(props.callKey, next);
+        setHeight(next);
+      },
+      openLink: (url) => {
+        // Right after a click or key press inside the page, the person asked for it.
+        const gesture =
+          globalThis.document.activeElement === frame &&
+          !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive;
+        if (gesture) return open(url);
+        return new Promise<boolean>((resolve) => {
+          request()?.answer(false);
+          setRequest({
+            url,
+            answer: (accepted) => {
+              setRequest(undefined);
+              resolve(accepted ? open(url) : false);
+            },
+          });
+        });
+      },
+      compose: (text) => {
+        const detail = { text, accepted: false };
+        root.dispatchEvent(new CustomEvent("mcp-app-message", { bubbles: true, detail }));
+        if (detail.accepted) app.notify(t("The app's message is in the message box. Send it when you are ready."));
+        else app.notify(t("This chat cannot take a message from the app."), "blocked");
+        return detail.accepted;
+      },
+      readResource: (uri) =>
+        window.haarness.api(connection, "readMcpResource", [props.payload.server, { uri }]),
+      log: (params) => console.debug("MCP App", props.payload.server, params),
+    },
+    send,
+  );
+  async function open(url: string) {
+    try {
+      await window.haarness.openLink(connection || undefined, thread, url);
+      return true;
+    } catch {
+      app.notify(t("This link could not be opened."), "blocked");
+      return false;
+    }
+  }
+  // The frame's host page is ready and the page is read: put the page in.
+  createEffect(
+    on([hostReady, page, render] as const, ([ready, value]) => {
+      if (!ready || !value) return;
+      token = crypto.randomUUID();
+      initialized = false;
+      setLoaded(false);
+      setLeft(false);
+      frame.contentWindow?.postMessage(
+        {
+          mcpApp: id,
+          type: "render",
+          title: t("{name} app", { name: label() }),
+          clipboard: !!value.meta.permissions?.clipboardWrite,
+          html: pageDocument(value.html, value.meta, token),
+        },
+        "*",
+      );
+    }),
+  );
+  // The page follows the theme and language as they change.
+  createEffect(
+    on(language, (locale) => initialized && bridge.notify("ui/notifications/host-context-changed", { locale }), {
+      defer: true,
+    }),
+  );
+  onMount(() => {
+    load();
+    const listen = (event: MessageEvent) => {
+      if (event.source !== frame.contentWindow) return;
+      const data = event.data as Record<string, unknown> | undefined;
+      if (!data || typeof data !== "object") return;
+      if (data.type === "mcp-app-host-ready") return void setHostReady(true);
+      if (data.mcpApp !== id) return;
+      if (data.type === "loaded") {
+        setLoaded(true);
+        // A page that never says how tall it is still shows.
+        if (!height()) setHeight(DEFAULT_HEIGHT);
+        return;
+      }
+      if (data.type === "navigation") return void setLeft(true);
+      if (data.type !== "receive") return;
+      const message = data.message as Record<string, unknown> | undefined;
+      if (message && Array.isArray(message[WHEEL])) return wheel(message[WHEEL] as number[]);
+      if (message && LEFT in message) {
+        if (message[LEFT] === token) setLeft(true);
+        return;
+      }
+      void bridge.receive(message);
+    };
+    window.addEventListener("message", listen);
+    // The root's style also carries layout variables; only a changed theme is news to the page.
+    const themeObserver = new MutationObserver(() => {
+      if (!initialized) return;
+      const next = { theme: theme(), styles: styles() };
+      const text = JSON.stringify(next);
+      if (text === lastTheme) return;
+      lastTheme = text;
+      bridge.notify("ui/notifications/host-context-changed", next);
+    });
+    themeObserver.observe(globalThis.document.documentElement, {
+      attributes: true,
+      attributeFilter: ["style", "data-theme", "data-palette"],
+    });
+    let lastWidth = width();
+    const resize = new ResizeObserver(() => {
+      if (!initialized || width() === lastWidth) return;
+      lastWidth = width();
+      bridge.notify("ui/notifications/host-context-changed", {
+        containerDimensions: { width: lastWidth, maxHeight: MAX_HEIGHT },
+      });
+    });
+    resize.observe(root);
+    onCleanup(() => {
+      window.removeEventListener("message", listen);
+      themeObserver.disconnect();
+      resize.disconnect();
+      request()?.answer(false);
+      if (initialized) void bridge.request("ui/resource-teardown");
+    });
+  });
+  /**
+   * Wheel input over the page never reaches the conversation, so the page's document reports it:
+   * the event goes to the frame element (the conversation stops following new output when scrolled
+   * up) and the conversation scrolls as it would have.
+   */
+  function wheel([deltaX, deltaY, mode]: number[]) {
+    if (![deltaX, deltaY, mode].every(Number.isFinite)) return;
+    frame.dispatchEvent(new WheelEvent("wheel", { deltaX, deltaY, deltaMode: mode, bubbles: true }));
+    let scroller = root.parentElement;
+    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY)))
+      scroller = scroller.parentElement;
+    if (!scroller) return;
+    const unit = mode === WheelEvent.DOM_DELTA_LINE ? 16 : mode === WheelEvent.DOM_DELTA_PAGE ? scroller.clientHeight : 1;
+    scroller.scrollBy({ top: deltaY * unit, left: 0 });
+  }
+  return (
+    <div
+      class="mcp-app"
+      ref={root}
+      data-mcp-app={props.payload.uri}
+      data-state={failure() ? "failed" : left() ? "left" : loaded() ? "ready" : "loading"}
+      classList={{ bordered: page()?.meta.prefersBorder !== false }}
+    >
+      <span ref={probe} class="mcp-app-probe" aria-hidden="true" />
+      <Show when={!failure() && !left()}>
+        <div class="mcp-app-frame" style={{ height: `${height() || DEFAULT_HEIGHT}px` }}>
+          <iframe
+            ref={frame}
+            title={t("{name} app", { name: label() })}
+            src="./mcp-app.html"
+            sandbox="allow-scripts allow-forms"
+            allow="clipboard-write"
+            referrerpolicy="no-referrer"
+            onLoad={() => setHostReady(true)}
+          />
+          <Show when={!loaded()}>
+            <div class="mcp-app-loading" role="status">
+              {t("Loading the app…")}
+            </div>
+          </Show>
+        </div>
+      </Show>
+      <Show when={failure() || left()}>
+        <div class="notice-inline mcp-app-notice" role="status">
+          <Icon name="alert" size="sm" />
+          <span>
+            {left()
+              ? t("This app tried to leave its page, so Haarness closed it.")
+              : t("This app's page could not be loaded.")}
+            <Show when={failure()}>
+              <span class="notice-detail">{failure()}</span>
+            </Show>
+          </span>
+          <button
+            class="mcp-app-action"
+            onClick={() => {
+              if (failure()) load();
+              setLeft(false);
+              setHostReady(false);
+              setRender((value) => value + 1);
+            }}
+          >
+            {t("Try again")}
+          </button>
+        </div>
+      </Show>
+      <Show when={props.payload.tooLarge}>
+        <div class="notice-inline mcp-app-notice" role="status">
+          <Icon name="alert" size="sm" />
+          <span>{t("This result is too large to show in the app.")}</span>
+        </div>
+      </Show>
+      <Show when={request()}>
+        {(pending) => (
+          <div class="notice-inline mcp-app-request" role="group" aria-label={t("Link from the app")}>
+            <Icon name="external" size="sm" />
+            <span>
+              {t("This app wants to open a link.")}
+              <span class="notice-detail mcp-app-url">{pending().url}</span>
+            </span>
+            <button class="mcp-app-action" onClick={() => pending().answer(true)}>
+              {t("Open")}
+            </button>
+            <button class="mcp-app-action" onClick={() => pending().answer(false)}>
+              {t("Dismiss")}
+            </button>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+}

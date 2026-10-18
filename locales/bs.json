@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "Kliknite i pritisnite tipke, uključujući modifikatorsku tipku.",
   "Use a modifier key and one more key, such as {keys}.": "Koristite modifikatorsku tipku i još jednu tipku, npr. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} pripada sistemu. Odaberite drugu prečicu.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu.",
+  "The server sent no page for this app.": "Server nije poslao stranicu za ovu aplikaciju.",
+  "The app's message is in the message box. Send it when you are ready.": "Poruka aplikacije je u polju za poruku. Pošalji je kad budeš spreman.",
+  "This chat cannot take a message from the app.": "Ovaj chat ne može primiti poruku od aplikacije.",
+  "{name} app": "Aplikacija {name}",
+  "Loading the app…": "Učitavanje aplikacije…",
+  "This app tried to leave its page, so Haarness closed it.": "Ova aplikacija je pokušala napustiti svoju stranicu, pa ju je Haarness zatvorio.",
+  "This app's page could not be loaded.": "Stranica ove aplikacije se nije mogla učitati.",
+  "This result is too large to show in the app.": "Ovaj rezultat je prevelik da bi se prikazao u aplikaciji.",
+  "Link from the app": "Link iz aplikacije",
+  "This app wants to open a link.": "Ova aplikacija želi otvoriti link."
 }
