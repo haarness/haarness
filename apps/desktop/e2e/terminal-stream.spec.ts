@@ -204,6 +204,16 @@ test("a terminal cut off from its server says so, offers Retry and New terminal,
     timeout: 30_000,
   });
   await expect(alert.getByRole("button", { name: "New terminal", exact: true })).toBeVisible();
+  // The notice leaves the output it covers selectable: a point in the
+  // terminal beside or below it reaches xterm, not the notice.
+  const reachable = await page.locator(".terminal-view").evaluate((view) => {
+    const box = view.getBoundingClientRect();
+    return [
+      [box.left + 12, box.top + 12],
+      [box.left + box.width / 2, box.top + box.height * 0.75],
+    ].every(([x, y]) => !!document.elementFromPoint(x, y)?.closest(".terminal-view"));
+  });
+  expect(reachable).toBe(true);
   // Typed while it is cut off, kept for the shell.
   await input().pressSequentially("kept");
   // Retry says it is reconnecting at once, while the outage lasts.

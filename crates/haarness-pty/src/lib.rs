@@ -223,7 +223,7 @@ impl PtyManager {
         // makes the replay/live boundary exact: a byte can appear in one side
         // or the other, never both and never neither.
         let receiver = session.output.subscribe();
-        let (replay, cursor) = buffer.replay(after.unwrap_or(buffer.start));
+        let (replay, cursor) = buffer.replay(after);
         Ok(PtySubscription {
             replay,
             cursor,
@@ -405,12 +405,14 @@ impl OutputBuffer {
         }
     }
 
-    /// The output after `requested`, with the control frame that announces
-    /// it. Output older than the buffer is gone: the replay then starts at
-    /// the first whole line (or character) outside an escape sequence, so a
-    /// client never draws half a sequence or half a character, and carries
-    /// the modes the dropped output left on.
-    fn replay(&self, requested: u64) -> (Vec<u8>, PtyCursor) {
+    /// The output after `requested` (none: a client that has nothing yet),
+    /// with the control frame that announces it. Output older than the
+    /// buffer is gone: the replay then starts at the first whole line (or
+    /// character) outside an escape sequence, so a client never draws half a
+    /// sequence or half a character, and carries the modes the dropped output
+    /// left on.
+    fn replay(&self, requested: Option<u64>) -> (Vec<u8>, PtyCursor) {
+        let requested = requested.unwrap_or(0);
         let truncated = requested < self.start;
         let (begin, modes) = if truncated {
             let (skip, modes) = self.modes.clean_start(self.bytes.iter().copied());
@@ -553,7 +555,7 @@ mod tests {
             buffer.append(format!("\x1b[31mline {line:07}\x1b[0m\r\n").as_bytes());
             line += 1;
         }
-        let (replay, cursor) = buffer.replay(0);
+        let (replay, cursor) = buffer.replay(Some(0));
         assert!(cursor.truncated);
         assert!(cursor.start > buffer.start && cursor.start - buffer.start < 64);
         assert_eq!(
@@ -567,7 +569,7 @@ mod tests {
         );
 
         // A client that has everything still buffered gets the rest as is.
-        let (replay, cursor) = buffer.replay(buffer.end - 5);
+        let (replay, cursor) = buffer.replay(Some(buffer.end - 5));
         assert_eq!(
             (replay.len(), cursor.start, cursor.truncated),
             (5, buffer.start, false)
@@ -578,10 +580,25 @@ mod tests {
         buffer.append(&vec![b'x'; BUFFER_LIMIT]);
         buffer.append(b"\n");
         buffer.append(&vec![b'y'; BUFFER_LIMIT - 100]);
-        let (replay, cursor) = buffer.replay(0);
+        let (replay, cursor) = buffer.replay(Some(0));
         assert_eq!(cursor.start, buffer.start + 100);
         assert!(replay.len() == BUFFER_LIMIT - 100 && replay.iter().all(|byte| *byte == b'y'));
         assert_eq!(cursor.modes.as_deref(), Some("\x1b[?1006h"));
+        // A first connection, which names no cursor, is told the same.
+        assert_eq!(buffer.replay(None), buffer.replay(Some(0)));
+    }
+
+    #[test]
+    fn a_truncated_replay_cut_just_after_a_line_break_keeps_the_next_line() {
+        let mut buffer = OutputBuffer::default();
+        buffer.append(&[vec![b'a'; 99], b"\n".to_vec()].concat());
+        buffer.append(b"first line\n");
+        buffer.append(&vec![b'c'; BUFFER_LIMIT - 11]);
+        assert_eq!(buffer.start, 100);
+        let (replay, cursor) = buffer.replay(None);
+        assert!(cursor.truncated);
+        assert_eq!(cursor.start, 100);
+        assert!(replay.starts_with(b"first line\n"));
     }
 
     #[test]
@@ -593,7 +610,7 @@ mod tests {
             buffer.append("日本".as_bytes());
         }
         assert!(buffer.bytes.front().is_some_and(|byte| byte & 0xc0 == 0x80));
-        let (replay, cursor) = buffer.replay(0);
+        let (replay, cursor) = buffer.replay(Some(0));
         assert!(cursor.truncated);
         assert!(std::str::from_utf8(&replay).is_ok());
         assert_eq!(
