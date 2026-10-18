@@ -413,14 +413,21 @@ export interface Host {
   log?(params: unknown): void;
 }
 
+/** Schemes a refused link may be named by: well known, and none of them words a page could choose. */
+const NAMED_SCHEMES = new Set([
+  "about", "afp", "blob", "chrome", "data", "facetime", "file", "ftp", "javascript", "nfs",
+  "rdp", "sftp", "smb", "sms", "ssh", "tel", "telnet", "vbscript", "vnc", "ws", "wss",
+]);
+
 /**
- * The scheme of a link an app asked for ("file:"), or undefined when it has
- * none worth naming. Only the scheme is ever shown: the rest is the page's
- * own text, which must not speak in the app's voice.
+ * The scheme of a refused link ("file:"), when it is one of a short list of
+ * well-known ones; otherwise undefined, and the notice says only that the
+ * link does not open. Any other scheme is the page's own text, which could
+ * read like a host or a sentence (`sign-in.at.example.com:`).
  */
 export function linkScheme(url: string): string | undefined {
-  const scheme = /^[\u0000-\u0020]*([a-z][a-z\d+.-]{0,31}):/i.exec(url)?.[1];
-  return scheme ? scheme.toLowerCase() + ":" : undefined;
+  const scheme = /^[\u0000-\u0020]*([a-z][a-z\d+.-]*):/i.exec(url)?.[1]?.toLowerCase();
+  return scheme && NAMED_SCHEMES.has(scheme) ? scheme + ":" : undefined;
 }
 
 export const REFUSED = {
