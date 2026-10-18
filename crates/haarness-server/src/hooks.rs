@@ -200,16 +200,33 @@ impl ConfiguredHooks {
                 return HookOutcome::default();
             }
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(payload.to_string().as_bytes()).await;
-            drop(stdin);
-        }
+        // The payload is written while the output is read, both within the
+        // hook's timeout. Written first, a payload larger than the pipe holds
+        // waited, with no limit, for a hook that never reads it, and for one
+        // that writes much before reading, which waited for us in turn. A hook
+        // that exits without reading closes the pipe; that error is ignored,
+        // and once the hook is done nothing waits for the rest to be written.
+        let stdin = child.stdin.take();
+        let input = payload.to_string().into_bytes();
+        let finished = async move {
+            let feed = async move {
+                if let Some(mut stdin) = stdin {
+                    let _ = stdin.write_all(&input).await;
+                }
+            };
+            let wait = child.wait_with_output();
+            tokio::pin!(wait);
+            tokio::select! {
+                output = &mut wait => output,
+                () = feed => wait.await,
+            }
+        };
         if entry.asynchronous {
             // Nothing waits for an async hook's answer, so its failure is
             // only ever visible in this log line.
             let timeout = entry.timeout;
             tokio::spawn(async move {
-                match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                match tokio::time::timeout(timeout, finished).await {
                     Ok(Ok(output)) if !output.status.success() => {
                         label.failed(output.status, &output.stderr, true);
                     }
@@ -220,7 +237,7 @@ impl ConfiguredHooks {
             });
             return HookOutcome::default();
         }
-        let output = match tokio::time::timeout(entry.timeout, child.wait_with_output()).await {
+        let output = match tokio::time::timeout(entry.timeout, finished).await {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => {
                 label.wait_failed(&error, false);
@@ -2139,6 +2156,85 @@ mod tests {
         assert_eq!(timed_out.len(), 1, "{:?}", capture.lines());
         assert!(timed_out[0].contains(" program=sleep"), "{}", timed_out[0]);
         assert_private(&capture);
+    }
+
+    /// A payload larger than the pipe holds, for a hook that never reads it:
+    /// writing it first waited for the hook with no limit, and an async hook
+    /// held the turn the same way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_never_reads_a_large_payload_still_times_out() {
+        let (capture, _guard) = Capture::install();
+        let input = json!({"command": "x".repeat(1 << 20)});
+        let started = std::time::Instant::now();
+        let decision =
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                hooks_for("PreToolUse", json!([{"command": "sleep 30", "timeout": 1}]))
+                    .pre_tool_use(ThreadId::new(), "bash", &input),
+            )
+            .await
+            .expect("the hook's timeout applies while its payload is written");
+        assert!(decision.block.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            capture.matching("hook timed out").len(),
+            1,
+            "{:?}",
+            capture.lines()
+        );
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            hooks_for(
+                "PreToolUse",
+                json!([{"command": "sleep 30", "timeout": 2, "async": true}]),
+            )
+            .pre_tool_use(ThreadId::new(), "bash", &input),
+        )
+        .await
+        .expect("an async hook never holds the turn");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A hook that prints more than the pipe holds before it reads its
+    /// payload waited for its output to be read, while the payload waited for
+    /// the hook.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_writes_much_before_reading_its_payload_finishes() {
+        let marker =
+            std::env::temp_dir().join(format!("haarness-hook-read-{}", uuid::Uuid::now_v7()));
+        let input = json!({"command": "x".repeat(1 << 20)});
+        let hooks = hooks_for(
+            "PreToolUse",
+            json!([{
+                "command": format!("head -c 262144 /dev/zero; wc -c > {}", marker.display()),
+                "timeout": 20
+            }]),
+        );
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            hooks.pre_tool_use(ThreadId::new(), "bash", &input),
+        )
+        .await
+        .expect("output is read while the payload is written");
+        let read: usize = std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(read > 1 << 20, "{read}");
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[tokio::test]
