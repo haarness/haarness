@@ -1595,6 +1595,7 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
     let (audit, audit_child) = chats[0];
     let delivered = notice(audit).await;
     assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let delivered_audit = delivered[0].1.clone();
     let text = &delivered[0].1;
     assert!(
         text.starts_with(&format!("<task id=\"{audit_child}\" state=\"error\">")),
@@ -1614,21 +1615,8 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
         "a result the restart kept from the chat is delivered: {delivered:?}"
     );
 
-    // Both idle chats took the notice as a delivered result: a turn each.
-    let requests = provider.requests.lock().unwrap().clone();
-    for parent in [audit, logs] {
-        assert!(
-            runtime.items(parent, None).await.unwrap().iter().any(|item| matches!(
-                &item.data,
-                haarness_protocol::ItemData::AssistantMessage { text } if text.starts_with("Echo: <task id=")
-            )),
-            "the idle chat answers the notice"
-        );
-    }
-    assert_eq!(requests.len(), 2, "{requests:?}");
-
-    // The busy chat was stopped by the same restart: it keeps the notice for
-    // when it goes on, without a turn of its own.
+    // Nothing starts by itself after a restart, in an idle chat or one the
+    // restart stopped: no turn, no model request.
     let (build, build_child) = chats[2];
     let delivered = notice(build).await;
     assert_eq!(delivered.len(), 1, "{delivered:?}");
@@ -1637,15 +1625,62 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
             .1
             .contains(&format!("task_id \"{build_child}\""))
     );
-    assert!(runtime.active_turn(build).await.unwrap().is_none());
-    let turns = runtime
-        .items(build, None)
+    assert!(provider.requests.lock().unwrap().is_empty());
+    for (parent, _) in &chats {
+        assert!(runtime.active_turn(*parent).await.unwrap().is_none());
+        let items = runtime.items(*parent, None).await.unwrap();
+        let turns = items
+            .iter()
+            .filter_map(|item| item.turn_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(turns.len(), 1, "no turn starts: {items:?}");
+        // The person sees it: an error notice in the chat, which the model
+        // does not get.
+        let notices = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                haarness_protocol::ItemData::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .filter(|message| message.starts_with("Haarness restarted before"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1, "{items:?}");
+    }
+    let shown = runtime.items(audit, None).await.unwrap();
+    assert!(shown.iter().any(|item| matches!(&item.data,
+        haarness_protocol::ItemData::Error { message, retryable: false }
+            if message.contains("\u{201c}Audit the parser\u{201d}") && message.contains("not resumed"))));
+
+    // The person's next message carries the result to the model.
+    let turn = runtime
+        .start_turn(audit, turn_request("what happened?"))
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let users = requests[0]
+        .messages
         .iter()
-        .filter_map(|item| item.turn_id)
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(turns.len(), 1, "no turn starts in the busy chat");
+        .filter_map(|message| match message {
+            ProviderMessage::Text { role, content } if role == "user" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let at = |wanted: &str| users.iter().position(|text| *text == wanted);
+    assert!(
+        at(&delivered_audit).is_some() && at(&delivered_audit) < at("what happened?"),
+        "the result goes before the new message: {users:?}"
+    );
+    assert!(
+        !users
+            .iter()
+            .any(|text| text.starts_with("Haarness restarted before")),
+        "the notice for the person stays out of the request"
+    );
 
     // A second restart names nothing again.
     assert_eq!(runtime.recover().await.unwrap(), 0);
@@ -1789,9 +1824,15 @@ async fn a_shutdown_leaves_a_background_task_to_be_reported_on_the_next_start() 
     );
     assert!(
         items.iter().any(|item| matches!(&item.data,
-            haarness_protocol::ItemData::AssistantMessage { text } if text.starts_with("Echo: <task id="))),
-        "the idle chat answers the report: {items:?}"
+            haarness_protocol::ItemData::Error { message, .. }
+                if message.contains("\u{201c}Long audit\u{201d} finished"))),
+        "the person sees it: {items:?}"
     );
+    assert!(
+        provider.0.requests.lock().unwrap().is_empty(),
+        "nothing starts by itself after a restart"
+    );
+    assert!(second.active_turn(thread.id).await.unwrap().is_none());
 }
 
 #[tokio::test]
