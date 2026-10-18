@@ -2509,5 +2509,8 @@
   "This result is too large to show in the app.": "ผลลัพธ์นี้ใหญ่เกินกว่าจะแสดงในแอป",
   "Link from the app": "ลิงก์จากแอป",
   "This app wants to open a link.": "แอปนี้ต้องการเปิดลิงก์",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "เครื่องมือนี้มีแอปมาด้วย เปิดแชตใน Haarness Desktop เพื่อใช้งาน"
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "เครื่องมือนี้มีแอปมาด้วย เปิดแชตใน Haarness Desktop เพื่อใช้งาน",
+  "Comment on selection": "แสดงความคิดเห็นส่วนที่เลือก",
+  "Comment on these lines…": "แสดงความคิดเห็นบรรทัดเหล่านี้…",
+  "Comment added to your message": "เพิ่มความคิดเห็นไปยังข้อความของคุณแล้ว"
 }

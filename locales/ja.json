@@ -2509,5 +2509,8 @@
   "This result is too large to show in the app.": "この結果は大きすぎてアプリに表示できません。",
   "Link from the app": "アプリからのリンク",
   "This app wants to open a link.": "このアプリがリンクを開こうとしています。",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "このツールにはアプリがあります。使うには Haarness Desktop でチャットを開いてください。"
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "このツールにはアプリがあります。使うには Haarness Desktop でチャットを開いてください。",
+  "Comment on selection": "選択範囲にコメント",
+  "Comment on these lines…": "これらの行にコメント…",
+  "Comment added to your message": "コメントをメッセージに追加しました"
 }

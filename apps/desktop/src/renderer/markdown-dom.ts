@@ -71,8 +71,30 @@ function nodes(parent: Node, previous: Node[], next: Node[], end: Node | null = 
   for (const current of previous.slice(next.length)) parent.removeChild(current);
 }
 
+/** Each Markdown host's blocks, in order, for finding which block a node is in. */
+const hosts = new WeakMap<HTMLElement, Block[]>();
+
+/**
+ * The index of the block `node` belongs to in a Markdown host: the block whose
+ * markers enclose the host's child that holds it. Blocks are drawn one per
+ * top-level token, so this is that token's index (see markdown-source.ts).
+ */
+export function markdownBlockIndex(host: HTMLElement, node: Node): number | undefined {
+  const blocks = hosts.get(host);
+  if (!blocks || !host.contains(node) || node === host) return undefined;
+  let top = node;
+  while (top.parentNode && top.parentNode !== host) top = top.parentNode;
+  for (let current: Node | null = top; current; current = current.previousSibling) {
+    if (!(current instanceof Comment)) continue;
+    const index = blocks.findIndex((block) => block.start === current || block.end === current);
+    if (index >= 0) return blocks[index].end === current && current !== top ? index + 1 : index;
+  }
+  return undefined;
+}
+
 export function createMarkdownDOM(host: HTMLElement) {
   const blocks: Block[] = [];
+  hosts.set(host, blocks);
   const between = (block: Block) => {
     const result: Node[] = [];
     for (let node = block.start.nextSibling; node && node !== block.end; node = node.nextSibling) result.push(node);
