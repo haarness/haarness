@@ -24,7 +24,10 @@ addEventListener('message', (event) => {
     }
     return;
   }
-  if (frame && event.source === frame.contentWindow) parent.postMessage({ mcpApp: key, type: 'receive', message: data }, '*');
+  // Whether the person had just clicked or typed in the page when this message
+  // arrived, read here, where the activation is seen as it happens.
+  const active = !!(navigator.userActivation && navigator.userActivation.isActive) && document.activeElement === frame;
+  if (frame && event.source === frame.contentWindow) parent.postMessage({ mcpApp: key, type: 'receive', message: data, active }, '*');
 });
 // A page that tries to navigate its frame is stopped here; the app closes it.
 addEventListener('securitypolicyviolation', (event) => {

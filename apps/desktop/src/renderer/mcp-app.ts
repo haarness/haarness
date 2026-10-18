@@ -124,20 +124,21 @@ function decode(blob: string) {
 }
 
 /**
- * Whether a declared host is a site on the internet: not every host (`*`, or
- * a wildcard over a whole top-level domain), and not this computer or its
- * network (`localhost`, `.local` names, loopback, private and link-local
- * addresses), which a page must never reach.
+ * Suffixes under which anyone may own a name, beyond single-label top-level
+ * domains: a wildcard right below one (`*.co.uk`, `*.github.io`) covers
+ * everyone's sites. A short list of common ones, not the whole public suffix
+ * list; a wildcard under a rarer shared suffix is not caught.
  */
-function publicHost(host: string) {
-  const name = host.toLowerCase().replace(/\.$/, "");
-  const fixed = name.startsWith("*.") ? name.slice(2) : name;
-  if (fixed.includes("*") || !fixed.includes(".")) return false;
-  if (/(^|\.)(localhost|local|internal|home\.arpa)$/.test(fixed)) return false;
-  const address = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(fixed);
-  if (!address) return true;
-  const [a, b] = [Number(address[1]), Number(address[2])];
-  return !(
+const SHARED_SUFFIXES = new Set([
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp",
+  "co.kr", "co.in", "co.za", "com.br", "com.cn", "com.hk", "com.mx", "com.sg", "com.tr", "com.tw", "co.id", "co.il",
+  "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "workers.dev", "web.app", "firebaseapp.com",
+  "appspot.com", "herokuapp.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com", "blogspot.com",
+]);
+
+/** A private, loopback, link-local, shared or multicast IPv4 address. */
+function privateAddress(a: number, b: number) {
+  return (
     a === 0 ||
     a === 10 ||
     a === 127 ||
@@ -150,6 +151,28 @@ function publicHost(host: string) {
 }
 
 /**
+ * Whether a declared host (already normalised by URL parsing, so `0x7f.1` is
+ * `127.0.0.1`) is a site on the internet: not every host (`*`, a wildcard
+ * over a top-level domain or a shared suffix), and not this computer or its
+ * network (`localhost`, `.local` names, loopback, private and link-local
+ * addresses, or a name that spells one out, as `127.0.0.1.nip.io` does).
+ * Names that only resolve to such an address cannot be told without asking
+ * DNS, so they are not caught.
+ */
+function publicHost(host: string) {
+  const name = host.replace(/\.$/, "");
+  const fixed = name.startsWith("*.") ? name.slice(2) : name;
+  if (fixed.includes("*") || !fixed.includes(".")) return false;
+  if (name.startsWith("*.") && SHARED_SUFFIXES.has(fixed)) return false;
+  if (/(^|\.)(localhost|local|internal|home\.arpa)$/.test(fixed)) return false;
+  for (const match of fixed.matchAll(/(?:^|[.-])(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?=$|[.-])/g)) {
+    const octets = match.slice(1, 5).map(Number);
+    if (octets.every((octet) => octet <= 255) && privateAddress(octets[0], octets[1])) return false;
+  }
+  return true;
+}
+
+/**
  * A CSP source list takes https and wss host sources of public sites only:
  * anything else (a keyword, a quote, a semicolon) could widen or end the
  * directive it is pasted into, and plain http, every host, or this computer's
@@ -157,10 +180,19 @@ function publicHost(host: string) {
  */
 export function sources(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
-  return list.filter((item): item is string => {
-    if (typeof item !== "string") return false;
-    const match = /^(https|wss):\/\/([a-z0-9*.-]+)(:\d+)?(\/[^\s;,'"]*)?$/i.exec(item);
-    return !!match && publicHost(match[2]);
+  return list.flatMap((item) => {
+    if (typeof item !== "string" || /[\s;,'"]/.test(item)) return [];
+    let url: URL;
+    try {
+      url = new URL(item);
+    } catch {
+      return [];
+    }
+    if (!["https:", "wss:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return [];
+    if (url.hostname.startsWith("[") || !publicHost(url.hostname)) return [];
+    // The normalised form goes into the policy, never the text as written.
+    const source = `${url.protocol}//${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    return /^(https|wss):\/\/[a-z0-9*.-]+(:\d+)?(\/[A-Za-z0-9._~%!$&()*+=:@/-]*)?$/.test(source) ? [source] : [];
   });
 }
 
@@ -204,6 +236,7 @@ export function granted(meta?: Meta) {
 /** The host's own message keys from the page document's script (see `document`). */
 export const WHEEL = "haarnessWheel";
 export const LEFT = "haarnessLeft";
+export const INPUT = "haarnessInput";
 
 const attribute = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -213,14 +246,21 @@ const attribute = (text: string) =>
  * everything parsed after it and cannot be loosened by the page. It goes after a doctype, so the
  * page keeps standards mode. Next comes one host script, which holds on to the parent before the
  * page can replace it: wheel events inside a frame never reach the conversation, so it reports
- * them for the conversation to scroll; and it reports the document going away with this
- * render's `token`, so a page that leaves is closed rather than left showing something else.
+ * them for the conversation to scroll; it reports the document going away with this
+ * render's `token`, so a page that leaves is closed rather than left showing something else;
+ * and it reports each press of the person's (a trusted pointer or key event, which page script
+ * cannot make) with the token, so one press allows one link or message. The script removes
+ * itself before the page runs, so the page cannot read the token and speak for the person.
  */
 export function document(html: string, meta: Meta | undefined, token: string) {
+  const secret = JSON.stringify(token).replace(/</g, "\\u003c");
   const head =
     `<meta http-equiv="Content-Security-Policy" content="${attribute(policy(meta))}">` +
-    `<script>(function(p){addEventListener("wheel",function(e){p.postMessage({${WHEEL}:[e.deltaX,e.deltaY,e.deltaMode]},"*")},{passive:true,capture:true});` +
-    `addEventListener("pagehide",function(){p.postMessage({${LEFT}:${JSON.stringify(token).replace(/</g, "\\u003c")}},"*")})})(parent)</script>`;
+    `<script>(function(p,s){addEventListener("wheel",function(e){p.postMessage({${WHEEL}:[e.deltaX,e.deltaY,e.deltaMode]},"*")},{passive:true,capture:true});` +
+    `addEventListener("pagehide",function(){p.postMessage({${LEFT}:s},"*")});` +
+    `function press(e){if(e.isTrusted&&!e.repeat)p.postMessage({${INPUT}:s},"*")}` +
+    `addEventListener("pointerdown",press,true);addEventListener("keydown",press,true);` +
+    `document.currentScript&&document.currentScript.remove()})(parent,${secret})</script>`;
   const doctype = html.match(/^\s*<!doctype[^>]*>/i)?.[0] ?? "<!doctype html>";
   return `${doctype}${head}${html.replace(/^\s*<!doctype[^>]*>/i, "")}`;
 }
@@ -283,6 +323,13 @@ export const STYLE_VARIABLES: Record<string, { token: string; color?: boolean } 
   "--shadow-md": { token: "--shadow-2" },
   "--shadow-lg": { token: "--shadow-2" },
 };
+
+/** Every Haarness token the theme variables come from: when none of them changed, neither did the theme. */
+export function themeTokens() {
+  return [
+    ...new Set(Object.values(STYLE_VARIABLES).flatMap((source) => ("token" in source ? [source.token] : []))),
+  ];
+}
 
 /** The theme variables a page gets, given how to read a token and how to resolve a colour token. */
 export function variables(read: (token: string) => string, color: (token: string) => string) {
@@ -348,10 +395,14 @@ export interface Host {
   initialize(params: Record<string, unknown>): unknown;
   initialized(): void;
   resize(size: { width?: number; height?: number }): void;
-  /** Opens a link the bridge allowed; false when the person declined or it failed. */
-  openLink(url: string): Promise<boolean>;
+  /**
+   * Opens a link the bridge allowed; false when the person declined or it
+   * failed. `gesture`: the person had just clicked or typed in the page when
+   * its request arrived.
+   */
+  openLink(url: string, gesture: boolean): Promise<boolean>;
   /** Puts text in the message box; false when the person declined or this chat cannot take it. */
-  compose(text: string): boolean | Promise<boolean>;
+  compose(text: string, gesture: boolean): boolean | Promise<boolean>;
   /** Reads a `ui://` resource of the page's own server. */
   readResource(uri: string): Promise<unknown>;
   log?(params: unknown): void;
@@ -382,7 +433,7 @@ type Rpc = {
 export function createBridge(host: Host, post: (message: Record<string, unknown>) => void) {
   let next = 0;
   const waiting = new Map<number, (value: unknown) => void>();
-  async function handle(method: string, params: Record<string, unknown>) {
+  async function handle(method: string, params: Record<string, unknown>, gesture: boolean) {
     switch (method) {
       case "ui/initialize":
         return host.initialize(params);
@@ -391,12 +442,12 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
       case "ui/open-link": {
         const url = webLink(params.url);
         if (!url) throw new RpcError(-32602, REFUSED.link);
-        return (await host.openLink(url)) ? {} : { isError: true };
+        return (await host.openLink(url, gesture)) ? {} : { isError: true };
       }
       case "ui/message": {
         const text = messageText(params);
         if (!text) throw new RpcError(-32602, REFUSED.message);
-        return (await host.compose(text)) ? {} : { isError: true };
+        return (await host.compose(text, gesture)) ? {} : { isError: true };
       }
       case "resources/read": {
         const uri = params.uri;
@@ -416,7 +467,8 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
     }
   }
   return {
-    async receive(data: unknown) {
+    /** A message from the page; `gesture` says whether the person had just acted in it. */
+    async receive(data: unknown, gesture = false) {
       const message = record(data) as Rpc | undefined;
       if (!message || message.jsonrpc !== "2.0") return;
       const id = message.id;
@@ -441,7 +493,7 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
         return;
       }
       try {
-        const result = await handle(message.method, params);
+        const result = await handle(message.method, params, gesture);
         post({ jsonrpc: "2.0", id, result });
       } catch (error) {
         post({

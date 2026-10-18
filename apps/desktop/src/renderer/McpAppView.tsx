@@ -11,6 +11,7 @@ import {
 } from "solid-js";
 import {
   DEFAULT_HEIGHT,
+  INPUT,
   LEFT,
   MAX_HEIGHT,
   PROTOCOL_VERSION,
@@ -21,6 +22,7 @@ import {
   recall,
   remember,
   resource,
+  themeTokens,
   variables,
   type Meta,
   type Payload,
@@ -32,8 +34,8 @@ const PAGE_LIMIT = 32;
 /** The last height each page reported, so a row that remounts keeps its size; the most recent kept. */
 const heights = new Map<string, number>();
 const HEIGHT_LIMIT = 512;
-/** Tokens that change whenever the theme or palette does. */
-const THEME_PROBES = ["--page", "--surface", "--text", "--primary", "--accent", "--font-size"];
+/** Every token the page's theme variables come from, read as written to tell whether the theme moved. */
+const THEME_TOKENS = themeTokens();
 
 function readPage(connection: string, server: string, uri: string) {
   const key = [connection, server, uri].join("\u0000");
@@ -88,6 +90,8 @@ export function McpAppView(props: {
   let initialized = false;
   /** The theme the page last heard about. */
   let lastTheme = "";
+  /** The person pressed in the page since the last link or message went through without asking. */
+  let pressed = false;
 
   const load = () => {
     setFailure("");
@@ -160,8 +164,8 @@ export function McpAppView(props: {
         remember(heights, props.callKey, next, HEIGHT_LIMIT);
         setHeight(next);
       },
-      openLink: (url) => {
-        if (gesture()) return open(url);
+      openLink: (url, active) => {
+        if (take(active)) return open(url);
         return new Promise<boolean>((resolve) => {
           request()?.answer(false);
           setRequest({
@@ -176,8 +180,8 @@ export function McpAppView(props: {
       // A message goes into the message box, and the keyboard with it, only
       // when the person just acted in the page or picks "Insert app message":
       // a page writing on its own must not change a draft or take the focus.
-      compose: (text) => {
-        if (gesture()) return insert(text);
+      compose: (text, active) => {
+        if (take(active)) return insert(text);
         return new Promise<boolean>((resolve) => {
           message()?.answer(false);
           setMessage({
@@ -195,12 +199,16 @@ export function McpAppView(props: {
     },
     send,
   );
-  /** Right after a click or key press inside the page: the person asked for it. */
-  function gesture() {
-    return (
-      globalThis.document.activeElement === frame &&
-      !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive
-    );
+  /**
+   * One action for each click or key press in the page: the page's document
+   * reported the person's press, the frame's host page saw the activation
+   * when the request arrived, the page has the focus, and no other link or
+   * message has used that press.
+   */
+  function take(active: boolean) {
+    if (!active || !pressed || globalThis.document.activeElement !== frame) return false;
+    pressed = false;
+    return true;
   }
   function insert(text: string) {
     const detail = { text, accepted: false };
@@ -223,6 +231,7 @@ export function McpAppView(props: {
     on([hostReady, page, render] as const, ([ready, value]) => {
       if (!ready || !value) return;
       token = crypto.randomUUID();
+      pressed = false;
       initialized = false;
       setLoaded(false);
       setLeft(false);
@@ -262,16 +271,20 @@ export function McpAppView(props: {
       if (data.type !== "receive") return;
       const message = data.message as Record<string, unknown> | undefined;
       if (message && Array.isArray(message[WHEEL])) return wheel(message[WHEEL] as number[]);
+      if (message && INPUT in message) {
+        if (message[INPUT] === token) pressed = true;
+        return;
+      }
       if (message && LEFT in message) {
         if (message[LEFT] === token) setLeft(true);
         return;
       }
-      void bridge.receive(message);
+      void bridge.receive(message, data.active === true);
     };
     window.addEventListener("message", listen);
     // The root's style also carries layout variables, which change often:
-    // changes are taken once a frame, and a few colour tokens tell whether
-    // the theme moved before every token is resolved again.
+    // changes are taken once a frame, and the theme's own tokens, read as
+    // written, tell whether it moved before every colour is resolved again.
     let themeFrame = 0;
     let lastSignature = "";
     const themeObserver = new MutationObserver(() => {
@@ -279,7 +292,7 @@ export function McpAppView(props: {
       themeFrame = requestAnimationFrame(() => {
         themeFrame = 0;
         const root = getComputedStyle(globalThis.document.documentElement);
-        const signature = [theme(), ...THEME_PROBES.map((token) => root.getPropertyValue(token))].join("\n");
+        const signature = [theme(), ...THEME_TOKENS.map((token) => root.getPropertyValue(token))].join("\n");
         if (signature === lastSignature) return;
         lastSignature = signature;
         const next = { theme: theme(), styles: styles() };
