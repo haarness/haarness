@@ -4698,6 +4698,17 @@ impl AgentRuntime {
         queue_revision: Option<u64>,
         unattended: bool,
     ) -> CoreResult<Turn> {
+        // As `queue_input` refuses it: a blank message would stay in the
+        // chat, and Claude refuses whitespace-only text on every later turn.
+        // A command expands into its own text.
+        if request.text.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.command.is_none()
+        {
+            return Err(CoreError::Invalid(
+                "text or an attachment is required".into(),
+            ));
+        }
         let _reload = self.reload_gate.read().await;
         request.attachments = crate::attachments::admit_off_executor(
             std::mem::take(&mut request.attachments),
@@ -9225,6 +9236,7 @@ impl RunnerTask {
         let prompt = arguments
             .get("prompt")
             .and_then(serde_json::Value::as_str)
+            .filter(|prompt| !prompt.trim().is_empty())
             .ok_or_else(|| CoreError::Invalid("task.prompt is required".into()))?
             .to_owned();
         let description = arguments
@@ -10405,6 +10417,11 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
     for item in provider_visible_items(&items) {
         let item_id = item.id;
         let message = match item.data.clone() {
+            // A blank message saved before turns refused one; Claude would
+            // refuse it on every request.
+            ItemData::UserMessage {
+                text, attachments, ..
+            } if text.trim().is_empty() && attachments.is_empty() => None,
             ItemData::UserMessage {
                 text,
                 attachments,
@@ -10466,6 +10483,10 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     Some(message)
                 }
             }
+            // A whitespace-only reply segment (often the line breaks a model
+            // writes before a tool call) says nothing, and Claude refuses
+            // whitespace-only text, which would fail every later request.
+            ItemData::AssistantMessage { text } if text.trim().is_empty() => None,
             ItemData::AssistantMessage { text } => Some(ProviderMessage::Text {
                 role: "assistant".into(),
                 content: text,
@@ -12541,6 +12562,64 @@ mod tests {
             &messages[1],
             ProviderMessage::Text { content, .. } if content == "fresh question"
         ));
+    }
+
+    #[test]
+    fn provider_messages_leave_out_whitespace_only_text() {
+        let user = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+        };
+        let messages = provider_messages(vec![
+            item(1, user("read the file")),
+            // The line breaks a model streams before its tool call.
+            item(
+                2,
+                ItemData::AssistantMessage {
+                    text: "\n\n".into(),
+                },
+            ),
+            item(
+                3,
+                ItemData::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "a.txt"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                4,
+                ItemData::ToolResult {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    output: "contents".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                5,
+                ItemData::AssistantMessage {
+                    text: "Done.".into(),
+                },
+            ),
+            // Saved before turns refused a blank message.
+            item(6, user("  \n ")),
+            item(7, user("thanks")),
+        ]);
+
+        let texts = messages
+            .iter()
+            .filter_map(|message| match message {
+                ProviderMessage::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["read the file", "Done.", "thanks"]);
+        assert_eq!(messages.len(), 5, "the tool call and its result stay");
     }
 
     #[test]

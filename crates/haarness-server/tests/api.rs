@@ -6185,6 +6185,55 @@ async fn workspace_tools_match_haarness_and_do_not_serialize_across_threads() {
 }
 
 #[tokio::test]
+async fn blank_turns_and_blank_task_prompts_are_refused_before_any_request() {
+    let workspace = std::env::temp_dir();
+    let (runtime, provider) = p0_runtime(&workspace, true);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let refused = runtime
+        .start_turn(thread.id, turn_request(" \n\t "))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, CoreError::Invalid(message) if message.contains("text or an attachment")),
+        "{refused:?}"
+    );
+    assert!(runtime.items(thread.id, None).await.unwrap().is_empty());
+    assert!(provider.requests.lock().unwrap().is_empty());
+
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool task {"description":"blank","prompt":"   "}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::ToolResult { name, output, is_error: true, .. }
+                if name == "task" && output.contains("task.prompt is required"))),
+        "{items:?}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::TaskState { .. })),
+        "no child chat starts from a blank prompt"
+    );
+}
+
+#[tokio::test]
 async fn child_provider_schema_hides_recursive_and_categorically_denied_tools() {
     let workspace = std::env::temp_dir();
     let provider = Capturing::default();
