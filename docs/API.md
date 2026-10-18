@@ -27,8 +27,18 @@ policy. Failed password authentication returns `401` and a Basic challenge.
 Managed local daemons and existing integrations retain `Authorization: Bearer <token>`;
 their private runtime token also lets a password-protected host route internally.
 
-Every mode retains Host/Origin validation. Loopback listeners require loopback
-Host and Origin hosts; network listeners require matching browser Origin/Host.
+Every mode retains Host/Origin validation, judged before credentials (a browser
+sends a saved password, and an open server needs none). Loopback listeners require
+loopback Host and Origin hosts. A request with no Origin that a page started (an
+image, link, frame or `no-cors` fetch, which browsers mark with a `Sec-Fetch-Site`
+of `same-site` or `cross-site`) gets `403`; only an absent `Sec-Fetch-Site`, `none`
+(the user's own navigation) or `same-origin` passes. On network listeners a browser
+request (an Origin, or a `Sec-Fetch-Site` other than `none`) must name the server
+by IP address or `localhost` in Host, so a web site whose DNS name was re-pointed at
+the server (DNS rebinding) is refused, and its Origin must match that Host, port
+included. The CLI, TUI, Desktop (its main process makes the requests), SDKs and the
+Cloud relay send neither header, so a reverse proxy may name the server however it
+likes for them.
 `/healthz` and `/openapi.json` remain public diagnostics. Use HTTPS or an SSH tunnel
 when connecting Desktop to a remote host. Passwords are optional configuration,
 not a login/account service, and the server never accepts a password as a bearer token.
