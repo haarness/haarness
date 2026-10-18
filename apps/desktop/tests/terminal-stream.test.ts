@@ -11,6 +11,7 @@ import {
   scrollPlaces,
   shownOutput,
   terminalStream,
+  topText,
   writeChunks,
   WRITE_LIMIT,
   type Link,
@@ -205,8 +206,11 @@ test("a dropped terminal says nothing for a quick reconnect, then that it reconn
 });
 
 test("a terminal shown again opens where it was scrolled to, while that line holds the same text", () => {
-  const saved = { start: 0, end: 9000, line: 120, cols: 80, rows: 24 };
-  const now = { start: 0, end: 9000, cols: 80, rows: 24, trimmed: false };
+  const lines = (from: number) => (index: number) => `row ${index + from}`;
+  const saved = { start: 0, end: 9000, line: 120, cols: 80, rows: 24, text: topText(lines(0), 120) };
+  assert.equal(saved.text, "row 120\nrow 121");
+  const text = (from: number) => (line: number) => topText(lines(from), line);
+  const now = { start: 0, end: 9000, cols: 80, rows: 24, trimmed: false, text: text(0) };
   // The same output at the same size, even past xterm's scrollback.
   assert.equal(restoredLine(saved, now), 120);
   assert.equal(restoredLine(saved, { ...now, trimmed: true }), 120);
@@ -220,6 +224,10 @@ test("a terminal shown again opens where it was scrolled to, while that line hol
   assert.equal(restoredLine(saved, { ...now, cols: 100 }), undefined);
   assert.equal(restoredLine(saved, { ...now, start: 4096 }), undefined);
   assert.equal(restoredLine(undefined, now), undefined);
+  // The scrollback was erased while hidden and refilled: other text there.
+  assert.equal(restoredLine(saved, { ...now, end: 12000, text: text(500) }), undefined);
+  // Lines xterm no longer has read as empty.
+  assert.equal(topText(() => undefined, 3), "\n");
 
   scrollPlaces.save("c:a", saved);
   assert.deepEqual(scrollPlaces.take("c:a"), saved);

@@ -34,13 +34,20 @@ export const shownOutput = {
 
 /** Where a view was scrolled up to (`line`, from the top of xterm's
  * buffer), and what it showed then: the output from `start` to `end`, as the
- * server counts it, at `cols` × `rows`. */
+ * server counts it, at `cols` × `rows`, with `text` at the top of the view
+ * (see `topText`). */
 export interface ScrollPlace {
   start: number;
   end: number;
   line: number;
   cols: number;
   rows: number;
+  text: string;
+}
+/** What a view scrolled to `line` shows at its top: that line and the next,
+ * to tell the place again. */
+export function topText(line: (index: number) => string | undefined, index: number) {
+  return [line(index) ?? "", line(index + 1) ?? ""].join("\n");
 }
 /**
  * The place each terminal's view was scrolled up to when it went (the panel
@@ -66,15 +73,18 @@ export const scrollPlaces = {
  * meanwhile) or wraps at another width holds other lines. The same output at
  * the same size fills xterm's buffer alike; with more output, or another
  * height, the lines stay where they were only while xterm dropped nothing
- * from the top of its scrollback (`trimmed`).
+ * from the top of its scrollback (`trimmed`). Even then the program may have
+ * cleared the screen and its scrollback (`clear`, `ESC [3J`) and written
+ * other lines there, so the text at the top (`text`, see `topText`) must
+ * still be what the view showed; otherwise it opens at the bottom.
  */
 export function restoredLine(
   saved: ScrollPlace | undefined,
-  now: Omit<ScrollPlace, "line"> & { trimmed: boolean },
+  now: Omit<ScrollPlace, "line" | "text"> & { trimmed: boolean; text: (line: number) => string },
 ) {
   if (!saved || saved.start !== now.start || saved.cols !== now.cols) return undefined;
-  if (saved.end === now.end && saved.rows === now.rows) return saved.line;
-  return now.trimmed ? undefined : saved.line;
+  if ((saved.end !== now.end || saved.rows !== now.rows) && now.trimmed) return undefined;
+  return now.text(saved.line) === saved.text ? saved.line : undefined;
 }
 
 /**
