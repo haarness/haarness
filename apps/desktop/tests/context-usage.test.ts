@@ -99,6 +99,11 @@ test("a timed request reports its first-token time, and its speed only over half
     firstTokenMs: 1240,
     tokensPerSecond: 85,
   });
+  // What streamed, not the provider's count with its hidden reasoning.
+  assert.deepEqual(
+    requestPace(usage({ output_tokens: 4000, first_token_ms: 1240, stream_ms: 2000, stream_tokens: 120 })),
+    { firstTokenMs: 1240, tokensPerSecond: 60 },
+  );
   // One burst is no rate, and a stopped or older record has no timing.
   assert.deepEqual(requestPace(usage({ first_token_ms: 300, stream_ms: 120 })), {
     firstTokenMs: 300,

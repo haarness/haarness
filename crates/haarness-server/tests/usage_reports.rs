@@ -427,7 +427,8 @@ async fn a_finished_request_records_its_first_token_time_and_streaming_span() {
         (300, ProviderEvent::ReasoningDelta("Thinking.".into())),
         (200, ProviderEvent::TextDelta("Hello ".into())),
         (250, ProviderEvent::TextDelta("there.".into())),
-        (100, usage(1_000, 40)),
+        // The provider's output count holds reasoning it never streamed.
+        (100, usage(1_000, 5_000)),
         (0, finished()),
     ]);
     let usages = server.turn(&thread, "hi").await;
@@ -438,6 +439,44 @@ async fn a_finished_request_records_its_first_token_time_and_streaming_span() {
     // usage report and the finish carry no content and do not extend it.
     assert!((300..10_000).contains(&first), "{usages:?}");
     assert!((450..10_000).contains(&stream), "{usages:?}");
+    // Output speed divides what streamed, not the provider's 5,000.
+    let streamed = usages[0]["stream_tokens"].as_u64().unwrap();
+    assert!((1..50).contains(&streamed), "{usages:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn a_tool_call_is_timed_from_when_it_started_not_when_its_arguments_were_whole() {
+    let (server, provider, root) = server("tool-timed").await;
+    let thread = server.thread().await;
+    // As Anthropic streams a call: its block starts, its arguments stream as
+    // fragments the adapter holds, and the whole call arrives at the end.
+    provider.push_paced(vec![
+        (300, ProviderEvent::ContentStarted),
+        (
+            1_500,
+            ProviderEvent::ToolCall {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "missing.txt"}),
+                provider_metadata: Value::Null,
+            },
+        ),
+        (0, usage(900, 1_200)),
+        (
+            0,
+            ProviderEvent::Finished {
+                reason: "tool_use".into(),
+            },
+        ),
+    ]);
+    let usages = server.turn(&thread, "read it").await;
+    assert_eq!(usages.len(), 2, "{usages:?}");
+    let first = usages[0]["first_token_ms"].as_u64().unwrap();
+    let stream = usages[0]["stream_ms"].as_u64().unwrap();
+    assert!((300..1_500).contains(&first), "{usages:?}");
+    assert!((1_400..10_000).contains(&stream), "{usages:?}");
     server.handle.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).ok();
 }

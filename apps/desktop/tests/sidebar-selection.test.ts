@@ -48,12 +48,17 @@ test("a click picks or drops a row, Shift picks the rows since the last click, a
   assert.deepEqual([...selection.chats].sort(), drawn);
 });
 
-test("worktrees are picked apart from chats, and what an action handled leaves the selection", () => {
+test("worktrees are picked apart from chats, and what an action handled or what no longer exists leaves the selection", () => {
   let selection = pickTree(emptySelection("project"), "tree-1");
   selection = pickChat(selection, "a", false, ["a", "b"]);
   assert.deepEqual(selection.trees, ["tree-1"]);
   assert.deepEqual(pickTree(selection, "tree-1").trees, []);
-  const left = settle(selection, { chats: ["a"] });
+  const everything = { chats: ["a", "b"], trees: ["tree-1"] };
+  const left = settle(selection, { chats: ["a"] }, everything);
   assert.deepEqual(left, { ...selection, chats: [], trees: ["tree-1"] });
-  assert.equal(settle(left!, { trees: ["tree-1"] }), null);
+  assert.equal(settle(left!, { trees: ["tree-1"] }, everything), null);
+  // Chats picked inside a worktree that was removed went with it: removing
+  // the worktree ends the mode instead of leaving picks nothing can reach.
+  selection = pickChat(pickTree(emptySelection("project"), "tree-1"), "in-tree", false, ["in-tree"]);
+  assert.equal(settle(selection, { trees: ["tree-1"] }, { chats: [], trees: [] }), null);
 });

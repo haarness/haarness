@@ -27,19 +27,20 @@ test("the chat and prompt keys keep away from editors, terminals, overlays and d
   assert.equal(keyPlace(at(["input"]), "", false), "field");
   assert.equal(keyPlace(at([".action-menu"]), "", false), "overlay");
   assert.equal(keyPlace(composer, "", true), "overlay");
-  // Alt and an arrow step chats from a draft; Mod and an arrow leave a draft's caret alone.
+  // Alt and an arrow step chats from a draft except on macOS, where Option
+  // and an arrow move its caret; Mod and an arrow leave a draft's caret alone.
   assert.deepEqual(
     (["page", "composer", "draft", "field", "editor", "terminal", "overlay"] as const).map(
-      (place) => [stepsChats(place), movesPrompts(place)],
+      (place) => [stepsChats(place, false), stepsChats(place, true), movesPrompts(place)],
     ),
     [
-      [true, true],
-      [true, true],
-      [true, false],
-      [false, false],
-      [false, false],
-      [false, false],
-      [false, false],
+      [true, true, true],
+      [true, true, true],
+      [true, false, false],
+      [false, false, false],
+      [false, false, false],
+      [false, false, false],
+      [false, false, false],
     ],
   );
 });
