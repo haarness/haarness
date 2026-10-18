@@ -3186,6 +3186,19 @@ mod tests {
         for path in [&command, &agent, &skill] {
             assert_eq!(fs::read_to_string(path).unwrap(), broken);
         }
+        // Frontmatter written as code is never rewritten into YAML around it.
+        let scripted = "---js\nmodule.exports = { tools: [] }\n---\nBody\n";
+        fs::write(&agent, scripted).unwrap();
+        let error = service
+            .agent(&json!({"action":"edit","name":"broken","prompt":"Replaced"}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("JavaScript frontmatter is not supported")
+                && error.contains("Nothing was changed"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&agent).unwrap(), scripted);
         fs::remove_dir_all(root).unwrap();
     }
 
