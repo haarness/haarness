@@ -2455,5 +2455,10 @@
   "First prompt": "Первый запрос",
   "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "По чатам, которые видны на боковой панели, откуда угодно, кроме редактора файлов и терминала",
   "Shows the sidebar and puts the keyboard on the open chat": "Показывает боковую панель и переводит клавиатуру на открытый чат",
-  "In the open chat; in the message box only while it is empty": "В открытом чате; в поле сообщения — только пока оно пустое"
+  "In the open chat; in the message box only while it is empty": "В открытом чате; в поле сообщения — только пока оно пустое",
+  "Open the project's root folder to manage its worktrees.": "Откройте корневую папку проекта, чтобы управлять его рабочими деревьями.",
+  "The project is unavailable.": "Проект недоступен.",
+  "Archived 1 chat": "Архивирован 1 чат",
+  "Archived {count} chats": "Архивировано чатов: {count}",
+  "now": "сейчас"
 }

@@ -2455,5 +2455,10 @@
   "First prompt": "İlk istem",
   "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Kenar çubuğunun gösterdiği sohbetler arasında, dosya düzenleyici ve terminal dışında her yerden",
   "Shows the sidebar and puts the keyboard on the open chat": "Kenar çubuğunu gösterir ve klavyeyi açık sohbete taşır",
-  "In the open chat; in the message box only while it is empty": "Açık sohbette; mesaj kutusunda yalnızca boşken"
+  "In the open chat; in the message box only while it is empty": "Açık sohbette; mesaj kutusunda yalnızca boşken",
+  "Open the project's root folder to manage its worktrees.": "Çalışma ağaçlarını yönetmek için projenin kök klasörünü açın.",
+  "The project is unavailable.": "Proje kullanılamıyor.",
+  "Archived 1 chat": "1 sohbet arşivlendi",
+  "Archived {count} chats": "{count} sohbet arşivlendi",
+  "now": "şimdi"
 }

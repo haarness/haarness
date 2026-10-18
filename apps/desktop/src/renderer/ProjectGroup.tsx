@@ -21,6 +21,19 @@ import { Button, Icon, ask, confirm, type IconName } from "./ui";
 import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
 import { chatTitle } from "./chat-title";
+import { relativeAge } from "./relative-age";
+
+/** One clock for every row's last-activity age, read by the rows that show
+ * one and ticking twice a minute from the first read. */
+const [clock, setClock] = createSignal(Date.now());
+let ticking = false;
+function now() {
+  if (!ticking) {
+    ticking = true;
+    setInterval(() => setClock(Date.now()), 30_000);
+  }
+  return clock();
+}
 
 function ProjectGroup(props: {
   project: DesktopProject;
@@ -292,7 +305,7 @@ function ProjectGroup(props: {
               run: () =>
                 void app.run(async () => {
                   if (
-                    await confirm(
+                    !(await confirm(
                       t("Archive all chats in {name}?", {
                         name: props.project.label,
                       }),
@@ -300,9 +313,15 @@ function ProjectGroup(props: {
                         "Archived chats leave the sidebar. Search still finds them, and each one can be restored.",
                       ),
                       { submit: t("Archive chats") },
-                    )
+                    ))
                   )
-                    await app.archiveProjectChats(props.project.id);
+                    return;
+                  const count = await app.archiveProjectChats(props.project.id);
+                  app.notify(
+                    count === 1
+                      ? t("Archived 1 chat")
+                      : t("Archived {count} chats", { count }),
+                  );
                 }),
             },
             {
@@ -720,7 +739,16 @@ export function SessionList(props: {
                     )}
                   </Show>
                 </span>
-                <Show when={row().waiting}>
+                {/* What the chat waits for, or else how long ago it was
+                    last active; the title stays the row's whole name. */}
+                <Show
+                  when={row().waiting}
+                  fallback={
+                    <span class="session-age" aria-hidden="true">
+                      {relativeAge(row().thread.updatedAt, now(), language(), t("now"))}
+                    </span>
+                  }
+                >
                   <span class="session-waiting" aria-hidden="true">
                     {t(row().waiting)}
                   </span>
@@ -948,7 +976,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                     class="session-waiting"
                                     aria-hidden="true"
                                   >
-                                    {row().waiting}
+                                    {t(row().waiting)}
                                   </span>
                                 </Show>
                               </button>

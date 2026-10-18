@@ -546,6 +546,15 @@ html[data-order-dragging] * {
 .session-row:focus-within .session-waiting {
   display: none;
 }
+/* When the chat was last active: quiet, narrow, and in figures that keep
+   their width as they count up. */
+.session-age {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 /* Row-trailing controls share one column with the project and checkout menus. */
 .session-row > .icon-button {
   width: 26px;
