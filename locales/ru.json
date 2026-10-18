@@ -2451,5 +2451,8 @@
   "Add screenshots": "Добавить снимки экрана",
   "Choose your screenshots folder": "Выберите папку со снимками экрана",
   "The screenshots changed. Open Screenshots again.": "Снимки экрана изменились. Откройте «Снимки экрана» снова.",
-  "Choose up to 20 screenshots from the list.": "Выберите из списка не больше 20 снимков экрана."
+  "Choose up to 20 screenshots from the list.": "Выберите из списка не больше 20 снимков экрана.",
+  "Show your newest screenshots?": "Показать последние снимки экрана?",
+  "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.": "Haarness покажет превью последних изображений из папки снимков экрана, чтобы вы могли выбрать, что прикрепить.",
+  "Show screenshots": "Показать снимки экрана"
 }

@@ -2451,5 +2451,8 @@
   "Add screenshots": "เพิ่มภาพหน้าจอ",
   "Choose your screenshots folder": "เลือกโฟลเดอร์ภาพหน้าจอของคุณ",
   "The screenshots changed. Open Screenshots again.": "ภาพหน้าจอเปลี่ยนไปแล้ว เปิด ภาพหน้าจอ อีกครั้ง",
-  "Choose up to 20 screenshots from the list.": "เลือกภาพหน้าจอจากรายการได้สูงสุด 20 ภาพ"
+  "Choose up to 20 screenshots from the list.": "เลือกภาพหน้าจอจากรายการได้สูงสุด 20 ภาพ",
+  "Show your newest screenshots?": "แสดงภาพหน้าจอล่าสุดของคุณไหม",
+  "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.": "Haarness จะแสดงตัวอย่างรูปภาพล่าสุดในโฟลเดอร์ภาพหน้าจอของคุณ เพื่อให้คุณเลือกรูปที่จะแนบ",
+  "Show screenshots": "แสดงภาพหน้าจอ"
 }

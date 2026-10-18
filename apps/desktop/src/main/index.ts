@@ -7,7 +7,7 @@ import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrom
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
-import { createScreenshotListings, displayFolder } from "../screenshots";
+import { activatingInput, createActivations, createScreenshotListings, displayFolder } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
@@ -135,6 +135,8 @@ function socketOpen(socket: PtyConnection) {
 const projectTransaction = createProjectQueue();
 /** Each window's last screenshot listing; the renderer picks by place in it. */
 const screenshotListings = createScreenshotListings<{ path: string; identity: FileIdentity }>();
+/** Each window's last click or key press: the screenshots folder is listed right after one. */
+const activations = createActivations();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
   launchVoice(
@@ -1134,7 +1136,26 @@ function installHandlers() {
         data().screenshotFolder = folder;
         await persist();
       }
-    } else folder = await defaultScreenshotFolder(data().screenshotFolder);
+    } else {
+      // The person opens the dialog from the Attach menu: a click or key press
+      // in this window just before, which the page cannot fake. Without one
+      // (VoiceOver's VO-Space and Voice Control press a control without
+      // either) Desktop asks first, so a page never lists the folder unseen.
+      if (!activations.take(win.id)) {
+        const choice = await dialog.showMessageBox(win, {
+          type: "question",
+          message: say("Show your newest screenshots?"),
+          detail: say(
+            "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.",
+          ),
+          buttons: [say("Show screenshots"), say("Cancel")],
+          defaultId: 0,
+          cancelId: 1,
+        });
+        if (choice.response !== 0) return { canceled: true };
+      }
+      folder = await defaultScreenshotFolder(data().screenshotFolder);
+    }
     if (!folder) {
       screenshotListings.forget(win.id);
       return { needsFolder: true };
@@ -1160,6 +1181,8 @@ function installHandlers() {
       // Only files that are still the ones listed: a name swapped for a link
       // or another file since is refused, never followed.
       const values = await readListedScreenshots(picks, attachments);
+      // A listing attaches once: another pick needs the dialog opened again.
+      screenshotListings.forget(win.id);
       return values.map((data, index) => ({ data, name: basename(picks[index].path) }));
     } catch (error) {
       throw new Error(say(error instanceof Error ? error.message : String(error)));
@@ -1389,6 +1412,9 @@ function createWindow() {
   win.webContents.on("will-navigate", (event, url) => {
     if (!source(url)) event.preventDefault();
   });
+  win.webContents.on("input-event", (_event, input) => {
+    if (activatingInput(input)) activations.note(win.id);
+  });
   win.webContents.session.setPermissionRequestHandler(
     (_web, permission, callback) =>
       callback(permission === "clipboard-sanitized-write"),
@@ -1442,6 +1468,7 @@ function createWindow() {
   });
   win.on("closed", () => {
     screenshotListings.forget(win.id);
+    activations.forget(win.id);
     resumeShortcut(win.id);
     voice.stop(win.id);
     windows.delete(win);

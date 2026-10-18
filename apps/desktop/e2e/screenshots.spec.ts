@@ -14,9 +14,15 @@ let temporary: string, workspace: string, shots: string, other: string, shapes: 
 let binary: string, env: Record<string, string>;
 const errors: string[] = [];
 
-type Calls = { folders: string[] };
+/** Answers for the native dialogs: folders to choose, and the buttons a question gets. */
+type Calls = { folders: string[]; questions: string[]; answers: number[] };
 
 const dialog = () => page.getByRole("dialog", { name: "Screenshots" });
+const calls = () => app.evaluate(() => (globalThis as unknown as { calls: Calls }).calls);
+const answer = (response: number) =>
+  app.evaluate((_, response) => (globalThis as unknown as { calls: Calls }).calls.answers.push(response), response);
+/** A click that does nothing, just before a call the person would make with one. */
+const click = () => page.getByRole("textbox", { name: "Message", exact: true }).click();
 const tile = (name: string) => dialog().getByRole("button", { name, exact: true });
 const chips = () => page.locator(".composer-attachments .attachment-name");
 
@@ -81,13 +87,19 @@ test.beforeAll(async () => {
   huge.writeUInt32BE(30000, 20);
   huge.set([8, 6, 0, 0, 0], 24);
   await writeFile(join(shapes, "Huge.png"), huge);
-  // The folder dialog answers from a queue: the project first, then folders for the picker.
+  // The folder dialog answers from a queue: the project first, then folders for
+  // the picker. Questions are recorded and answered from their own queue (Cancel when empty).
   await app.evaluate(({ dialog: native }, folders) => {
-    const calls: Calls = { folders };
+    const calls: Calls = { folders, questions: [], answers: [] };
     (globalThis as unknown as { calls: Calls }).calls = calls;
     native.showOpenDialog = async () => {
       const next = calls.folders.shift();
       return next ? { canceled: false, filePaths: [next] } : { canceled: true, filePaths: [] };
+    };
+    native.showMessageBox = async (...args: unknown[]) => {
+      const options = (args.length > 1 ? args[1] : args[0]) as { message: string };
+      calls.questions.push(options.message);
+      return { response: calls.answers.shift() ?? 1, checkboxChecked: false };
     };
   }, [workspace]);
   await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
@@ -172,20 +184,39 @@ test("another folder can be picked from once, and Escape adds nothing", async ()
   expect(errors).toEqual([]);
 });
 
-test("a pick names only places in the window's latest listing", async () => {
-  // The renderer gets names, times and thumbnails, never paths.
-  const listing = await page.evaluate(() => window.haarness.screenshots({}));
-  expect(JSON.stringify(listing)).not.toContain("Screenshots folder/");
-  expect(Object.keys((listing as { items: object[] }).items[0]).sort()).toEqual(["modified", "name", "thumbnail"]);
-  // A dialog left open over a newer listing is refused rather than attaching other files.
+test("the folder is listed right after a click or key press, or when the person agrees, and a pick names only places in that listing", async () => {
+  // Opening the dialog from the menu asks nothing, and uses up that click.
   await page.getByRole("button", { name: "Attach", exact: true }).click();
   await page.getByRole("menuitem", { name: "Attach screenshots", exact: true }).click();
+  await expect(tile("Screenshot 2.png")).toBeVisible();
+  expect((await calls()).questions).toEqual([]);
+  // A page asking without one gets a question first, and nothing when it is declined.
+  expect(await page.evaluate(() => window.haarness.screenshots({}))).toEqual({ canceled: true });
+  expect((await calls()).questions).toEqual(["Show your newest screenshots?"]);
+  // Agreed to, the renderer gets names, times and thumbnails, never paths.
+  await answer(0);
+  const listing = await page.evaluate(() => window.haarness.screenshots({}));
+  expect((await calls()).questions).toHaveLength(2);
+  expect(JSON.stringify(listing)).not.toContain("Screenshots folder/");
+  expect(Object.keys((listing as { items: object[] }).items[0]).sort()).toEqual(["modified", "name", "thumbnail"]);
+  // The dialog left open over that newer listing is refused rather than attaching other files.
   await tile("Screenshot 2.png").click();
-  await page.evaluate(() => window.haarness.screenshots({}));
   await dialog().getByRole("button", { name: "Add 1 screenshot", exact: true }).click();
   await expect(dialog().getByRole("alert")).toHaveText("The screenshots changed. Open Screenshots again.");
   await dialog().getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(chips()).toHaveCount(3);
+  // That click lets a page list once, without a question.
+  expect(await page.evaluate(() => window.haarness.screenshots({}))).toHaveProperty("listing");
+  expect((await calls()).questions).toHaveLength(2);
+  // Opened without a click Desktop can see (as VoiceOver and Voice Control
+  // press), the dialog asks, and declining closes it.
+  await page.evaluate(() => {
+    document.querySelector<HTMLButtonElement>('.composer-leading button[aria-label="Attach"]')!.click();
+    document.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="Attach screenshots"]')!.click();
+  });
+  await expect.poll(async () => (await calls()).questions.length).toBe(3);
+  await expect(dialog()).toHaveCount(0);
+  await click();
   const result = await page.evaluate(async () => {
     const listing = (await window.haarness.screenshots({})) as { listing: string };
     const outcome = async (run: () => Promise<unknown>) =>
@@ -197,8 +228,12 @@ test("a pick names only places in the window's latest listing", async () => {
       stale: await outcome(() => window.haarness.screenshotAttach("not-a-listing", [0])),
       outside: await outcome(() => window.haarness.screenshotAttach(listing.listing, [7])),
       picked: await outcome(() => window.haarness.screenshotAttach(listing.listing, [2, 0])),
+      again: await outcome(() => window.haarness.screenshotAttach(listing.listing, [0])),
     };
   });
+  // The click just before listed without a question; a listing attaches once.
+  expect((await calls()).questions).toHaveLength(3);
+  expect(result.again).toEqual({ error: "The screenshots changed. Open Screenshots again." });
   expect(result.stale).toEqual({ error: "The screenshots changed. Open Screenshots again." });
   expect(result.outside).toEqual({ error: "Choose up to 20 screenshots from the list." });
   const picked = (result.picked as { value: { name: string; data: string }[] }).value;
@@ -208,6 +243,7 @@ test("a pick names only places in the window's latest listing", async () => {
   // A screenshot swapped for a link to another file since it was listed is refused, not followed.
   const path = join(shots, "Screenshot 1.png");
   const original = await readFile(path);
+  await click();
   const latest = await page.evaluate(async () => ((await window.haarness.screenshots({})) as { listing: string }).listing);
   await rm(path);
   await symlink(join(other, "Elsewhere.png"), path);

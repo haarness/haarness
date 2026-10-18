@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { listScreenshots, readListedScreenshots } from "../src/main/screenshot-files";
 import {
   SCREENSHOT_LIMIT,
+  activatingInput,
+  createActivations,
   createScreenshotListings,
   displayFolder,
   imageName,
@@ -123,6 +125,44 @@ test("a screenshot swapped for a link or another file after it was listed is ref
   } finally {
     await rm(folder, { recursive: true, force: true });
   }
+});
+
+test("the folder is listed once per click or key press, and only shortly after it", () => {
+  for (const input of [
+    { type: "mouseDown" },
+    { type: "keyDown", key: "Enter" },
+    { type: "rawKeyDown", key: " " },
+    { type: "touchEnd" },
+    { type: "gestureTap" },
+  ])
+    assert.ok(activatingInput(input), JSON.stringify(input));
+  for (const input of [
+    { type: "mouseMove" },
+    { type: "mouseUp" },
+    { type: "mouseWheel" },
+    { type: "keyDown", key: "a" },
+    { type: "keyDown", key: "Escape" },
+    { type: "keyUp", key: "Enter" },
+    { type: "char", key: "Enter" },
+  ])
+    assert.ok(!activatingInput(input), JSON.stringify(input));
+  let now = 1000;
+  const activations = createActivations(5000, () => now);
+  // Nothing yet: a page asking on its own gets nothing.
+  assert.equal(activations.take(1), false);
+  activations.note(1);
+  now += 4000;
+  // Another window's click lists nothing here.
+  assert.equal(activations.take(2), false);
+  assert.equal(activations.take(1), true);
+  // Used up.
+  assert.equal(activations.take(1), false);
+  activations.note(1);
+  now += 5001;
+  assert.equal(activations.take(1), false);
+  activations.note(1);
+  activations.forget(1);
+  assert.equal(activations.take(1), false);
 });
 
 test("picked screenshots are numbered in the order they were clicked", () => {
