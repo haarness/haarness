@@ -254,6 +254,8 @@ Every discovered workflow is also a first-class slash command: a definition whos
 
 Drop a local PDF, image, audio file or short video into the terminal to attach it. Attachments are capped at 20 MiB total for inline provider requests, and Backspace removes the latest chip.
 
+`/usage` (**Alt+U**) lists the session's tokens, cost and context, and, once a request has finished cleanly, `Last request: first token 1.2s · 85 tok/s`: the wait from sending the newest timed request to its first streamed content, and its output tokens per second while they streamed (left out under half a second of streaming). The sidebar's usage section shows the same figure under the token counts. The server records both times on each request's usage item (`first_token_ms`, `stream_ms`), read off a monotonic clock; stopped and failed requests record neither.
+
 Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. See [TUI message browser](TUI-MESSAGES.md).
 
 See [Side questions with `/btw`](SIDE-QUESTIONS.md) for isolated questions that leave the main transcript unchanged.

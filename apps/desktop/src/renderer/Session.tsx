@@ -69,12 +69,19 @@ import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
+import {
+  keyPlace,
+  movesPrompts,
+  overlayOpen,
+  promptTarget,
+  type PromptMove,
+} from "./keyboard-nav";
 import { MenuButton, type MenuAction } from "./MenuButton";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
-import { matchesShortcut, shortcutText } from "./search";
+import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
 import {
   describeTool,
   errorRecovery,
@@ -1017,6 +1024,73 @@ export function Session() {
     setReadingPrompt(prompt.id);
     virtual.scrollToIndex(prompt.index, { align: "start" });
   }
+  /** The prompt keys: a step from the prompt being read, either end, or
+   * back to following the newest output. False when there is nowhere to go. */
+  function movePrompt(move: PromptMove) {
+    const prompts = outline();
+    const reading = prompts.findIndex((prompt) => prompt.id === readingPrompt());
+    const target = promptTarget(move, prompts.length, reading, follow());
+    if (target === undefined) return false;
+    if (target === "latest") {
+      setFollow(true);
+      followLatest();
+    } else jumpToPrompt(target);
+    return true;
+  }
+  onMount(() => {
+    const keys = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || state.panel !== "chat")
+        return;
+      const { promptPrev, promptNext, promptFirst, promptLast } =
+        state.preferences.shortcuts;
+      const move = (
+        [
+          ["previous", promptPrev],
+          ["next", promptNext],
+          ["first", promptFirst],
+          ["last", promptLast],
+        ] as const
+      ).find(
+        ([, keys]) => keys && matchesShortcut(event, keys, state.platform),
+      )?.[0];
+      if (
+        !move ||
+        !movesPrompts(
+          keyPlace(document.activeElement, draft(), overlayOpen(document)),
+        )
+      )
+        return;
+      if (movePrompt(move)) event.preventDefault();
+    };
+    window.addEventListener("keydown", keys);
+    onCleanup(() => window.removeEventListener("keydown", keys));
+  });
+  app.registerSearch("prompts", () =>
+    outline().length
+      ? (
+          [
+            ["prompt-previous", "Previous prompt", "promptPrev", "move-up", "previous"],
+            ["prompt-next", "Next prompt", "promptNext", "move-down", "next"],
+            ["prompt-first", "First prompt", "promptFirst", "up", "first"],
+            ["prompt-latest", "Jump to latest", "promptLast", "jump", "last"],
+          ] as const
+        ).map(([key, name, shortcut, icon, move]) => ({
+          key,
+          group: "Chat actions",
+          name: t(name),
+          keywords: "message navigate scroll conversation",
+          icon,
+          hint: shortcutLabel(
+            state.preferences.shortcuts[shortcut] ?? "",
+            state.platform,
+          ),
+          action: () => {
+            set("panel", "chat");
+            movePrompt(move);
+          },
+        }))
+      : [],
+  );
   // The outline's lane sits over the transcript, so wheel input it does not
   // use scrolls the conversation here, as the user's own gesture.
   function outlineWheel(event: WheelEvent) {
