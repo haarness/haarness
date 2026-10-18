@@ -1417,7 +1417,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 let delta=&event["choices"][0]["delta"];
                 if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){
-                    if native_json { json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); }
+                    if native_json {
+                        if json_output.is_empty() { yield ProviderEvent::ContentStarted; }
+                        json_output.push_str(text);
+                    } else { yield ProviderEvent::TextDelta(text.into()); }
                 }
                 if let Some(parts) = delta["content"].as_array() {
                     for part in parts {
@@ -1466,7 +1469,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if let Some(deltas)=delta["tool_calls"].as_array(){
                     for tool in deltas {
                         let index = usize::try_from(tool["index"].as_u64().unwrap_or(0)).unwrap_or(0);
-                        if calls.len() <= index { calls.resize(index + 1, (String::new(), String::new(), String::new())); }
+                        // A call's arguments are held until the stream ends;
+                        // the call starts with its first fragment.
+                        if calls.len() <= index {
+                            calls.resize(index + 1, (String::new(), String::new(), String::new()));
+                            yield ProviderEvent::ContentStarted;
+                        }
                         if let Some(id)=tool["id"].as_str(){calls[index].0 = id.into();}
                         if let Some(name)=tool["function"]["name"].as_str(){calls[index].1 = name.into();}
                         if let Some(args)=tool["function"]["arguments"].as_str(){calls[index].2.push_str(args);}
@@ -2448,6 +2456,19 @@ mod tests {
                 ("call_b".into(), "list".into(), json!({"path": "."})),
             ]
         );
+        // Each call starts with its first fragment, long before the calls
+        // are emitted at the end of the stream.
+        let started: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| matches!(event, ProviderEvent::ContentStarted))
+            .map(|(index, _)| index)
+            .collect();
+        let first_call = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ToolCall { .. }));
+        assert_eq!(started.len(), 2, "{events:?}");
+        assert!(Some(started[1]) < first_call, "{events:?}");
         let reasoning: Vec<_> = events
             .iter()
             .filter_map(|event| match event {

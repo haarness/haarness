@@ -2636,6 +2636,7 @@ fn usage_totals_reach_the_composer_label() {
                 estimated: false,
                 first_token_ms: None,
                 stream_ms: None,
+                stream_tokens: None,
             },
         ),
         message_item(
@@ -2651,6 +2652,7 @@ fn usage_totals_reach_the_composer_label() {
                 estimated: false,
                 first_token_ms: None,
                 stream_ms: None,
+                stream_tokens: None,
             },
         ),
     ];
@@ -2689,24 +2691,27 @@ fn usage_totals_reach_the_composer_label() {
 #[test]
 fn the_newest_timed_request_reaches_the_sidebar() {
     let thread = fixture_thread();
-    let usage =
-        |first_token_ms: Option<u64>, stream_ms: Option<u64>, output_tokens: u64| ItemData::Usage {
-            prompt: None,
-            input_tokens: 1_000,
-            output_tokens,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            cost_usd: None,
-            estimated: false,
-            first_token_ms,
-            stream_ms,
-        };
+    // Each request: when it started answering, how long it streamed, and
+    // how many tokens streamed in that time.
+    let usage = |timing: Option<(u64, u64, u64)>| ItemData::Usage {
+        prompt: None,
+        input_tokens: 1_000,
+        // Hidden reasoning counts here but never streamed.
+        output_tokens: 4_000,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: None,
+        estimated: false,
+        first_token_ms: timing.map(|timing| timing.0),
+        stream_ms: timing.map(|timing| timing.1),
+        stream_tokens: timing.map(|timing| timing.2),
+    };
     let items = vec![
-        message_item(1, &thread, usage(Some(900), Some(4_000), 100)),
+        message_item(1, &thread, usage(Some((900, 4_000, 100)))),
         // A request recorded before timing existed, or a stopped one, is
         // passed over for the newest one that was timed.
-        message_item(2, &thread, usage(Some(1_240), Some(2_000), 170)),
-        message_item(3, &thread, usage(None, None, 30)),
+        message_item(2, &thread, usage(Some((1_240, 2_000, 170)))),
+        message_item(3, &thread, usage(None)),
     ];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
     assert_eq!(
@@ -2725,7 +2730,7 @@ fn the_newest_timed_request_reaches_the_sidebar() {
         "{sidebar:?}"
     );
     // Under half a second of streaming there is no honest rate.
-    app.items = vec![message_item(1, &thread, usage(Some(400), Some(300), 90))];
+    app.items = vec![message_item(1, &thread, usage(Some((400, 300, 90))))];
     assert_eq!(
         app.request_pace_label().as_deref(),
         Some("first token 0.4s")

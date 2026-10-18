@@ -11228,7 +11228,7 @@ test("conversation context inspector shows measured usage, retained estimates an
     {type:"compaction",summary:"s".repeat(40),files_touched:[],outstanding:[]},
     {type:"user_message",text:"next"},
     {type:"assistant_message",text:"reply123"},
-    {type:"usage",input_tokens:500,output_tokens:100,cache_read_tokens:200,cache_write_tokens:20,cost_usd:null,first_token_ms:1240,stream_ms:2000},
+    {type:"usage",input_tokens:500,output_tokens:100,cache_read_tokens:200,cache_write_tokens:20,cost_usd:null,first_token_ms:1240,stream_ms:2000,stream_tokens:80},
   ];
   archive.threads[0].items = data.map((data,index) => ({id:crypto.randomUUID(),threadId:id,turnId:null,createdAt:now,sequence:index+1,data})) as (typeof archive.threads)[number]["items"];
   await client.importSessionArchive({archive});
@@ -11247,9 +11247,10 @@ test("conversation context inspector shows measured usage, retained estimates an
   await expect(metric(totals,"Cache write tokens")).toHaveText("100");
   await expect(metric(totals,"Known cost")).toHaveText("$0.0250");
   await expect(metric(latest,"Input")).toHaveText("500");
-  // Its pace: 1.24 s to the first content, 100 tokens over 2 s of streaming.
+  // Its pace: 1.24 s to the first content, then 80 streamed tokens over 2 s;
+  // the other 20 output tokens never streamed.
   await expect(metric(latest,"First token")).toHaveText("1.2s");
-  await expect(metric(latest,"Output speed")).toHaveText("50 tokens/s");
+  await expect(metric(latest,"Output speed")).toHaveText("40 tokens/s");
   await expect(latest).toContainText("at least half a second");
   // The last report after the compaction (500 in + 100 out), nothing appended since.
   const inUse = panel.getByRole("region", {name:"Context in use",exact:true});

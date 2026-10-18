@@ -2025,20 +2025,23 @@ impl App {
     }
     /// The newest timed request of this chat: how long it took to start
     /// answering and, when its output streamed for at least half a second,
-    /// how fast that output came in tokens per second. A shorter stream is
-    /// mostly one burst, and dividing by it reads as an absurd rate.
+    /// how fast that output came: the tokens that streamed per second. A
+    /// shorter stream is mostly one burst, and dividing by it reads as an
+    /// absurd rate.
     pub fn request_pace(&self) -> Option<(u64, Option<f64>)> {
         self.items.iter().rev().find_map(|item| match &item.data {
             ItemData::Usage {
                 output_tokens,
                 first_token_ms: Some(first_token_ms),
                 stream_ms,
+                stream_tokens,
                 ..
             } if item.thread_id == self.thread.id => {
+                let streamed = stream_tokens.unwrap_or(*output_tokens);
                 #[allow(clippy::cast_precision_loss)] // display-only rate
                 let speed = stream_ms
-                    .filter(|stream_ms| *stream_ms >= 500 && *output_tokens > 0)
-                    .map(|stream_ms| *output_tokens as f64 / (stream_ms as f64 / 1000.0));
+                    .filter(|stream_ms| *stream_ms >= 500 && streamed > 0)
+                    .map(|stream_ms| streamed as f64 / (stream_ms as f64 / 1000.0));
                 Some((*first_token_ms, speed))
             }
             _ => None,
