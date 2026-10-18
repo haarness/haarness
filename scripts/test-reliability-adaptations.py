@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -237,11 +238,19 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
         unicode_session = attach(unicode_thread, 60)
         run(['tmux', 'send-keys', '-l', '-t', unicode_session, '/sessions'])
         key(unicode_session, 'Enter')
-        until(lambda: '👩‍💻' in capture(unicode_session) and '…' in capture(unicode_session), 'Unicode session picker did not render a truncated label')
+        # tmux before 3.4 (Ubuntu 22.04 has 3.2a) does not join emoji drawn a
+        # cell at a time: the next grapheme overwrites the laptop of 👩‍💻.
+        version = run(['tmux', '-V']).split()[-1]
+        number = re.search(r'(\d+)\.(\d+)', version)
+        joins = not number or (int(number[1]), int(number[2])) >= (3, 4)
+        until(lambda: ('👩‍💻' in capture(unicode_session) or not joins) and '…' in capture(unicode_session), 'Unicode session picker did not render a truncated label')
         rendered = capture(unicode_session)
         assert '\ufffd' not in rendered
-        assert '👩' not in rendered.replace('👩‍💻', ''), 'truncation split a joined emoji'
-        proof('unicode-narrow-terminal', unicode_session)
+        if joins:
+            assert '👩' not in rendered.replace('👩‍💻', ''), 'truncation split a joined emoji'
+            proof('unicode-narrow-terminal', unicode_session)
+        else:
+            print(f'SKIP: unicode-narrow-terminal joined emoji (tmux {version} draws them apart)')
         (OUT / 'results.json').write_text(json.dumps(checks, indent=2))
     finally:
         for session in sessions:
