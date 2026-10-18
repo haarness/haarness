@@ -55,6 +55,44 @@ export function forgetImages() {
   rememberedBytes = 0;
 }
 
+/**
+ * Placeholders and their buttons made here. A reply's own markup is never
+ * one, whatever classes or attributes it copies, so only these load images.
+ */
+const made = new WeakSet<Node>();
+export function madeHere(node: Node | null | undefined): boolean {
+  return !!node && made.has(node);
+}
+
+/**
+ * What the sanitizer keeps of an attribute a reply wrote: never the
+ * `data-remote-*` attributes or `remote-image*` classes placeholders use, so
+ * markup cannot dress as one. Undefined drops the attribute.
+ */
+export function replyAttribute(name: string, value: string): string | undefined {
+  if (/^data-remote-/i.test(name)) return undefined;
+  if (name.toLowerCase() !== "class") return value;
+  const tokens = value.split(/\s+/).filter(Boolean);
+  const kept = tokens.filter((token) => !/^remote-image/i.test(token));
+  if (kept.length === tokens.length) return value;
+  return kept.length ? kept.join(" ") : undefined;
+}
+
+/**
+ * The addresses one click on `host`'s button loads: each placeholder of that
+ * host whose address really is on that host, so the host the button names is
+ * the only one asked.
+ */
+export function loadableSources(placeholders: { host?: string; src?: string }[], host: string): string[] {
+  return [
+    ...new Set(
+      placeholders
+        .filter((placeholder) => placeholder.host === host && remoteImageHost(placeholder.src) === host)
+        .map((placeholder) => placeholder.src!),
+    ),
+  ];
+}
+
 export interface RemoteImageLabels {
   /** The button: "Load image from {host}". */
   load: (host: string) => string;
@@ -94,6 +132,8 @@ function placeholder(document: Document, src: string, host: string, alt: string,
   button.title = src;
   button.textContent = labels.load(host);
   holder.append(text, button);
+  made.add(holder);
+  made.add(button);
   return holder;
 }
 

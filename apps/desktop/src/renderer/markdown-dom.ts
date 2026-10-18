@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
-import { holdRemoteImages, type RemoteImageLabels } from "./remote-images";
+import { holdRemoteImages, madeHere, replyAttribute, type RemoteImageLabels } from "./remote-images";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -21,6 +21,14 @@ const purifier = DOMPurify(window);
 // the user's sign-in. Each is read as the URL parser reads it, which drops
 // tabs and newlines anywhere, so `/<TAB>/host/x.png` names one too.
 purifier.addHook("uponSanitizeAttribute", (node, data) => {
+  // Image placeholders are the app's own (remote-images.ts): a reply keeps
+  // none of their classes or data attributes, so it cannot forge one.
+  const kept = replyAttribute(data.attrName, data.attrValue);
+  if (kept === undefined) {
+    data.keepAttr = false;
+    return;
+  }
+  data.attrValue = kept;
   if (!URL_ATTRIBUTES.has(data.attrName)) return;
   if (node.nodeName === "A" && data.attrName === "href") {
     const value = parsedAddress(data.attrValue);
@@ -53,8 +61,11 @@ function nodes(parent: Node, previous: Node[], next: Node[], end: Node | null = 
     const target = next[index];
     const current = previous[index];
     if (!current) { parent.insertBefore(target, end); continue; }
+    // An image placeholder is replaced, never patched from or into a reply's
+    // own element, so only placeholders the app made carry its button.
     if (current.nodeType !== target.nodeType || current.nodeName !== target.nodeName ||
-      (current instanceof Element && target instanceof Element && current.namespaceURI !== target.namespaceURI)) {
+      (current instanceof Element && target instanceof Element && current.namespaceURI !== target.namespaceURI) ||
+      madeHere(current) !== madeHere(target)) {
       parent.replaceChild(target, current);
       continue;
     }

@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fetchRemoteImage, imageAddress, imageType, privateAddress } from "../src/main/remote-image";
-import { forgetImages, loadedImage, rememberImage, remoteImageHost } from "../src/renderer/remote-images";
+import {
+  forgetImages,
+  holdRemoteImages,
+  loadableSources,
+  loadedImage,
+  madeHere,
+  rememberImage,
+  remoteImageHost,
+  replyAttribute,
+} from "../src/renderer/remote-images";
 
 test("an image from another host is named by its host; anything that stays in the page is not", () => {
   assert.equal(remoteImageHost("https://evil.example/pixel.png?d=secret"), "evil.example");
@@ -27,6 +36,86 @@ test("loaded images are kept per chat, newest first, within a byte budget", () =
   assert.equal(loadedImage("chat-a", "https://x/3.png"), undefined);
   forgetImages();
   assert.equal(loadedImage("chat-a", "https://x/2.png"), undefined);
+});
+
+/** Just enough of the DOM for holdRemoteImages, which these tests have no browser for. */
+class Fake {
+  className = "";
+  dataset: Record<string, string> = {};
+  children: Fake[] = [];
+  textContent = "";
+  type = "";
+  title = "";
+  alt = "";
+  src = "";
+  replacement?: Fake;
+  constructor(
+    readonly ownerDocument: { createElement: (tag: string) => Fake },
+    readonly tag: string,
+    readonly attributes: Record<string, string> = {},
+  ) {}
+  getAttribute(name: string) {
+    return this.attributes[name] ?? null;
+  }
+  append(...nodes: Fake[]) {
+    this.children.push(...nodes);
+  }
+  replaceWith(node: Fake) {
+    this.replacement = node;
+  }
+}
+const fakeDocument = { createElement: (tag: string): Fake => new Fake(fakeDocument, tag) };
+const labels = { load: (host: string) => `Load image from ${host}`, unnamed: "Image" };
+
+test("only placeholders the app made count as placeholders, whatever a copy looks like", () => {
+  const image = new Fake(fakeDocument, "img", { src: "https://github.com/a.png", alt: "Logo" });
+  holdRemoteImages({ querySelectorAll: () => [image] } as unknown as ParentNode, () => undefined, labels);
+  const holder = image.replacement!;
+  const button = holder.children[1];
+  assert.equal(holder.className, "remote-image");
+  assert.equal(holder.dataset.remoteHost, "github.com");
+  assert.equal(button.textContent, "Load image from github.com");
+  assert.equal(madeHere(holder as unknown as Node), true);
+  assert.equal(madeHere(button as unknown as Node), true);
+  // The same classes and data written by anything else are not one.
+  const forged = new Fake(fakeDocument, "span");
+  forged.className = "remote-image";
+  Object.assign(forged.dataset, { remoteHost: "github.com", remoteSrc: "https://evil.example/?d=SECRET" });
+  assert.equal(madeHere(forged as unknown as Node), false);
+  assert.equal(madeHere(holder.children[0] as unknown as Node), false);
+  assert.equal(madeHere(undefined), false);
+});
+
+test("a click loads only addresses that are on the host its button names", () => {
+  assert.deepEqual(
+    loadableSources(
+      [
+        { host: "github.com", src: "https://github.com/a.png" },
+        // A placeholder that says github.com but points elsewhere is never fetched.
+        { host: "github.com", src: "https://evil.example/?d=SECRET" },
+        { host: "github.com", src: "https://github.com.evil.example/x.png" },
+        { host: "github.com", src: "https://github.com/a.png" },
+        { host: "github.com", src: "https://github.com/b.png" },
+        { host: "images.test", src: "https://images.test/c.png" },
+        { host: "github.com" },
+        { src: "https://github.com/d.png" },
+      ],
+      "github.com",
+    ),
+    ["https://github.com/a.png", "https://github.com/b.png"],
+  );
+});
+
+test("a reply keeps none of the attributes and classes placeholders use", () => {
+  assert.equal(replyAttribute("data-remote-src", "https://evil.example/"), undefined);
+  assert.equal(replyAttribute("data-remote-host", "github.com"), undefined);
+  assert.equal(replyAttribute("DATA-REMOTE-ALT", "x"), undefined);
+  assert.equal(replyAttribute("class", "remote-image"), undefined);
+  assert.equal(replyAttribute("class", "note  remote-image-load big REMOTE-IMAGE-alt"), "note big");
+  // Anything else stays as written.
+  assert.equal(replyAttribute("class", "remoteimage  wide"), "remoteimage  wide");
+  assert.equal(replyAttribute("data-note", "kept"), "kept");
+  assert.equal(replyAttribute("title", "remote-image"), "remote-image");
 });
 
 test("only http and https addresses without credentials are fetched", () => {
