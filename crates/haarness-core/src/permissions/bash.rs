@@ -177,6 +177,9 @@ struct Stdin<'a, 't> {
     parent: Option<tree_sitter::Node<'t>>,
     /// Each pipeline stage's stage before it, by node id.
     previous: &'a HashMap<usize, tree_sitter::Node<'t>>,
+    /// The parent of each statement with redirects, by node id: a shell
+    /// with a redirect (`… | sh 2>&1`) is a pipeline stage through it.
+    wrappers: &'a HashMap<usize, tree_sitter::Node<'t>>,
 }
 
 /// What a command reads on standard input, as far as the command line says.
@@ -247,10 +250,16 @@ impl Reader<'_> {
         let mut command_nodes = Vec::new();
         let mut redirects = Vec::new();
         let mut previous = HashMap::new();
+        let mut wrappers = HashMap::new();
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
+            }
+            if node.kind() == "redirected_statement"
+                && let Some(parent) = parent
+            {
+                wrappers.insert(node.id(), parent);
             }
             if node.kind() == "file_redirect" {
                 redirects.push(node);
@@ -325,6 +334,7 @@ impl Reader<'_> {
                 node,
                 parent,
                 previous: &previous,
+                wrappers: &wrappers,
             };
             self.unwrap(&words, Some(stdin), command, depth);
         }
@@ -963,7 +973,18 @@ fn stdin_script(stdin: Stdin<'_, '_>, source: &str) -> Input {
         return Input::Text(text);
     }
     match stdin.parent {
-        Some(pipeline) if pipeline.kind() == "pipeline" => piped_input(stdin, pipeline, source),
+        Some(pipeline) if pipeline.kind() == "pipeline" => {
+            piped_input(stdin, stdin.node, pipeline, source)
+        }
+        // `… | sh 2>&1`: the stage is the statement with the redirect.
+        Some(wrapper) if wrapper.kind() == "redirected_statement" => {
+            match stdin.wrappers.get(&wrapper.id()) {
+                Some(&pipeline) if pipeline.kind() == "pipeline" => {
+                    piped_input(stdin, wrapper, pipeline, source)
+                }
+                _ => Input::Unknown,
+            }
+        }
         _ => Input::Unknown,
     }
 }
@@ -994,8 +1015,13 @@ fn here_input(
 
 /// What the stages before the command in `pipeline` write into it, walked
 /// back one stage at a time past `cat` stages that pass their input on.
-fn piped_input(stdin: Stdin<'_, '_>, pipeline: tree_sitter::Node<'_>, source: &str) -> Input {
-    let mut stage = stdin.node;
+fn piped_input<'t>(
+    stdin: Stdin<'_, 't>,
+    stage: tree_sitter::Node<'t>,
+    pipeline: tree_sitter::Node<'_>,
+    source: &str,
+) -> Input {
+    let mut stage = stage;
     for _ in 0..=MAX_HOPS {
         let Some(&before) = stdin.previous.get(&stage.id()) else {
             // `cat <<EOF | sh`: the pipe is part of the here-document's
@@ -2079,6 +2105,8 @@ mod readings {
             "echo 'rm x' | sh",
             "printf 'rm x\\n' | bash",
             "cat <<EOF | sh\nrm x\nEOF",
+            "echo 'rm x' | sh 2>&1",
+            "cat <<EOF | sh >log\nrm x\nEOF",
             "source <(echo 'rm x')",
             ". <(printf 'rm x')",
             "bash <(echo rm x)",
