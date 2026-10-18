@@ -3819,7 +3819,7 @@ impl AgentRuntime {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
-                let evaluation = engine.evaluate_detailed(&operation);
+                let evaluation = plan.judge(pattern, engine.evaluate_detailed(&operation));
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
                         evaluation.decision,
@@ -8684,14 +8684,21 @@ impl RunnerTask {
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
-                if self.skill_engine().evaluate(&plan.operation(pattern))
+                if plan
+                    .judge(
+                        pattern,
+                        self.skill_engine()
+                            .evaluate_detailed(&plan.operation(pattern)),
+                    )
+                    .decision
                     == PermissionDecision::Deny
                 {
                     return Err(CoreError::PermissionDenied(
                         "This tool is disabled by the active skill".into(),
                     ));
                 }
-                let evaluation = engine.evaluate_detailed(&plan.operation(pattern));
+                let evaluation =
+                    plan.judge(pattern, engine.evaluate_detailed(&plan.operation(pattern)));
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
@@ -11146,6 +11153,10 @@ struct AskPlan {
     /// and extensions judged the arguments, so their answer about the path
     /// given never settles these: see `permission_hook_answer`.
     resolved: Vec<(String, String)>,
+    /// Patterns read from inside a written shell command (another spelling
+    /// of it, or a command it runs), each with the command as written: see
+    /// [`AskPlan::judge`].
+    derived: Vec<crate::permissions::bash::Derived>,
 }
 
 impl AskPlan {
@@ -11167,19 +11178,69 @@ impl AskPlan {
             .iter()
             .any(|(resolved, _)| resolved == pattern)
     }
-    /// This group narrowed to the patterns still to be answered.
+    /// The verdict on `pattern`. A pattern read from inside a written
+    /// command is judged only by a rule about it: a rule that also covers
+    /// every command it was read from (a blanket `*`, `"bash": "ask"`, or an
+    /// allow for the wrapper), or no rule at all, judged those commands as
+    /// written already, so it leaves the pattern allowed. A deny or ask for
+    /// `rm *` still reaches `sudo rm x` and `bash -c 'rm x'`.
+    fn judge(
+        &self,
+        pattern: &str,
+        evaluation: crate::permissions::Evaluation,
+    ) -> crate::permissions::Evaluation {
+        if evaluation.decision == PermissionDecision::Allow || evaluation.protected {
+            return evaluation;
+        }
+        let mut sources = self
+            .derived
+            .iter()
+            .filter(|derived| derived.pattern == pattern)
+            .peekable();
+        if sources.peek().is_none() {
+            return evaluation;
+        }
+        let general = evaluation.matched.as_deref().is_none_or(|rule| {
+            sources.all(|derived| {
+                crate::permissions::wildcard_match(rule, &self.operation(&derived.written))
+            })
+        });
+        if general {
+            crate::permissions::Evaluation {
+                decision: PermissionDecision::Allow,
+                ..evaluation
+            }
+        } else {
+            evaluation
+        }
+    }
+    /// This group narrowed to the patterns still to be answered. An
+    /// "always" answer also remembers the patterns read from inside the
+    /// command that are still asked.
     fn asking(self, patterns: Vec<String>) -> Self {
         let resolved = self
             .resolved
             .into_iter()
             .filter(|(pattern, _)| patterns.contains(pattern))
             .collect();
+        let derived: Vec<_> = self
+            .derived
+            .into_iter()
+            .filter(|derived| patterns.contains(&derived.pattern))
+            .collect();
+        let mut always = self.always;
+        for derived in &derived {
+            if !always.contains(&derived.always) {
+                always.push(derived.always.clone());
+            }
+        }
         Self {
             permission: self.permission,
             patterns,
-            always: self.always,
+            always,
             external_paths: Vec::new(),
             resolved,
+            derived,
         }
     }
 }
@@ -11353,6 +11414,7 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         always: Vec::new(),
         external_paths: Vec::new(),
         resolved: Vec::new(),
+        derived: Vec::new(),
     };
     for plan in plans {
         combined
@@ -11397,6 +11459,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![pattern],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            derived: Vec::new(),
         }];
     }
     if matches!(
@@ -11420,6 +11483,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![format!("{action}:*")],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            derived: Vec::new(),
         }];
     }
     if name.starts_with("browser_") {
@@ -11448,6 +11512,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns,
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            derived: Vec::new(),
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -11463,6 +11528,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: remember,
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
+                derived: Vec::new(),
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -11490,6 +11556,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![format!("{kind}:*")],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            derived: Vec::new(),
         }];
     }
     if name == "workflow" {
@@ -11506,6 +11573,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec!["*".into()],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            derived: Vec::new(),
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             // The new file also meets the rules for where a linked
@@ -11523,6 +11591,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: vec![file],
                 external_paths: Vec::new(),
                 resolved,
+                derived: Vec::new(),
             });
         }
         return plans;
@@ -11557,6 +11626,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: external_patterns,
                 external_paths,
                 resolved: Vec::new(),
+                derived: Vec::new(),
             });
         }
         if !analysis.patterns.is_empty() {
@@ -11566,6 +11636,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: analysis.always,
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
+                derived: analysis.derived,
             });
         }
         return plans;
@@ -11601,6 +11672,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns,
             external_paths,
             resolved,
+            derived: Vec::new(),
         });
     }
     if name == "apply_patch" {
@@ -11638,6 +11710,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     always: vec!["*".into()],
                     external_paths: Vec::new(),
                     resolved,
+                    derived: Vec::new(),
                 });
                 return plans;
             }
@@ -11648,6 +11721,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec!["*".into()],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            derived: Vec::new(),
         });
         return plans;
     }
@@ -11701,6 +11775,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         always,
         external_paths: Vec::new(),
         resolved,
+        derived: Vec::new(),
     });
     plans
 }
@@ -11807,6 +11882,134 @@ mod switch_permission_tests {
                 PermissionDecision::Ask
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_reading_tests {
+    use super::*;
+    use crate::permissions::PermissionRule;
+
+    fn engine(rules: &[(&str, PermissionDecision)]) -> PermissionEngine {
+        let mut engine = PermissionEngine::build_defaults();
+        for (pattern, decision) in rules {
+            engine.add_rule(PermissionRule {
+                pattern: (*pattern).into(),
+                decision: *decision,
+            });
+        }
+        engine
+    }
+
+    /// The bash patterns of `command` that `engine` does not simply allow,
+    /// each with its verdict, as a tool call judges them.
+    fn verdicts(engine: &PermissionEngine, command: &str) -> Vec<(String, PermissionDecision)> {
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": command}),
+            Path::new("/workspace"),
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap();
+        plan.patterns
+            .iter()
+            .map(|pattern| {
+                let evaluation = engine.evaluate_detailed(&plan.operation(pattern));
+                (pattern.clone(), plan.judge(pattern, evaluation).decision)
+            })
+            .filter(|(_, decision)| *decision != PermissionDecision::Allow)
+            .collect()
+    }
+
+    #[test]
+    fn a_deny_or_ask_for_a_command_reaches_it_through_wrappers_and_shells() {
+        use PermissionDecision::{Ask, Deny};
+        let denies = engine(&[("bash:rm *", Deny)]);
+        for command in [
+            "bash -c \"rm -rf x\"",
+            "sh -xc 'rm x'",
+            "eval \"rm x\"",
+            "env -S 'rm x'",
+            "xargs rm",
+            "find . -exec rm {} +",
+            "sudo rm x",
+            "nohup rm x",
+            "timeout 5 rm x",
+            "command rm x",
+            "/bin/rm x",
+            "\\rm x",
+            "FOO=1 rm x",
+        ] {
+            assert!(
+                verdicts(&denies, command)
+                    .iter()
+                    .any(|(_, decision)| *decision == Deny),
+                "{command}"
+            );
+        }
+        let asks = engine(&[("bash:git push *", Ask)]);
+        assert_eq!(
+            verdicts(&asks, "FOO=1 git push --force"),
+            vec![("git push --force".to_owned(), Ask)]
+        );
+    }
+
+    #[test]
+    fn rules_that_cover_the_written_command_add_no_question() {
+        use PermissionDecision::{Allow, Ask};
+        // An allow for git still allows other spellings of git commands.
+        let git = engine(&[("bash:git *", Allow)]);
+        for command in ["FOO=1 git status", "\"git\" status", "/usr/bin/git status"] {
+            assert_eq!(verdicts(&git, command), Vec::new(), "{command}");
+        }
+        // Under `"bash": "ask"`, the command as written asks as before, and
+        // its readings add nothing: the blanket rule judged it already.
+        let review = engine(&[
+            ("bash:*", Ask),
+            ("bash:git *", Allow),
+            ("bash:timeout *", Allow),
+        ]);
+        assert_eq!(
+            verdicts(&review, "FOO=1 git status"),
+            vec![("FOO=1 git status".to_owned(), Ask)]
+        );
+        assert_eq!(verdicts(&review, "timeout 5 cargo test"), Vec::new());
+        assert_eq!(verdicts(&review, "git commit -m 'x'"), Vec::new());
+        // A command also written on its own is judged as written.
+        assert_eq!(
+            verdicts(&review, "cargo test; timeout 5 cargo test"),
+            vec![("cargo test".to_owned(), Ask)]
+        );
+    }
+
+    #[test]
+    fn an_always_answer_remembers_the_readings_it_was_asked_about() {
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": "FOO=1 git push --force"}),
+            Path::new("/workspace"),
+        )
+        .remove(0);
+        let asked = plan.asking(vec!["git push --force".into()]);
+        assert_eq!(asked.always, vec!["git push *"]);
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": "sudo rm x"}),
+            Path::new("/workspace"),
+        )
+        .remove(0);
+        assert_eq!(plan.asking(vec!["sudo rm x".into()]).always, vec!["sudo *"]);
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": "sudo rm x"}),
+            Path::new("/workspace"),
+        )
+        .remove(0);
+        assert_eq!(
+            plan.asking(vec!["sudo rm x".into(), "rm x".into()]).always,
+            vec!["sudo *", "rm *"]
+        );
     }
 }
 
