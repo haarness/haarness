@@ -16798,6 +16798,166 @@ async fn batch_children_are_live_rows_under_the_batch_call() {
     assert!(targets.contains(&"call-batch:2".to_owned()), "{targets:?}");
 }
 
+/// A batch of ordinary tools, and its result: `entries` holds each step's
+/// outcome as the server reports it (`Ok(output)` or `Err(error)`).
+fn batch_items(
+    thread: &Thread,
+    steps: &[(&str, serde_json::Value)],
+    entries: Option<&[Result<&str, &str>]>,
+) -> Vec<Item> {
+    let calls: Vec<serde_json::Value> = steps
+        .iter()
+        .map(|(tool, parameters)| serde_json::json!({"tool": tool, "parameters": parameters}))
+        .collect();
+    let mut items = vec![message_item(
+        1,
+        thread,
+        ItemData::ToolCall {
+            call_id: "call-batch".into(),
+            name: "batch".into(),
+            arguments: serde_json::json!({ "tool_calls": calls }),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    if let Some(entries) = entries {
+        let results: Vec<serde_json::Value> = steps
+            .iter()
+            .zip(entries)
+            .map(|((tool, _), entry)| match entry {
+                Ok(output) => serde_json::json!({"tool": tool, "output": output, "metadata": {}}),
+                Err(error) => serde_json::json!({"tool": tool, "error": error}),
+            })
+            .collect();
+        let failures = entries.iter().filter(|entry| entry.is_err()).count();
+        let metadata = serde_json::json!({"results": results, "failures": failures});
+        items.push(message_item(
+            2,
+            thread,
+            ItemData::ToolResult {
+                call_id: "call-batch".into(),
+                name: "batch".into(),
+                output: serde_json::to_string_pretty(&metadata).unwrap(),
+                is_error: false,
+                metadata,
+            },
+        ));
+    }
+    items
+}
+
+#[test]
+fn a_running_batch_lists_its_steps_under_the_row() {
+    let thread = fixture_thread();
+    let steps = [
+        ("read", serde_json::json!({"path":"src/main.rs"})),
+        ("grep", serde_json::json!({"pattern":"TODO","path":"src"})),
+        ("bash", serde_json::json!({"command":"cargo check"})),
+    ];
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        batch_items(&thread, &steps, None),
+        vec![],
+        vec![],
+    );
+    // The running tool is one of the batch's own steps: the batch is live
+    // work, not a call queued behind another tool.
+    app.phase = Some(crate::state::PhaseInfo {
+        state: "tool".into(),
+        call_id: Some("call-batch:2".into()),
+        ..Default::default()
+    });
+    let rows: Vec<String> = app.lines((100, 40)).iter().map(Line::text).collect();
+    let text = rows.join("\n");
+    let spin = crate::view::span::spinner(app.tick);
+    assert!(text.contains(&format!("{spin} batch")), "{text}");
+    assert!(!text.contains("queued"), "{text}");
+    let batch = rows.iter().position(|row| row.contains("batch")).unwrap();
+    assert_eq!(rows[batch + 1].trim(), format!("{spin} read src/main.rs"));
+    assert_eq!(rows[batch + 2].trim(), format!("{spin} grep TODO in src"));
+    assert_eq!(rows[batch + 3].trim(), format!("{spin} bash cargo check"));
+}
+
+#[test]
+fn a_finished_batch_marks_each_step_and_folds_a_long_list() {
+    let thread = fixture_thread();
+    let steps: Vec<(&str, serde_json::Value)> = (1..=9)
+        .map(|n| {
+            (
+                "read",
+                serde_json::json!({"path": format!("src/file{n}.rs")}),
+            )
+        })
+        .collect();
+    let outcomes: Vec<Result<&str, &str>> = steps.iter().map(|_| Ok("contents")).collect();
+    let items = batch_items(&thread, &steps, Some(&outcomes));
+    let result_id = items[1].id;
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let text = app
+        .lines((100, 40))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("● batch"), "{text}");
+    assert!(!text.contains("failed"), "{text}");
+    assert!(text.contains("● read src/file1.rs"), "{text}");
+    assert!(text.contains("● read src/file5.rs"), "{text}");
+    assert!(!text.contains("src/file6.rs"), "{text}");
+    assert!(text.contains("… +4 more"), "{text}");
+    // Opening the row lists every step.
+    app.expanded.insert(result_id);
+    let expanded = app
+        .lines((100, 80))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("● read src/file9.rs"), "{expanded}");
+    assert!(!expanded.contains("… +4 more"), "{expanded}");
+}
+
+#[test]
+fn a_batch_with_a_failed_step_reads_failed_and_marks_that_step() {
+    let thread = fixture_thread();
+    let steps = [
+        ("read", serde_json::json!({"path":"README.md"})),
+        ("read", serde_json::json!({"path":"missing.txt"})),
+        ("glob", serde_json::json!({"pattern":"**/*.rs"})),
+    ];
+    let outcomes = [
+        Ok("# Readme"),
+        Err("No such file or directory"),
+        Ok("src/main.rs"),
+    ];
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        batch_items(&thread, &steps, Some(&outcomes)),
+        vec![],
+        vec![],
+    );
+    let rows = app.lines((100, 40));
+    let text = rows.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("✗ batch  1 failed"), "{text}");
+    assert!(text.contains("● read README.md"), "{text}");
+    assert!(text.contains("✗ read missing.txt"), "{text}");
+    assert!(text.contains("● glob **/*.rs"), "{text}");
+    let failed = rows
+        .iter()
+        .find(|row| row.text().contains("✗ read missing.txt"))
+        .unwrap();
+    assert_eq!(failed.spans[0].fg, app.theme.danger);
+    app.language = crate::locale::Language::German;
+    let german = app
+        .lines((100, 40))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(german.contains("✗ batch  1 fehlgeschlagen"), "{german}");
+}
+
 #[tokio::test]
 async fn completion_toasts_only_reach_an_unfocused_terminal() {
     let thread = fixture_thread();

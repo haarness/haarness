@@ -2519,5 +2519,7 @@
   "Comment on selection": "Skomentuj zaznaczenie",
   "Comment on these lines…": "Skomentuj te wiersze…",
   "Comment added to your message": "Komentarz dodany do wiadomości",
-  "Preview comment": "Komentarz do podglądu"
+  "Preview comment": "Komentarz do podglądu",
+  "{count} failed": "nieudane: {count}",
+  "+{count} more": "jeszcze {count}"
 }

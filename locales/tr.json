@@ -2519,5 +2519,7 @@
   "Comment on selection": "Seçime yorum yap",
   "Comment on these lines…": "Bu satırlara yorum yapın…",
   "Comment added to your message": "Mesajınıza yorum eklendi",
-  "Preview comment": "Önizleme yorumu"
+  "Preview comment": "Önizleme yorumu",
+  "{count} failed": "{count} başarısız",
+  "+{count} more": "{count} tane daha"
 }
