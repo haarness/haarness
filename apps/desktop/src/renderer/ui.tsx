@@ -21,19 +21,27 @@ export const Button = (props: {
   hint?: string;
   /** Pressing it leaves the page's text selection, which it acts on, as it was. */
   keepSelection?: boolean;
+  /** Something changed behind it that the person has not seen yet. */
+  dot?: boolean;
+  /** What the dot means, for screen readers and the tooltip. */
+  description?: string;
 }) => (
   <button
     type="button"
     class={"icon-button " + (props.class ?? "")}
     classList={{ active: props.active }}
-    title={props.hint ? props.label + " — " + props.hint : props.label}
+    title={[props.label, props.hint, props.description].filter(Boolean).join(" — ")}
     aria-label={props.label}
+    aria-description={props.description}
     aria-pressed={props.active === undefined ? undefined : props.active}
     onClick={props.onClick}
     onMouseDown={props.keepSelection ? (event) => event.preventDefault() : undefined}
     disabled={props.disabled}
   >
     <Icon name={props.icon} size={props.size} />
+    <Show when={props.dot}>
+      <span class="icon-button-dot" aria-hidden="true" />
+    </Show>
   </button>
 );
 export interface Field {

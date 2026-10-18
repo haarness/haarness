@@ -1661,6 +1661,8 @@
   "collapse": "fold sammen",
   "lines {from}–{to} of {total}": "linjer {from}–{to} av {total}",
   "always allows": "tillater alltid",
+  "Haarness could not read all of this command.": "Haarness kunne ikke lese hele denne kommandoen.",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness kunne ikke lese hele denne kommandoen; en regel for {rule} kan gjelde.",
   "Leads to {path}": "Fører til {path}",
   "every file edit": "hver filredigering",
   "every shell command": "hver shell-kommando",
@@ -2519,5 +2521,13 @@
   "Comment on selection": "Kommenter markeringen",
   "Comment on these lines…": "Kommenter disse linjene …",
   "Comment added to your message": "Kommentar lagt til i meldingen din",
-  "Preview comment": "Kommentar til forhåndsvisningen"
+  "Preview comment": "Kommentar til forhåndsvisningen",
+  "{count} failed": "{count} mislyktes",
+  "+{count} more": "{count} til",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en lenke som Haarness ikke åpner. Apper kan bare åpne http-, https- og mailto-lenker.",
+  "Load image from {host}": "Last inn bilde fra {host}",
+  "The image from {host} could not be loaded.": "Bildet fra {host} kunne ikke lastes inn.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en {scheme}-lenke. Apper kan bare åpne http-, https- og mailto-lenker.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} og {count} til"
 }

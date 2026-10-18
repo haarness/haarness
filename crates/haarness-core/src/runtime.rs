@@ -3819,7 +3819,7 @@ impl AgentRuntime {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
-                let evaluation = engine.evaluate_detailed(&operation);
+                let evaluation = plan.evaluate(&engine, pattern);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
                         evaluation.decision,
@@ -3834,7 +3834,13 @@ impl AgentRuntime {
                 };
                 match decision {
                     PermissionDecision::Deny => {
-                        allowed = Err(operation);
+                        allowed = Err(match plan.read_limit(pattern) {
+                            Some(rule) => format!(
+                                "{} (Haarness could not read all of it, and permission rule '{rule}' may apply to what it runs)",
+                                clip(&operation)
+                            ),
+                            None => operation,
+                        });
                         break;
                     }
                     // A hook pre-approval never answers what only a person
@@ -3875,11 +3881,7 @@ impl AgentRuntime {
                 .filter(|operation| tool.explicit_approval(&arguments, operation))
                 .collect();
             let explicit = !explicit_operations.is_empty();
-            let operation = if asked.len() == 1 {
-                format!("{}:{}", plan.permission, asked[0])
-            } else {
-                format!("{}: {}", plan.permission, asked.join("  "))
-            };
+            let operation = plan.describe(asked);
             // Same rule as model calls: a scheduled run's workflow cannot
             // get a person's answer, so it fails now.
             if (explicit || forced) && stance.unattended {
@@ -3902,6 +3904,7 @@ impl AgentRuntime {
                 continue;
             }
             let always_rules = plan.always_rules();
+            let card = plan.card_detail(&arguments, asked);
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
@@ -3928,7 +3931,7 @@ impl AgentRuntime {
                     permission: plan.permission.clone(),
                     patterns: asked.clone(),
                     always_rules: always_rules.clone(),
-                    detail: arguments.clone(),
+                    detail: card.clone(),
                     thread_id,
                     root_thread_id: root,
                     turn_id: None,
@@ -3953,7 +3956,7 @@ impl AgentRuntime {
                     ItemData::PermissionRequest {
                         permission_id: id.clone(),
                         operation: operation.clone(),
-                        detail: arguments.clone(),
+                        detail: card.clone(),
                         permission: plan.permission.clone(),
                         patterns: asked.clone(),
                         always_patterns: always_rules.clone(),
@@ -3980,7 +3983,7 @@ impl AgentRuntime {
                     "allowAlways": !forced,
                     "explicit": explicit,
                     "operation": operation,
-                    "detail": arguments,
+                    "detail": card,
                     "permission": plan.permission,
                     "patterns": asked,
                     "alwaysPatterns": always_rules,
@@ -5621,6 +5624,11 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn resolve_name(&self, name: &str) -> String {
         self.runner.resolve_tool_name(name)
+    }
+
+    fn skip_call(&self) {
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn invoke(&self, name: &str, arguments: serde_json::Value) -> CoreResult<ToolOutput> {
@@ -8684,14 +8692,13 @@ impl RunnerTask {
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
-                if self.skill_engine().evaluate(&plan.operation(pattern))
-                    == PermissionDecision::Deny
+                if plan.evaluate(&self.skill_engine(), pattern).decision == PermissionDecision::Deny
                 {
                     return Err(CoreError::PermissionDenied(
                         "This tool is disabled by the active skill".into(),
                     ));
                 }
-                let evaluation = engine.evaluate_detailed(&plan.operation(pattern));
+                let evaluation = plan.evaluate(&engine, pattern);
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
@@ -8713,11 +8720,7 @@ impl RunnerTask {
                 match decision {
                     PermissionDecision::Deny => {
                         let rule = evaluation.matched.unwrap_or_else(|| "policy".into());
-                        return Err(CoreError::PermissionDenied(format!(
-                            "'{}' is denied by permission rule '{rule}'. This is configured \
-                             policy — do not retry this action.",
-                            plan.operation(pattern)
-                        )));
+                        return Err(CoreError::PermissionDenied(plan.refusal(pattern, &rule)));
                     }
                     // A hook pre-approval skips the prompt (never a deny), but
                     // never answers what only a person may, nor where a path
@@ -8935,11 +8938,7 @@ impl RunnerTask {
         forced: bool,
         explicit_operations: Vec<String>,
     ) -> CoreResult<PermissionResolution> {
-        let operation = if plan.patterns.len() == 1 {
-            format!("{}:{}", plan.permission, plan.patterns[0])
-        } else {
-            format!("{}: {}", plan.permission, plan.patterns.join("  "))
-        };
+        let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
         let explicit = !explicit_operations.is_empty();
         // A run nobody watches (a schedule) cannot get a person's answer:
@@ -8994,6 +8993,7 @@ impl RunnerTask {
                 HookAnswer::Allowed | HookAnswer::Open => {}
             }
         }
+        let detail = &plan.card_detail(detail, &plan.patterns);
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         // A chat in Auto approves eligible requests once, without a prompt.
@@ -9017,7 +9017,7 @@ impl RunnerTask {
                         refreshed.evaluate(&operation) != PermissionDecision::Deny
                             && crate::permissions::explicit_granted(&session_rules, &operation)
                     } else {
-                        refreshed.evaluate(&operation) == PermissionDecision::Allow
+                        plan.evaluate(&refreshed, pattern).decision == PermissionDecision::Allow
                     }
                 })
             {
@@ -11146,6 +11146,76 @@ struct AskPlan {
     /// and extensions judged the arguments, so their answer about the path
     /// given never settles these: see `permission_hook_answer`.
     resolved: Vec<(String, String)>,
+    /// For a bash group, which patterns are commands as written and which
+    /// are read from inside them: see [`AskPlan::evaluate`].
+    shell: Option<ShellReadings>,
+}
+
+/// What a bash group read from inside its written commands (see
+/// `permissions::bash`).
+struct ShellReadings {
+    /// Each written command as an operation (`bash:sudo rm x`), with its
+    /// "always" pattern and whether a limit stopped its readings.
+    written: Vec<(String, crate::permissions::bash::Written)>,
+    /// Each written command's index, by pattern.
+    index: HashMap<String, usize>,
+    /// Each reading's written commands, by pattern.
+    sources: HashMap<String, Vec<usize>>,
+    /// Each reading's "always" pattern.
+    always: HashMap<String, String>,
+    /// Whether a rule also names a written command, by (index, rule): a
+    /// written command may be long (a here-document), so each is matched
+    /// once per rule.
+    covered: Mutex<HashMap<(usize, String), bool>>,
+    /// The rule each written command a limit stopped reading met instead,
+    /// by pattern (empty when the line is unreadable and no rule applies).
+    limited: Mutex<HashMap<String, String>>,
+    /// The line is too large to read: see [`AskPlan::evaluate`].
+    unreadable: bool,
+}
+
+impl ShellReadings {
+    fn new(analysis: &crate::permissions::bash::BashAnalysis) -> Self {
+        let mut sources: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut always = HashMap::new();
+        for derived in &analysis.derived {
+            sources
+                .entry(derived.pattern.clone())
+                .or_default()
+                .push(derived.written);
+            always
+                .entry(derived.pattern.clone())
+                .or_insert_with(|| derived.always.clone());
+        }
+        Self {
+            written: analysis
+                .written
+                .iter()
+                .map(|written| (format!("bash:{}", written.pattern), written.clone()))
+                .collect(),
+            index: analysis
+                .written
+                .iter()
+                .enumerate()
+                .map(|(index, written)| (written.pattern.clone(), index))
+                .collect(),
+            sources,
+            always,
+            covered: Mutex::new(HashMap::new()),
+            limited: Mutex::new(HashMap::new()),
+            unreadable: analysis.unreadable,
+        }
+    }
+
+    fn covers(&self, rule: &str, index: usize) -> bool {
+        let key = (index, rule.to_owned());
+        if let Some(&covered) = self.covered.lock().get(&key) {
+            return covered;
+        }
+        let covered = crate::permissions::wildcard_match(rule, &self.written[index].0);
+        self.covered.lock().insert(key, covered);
+        covered
+    }
 }
 
 impl AskPlan {
@@ -11167,19 +11237,180 @@ impl AskPlan {
             .iter()
             .any(|(resolved, _)| resolved == pattern)
     }
-    /// This group narrowed to the patterns still to be answered.
+    /// The verdict on `pattern` from `engine`. A pattern read from inside
+    /// a written shell command is judged only by rules about it (see
+    /// [`PermissionEngine::evaluate_reading`]): a deny or ask for `rm *`
+    /// reaches `sudo rm x` and `bash -c 'rm x'`, while a blanket rule or an
+    /// allow for the wrapper adds no question. A written command whose
+    /// readings a limit stopped asks when a bash rule narrower than it denies
+    /// or asks, since its readings may have missed what that rule is about.
+    fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
+        let operation = self.operation(pattern);
+        let Some(shell) = &self.shell else {
+            return engine.evaluate_detailed(&operation);
+        };
+        if let Some(sources) = shell.sources.get(pattern) {
+            return engine.evaluate_reading(&operation, &|rule| {
+                sources.iter().all(|&index| shell.covers(rule, index))
+            });
+        }
+        let evaluation = engine.evaluate_detailed(&operation);
+        // A line too large to read, judged by its first command: no allow,
+        // remembered answer or Always settles it, since what it runs is
+        // unknown. Any bash deny refuses it; otherwise only a person
+        // answers, every time.
+        if shell.unreadable
+            && evaluation.decision != PermissionDecision::Deny
+            && shell.index.get(pattern) == Some(&0)
+        {
+            let (rule, decision) = engine
+                .narrower_bash_rule(&|_| false)
+                .map_or((None, PermissionDecision::Ask), |(rule, decision)| {
+                    (Some(rule), decision)
+                });
+            shell
+                .limited
+                .lock()
+                .insert(pattern.to_owned(), rule.clone().unwrap_or_default());
+            return crate::permissions::Evaluation {
+                decision,
+                matched: rule,
+                protected: decision == PermissionDecision::Ask,
+            };
+        }
+        if evaluation.decision != PermissionDecision::Deny
+            && let Some(&index) = shell.index.get(pattern)
+            && shell.written[index].1.incomplete
+            && let Some((rule, decision)) =
+                engine.narrower_bash_rule(&|rule| shell.covers(rule, index))
+        {
+            shell
+                .limited
+                .lock()
+                .insert(pattern.to_owned(), rule.clone());
+            // A deny may be about what the unread part runs, so it refuses;
+            // an ask is a person's every time, as a configuration edit is:
+            // not Auto, `--yolo`, a hook or a run nobody watches.
+            return crate::permissions::Evaluation {
+                decision,
+                matched: Some(rule),
+                protected: decision == PermissionDecision::Ask,
+            };
+        }
+        evaluation
+    }
+    /// The rule a written command met because a limit stopped reading it,
+    /// when it did.
+    fn read_limit(&self, pattern: &str) -> Option<String> {
+        self.shell
+            .as_ref()
+            .and_then(|shell| shell.limited.lock().get(pattern).cloned())
+    }
+    /// Why `pattern` is refused under `rule`, for the model.
+    fn refusal(&self, pattern: &str, rule: &str) -> String {
+        match self.read_limit(pattern) {
+            Some(_) => format!(
+                "Haarness could not read all of '{}', and permission rule '{rule}' may apply to what it runs, so it is refused. This is configured policy — do not retry this action; split the command into smaller ones.",
+                clip(&self.operation(pattern))
+            ),
+            None => format!(
+                "'{}' is denied by permission rule '{rule}'. This is configured policy — do not retry this action.",
+                self.operation(pattern)
+            ),
+        }
+    }
+    /// The tool's arguments as a prompt about `patterns` shows them: with
+    /// the rule a command met because a limit stopped reading it
+    /// (`__readLimit`, without its `bash:`), so the card can say why it asks.
+    fn card_detail(&self, detail: &serde_json::Value, patterns: &[String]) -> serde_json::Value {
+        let mut detail = detail.clone();
+        if let Some(rule) = patterns.iter().find_map(|pattern| self.read_limit(pattern))
+            && let Some(fields) = detail.as_object_mut()
+        {
+            let rule = rule.strip_prefix("bash:").unwrap_or(&rule).to_owned();
+            fields.insert("__readLimit".into(), serde_json::Value::String(rule));
+        }
+        detail
+    }
+    /// What a prompt about `patterns` is called: for shell commands, the
+    /// commands as written that they belong to, so logs and messages name
+    /// what runs (`bash:sudo tool-x a`), while the patterns name the reading
+    /// a rule asked about (`tool-x a`).
+    fn describe(&self, patterns: &[String]) -> String {
+        let mut named: Vec<&str> = Vec::new();
+        for pattern in patterns {
+            let name = self
+                .shell
+                .as_ref()
+                .and_then(|shell| {
+                    let index = *shell.sources.get(pattern)?.first()?;
+                    Some(shell.written[index].1.pattern.as_str())
+                })
+                .unwrap_or(pattern);
+            if !named.contains(&name) {
+                named.push(name);
+            }
+        }
+        // A command can be long (a here-document); the request keeps it
+        // whole in its arguments, and its name stays readable in logs.
+        let named: Vec<String> = named
+            .into_iter()
+            .map(|name| {
+                if self.shell.is_some() {
+                    clip(name)
+                } else {
+                    name.to_owned()
+                }
+            })
+            .collect();
+        if named.len() == 1 {
+            format!("{}:{}", self.permission, named[0])
+        } else {
+            format!("{}: {}", self.permission, named.join("  "))
+        }
+    }
+    /// This group narrowed to the patterns still to be answered. For shell
+    /// commands, an "always" answer remembers the "always" patterns of
+    /// exactly those: an ask about the `tool-x a` in `sudo tool-x a`
+    /// remembers `tool-x *`, not `sudo *`.
     fn asking(self, patterns: Vec<String>) -> Self {
         let resolved = self
             .resolved
             .into_iter()
             .filter(|(pattern, _)| patterns.contains(pattern))
             .collect();
+        let always = match &self.shell {
+            Some(shell) => {
+                let mut always: Vec<String> = Vec::new();
+                for pattern in &patterns {
+                    let remembered = shell.always.get(pattern).or_else(|| {
+                        shell
+                            .index
+                            .get(pattern)
+                            .map(|&index| &shell.written[index].1.always)
+                    });
+                    if let Some(remembered) = remembered
+                        && !remembered.is_empty()
+                        && !always.contains(remembered)
+                    {
+                        always.push(remembered.clone());
+                    }
+                }
+                if always.is_empty() {
+                    self.always
+                } else {
+                    always
+                }
+            }
+            None => self.always,
+        };
         Self {
             permission: self.permission,
             patterns,
-            always: self.always,
+            always,
             external_paths: Vec::new(),
             resolved,
+            shell: self.shell,
         }
     }
 }
@@ -11304,6 +11535,14 @@ fn operation_for_log(operation: &str) -> String {
     crate::redact::log_text(operation, 300)
 }
 
+/// Text kept to 200 characters for logs and messages, with `…` when cut.
+fn clip(text: &str) -> String {
+    match text.char_indices().nth(200) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
 /// Why a scheduled run's request that always asks failed instead of waiting.
 fn cannot_ask_forced(operation: &str) -> String {
     format!(
@@ -11353,6 +11592,7 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         always: Vec::new(),
         external_paths: Vec::new(),
         resolved: Vec::new(),
+        shell: None,
     };
     for plan in plans {
         combined
@@ -11397,6 +11637,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![pattern],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            shell: None,
         }];
     }
     if matches!(
@@ -11420,6 +11661,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![format!("{action}:*")],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            shell: None,
         }];
     }
     if name.starts_with("browser_") {
@@ -11448,6 +11690,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns,
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            shell: None,
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -11463,6 +11706,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: remember,
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
+                shell: None,
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -11490,6 +11734,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![format!("{kind}:*")],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            shell: None,
         }];
     }
     if name == "workflow" {
@@ -11506,6 +11751,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec!["*".into()],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            shell: None,
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             // The new file also meets the rules for where a linked
@@ -11523,6 +11769,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: vec![file],
                 external_paths: Vec::new(),
                 resolved,
+                shell: None,
             });
         }
         return plans;
@@ -11557,15 +11804,18 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: external_patterns,
                 external_paths,
                 resolved: Vec::new(),
+                shell: None,
             });
         }
         if !analysis.patterns.is_empty() {
+            let shell = ShellReadings::new(&analysis);
             plans.push(AskPlan {
                 permission: "bash".into(),
                 patterns: analysis.patterns,
                 always: analysis.always,
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
+                shell: Some(shell),
             });
         }
         return plans;
@@ -11601,6 +11851,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns,
             external_paths,
             resolved,
+            shell: None,
         });
     }
     if name == "apply_patch" {
@@ -11638,6 +11889,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     always: vec!["*".into()],
                     external_paths: Vec::new(),
                     resolved,
+                    shell: None,
                 });
                 return plans;
             }
@@ -11648,6 +11900,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec!["*".into()],
             external_paths: Vec::new(),
             resolved: Vec::new(),
+            shell: None,
         });
         return plans;
     }
@@ -11701,6 +11954,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         always,
         external_paths: Vec::new(),
         resolved,
+        shell: None,
     });
     plans
 }
@@ -11807,6 +12061,296 @@ mod switch_permission_tests {
                 PermissionDecision::Ask
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_reading_tests {
+    use super::*;
+    use crate::permissions::PermissionRule;
+
+    fn engine(rules: &[(&str, PermissionDecision)]) -> PermissionEngine {
+        let mut engine = PermissionEngine::build_defaults();
+        for (pattern, decision) in rules {
+            engine.add_rule(PermissionRule {
+                pattern: (*pattern).into(),
+                decision: *decision,
+            });
+        }
+        engine
+    }
+
+    /// The bash patterns of `command` that `engine` does not simply allow,
+    /// each with its verdict, as a tool call judges them.
+    fn verdicts(engine: &PermissionEngine, command: &str) -> Vec<(String, PermissionDecision)> {
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": command}),
+            Path::new("/workspace"),
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap();
+        plan.patterns
+            .iter()
+            .map(|pattern| (pattern.clone(), plan.evaluate(engine, pattern).decision))
+            .filter(|(_, decision)| *decision != PermissionDecision::Allow)
+            .collect()
+    }
+
+    #[test]
+    fn a_deny_or_ask_for_a_command_reaches_it_through_wrappers_and_shells() {
+        use PermissionDecision::{Ask, Deny};
+        let denies = engine(&[("bash:rm *", Deny)]);
+        for command in [
+            "bash -c \"rm -rf x\"",
+            "sh -xc 'rm x'",
+            "eval \"rm x\"",
+            "env -S 'rm x'",
+            "xargs rm",
+            "find . -exec rm {} +",
+            "sudo rm x",
+            "nohup rm x",
+            "timeout 5 rm x",
+            "command rm x",
+            "/bin/rm x",
+            "\\rm x",
+            "FOO=1 rm x",
+        ] {
+            assert!(
+                verdicts(&denies, command)
+                    .iter()
+                    .any(|(_, decision)| *decision == Deny),
+                "{command}"
+            );
+        }
+        let asks = engine(&[("bash:git push *", Ask)]);
+        assert_eq!(
+            verdicts(&asks, "FOO=1 git push --force"),
+            vec![("git push --force".to_owned(), Ask)]
+        );
+    }
+
+    #[test]
+    fn rules_that_cover_the_written_command_add_no_question() {
+        use PermissionDecision::{Allow, Ask};
+        // An allow for git still allows other spellings of git commands.
+        let git = engine(&[("bash:git *", Allow)]);
+        for command in ["FOO=1 git status", "\"git\" status", "/usr/bin/git status"] {
+            assert_eq!(verdicts(&git, command), Vec::new(), "{command}");
+        }
+        // Under `"bash": "ask"`, the command as written asks as before, and
+        // its readings add nothing: the blanket rule judged it already.
+        let review = engine(&[
+            ("bash:*", Ask),
+            ("bash:git *", Allow),
+            ("bash:timeout *", Allow),
+        ]);
+        assert_eq!(
+            verdicts(&review, "FOO=1 git status"),
+            vec![("FOO=1 git status".to_owned(), Ask)]
+        );
+        assert_eq!(verdicts(&review, "timeout 5 cargo test"), Vec::new());
+        assert_eq!(verdicts(&review, "git commit -m 'x'"), Vec::new());
+        // A command also written on its own is judged as written.
+        assert_eq!(
+            verdicts(&review, "cargo test; timeout 5 cargo test"),
+            vec![("cargo test".to_owned(), Ask)]
+        );
+    }
+
+    fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
+        PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        }
+    }
+
+    fn plan(command: &str) -> AskPlan {
+        ask_plans(
+            "bash",
+            &json!({"command": command}),
+            Path::new("/workspace"),
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap()
+    }
+
+    #[test]
+    fn readings_are_judged_in_every_layer_without_the_rules_that_cover_the_written_command() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        // A parent's whitelist boundary does not hide the child's own deny,
+        // and still lets the wrapper it allows run what it runs.
+        let mut child = engine(&[("bash:tool-x *", Deny)]);
+        child.add_inherited_ceiling(vec![vec![
+            rule("bash:*", Deny),
+            rule("bash:timeout *", Allow),
+        ]]);
+        assert!(
+            verdicts(&child, "timeout 5 tool-x a").contains(&("tool-x a".to_owned(), Deny)),
+            "{:?}",
+            verdicts(&child, "timeout 5 tool-x a")
+        );
+        assert_eq!(verdicts(&child, "timeout 5 cargo test"), Vec::new());
+        // A deny for the reading bites before or after a blanket ask.
+        for rules in [
+            [("bash:tool-x *", Deny), ("bash:*", Ask)],
+            [("bash:*", Ask), ("bash:tool-x *", Deny)],
+        ] {
+            assert!(
+                verdicts(&engine(&rules), "sudo tool-x a").contains(&("tool-x a".to_owned(), Deny)),
+                "{rules:?}"
+            );
+        }
+        let asks = engine(&[("bash:tool-x *", Ask), ("bash:sudo *", Allow)]);
+        assert_eq!(
+            verdicts(&asks, "sudo tool-x a"),
+            vec![("tool-x a".to_owned(), Ask)]
+        );
+        // A skill's rules are an engine of their own; their deny reaches a
+        // reading too.
+        let skill = PermissionEngine::new(vec![rule("bash:rm *", Deny)]);
+        assert!(verdicts(&skill, "sudo rm x").contains(&("rm x".to_owned(), Deny)));
+    }
+
+    #[test]
+    fn a_command_a_limit_stopped_reading_is_refused_by_a_deny_and_asked_by_an_ask() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let padded = format!("bash -c '{}rm x'", "true; ".repeat(300 * 1024 / 6));
+        let plan = plan(&padded);
+        // A deny anywhere refuses, before an ask.
+        for rules in [
+            vec![("bash:rm *", Deny)],
+            vec![("bash:rm *", Ask), ("bash:curl *", Deny)],
+        ] {
+            let evaluation = plan.evaluate(&engine(&rules), &padded);
+            assert_eq!(evaluation.decision, Deny, "{rules:?}");
+            assert!(!evaluation.protected);
+        }
+        let refusal = plan.refusal(&padded, "bash:rm *");
+        assert!(
+            refusal.starts_with("Haarness could not read all of 'bash:bash -c 'true; ")
+                && refusal.contains("permission rule 'bash:rm *' may apply")
+                && refusal.len() < 1024,
+            "{}",
+            &refusal[..200]
+        );
+        // An ask is a person's every time: protected, so never answered by
+        // Auto, `--yolo`, a hook or a schedule, and no Always.
+        let evaluation = plan.evaluate(&engine(&[("bash:rm *", Ask)]), &padded);
+        assert_eq!(evaluation.decision, Ask);
+        assert!(evaluation.protected);
+        let card = plan.card_detail(&json!({"command": padded}), std::slice::from_ref(&padded));
+        assert_eq!(card["__readLimit"], "rm *");
+        assert_eq!(card["command"], padded.as_str());
+        let name = plan.describe(std::slice::from_ref(&padded));
+        assert!(name.ends_with('…') && name.chars().count() < 260, "{name}");
+        // A skill's deny is a narrower rule too.
+        let skill = PermissionEngine::new(vec![rule("bash:rm *", Deny)]);
+        assert_eq!(plan.evaluate(&skill, &padded).decision, Deny);
+        // Without a narrower rule it runs as before.
+        assert_eq!(verdicts(&engine(&[]), &padded), Vec::new());
+        assert_eq!(
+            verdicts(&engine(&[("bash:*", Ask), ("bash:bash *", Allow)]), &padded),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_line_too_large_to_read_is_never_allowed_by_a_rule_or_an_always() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let line = format!(
+            "echo {}x{}; printf done",
+            "$(echo ".repeat(1500),
+            ")".repeat(1500)
+        );
+        let plan = plan(&line);
+        let first = plan.patterns[0].clone();
+        // An Always on its first word does not settle it: a person answers.
+        let mut always = engine(&[]);
+        always.add_grant(rule("bash:echo *", Allow));
+        let evaluation = plan.evaluate(&always, &first);
+        assert_eq!(evaluation.decision, Ask);
+        assert!(evaluation.protected);
+        let card = plan.card_detail(&json!({"command": line}), std::slice::from_ref(&first));
+        assert_eq!(card["__readLimit"], "");
+        // Any bash deny refuses it, with a short reason.
+        let evaluation = plan.evaluate(&engine(&[("bash:git push *", Deny)]), &first);
+        assert_eq!(evaluation.decision, Deny);
+        assert!(plan.refusal(&first, "bash:git push *").len() < 1024);
+    }
+
+    #[test]
+    fn an_always_answer_remembers_only_what_was_asked() {
+        use PermissionDecision::{Allow, Ask};
+        let asked: Vec<String> = verdicts(&engine(&[("bash:tool-x *", Ask)]), "sudo tool-x a")
+            .into_iter()
+            .map(|(pattern, _)| pattern)
+            .collect();
+        assert_eq!(asked, vec!["tool-x a"]);
+        let remembered = plan("sudo tool-x a").asking(asked).always_rules();
+        assert_eq!(remembered, vec!["bash:tool-x *"]);
+        // So afterwards other sudo commands still ask under "bash": "ask".
+        let mut review = engine(&[("bash:*", Ask)]);
+        for pattern in remembered {
+            review.add_grant(rule(&pattern, Allow));
+        }
+        assert_eq!(
+            verdicts(&review, "sudo other"),
+            vec![("sudo other".to_owned(), Ask)]
+        );
+        assert_eq!(verdicts(&review, "tool-x b"), Vec::new());
+        // The same holds for the commands of a chain.
+        assert_eq!(
+            plan("git status && rm x")
+                .asking(vec!["rm x".into()])
+                .always,
+            vec!["rm *"]
+        );
+    }
+
+    #[test]
+    fn a_prompt_about_a_reading_is_named_after_the_command_as_written() {
+        let sudo = plan("sudo tool-x a");
+        assert_eq!(sudo.describe(&["tool-x a".into()]), "bash:sudo tool-x a");
+        assert_eq!(
+            sudo.describe(&["sudo tool-x a".into(), "tool-x a".into()]),
+            "bash:sudo tool-x a"
+        );
+        assert_eq!(
+            plan("git status; sudo tool-x a").describe(&["git status".into(), "tool-x a".into()]),
+            "bash: git status  sudo tool-x a"
+        );
+    }
+
+    #[test]
+    fn an_always_answer_remembers_the_readings_it_was_asked_about() {
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": "FOO=1 git push --force"}),
+            Path::new("/workspace"),
+        )
+        .remove(0);
+        let asked = plan.asking(vec!["git push --force".into()]);
+        assert_eq!(asked.always, vec!["git push *"]);
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": "sudo rm x"}),
+            Path::new("/workspace"),
+        )
+        .remove(0);
+        assert_eq!(plan.asking(vec!["sudo rm x".into()]).always, vec!["sudo *"]);
+        let plan = ask_plans(
+            "bash",
+            &json!({"command": "sudo rm x"}),
+            Path::new("/workspace"),
+        )
+        .remove(0);
+        assert_eq!(
+            plan.asking(vec!["sudo rm x".into(), "rm x".into()]).always,
+            vec!["sudo *", "rm *"]
+        );
     }
 }
 

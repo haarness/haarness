@@ -1661,6 +1661,8 @@
   "collapse": "свернуть",
   "lines {from}–{to} of {total}": "строки {from}–{to} из {total}",
   "always allows": "всегда разрешает",
+  "Haarness could not read all of this command.": "Haarness не смог прочитать эту команду целиком.",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness не смог прочитать эту команду целиком; может действовать правило для {rule}.",
   "Leads to {path}": "Ведёт к {path}",
   "every file edit": "любое изменение файлов",
   "every shell command": "любая команда оболочки",
@@ -2519,5 +2521,13 @@
   "Comment on selection": "Прокомментировать выделенное",
   "Comment on these lines…": "Комментарий к этим строкам…",
   "Comment added to your message": "Комментарий добавлен к вашему сообщению",
-  "Preview comment": "Комментарий к предпросмотру"
+  "Preview comment": "Комментарий к предпросмотру",
+  "{count} failed": "с ошибкой: {count}",
+  "+{count} more": "ещё {count}",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Это приложение попыталось открыть ссылку, которую Haarness не открывает. Приложения могут открывать только ссылки http, https и mailto.",
+  "Load image from {host}": "Загрузить изображение с {host}",
+  "The image from {host} could not be loaded.": "Не удалось загрузить изображение с {host}.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Это приложение попыталось открыть ссылку {scheme}. Приложения могут открывать только ссылки http, https и mailto.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} и ещё {count}"
 }

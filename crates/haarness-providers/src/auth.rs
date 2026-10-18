@@ -1010,55 +1010,122 @@ async fn bind_loopback(port: u16) -> std::io::Result<Vec<TcpListener>> {
     }
 }
 
+/// Waits for the browser's return. Port 1455 is fixed, so any web page can
+/// send a request to it: only one carrying this sign-in's `state` ends the
+/// wait, with a code or the provider's refusal. Anything else is answered and
+/// the wait goes on (until [`CALLBACK_TIMEOUT`]), and its text never becomes
+/// the error.
 async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult<BrowserCallback> {
+    // Each connection is read in a task of its own while the listeners keep
+    // accepting, so idle ones (a page's `<link rel=preconnect>`, a browser's
+    // spare socket) never hold up the real return.
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
-        let (accepted, _, _) = futures::future::select_all(accepts).await;
-        let (mut stream, _) = accepted
-            .map_err(|error| AuthError::OpenAi(format!("callback listener failed: {error}")))?;
-        let mut buffer = vec![0_u8; 16 * 1024];
-        let count = stream
-            .read(&mut buffer)
-            .await
-            .map_err(|error| AuthError::OpenAi(format!("callback read failed: {error}")))?;
-        let request = String::from_utf8_lossy(&buffer[..count]);
-        let Some(target) = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-        else {
-            respond(stream, "400 Bad Request", "Invalid OAuth callback").await?;
-            continue;
-        };
-        let url = Url::parse(&format!("http://localhost{target}"))
-            .map_err(|error| AuthError::OpenAi(format!("invalid callback URL: {error}")))?;
-        if url.path() != "/auth/callback" {
-            respond(stream, "404 Not Found", "Not found").await?;
-            continue;
+        tokio::select! {
+            (accepted, _, _) = futures::future::select_all(accepts) => {
+                let (stream, _) = accepted.map_err(|error| {
+                    AuthError::OpenAi(format!("callback listener failed: {error}"))
+                })?;
+                connections.spawn(answer_callback(stream, state.to_owned()));
+            }
+            // Every finished connection is taken, so one that ended the sign-in is
+            // never left behind one that did not (a pattern that fails disables its
+            // branch for the rest of the `select!`).
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                if let Ok(Some(outcome)) = joined {
+                    return outcome;
+                }
+            }
         }
-        if let Some(error) = query(&url, "error_description").or_else(|| query(&url, "error")) {
-            respond(stream, "400 Bad Request", &error_page(&error)).await?;
-            return Err(AuthError::OpenAi(error));
+    }
+}
+
+/// Reads one connection to the callback port and answers it. `Some` when it
+/// ends the sign-in.
+async fn answer_callback(
+    mut stream: TcpStream,
+    state: String,
+) -> Option<AuthResult<BrowserCallback>> {
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let Ok(Ok(count)) = tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buffer)).await
+    else {
+        return None;
+    };
+    let request = String::from_utf8_lossy(&buffer[..count]);
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default();
+    match read_callback(target, &state) {
+        CallbackRequest::Elsewhere => {
+            let _ = respond(stream, "404 Not Found", "Not found").await;
+            None
         }
-        if query(&url, "state").as_deref() != Some(state) {
-            respond(
+        CallbackRequest::Foreign => {
+            let _ = respond(
                 stream,
                 "400 Bad Request",
-                &error_page("Invalid OAuth state"),
+                &error_page("This is not the sign-in Haarness started."),
             )
-            .await?;
-            return Err(AuthError::OpenAi("invalid OAuth state".into()));
+            .await;
+            None
         }
-        let Some(code) = query(&url, "code") else {
-            respond(
-                stream,
-                "400 Bad Request",
-                &error_page("Missing authorization code"),
-            )
-            .await?;
-            return Err(AuthError::OpenAi("missing authorization code".into()));
+        CallbackRequest::Code(code) => Some(Ok(BrowserCallback { code, stream })),
+        CallbackRequest::Refused(error) => {
+            let _ = respond(stream, "400 Bad Request", &error_page(&error)).await;
+            Some(Err(AuthError::OpenAi(error)))
+        }
+    }
+}
+
+/// How long one connection to the callback port may take to send its request.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What one request to the callback port means for the sign-in.
+#[derive(Debug, PartialEq, Eq)]
+enum CallbackRequest {
+    /// Not the callback path: answered 404.
+    Elsewhere,
+    /// The callback path without this sign-in's state: answered 400.
+    Foreign,
+    /// This sign-in's authorization code.
+    Code(String),
+    /// This sign-in failed: the provider's refusal, or no code.
+    Refused(String),
+}
+
+fn read_callback(target: &str, state: &str) -> CallbackRequest {
+    let Ok(url) = Url::parse(&format!("http://localhost{target}")) else {
+        return CallbackRequest::Elsewhere;
+    };
+    if url.path() != "/auth/callback" {
+        return CallbackRequest::Elsewhere;
+    }
+    if query(&url, "state").as_deref() != Some(state) {
+        return CallbackRequest::Foreign;
+    }
+    if let Some(error) = query(&url, "error") {
+        // With this sign-in's state it comes from the provider; still only
+        // printable text, and not much of it.
+        let printable = |text: &str| -> String {
+            text.chars()
+                .filter(|character| character.is_ascii_graphic() || *character == ' ')
+                .take(300)
+                .collect()
         };
-        return Ok(BrowserCallback { code, stream });
+        let description = query(&url, "error_description")
+            .map(|text| printable(&text))
+            .filter(|text| !text.trim().is_empty());
+        return CallbackRequest::Refused(match description {
+            Some(description) => format!("{description} ({})", printable(&error)),
+            None => printable(&error),
+        });
+    }
+    match query(&url, "code") {
+        Some(code) if !code.is_empty() => CallbackRequest::Code(code),
+        _ => CallbackRequest::Refused("missing authorization code".into()),
     }
 }
 
@@ -1317,8 +1384,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore, OpenAiOAuthClient,
-        OpenAiOAuthConfig, openai_residency, query,
+        CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
+        OpenAiOAuthClient, OpenAiOAuthConfig, openai_residency, query, read_callback,
     };
 
     #[tokio::test]
@@ -1356,6 +1423,204 @@ mod tests {
             Some(redirect.as_str())
         );
         drop(login);
+    }
+
+    #[test]
+    fn only_a_callback_with_this_sign_ins_state_ends_it() {
+        for target in [
+            "/",
+            "/favicon.ico",
+            "/auth/callbackx?state=st-1",
+            "not a target",
+        ] {
+            assert_eq!(
+                read_callback(target, "st-1"),
+                CallbackRequest::Elsewhere,
+                "{target}"
+            );
+        }
+        for target in [
+            "/auth/callback?error=access_denied&error_description=Pwned%20by%20a%20page",
+            "/auth/callback?code=c&state=other",
+            "/auth/callback?code=c",
+        ] {
+            assert_eq!(
+                read_callback(target, "st-1"),
+                CallbackRequest::Foreign,
+                "{target}"
+            );
+        }
+        assert_eq!(
+            read_callback("/auth/callback?code=c-1&state=st-1", "st-1"),
+            CallbackRequest::Code("c-1".into())
+        );
+        assert_eq!(
+            read_callback(
+                "/auth/callback?state=st-1&error=access_denied&error_description=User%20said%20no%3Cb%3E%0A",
+                "st-1"
+            ),
+            CallbackRequest::Refused("User said no<b> (access_denied)".into())
+        );
+        assert_eq!(
+            read_callback("/auth/callback?state=st-1", "st-1"),
+            CallbackRequest::Refused("missing authorization code".into())
+        );
+    }
+
+    /// Port 1455 is fixed, so a web page can reach it: its requests are
+    /// answered and the sign-in keeps waiting for the real return.
+    #[tokio::test]
+    async fn a_web_page_cannot_end_a_browser_sign_in() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let login = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_browser_login()
+        .await
+        .unwrap();
+        let state = query(&login.url, "state").unwrap();
+        let waiting = tokio::spawn(login.finish());
+        let client = reqwest::Client::new();
+        for forged in [
+            "auth/callback?error=access_denied&error_description=PAGE_TEXT".to_owned(),
+            "auth/callback?code=PAGE_CODE&state=PAGE_STATE".to_owned(),
+            "favicon.ico".to_owned(),
+        ] {
+            let response = client
+                .get(format!("http://127.0.0.1:{port}/{forged}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_client_error(), "{forged}");
+            assert!(
+                !response.text().await.unwrap().contains("PAGE_"),
+                "{forged}"
+            );
+        }
+        // A connection that never sends a request holds nothing up.
+        let silent = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "a forged request ended the sign-in");
+        drop(silent);
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/auth/callback?state={state}&error=access_denied"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let error = waiting.await.unwrap().err().unwrap().to_string();
+        assert!(error.contains("access_denied"), "{error}");
+    }
+
+    /// Idle connections (a page's preconnect, a browser's spare socket) are
+    /// read alongside the real return, which they do not hold up.
+    #[tokio::test]
+    async fn idle_connections_do_not_delay_the_browser_return() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let login = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_browser_login()
+        .await
+        .unwrap();
+        let state = query(&login.url, "state").unwrap();
+        let waiting = tokio::spawn(login.finish());
+        let mut idle = Vec::new();
+        for _ in 0..3 {
+            idle.push(
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let started = std::time::Instant::now();
+        let response = reqwest::get(format!(
+            "http://127.0.0.1:{port}/auth/callback?state={state}&error=access_denied"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 400);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+            .await
+            .expect("the return is read while idle connections wait")
+            .unwrap()
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("access_denied"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        drop(idle);
+    }
+
+    /// Two connections that end without the callback, finishing together,
+    /// leave the browser's return to be taken at once: in this flow nothing
+    /// else would arrive, since the browser waits for the token exchange.
+    #[tokio::test]
+    async fn the_return_is_taken_after_connections_that_ended_without_it() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let login = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_browser_login()
+        .await
+        .unwrap();
+        let state = query(&login.url, "state").unwrap();
+        let waiting = tokio::spawn(login.finish());
+        let mut probes = Vec::new();
+        for _ in 0..2 {
+            probes.push(
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        for probe in &mut probes {
+            probe
+                .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+        }
+        for probe in &mut probes {
+            let mut response = String::new();
+            probe.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        }
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /auth/callback?state={state}&error=access_denied HTTP/1.1\r\nHost: x\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+            .await
+            .expect("the return is taken without waiting for another connection")
+            .unwrap()
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("access_denied"), "{error}");
     }
 
     #[tokio::test]

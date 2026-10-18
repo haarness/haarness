@@ -272,6 +272,8 @@ export interface Bridge {
   globalShortcut(action: "suspend" | "resume"): Promise<void>;
   account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;
   openLink(connection: string | undefined, thread: string | undefined | null, url: string): Promise<"external" | "browser">;
+  /** An image on another host as a data URL, fetched by the app without cookies or a referrer; throws why it did not load. */
+  remoteImage(url: string): Promise<string>;
   browserData(connection: string, input?: { action: "get" | "remove" | "clear" | "save"; kind?: "history" | "downloads" | "all"; id?: string }): Promise<import("./browser-settings").BrowserData>;
   browserAttach(connection:string,thread:string):Promise<BrowserState>;
   browserAdopt(connection:string,thread:string):Promise<void>;
