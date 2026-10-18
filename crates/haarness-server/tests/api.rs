@@ -1835,6 +1835,23 @@ async fn a_shutdown_leaves_a_background_task_to_be_reported_on_the_next_start() 
     assert!(second.active_turn(thread.id).await.unwrap().is_none());
 }
 
+/// The native tools, `task` among them, and the blocking one.
+struct WithBlocking(haarness_server::NativeToolRegistry, Arc<BlockingWriteTool>);
+impl ToolRegistry for WithBlocking {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if name == "blocking_write" {
+            Some(self.1.clone() as Arc<dyn Tool>)
+        } else {
+            self.0.get(name)
+        }
+    }
+    fn list(&self) -> Vec<ToolDefinition> {
+        let mut list = self.0.list();
+        list.push(self.1.definition());
+        list
+    }
+}
+
 #[tokio::test]
 async fn a_result_still_waiting_for_its_chat_at_a_shutdown_is_recorded_on_the_next_start() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1862,22 +1879,6 @@ async fn a_result_still_waiting_for_its_chat_at_a_shutdown_is_recorded_on_the_ne
             },
         )
     };
-    /// The native tools, `task` among them, and the blocking one.
-    struct WithBlocking(haarness_server::NativeToolRegistry, Arc<BlockingWriteTool>);
-    impl ToolRegistry for WithBlocking {
-        fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-            if name == "blocking_write" {
-                Some(self.1.clone() as Arc<dyn Tool>)
-            } else {
-                self.0.get(name)
-            }
-        }
-        fn list(&self) -> Vec<ToolDefinition> {
-            let mut list = self.0.list();
-            list.push(self.1.definition());
-            list
-        }
-    }
     let first = runtime(
         Capturing::default(),
         Arc::new(WithBlocking(
