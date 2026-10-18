@@ -768,14 +768,21 @@ test("sidebar Alt and an arrow step the chats the sidebar shows; on a focused ro
   await composer.press("Alt+ArrowDown");
   await expect(row("One")).toHaveAttribute("aria-current", "true");
   await expect(composer).toBeFocused();
-  // A draft does not stop the step, and past the last row it wraps.
-  await composer.fill("draft stays");
-  await composer.press("Alt+ArrowDown");
+  // In a draft on macOS, Option and an arrow move the caret instead; off
+  // macOS a draft does not stop the step.
+  await composer.fill("draft stays\nsecond line");
+  if (process.platform === "darwin") {
+    await composer.press("Alt+ArrowUp");
+    await expect(row("One")).toHaveAttribute("aria-current", "true");
+    expect(await composer.evaluate((box: HTMLTextAreaElement) => box.selectionStart)).toBeLessThan("draft stays\nsecond line".length);
+    await composer.evaluate((box: HTMLTextAreaElement) => box.blur());
+    await page.keyboard.press("Alt+ArrowDown");
+  } else await composer.press("Alt+ArrowDown");
+  // Past the last row it wraps.
   await expect(row("Three")).toHaveAttribute("aria-current", "true");
-  await expect(composer).toBeFocused();
-  await composer.press("Alt+ArrowUp");
+  await page.keyboard.press("Alt+ArrowUp");
   await expect(row("One")).toHaveAttribute("aria-current", "true");
-  await expect(composer).toHaveValue("draft stays");
+  await expect(composer).toHaveValue("draft stays\nsecond line");
   // A sidebar row with the keyboard moves itself and leaves the open chat alone.
   await row("One").press("Alt+ArrowUp");
   await expect(project("alpha").locator(".session-title")).toHaveText(["Three", "One", "Two"]);
@@ -803,6 +810,19 @@ test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the 
   const row = project("alpha").getByRole("button", { name: "Focus me", exact: true });
   await expect(row).toBeFocused();
   await expect(row).toHaveAttribute("aria-current", "true");
+  // From there ↑ and ↓ move between rows without opening them, Enter opens
+  // one, and Alt with an arrow still moves the row that has the keyboard.
+  await page.keyboard.press("ArrowUp");
+  await expect(other).toBeFocused();
+  await expect(row).toHaveAttribute("aria-current", "true");
+  await page.keyboard.press("Enter");
+  await expect(other).toHaveAttribute("aria-current", "true");
+  await other.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(row).toBeFocused();
+  await page.keyboard.press("Alt+ArrowUp");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Focus me", "Other chat"]);
+  await expect(row).toBeFocused();
 });
 
 test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {

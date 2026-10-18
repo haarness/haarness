@@ -368,9 +368,32 @@ export function App() {
       row?.scrollIntoView({ block: "nearest" });
     });
   }
+  /** On a chat row that has the keyboard, ↑ and ↓ move it to the row above
+   * or below, and Home and End to the first or last, as in a list; Enter
+   * opens the chat. Alt with an arrow still moves the row itself (Sortable
+   * stops that key first). */
+  function walkRows(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return false;
+    const rows = chatRows();
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    if (at < 0) return false;
+    const target =
+      rows[
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? rows.length - 1
+            : Math.min(rows.length - 1, Math.max(0, at + (event.key === "ArrowDown" ? 1 : -1)))
+      ];
+    target.focus();
+    target.scrollIntoView({ block: "nearest" });
+    return true;
+  }
   onMount(() => {
     const keys = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;
+      if (walkRows(event)) return void event.preventDefault();
       const { chatPrev, chatNext, focusSidebar: focus } = state.preferences.shortcuts;
       const offset =
         chatNext && matchesShortcut(event, chatNext, state.platform)
@@ -384,7 +407,8 @@ export function App() {
       const draft =
         document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "";
       const place = keyPlace(from, draft, overlayOpen(document));
-      if (focusing ? place === "overlay" : !stepsChats(place)) return;
+      if (focusing ? place === "overlay" : !stepsChats(place, state.platform === "darwin"))
+        return;
       event.preventDefault();
       if (focusing) void app.run(focusSidebar);
       else stepChat(offset, from);
