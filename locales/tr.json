@@ -2509,5 +2509,8 @@
   "This result is too large to show in the app.": "Bu sonuç uygulamada gösterilemeyecek kadar büyük.",
   "Link from the app": "Uygulamadan gelen bağlantı",
   "This app wants to open a link.": "Bu uygulama bir bağlantı açmak istiyor.",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Bu aracın bir uygulaması var; kullanmak için sohbeti Haarness Desktop'ta açın."
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Bu aracın bir uygulaması var; kullanmak için sohbeti Haarness Desktop'ta açın.",
+  "Comment on selection": "Seçime yorum yap",
+  "Comment on these lines…": "Bu satırlara yorum yapın…",
+  "Comment added to your message": "Mesajınıza yorum eklendi"
 }
