@@ -127,6 +127,9 @@ test("keys translated through a variable are in the catalog", () => {
     "Cloud sessions in your Haarness account", "Local projects on this computer",
     // The palette's count picks its singular or plural key.
     "{count} result",
+    // Refusals of a screenshot pick, translated in the main process.
+    "The screenshots changed. Open Screenshots again.",
+    "Choose up to 20 screenshots from the list.",
     // Browser settings row, handed to SettingRow.
     "Show the agent’s cursor",
     "See where Haarness points, clicks and types while it controls the browser. Turning it off makes browser actions a little faster.",
