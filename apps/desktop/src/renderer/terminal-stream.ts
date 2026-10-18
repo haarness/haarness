@@ -8,7 +8,7 @@ const shown = new Map<string, number>();
 /** Terminals this window started, whose whole output is new to it. */
 const started = new Set<string>();
 /** Where views were scrolled up to when they went; see `scrollPlaces`. */
-const places = new Map<string, { start: number; line: number }>();
+const places = new Map<string, ScrollPlace>();
 export const shownOutput = {
   get: (key: string) => shown.get(key) ?? 0,
   set: (key: string, end: number) => shown.set(key, Math.max(end, shown.get(key) ?? 0)),
@@ -32,27 +32,50 @@ export const shownOutput = {
   },
 };
 
+/** Where a view was scrolled up to (`line`, from the top of xterm's
+ * buffer), and what it showed then: the output from `start` to `end`, as the
+ * server counts it, at `cols` × `rows`. */
+export interface ScrollPlace {
+  start: number;
+  end: number;
+  line: number;
+  cols: number;
+  rows: number;
+}
 /**
- * The line each terminal's view was scrolled up to when it went (the panel
+ * The place each terminal's view was scrolled up to when it went (the panel
  * hidden, another tab chosen), by `<connection>:<pty>`, so the view shown
- * again opens there instead of at the bottom. A place belongs to the replay
- * it was read in, named by where that replay started: one that starts
- * elsewhere (older output was dropped meanwhile) holds other lines, and
- * opens at the bottom.
+ * again opens there instead of at the bottom (see `restoredLine`).
  */
 export const scrollPlaces = {
-  /** A view goes: scrolled up to `line`, or at the bottom (`undefined`). */
-  save(key: string, start: number, line: number | undefined) {
-    if (line === undefined) places.delete(key);
-    else places.set(key, { start, line });
+  /** A view goes: scrolled up to a place, or at the bottom (`undefined`). */
+  save(key: string, place: ScrollPlace | undefined) {
+    if (place === undefined) places.delete(key);
+    else places.set(key, place);
   },
-  /** A view's first replay starts at `start`: where it should open. */
-  take(key: string, start: number) {
+  /** A view is shown again: where it was, once. */
+  take(key: string) {
     const place = places.get(key);
     places.delete(key);
-    return place?.start === start ? place.line : undefined;
+    return place;
   },
 };
+/**
+ * The line a view shown again opens at: where it was, while that line holds
+ * the same text. A replay that starts elsewhere (older output was dropped
+ * meanwhile) or wraps at another width holds other lines. The same output at
+ * the same size fills xterm's buffer alike; with more output, or another
+ * height, the lines stay where they were only while xterm dropped nothing
+ * from the top of its scrollback (`trimmed`).
+ */
+export function restoredLine(
+  saved: ScrollPlace | undefined,
+  now: Omit<ScrollPlace, "line"> & { trimmed: boolean },
+) {
+  if (!saved || saved.start !== now.start || saved.cols !== now.cols) return undefined;
+  if (saved.end === now.end && saved.rows === now.rows) return saved.line;
+  return now.trimmed ? undefined : saved.line;
+}
 
 /**
  * Writes what the server sends into xterm and says whether xterm's answers
