@@ -18,6 +18,7 @@ import {
   reconnects,
   restoredLine,
   scrollPlaces,
+  topText,
   shownOutput,
   terminalStream,
   writeChunks,
@@ -440,6 +441,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
               cols: terminal.cols,
               rows: terminal.rows,
               trimmed: terminal.buffer.active.length >= terminal.rows + SCROLLBACK,
+              text: (index) => topText(lineText, index),
             });
             place = undefined;
             if (line !== undefined) terminal.scrollToLine(line);
@@ -474,6 +476,8 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     let replayStart: number | undefined;
     let place: ScrollPlace | undefined;
     let restoring = false;
+    const lineText = (index: number) =>
+      terminal.buffer.active.getLine(index)?.translateToString(true);
     let focused = false;
     // What the view says while the connection is down; reconnects go on
     // whatever it says.
@@ -542,6 +546,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
                   line: buffer.viewportY,
                   cols: terminal.cols,
                   rows: terminal.rows,
+                  text: topText(lineText, buffer.viewportY),
                 }
               : undefined),
         );
