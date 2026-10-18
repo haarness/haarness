@@ -11,10 +11,12 @@
 
 use std::fmt::Write as _;
 
-/// How far into a truncated replay a clean start is looked for.
+/// How far past the first point outside a sequence a truncated replay looks
+/// for the start of a whole line.
 pub(crate) const CLEAN_START_LIMIT: usize = 64 * 1024;
-/// Longer parameter lists are not mode changes anyone sends.
-const PARAMS_LIMIT: usize = 64;
+/// The parameters of a sequence that count; later ones are ignored, as
+/// terminals do (vte keeps 32).
+const PARAMS_LIMIT: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum State {
@@ -38,11 +40,18 @@ enum State {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Modes {
     state: State,
-    /// The CSI parameter bytes after any marker (`?`, `>`, `<`, `=`).
-    params: Vec<u8>,
+    /// The last byte was a line break outside any sequence.
+    line_start: bool,
+    /// The CSI parameters so far, at most `PARAMS_LIMIT`; the last one is
+    /// being read. An empty one is 0, and one with sub-parameters (`:`),
+    /// which no mode has, is `None`.
+    params: Vec<Option<u16>>,
+    /// More parameters came than `PARAMS_LIMIT`.
+    full: bool,
+    /// The marker before the parameters (`?`, `>`, `<`, `=`).
     marker: Option<u8>,
-    intermediate: bool,
-    overflow: bool,
+    /// An intermediate byte, or a marker after a parameter: not a mode change.
+    ignored: bool,
     /// The mode (47, 1047 or 1049) that switched to the alternate screen.
     alternate: Option<u16>,
     application_cursor: bool,
@@ -66,6 +75,11 @@ impl Modes {
     }
 
     fn byte(&mut self, byte: u8) {
+        self.step(byte);
+        self.line_start = byte == b'\n' && self.state == State::Ground;
+    }
+
+    fn step(&mut self, byte: u8) {
         match self.state {
             State::Ground => {
                 if byte == 0x1b {
@@ -84,14 +98,8 @@ impl Modes {
                 0x3c..=0x3f if self.params.is_empty() && self.marker.is_none() => {
                     self.marker = Some(byte);
                 }
-                0x30..=0x3f => {
-                    if self.params.len() < PARAMS_LIMIT {
-                        self.params.push(byte);
-                    } else {
-                        self.overflow = true;
-                    }
-                }
-                0x20..=0x2f => self.intermediate = true,
+                0x30..=0x3b => self.param(byte),
+                0x3c..=0x3f | 0x20..=0x2f => self.ignored = true,
                 0x40..=0x7e => {
                     self.dispatch(byte);
                     self.state = State::Ground;
@@ -118,9 +126,9 @@ impl Modes {
         self.state = match byte {
             b'[' => {
                 self.params.clear();
+                self.full = false;
                 self.marker = None;
-                self.intermediate = false;
-                self.overflow = false;
+                self.ignored = false;
                 State::Csi
             }
             b']' | b'P' | b'_' | b'^' | b'X' => State::String,
@@ -144,6 +152,33 @@ impl Modes {
         };
     }
 
+    /// A digit, `:` or `;` of a CSI sequence's parameters.
+    fn param(&mut self, byte: u8) {
+        if self.params.is_empty() {
+            self.params.push(Some(0));
+        }
+        if byte == b';' {
+            if self.params.len() < PARAMS_LIMIT {
+                self.params.push(Some(0));
+            } else {
+                self.full = true;
+            }
+            return;
+        }
+        if self.full {
+            return;
+        }
+        let current = self.params.last_mut().expect("a parameter is being read");
+        *current = match (byte, *current) {
+            (b':', _) | (_, None) => None,
+            (digit, Some(value)) => Some(
+                value
+                    .saturating_mul(10)
+                    .saturating_add(u16::from(digit - b'0')),
+            ),
+        };
+    }
+
     /// A CSI sequence ended with `last`: `h` sets and `l` resets the modes it
     /// lists, private (`?`) or ANSI.
     fn dispatch(&mut self, last: u8) {
@@ -152,14 +187,11 @@ impl Modes {
             b'l' => false,
             _ => return,
         };
-        if self.overflow || self.intermediate {
+        if self.ignored {
             return;
         }
         let params = std::mem::take(&mut self.params);
-        for mode in params
-            .split(|byte| *byte == b';')
-            .filter_map(|part| std::str::from_utf8(part).ok()?.parse::<u16>().ok())
-        {
+        for mode in params.iter().copied().flatten() {
             match self.marker {
                 Some(b'?') => self.private(mode, set),
                 None if mode == 4 => self.insert = set,
@@ -231,23 +263,37 @@ impl Modes {
 
     /// Where a replay of `bytes`, which follow the output these modes were
     /// fed, should start so that it begins neither inside an escape sequence
-    /// nor inside a character, and the modes in effect at that point. The
-    /// start of the first whole line within `CLEAN_START_LIMIT` bytes is
-    /// preferred; without one, the first character boundary outside a
-    /// sequence.
+    /// nor inside a character, and the modes in effect at that point. Output
+    /// cut just after a line break starts where it is. Otherwise the start
+    /// of the first whole line is preferred, within `CLEAN_START_LIMIT` bytes
+    /// of the first character boundary outside a sequence, else that
+    /// boundary. A string however long (an image, a clipboard copy) is
+    /// skipped to its end: its payload is not text. Output that is all
+    /// inside one gives nothing to replay.
     pub(crate) fn clean_start(&self, bytes: impl IntoIterator<Item = u8>) -> (usize, Self) {
+        if self.line_start {
+            return (0, self.clone());
+        }
         let mut modes = self.clone();
-        let mut boundary = None;
-        for (index, byte) in bytes.into_iter().take(CLEAN_START_LIMIT).enumerate() {
+        let mut boundary: Option<(usize, Self)> = None;
+        let mut count = 0;
+        for (index, byte) in bytes.into_iter().enumerate() {
+            count = index + 1;
             if boundary.is_none() && modes.state == State::Ground && !continuation(byte) {
                 boundary = Some((index, modes.clone()));
+            }
+            if boundary
+                .as_ref()
+                .is_some_and(|(at, _)| index >= at + CLEAN_START_LIMIT)
+            {
+                break;
             }
             modes.byte(byte);
             if byte == b'\n' && modes.state == State::Ground {
                 return (index + 1, modes);
             }
         }
-        boundary.unwrap_or_else(|| (0, self.clone()))
+        boundary.unwrap_or((count, modes))
     }
 }
 
@@ -293,16 +339,37 @@ mod tests {
     #[test]
     fn text_inside_strings_and_other_sequences_is_not_a_mode_change() {
         // A window title naming a mode, a key-modifier request (`>`), an
-        // intermediate byte and an overlong parameter list change nothing.
-        let mut overlong = b"\x1b[?1".to_vec();
-        overlong.extend(std::iter::repeat_n(b';', PARAMS_LIMIT));
-        overlong.extend(b"2004h");
-        let mut modes = fed(b"\x1b]0;[?1049h title\x07\x1bP+q[?2004h\x1b\\\x1b[>1h\x1b[?1$h");
-        modes.feed(overlong);
+        // intermediate byte and a marker after a parameter change nothing.
+        let modes = fed(b"\x1b]0;[?1049h title\x07\x1bP+q[?2004h\x1b\\\x1b[>1h\x1b[?1$h\x1b[1?1h");
         assert_eq!(modes.preamble(), "");
         // ESC inside a string ends it and starts a sequence of its own, as
         // in a terminal.
         assert_eq!(fed(b"\x1b]0;title\x1b[?1h").preamble(), "\x1b[?1h");
+    }
+
+    #[test]
+    fn a_long_mode_list_applies_its_first_32_modes() {
+        let on = b"\x1b[?1049h\x1b[?1000h\x1b[?2004h";
+        // A program's exit turns everything off in one long list.
+        let mut list = b"\x1b[?1000".to_vec();
+        for _ in 0..20 {
+            list.extend(b";1");
+        }
+        list.extend(b";1049;2004l");
+        let mut modes = fed(on);
+        modes.feed(list);
+        assert_eq!(modes.preamble(), "");
+        // Past the 32nd, as terminals do, parameters are ignored.
+        let mut list = b"\x1b[?1000".to_vec();
+        for _ in 0..30 {
+            list.extend(b";;");
+        }
+        list.extend(b";1049;2004l");
+        let mut modes = fed(on);
+        modes.feed(list);
+        assert_eq!(modes.preamble(), "\x1b[?1049h\x1b[?2004h");
+        // Sub-parameters and overlong numbers are no mode.
+        assert_eq!(fed(b"\x1b[?1:1h\x1b[?99999999h").preamble(), "");
     }
 
     #[test]
@@ -341,11 +408,34 @@ mod tests {
         let (start, at) = modes.clean_start([b'2', b'H', 0x97, 0xa5, b'z']);
         assert_eq!(start, 4);
         assert_eq!(at.state, State::Ground);
-        // Nothing clean within the limit: the raw cut.
+    }
+
+    #[test]
+    fn a_long_string_cut_in_the_middle_is_skipped_to_its_end() {
+        // An image or a clipboard copy (OSC 52) longer than the search for a
+        // line: its payload is never replayed as text.
         let mut modes = Modes::default();
-        modes.feed(*b"\x1b]0;");
-        let (start, at) = modes.clean_start(std::iter::repeat_n(b'a', CLEAN_START_LIMIT + 10));
+        modes.feed(*b"\x1b]52;c;");
+        let mut bytes = vec![b'Q'; CLEAN_START_LIMIT * 2];
+        bytes.extend(b"\x07\x1b[?2004hprompt\nnext");
+        let (start, at) = modes.clean_start(bytes.iter().copied());
+        assert_eq!(&bytes[start..], b"next");
+        assert_eq!(at.preamble(), "\x1b[?2004h");
+        // All of it inside one string: nothing to replay.
+        let (start, _) = modes.clean_start(std::iter::repeat_n(b'Q', CLEAN_START_LIMIT + 10));
+        assert_eq!(start, CLEAN_START_LIMIT + 10);
+    }
+
+    #[test]
+    fn output_cut_just_after_a_line_break_starts_where_it_is() {
+        let mut modes = Modes::default();
+        modes.feed(*b"\x1b[?2004hold line\r\n");
+        let (start, at) = modes.clean_start(*b"kept line\r\nnext");
         assert_eq!(start, 0);
-        assert_eq!(at, modes);
+        assert_eq!(at.preamble(), "\x1b[?2004h");
+        // A line break inside a string is not one.
+        let mut modes = Modes::default();
+        modes.feed(*b"\x1b]0;a\n");
+        assert_eq!(modes.clean_start(*b"b\x07c\nd").0, 4);
     }
 }

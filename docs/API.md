@@ -147,10 +147,12 @@ shell. Patch changes the title and/or resizes using both dimensions. A WebSocket
 client sends raw input as binary frames and receives raw output as binary
 frames. JSON text control frames mark replay boundaries and acknowledge the
 monotonic byte `cursor`; reconnecting with the last acknowledged cursor replays
-the missing range from a bounded two-megabyte buffer. A cursor older than the
-buffer gets `truncated: true` and a replay that starts at the first whole line
-still buffered (or, without a line break in its first 64 KiB, the first
-character outside an escape sequence), whose offset is `start`; `modes` then
+the missing range from a bounded two-megabyte buffer; leaving `cursor` out is
+the same as 0. A cursor older than the buffer gets `truncated: true` and a
+replay that starts where the buffer does when that is a line start, else at
+the first whole line still buffered (or, without a line break within 64 KiB,
+the first character outside an escape sequence; a string such as an image or
+a clipboard copy is skipped to its end), whose offset is `start`; `modes` then
 holds the escape sequences that restore the terminal modes the dropped output
 left on (alternate screen, application cursor keys and keypad, mouse tracking
 and encoding, focus reports, bracketed paste, a hidden cursor, autowrap off,
