@@ -111,7 +111,11 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
  */
 export function createMarkdownDOM(
   host: HTMLElement,
-  images?: { loaded: (src: string) => string | undefined; labels: () => RemoteImageLabels },
+  images?: {
+    loaded: (src: string) => string | undefined;
+    loading: (src: string) => boolean;
+    labels: () => RemoteImageLabels;
+  },
 ) {
   const blocks: Block[] = [];
   hosts.set(host, blocks);
@@ -135,7 +139,7 @@ export function createMarkdownDOM(
         FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
         FORBID_ATTR: ["style"],
       });
-      if (images) holdRemoteImages(fragment, images.loaded, images.labels());
+      if (images) holdRemoteImages(fragment, images.loaded, images.labels(), images.loading);
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);
       block.html = html;
     });

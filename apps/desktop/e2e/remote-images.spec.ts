@@ -208,6 +208,10 @@ test("the placeholder speaks the interface language and keeps its host readable 
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   try {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    // A placeholder drawn in English before follows the language too.
+    await expect(
+      page.locator(".message.assistant").first().getByRole("button", { name: "تحميل الصورة من badges.test", exact: true }),
+    ).toBeVisible();
     // A reply drawn in Arabic: its button names the host inside the translated sentence.
     const message = await reply(`![](http://badges.test:${port}/badge.png?rtl=1)`);
     const load = message.getByRole("button", { name: "تحميل الصورة من badges.test", exact: true });

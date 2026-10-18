@@ -6,9 +6,12 @@ import { fetchRemoteImage, imageAddress, imageType, privateAddress } from "../sr
 import {
   forgetImages,
   holdRemoteImages,
+  imageLoading,
   loadableSources,
   loadedImage,
+  loadImage,
   madeHere,
+  relabelImages,
   rememberImage,
   remoteImageHost,
   replyAttribute,
@@ -63,6 +66,10 @@ class Fake {
   replaceWith(node: Fake) {
     this.replacement = node;
   }
+  disabled = false;
+  querySelector(selector: string): Fake | null {
+    return this.children.find((child) => `.${child.className}` === selector) ?? null;
+  }
 }
 const fakeDocument = { createElement: (tag: string): Fake => new Fake(fakeDocument, tag) };
 const labels = { load: (host: string) => `Load image from ${host}`, unnamed: "Image" };
@@ -84,6 +91,61 @@ test("only placeholders the app made count as placeholders, whatever a copy look
   assert.equal(madeHere(forged as unknown as Node), false);
   assert.equal(madeHere(holder.children[0] as unknown as Node), false);
   assert.equal(madeHere(undefined), false);
+});
+
+test("a fetch already running keeps its button off, and placeholders follow a language change", () => {
+  const image = new Fake(fakeDocument, "img", { src: "https://images.example/a.png" });
+  const blank = new Fake(fakeDocument, "img", { src: "https://images.example/b.png", alt: "Chart" });
+  holdRemoteImages(
+    { querySelectorAll: () => [image, blank] } as unknown as ParentNode,
+    () => undefined,
+    labels,
+    (src) => src.endsWith("a.png"),
+  );
+  const [busy, idle] = [image.replacement!, blank.replacement!];
+  assert.equal(busy.children[1].disabled, true);
+  assert.equal(idle.children[1].disabled, false);
+  const forged = new Fake(fakeDocument, "span");
+  forged.className = "remote-image";
+  relabelImages({ querySelectorAll: () => [busy, idle, forged] } as unknown as ParentNode, {
+    load: (host) => `تحميل الصورة من ${host}`,
+    unnamed: "صورة",
+  });
+  assert.equal(busy.children[0].textContent, "صورة");
+  assert.equal(busy.children[1].textContent, "تحميل الصورة من images.example");
+  // Alt text the reply wrote stays as written.
+  assert.equal(idle.children[0].textContent, "Chart");
+  assert.equal(forged.children.length, 0);
+});
+
+test("an image is fetched once at a time per chat, and again after a failure", async () => {
+  forgetImages();
+  const fetched: string[] = [];
+  let finish!: (data: string) => void;
+  let fail!: (error: Error) => void;
+  const fetch = (src: string) => {
+    fetched.push(src);
+    return new Promise<string>((resolve, reject) => {
+      finish = resolve;
+      fail = reject;
+    });
+  };
+  const first = loadImage("chat", "https://x/a.png", fetch);
+  const second = loadImage("chat", "https://x/a.png", fetch);
+  assert.equal(imageLoading("chat", "https://x/a.png"), true);
+  assert.deepEqual(fetched, ["https://x/a.png"]);
+  finish("data:a");
+  assert.deepEqual(await Promise.all([first, second]), ["data:a", "data:a"]);
+  assert.equal(imageLoading("chat", "https://x/a.png"), false);
+  assert.equal(loadedImage("chat", "https://x/a.png"), "data:a");
+  const failing = loadImage("chat", "https://x/b.png", fetch);
+  fail(new Error("refused"));
+  await assert.rejects(failing, /refused/);
+  assert.equal(imageLoading("chat", "https://x/b.png"), false);
+  void loadImage("chat", "https://x/b.png", fetch).catch(() => {});
+  assert.deepEqual(fetched, ["https://x/a.png", "https://x/b.png", "https://x/b.png"]);
+  fail(new Error("again"));
+  forgetImages();
 });
 
 test("a click loads only addresses that are on the host its button names", () => {
