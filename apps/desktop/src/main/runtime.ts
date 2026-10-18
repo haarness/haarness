@@ -125,13 +125,21 @@ export async function invoke(
     child.stderr.on("data", (chunk) => {
       errors = (errors + chunk.toString()).slice(-12000);
     });
+    let settled = false;
+    let drain: ReturnType<typeof setTimeout> | undefined;
     child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(drain);
       if (id) commands.delete(id);
       reject(error);
     });
-    child.once("close", (code) => {
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(drain);
       if (id) commands.delete(id);
       if (code !== 0 || exceeded) {
         reject(
@@ -150,7 +158,15 @@ export async function invoke(
         value = JSON.parse(output);
       } catch {}
       resolve({ output, value });
+    };
+    // Output ends with the process. A server it started that kept the pipes
+    // (Windows hands inheritable handles to every child) would hold "close"
+    // back for as long as that server runs, so the exit is final once the
+    // output has had a moment to drain.
+    child.once("exit", (code) => {
+      drain = setTimeout(() => finish(code), 1000);
     });
+    child.once("close", (code) => finish(code));
     child.stdin.end(input === undefined ? "" : JSON.stringify(input));
   });
 }

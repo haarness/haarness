@@ -4,6 +4,8 @@ import {
   matchesShortcut,
   physicalKey,
   searchEntries,
+  shortcutField,
+  shortcutFromField,
   shortcutLabel,
   shortcutText,
   type SearchEntry,
@@ -161,4 +163,13 @@ test("the tab step defaults give way to keys people already chose", () => {
     assert.equal(shortcutsClash(defaults.shortcuts, platform), false);
   // Unset keys are no clash.
   assert.equal(shortcutsClash({ a: "", b: "" }, "darwin"), false);
+});
+
+test("shortcut fields write Ctrl off macOS and save it as Mod, the same key there", () => {
+  assert.equal(shortcutField("Mod+Alt+Shift+F8", "linux"), "Ctrl+Alt+Shift+F8");
+  assert.equal(shortcutField("Mod+Alt+Shift+F8", "darwin"), "Mod+Alt+Shift+F8");
+  assert.equal(shortcutField("Ctrl+Tab", "darwin"), "Ctrl+Tab");
+  assert.equal(shortcutFromField("Ctrl+Shift+E", "win32"), "Mod+Shift+E");
+  assert.equal(shortcutFromField("ctrl+k", "linux"), "Mod+k");
+  assert.equal(shortcutFromField("Ctrl+Tab", "darwin"), "Ctrl+Tab");
 });

@@ -141,7 +141,12 @@ const voice = createVoiceInput((locale) =>
     locale,
   ),
 );
-let pendingLink: string | undefined;
+// Windows and Linux start the app with a clicked haarness:// link as an
+// argument (macOS sends open-url instead); hold it until a window can open it.
+let pendingLink: string | undefined =
+  process.platform === "darwin"
+    ? undefined
+    : process.argv.find((arg) => arg.startsWith("haarness://"));
 let updateReady = false,
   updateAvailable = false,
   updateListeners = false;

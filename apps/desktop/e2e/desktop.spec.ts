@@ -3065,12 +3065,15 @@ test("the global shortcut is off until turned on, registers only a free combinat
   await field.blur();
   await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
   expect(await registered("Control+Alt+Shift+F9")).toBe(false);
-  // One the system keeps is refused, and the field shows the saved one again.
-  await field.focus();
-  await page.keyboard.press("Meta+Space");
-  await expect(settings.getByRole("alert")).toContainText("belongs to the system");
-  await settings.getByRole("button", { name: "Dismiss error", exact: true }).click();
-  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  // One the system keeps (Spotlight's) is refused, and the field shows the
+  // saved one again. Off macOS the recorder takes no Super/Windows chord.
+  if (process.platform === "darwin") {
+    await field.focus();
+    await page.keyboard.press("Meta+Space");
+    await expect(settings.getByRole("alert")).toContainText("belongs to the system");
+    await settings.getByRole("button", { name: "Dismiss error", exact: true }).click();
+    await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  }
   // One another app holds is refused too, and the saved one stays in use.
   await app.evaluate(({ globalShortcut }) => globalShortcut.register("Control+Alt+Shift+F7", () => {}));
   await field.focus();
@@ -3097,7 +3100,11 @@ test("the global shortcut is off until turned on, registers only a free combinat
   await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
   expect(
     await page.evaluate(async () => (await window.haarness.boot()).preferences.globalShortcut),
-  ).toEqual({ enabled: false, keys: "Ctrl+Alt+Shift+F8" });
+  ).toEqual({
+    enabled: false,
+    // Control is Mod off macOS (one key there), and Ctrl of its own on macOS.
+    keys: process.platform === "darwin" ? "Ctrl+Alt+Shift+F8" : "Mod+Alt+Shift+F8",
+  });
   await page.keyboard.press("Escape");
   await expect(settings).toHaveCount(0);
   expect(errors).toEqual([]);
@@ -6050,14 +6057,25 @@ test("schedule pickers, native execution and grouped conversations work end to e
     expect(jobs().find((job) => job.id === id)!.trigger.at).toBe(
       new Date(at).toISOString().replace(".000Z", "Z"),
     );
-    const label = `gui/${process.getuid!()}/dev.haarness.schedule.${id}`;
-    execFileSync("/bin/launchctl", ["print", label], { stdio: "ignore" });
-    execFileSync("/bin/launchctl", ["kickstart", label]);
+    // Start the installed job the way its system scheduler would.
+    let source = "launchd";
+    if (process.platform === "darwin") {
+      const label = `gui/${process.getuid!()}/dev.haarness.schedule.${id}`;
+      execFileSync("/bin/launchctl", ["print", label], { stdio: "ignore" });
+      execFileSync("/bin/launchctl", ["kickstart", label]);
+    } else if (process.platform === "linux") {
+      source = "systemd-user";
+      execFileSync("systemctl", ["--user", "is-enabled", `haarness-schedule-${id}.timer`], { stdio: "ignore" });
+      execFileSync("systemctl", ["--user", "start", "--no-block", `haarness-schedule-${id}.service`]);
+    } else {
+      source = "windows-task";
+      execFileSync("schtasks.exe", ["/Run", "/TN", `Haarness\\Schedule\\${id}`], { stdio: "ignore" });
+    }
     await expect
       .poll(() => JSON.parse(command(["history", id, "--json"])), {
         timeout: 30000,
       })
-      .toMatchObject([{ status: "success", source: "launchd" }]);
+      .toMatchObject([{ status: "success", source }]);
     expect(received.at(-1)).toEqual({
       model: "schedule-other",
       effort: "high",
