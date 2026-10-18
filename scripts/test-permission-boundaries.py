@@ -18,7 +18,8 @@
    and other spellings; an ask through an assignment stops a headless run naming the whole
    command; an allowed wrapper and quoted words add no question under `"bash": "ask"`; a path
    outside the project inside `bash -c` or behind a wrapper asks for its folder; a command too
-   long to read is refused by a deny under `--yolo` and by a skill's, and an ask needs a person.
+   long to read is refused by a deny under `--yolo` and by a skill's, and an ask needs a person; a
+   line too large to read needs a person even when its first word is allowed.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
@@ -380,6 +381,13 @@ def case_shell_readings():
     assert 'disabled by the active skill' in result.stdout + result.stderr, result.stdout + result.stderr
     assert (guarded / 'victim').is_dir(), 'an unread command ran past the skill deny'
     passed('a command too long to read is refused by a deny under --yolo and by a skill, and an ask needs a person')
+    # A line too large to read: an allow for its first word never settles it.
+    huge = project('shell-unreadable', {'permission': {'bash': {'*': 'allow', 'echo *': 'allow'}}})
+    line = 'echo ' + '$(echo ' * 1500 + 'x' + ')' * 1500 + '; touch marker'
+    result = haarness(huge, 'run', '--yolo', '!tool bash ' + json.dumps({'command': line}), check=False)
+    assert result.returncode != 0 and 'which always needs an answer' in result.stderr, result.stderr[-2000:]
+    assert not (huge / 'marker').exists(), 'an unreadable line ran under an allow for echo'
+    passed('a line too large to read needs a person even when its first word is allowed')
 
 
 CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow',

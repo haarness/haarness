@@ -232,11 +232,15 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
                 .filter(|_| key == "command")
             {
                 text.push('\n');
-                text.push_str(
-                    &language
-                        .text("Haarness could not read all of this command; a rule for {rule} may apply.")
-                        .replace("{rule}", rule),
-                );
+                if rule.is_empty() {
+                    text.push_str(language.text("Haarness could not read all of this command."));
+                } else {
+                    text.push_str(
+                        &language
+                            .text("Haarness could not read all of this command; a rule for {rule} may apply.")
+                            .replace("{rule}", rule),
+                    );
+                }
             }
             return Some(text);
         }

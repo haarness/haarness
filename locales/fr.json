@@ -1661,6 +1661,7 @@
   "collapse": "réduire",
   "lines {from}–{to} of {total}": "lignes {from}–{to} sur {total}",
   "always allows": "autorise toujours",
+  "Haarness could not read all of this command.": "Haarness n'a pas pu lire toute cette commande.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness n'a pas pu lire toute cette commande ; une règle pour {rule} peut s'appliquer.",
   "Leads to {path}": "Mène à {path}",
   "every file edit": "chaque modification de fichier",

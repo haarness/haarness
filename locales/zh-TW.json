@@ -1661,6 +1661,7 @@
   "collapse": "收合",
   "lines {from}–{to} of {total}": "第 {from}–{to} 行，共 {total} 行",
   "always allows": "一律允許",
+  "Haarness could not read all of this command.": "Haarness 無法讀取這條命令的全部內容。",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness 無法讀取這條命令的全部內容；{rule} 的規則可能適用。",
   "Leads to {path}": "實際指向 {path}",
   "every file edit": "所有檔案編輯",
