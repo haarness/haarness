@@ -93,25 +93,60 @@ pub fn is_config_path(path: &Path) -> bool {
     {
         return true;
     }
-    global_config_dir().is_some_and(|global| {
-        let global = normalize_absolute(&global);
-        let real = global.canonicalize().unwrap_or_else(|_| global.clone());
-        [global, real].iter().any(|root| {
-            path.strip_prefix(root).is_ok_and(|rest| {
-                let rest: Vec<String> = rest
-                    .components()
-                    .map(|part| file_name_key(&part.as_os_str().to_string_lossy()))
-                    .collect();
-                matches!(
-                    rest.iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                    ["config.toml" | "extensions.json"] | ["extensions", _, ..]
-                )
+    global_config_dir().is_some_and(|global| is_global_config_path(&path, &global))
+}
+
+/// Whether `path` is one of the global configuration folder's own files:
+/// `config.toml`, `extensions.json`, `haarness.json{,c}`, `opencode.json{,c}`
+/// or extension code under `extensions/`. The folder and each of those may
+/// be a link (dotfiles kept elsewhere and linked in, as `stow` does), so the
+/// files they really lead to count too.
+#[must_use]
+pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
+    const FILES: [&str; 6] = [
+        "config.toml",
+        "extensions.json",
+        "haarness.json",
+        "haarness.jsonc",
+        "opencode.json",
+        "opencode.jsonc",
+    ];
+    let path = normalize_absolute(path);
+    let real_path = path.canonicalize().ok();
+    let names = |candidate: &Path| path == candidate || real_path.as_deref() == Some(candidate);
+    let global = normalize_absolute(global);
+    let roots = [Some(global.clone()), global.canonicalize().ok()];
+    // A path inside the folder, as written or through the folder's link.
+    let inside = roots.iter().flatten().any(|root| {
+        [Some(&path), real_path.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|path| {
+                path.strip_prefix(root).is_ok_and(|rest| {
+                    let rest: Vec<String> = rest
+                        .components()
+                        .map(|part| file_name_key(&part.as_os_str().to_string_lossy()))
+                        .collect();
+                    match rest.as_slice() {
+                        [name] => FILES.contains(&name.as_str()),
+                        [folder, _, ..] => folder == "extensions",
+                        [] => false,
+                    }
+                })
             })
+    });
+    // Or where one of the files, or the extensions folder, really is.
+    inside
+        || FILES
+            .iter()
+            .filter_map(|name| global.join(name).canonicalize().ok())
+            .any(|real| names(&real))
+        || global.join("extensions").canonicalize().is_ok_and(|real| {
+            [Some(&path), real_path.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|path| path.starts_with(&real) && path != &real)
         })
-    })
 }
 
 /// A file or folder name as Haarness compares it: lower case, without the
@@ -129,30 +164,38 @@ pub fn set_global_config_dir(dir: PathBuf) {
     let _ = GLOBAL_CONFIG_DIR.set(dir);
 }
 
-/// The global configuration folder: the one the CLI recorded, else the same
-/// resolution it uses: `$HAARNESS_DATA_DIR/config`, `$HAARNESS_HOME/config`,
-/// `$XDG_CONFIG_HOME/haarness`, then `.config/haarness` in the home folder
-/// (`HOME`, or `USERPROFILE` on Windows).
+/// The global configuration folder: the one the CLI recorded, else
+/// [`global_config_dir_from`] the process environment.
 fn global_config_dir() -> Option<PathBuf> {
     if let Some(dir) = GLOBAL_CONFIG_DIR.get() {
         return Some(dir.clone());
     }
-    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    if let Some(root) = set("HAARNESS_DATA_DIR") {
-        return Some(PathBuf::from(root).join("config"));
-    }
-    let absolute = |name: &str| {
-        set(name)
+    global_config_dir_from(&|name| std::env::var_os(name))
+}
+
+/// The global configuration folder for an environment, resolved as the
+/// CLI's `Paths` does: `$HAARNESS_DATA_DIR/config`, `$HAARNESS_HOME/config`,
+/// `$XDG_CONFIG_HOME/haarness`, then `.config/haarness` in `$HOME` (or, on
+/// Windows, `%USERPROFILE%`).
+#[must_use]
+pub fn global_config_dir_from(env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let set = |name: &str| {
+        env(name)
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
     };
-    if let Some(root) = absolute("HAARNESS_HOME") {
+    if let Some(root) = set("HAARNESS_DATA_DIR") {
         return Some(root.join("config"));
     }
-    absolute("XDG_CONFIG_HOME")
+    if let Some(root) = set("HAARNESS_HOME").filter(|path| path.is_absolute()) {
+        return Some(root.join("config"));
+    }
+    set("XDG_CONFIG_HOME")
+        .filter(|path| path.is_absolute())
         .or_else(|| {
-            absolute("HOME")
-                .or_else(|| absolute("USERPROFILE"))
+            env("HOME")
+                .map(PathBuf::from)
+                .or_else(|| set("USERPROFILE"))
                 .map(|home| home.join(".config"))
         })
         .map(|base| base.join("haarness"))
@@ -357,18 +400,6 @@ impl PermissionEngine {
 
     #[must_use]
     pub fn evaluate_detailed(&self, operation: &str) -> Evaluation {
-        self.evaluate_with(operation, false)
-    }
-
-    /// [`Self::evaluate_detailed`] for an edit the caller knows widens what an
-    /// agent, command or skill may do (its frontmatter's `permission` or
-    /// `tools` change): asked like a configuration file edit.
-    #[must_use]
-    pub fn evaluate_guarded(&self, operation: &str) -> Evaluation {
-        self.evaluate_with(operation, true)
-    }
-
-    fn evaluate_with(&self, operation: &str, guarded: bool) -> Evaluation {
         let operation = normalize_operation_alias(operation);
         let spellings = self.path_spellings(&operation);
         let names = |rule: &&PermissionRule| rule_names(rule, &operation, &spellings);
@@ -402,7 +433,7 @@ impl PermissionEngine {
             .split_once(':')
             .filter(|(permission, _)| *permission == "edit")
             .map(|(_, target)| target)
-            .filter(|target| guarded || is_config_path(Path::new(target)))
+            .filter(|target| is_config_path(Path::new(target)))
         {
             let name = Path::new(target)
                 .file_name()
@@ -1531,22 +1562,20 @@ mod tests {
         ] {
             assert!(is_config_path(Path::new(path)), "{path}");
         }
-        // The global configuration folder's own settings and extensions.
-        let global = global_config_dir().expect("a home folder");
+        // The global configuration folder's own settings and extensions;
+        // the CLI's layout resolution is pinned by its own tests.
+        let global = Path::new("/home/me/.config/haarness");
         for name in [
             "config.toml",
             "extensions.json",
             "extensions/x.js",
             "haarness.json",
         ] {
-            assert!(is_config_path(&global.join(name)), "{name}");
+            assert!(is_global_config_path(&global.join(name), global), "{name}");
         }
         for name in ["AGENTS.md", "commands/x.md", "extensions"] {
-            assert!(!is_config_path(&global.join(name)), "{name}");
+            assert!(!is_global_config_path(&global.join(name), global), "{name}");
         }
-        // The folder the CLI recorded is the one protected.
-        set_global_config_dir(global.clone());
-        assert_eq!(global_config_dir().as_deref(), Some(global.as_path()));
         for path in [
             "config.toml",
             "src/config.toml",
