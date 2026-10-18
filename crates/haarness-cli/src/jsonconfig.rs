@@ -328,10 +328,30 @@ pub fn load_layers(
     layers.instruction_files = local_files.iter().map(|(file, _)| file.clone()).collect();
     let mut segments = Vec::new();
     let mut import_budget = ImportBudget::default();
+    // Nothing asks before instructions load, so an import a configured
+    // `read` rule denies is left out rather than put in every prompt.
+    let mut read_rules = layers
+        .native
+        .permissions
+        .as_ref()
+        .and_then(|permissions| super::compile_permissions(permissions).ok())
+        .unwrap_or_default();
+    read_rules.extend(layers.rules.iter().cloned());
+    let mut read_rules = haarness_core::PermissionEngine::new(read_rules);
+    read_rules.set_workspace(workspace);
+    let denied = |file: &Path| {
+        (read_rules.evaluate(&format!("read:{}", file.display()))
+            == haarness_core::PermissionDecision::Deny)
+            .then_some("a read rule denies it")
+    };
     for (file, trusted) in local_files {
-        if let Some(content) =
-            instruction_files::read_with_imports(&file, workspace, &mut import_budget, trusted)
-        {
+        if let Some(content) = instruction_files::read_with_imports(
+            &file,
+            workspace,
+            &mut import_budget,
+            trusted,
+            &denied,
+        ) {
             segments.push(instruction_files::segment(
                 &file.display().to_string(),
                 &content,
@@ -1952,6 +1972,48 @@ mod tests {
         assert_eq!(disabled.model.as_deref(), Some("global"));
         assert!(disabled.mcp.is_empty());
         assert!(disabled.agents.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instruction_imports_leave_out_files_a_read_rule_denies_and_secrets() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-denied-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let workspace = root.join("project");
+        for dir in [
+            config.clone(),
+            workspace.join(".git"),
+            workspace.join("private"),
+            workspace.join("public"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"permission":{"read":{"private/*":"deny"}}}"#,
+        )
+        .unwrap();
+        fs::write(workspace.join("private/notes.md"), "PRIVATE_BODY").unwrap();
+        fs::write(workspace.join("public/notes.md"), "PUBLIC_BODY").unwrap();
+        fs::write(workspace.join(".env"), "ENV_SECRET").unwrap();
+        fs::write(
+            workspace.join("AGENTS.md"),
+            "@private/notes.md\n@public/notes.md\n@.env\n",
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(instructions.contains("PUBLIC_BODY"), "{instructions}");
+        assert!(!instructions.contains("PRIVATE_BODY"), "{instructions}");
+        assert!(!instructions.contains("ENV_SECRET"), "{instructions}");
+        assert!(
+            instructions
+                .contains("[Instruction import omitted: private/notes.md (a read rule denies it)]")
+        );
+        assert!(instructions.contains("[Instruction import omitted: .env (it is a secret file)]"));
         fs::remove_dir_all(root).unwrap();
     }
 

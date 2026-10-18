@@ -11298,12 +11298,21 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
+            // The new file also meets the rules for where a linked
+            // `.haarness/workflows` folder really puts it.
+            let file = format!(".haarness/workflows/{target}.ts");
+            let mut patterns = vec![file.clone()];
+            let mut resolved = Vec::new();
+            if let Some(pattern) = resolved_file_pattern(workspace, &file) {
+                resolved.push((pattern.clone(), pattern.clone()));
+                patterns.push(pattern);
+            }
             plans.push(AskPlan {
                 permission: "edit".into(),
-                patterns: vec![format!(".haarness/workflows/{target}.ts")],
-                always: vec![format!(".haarness/workflows/{target}.ts")],
+                patterns,
+                always: vec![file],
                 external_paths: Vec::new(),
-                resolved: Vec::new(),
+                resolved,
             });
         }
         return plans;
@@ -11458,7 +11467,8 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         patterns.push(pattern);
     }
     let mut resolved = Vec::new();
-    if matches!(name, "read" | "write" | "edit" | "multiedit")
+    // A list through a link meets the rules for the folder it really lists.
+    if matches!(name, "read" | "write" | "edit" | "multiedit" | "list")
         && let Some(pattern) = resolved_file_pattern(workspace, &target)
     {
         resolved.push((pattern.clone(), pattern.clone()));
@@ -13560,7 +13570,12 @@ mod tests {
         assert_eq!(plans[0].always, plans[0].patterns);
         assert_eq!(plans[0].external_paths.len(), 1);
         assert_eq!(plans[1].permission, "list");
-        assert_eq!(plans[1].patterns, vec!["/tmp"]);
+        assert_eq!(plans[1].patterns[0], "/tmp");
+        // Where a linked folder really is (macOS's /tmp is /private/tmp).
+        let real = std::path::Path::new("/tmp").canonicalize().unwrap();
+        if real != std::path::Path::new("/tmp") {
+            assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
+        }
     }
 
     #[test]
@@ -13658,6 +13673,60 @@ mod tests {
                 assert_eq!(plan.always, vec!["*"]);
             }
         }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_list_or_a_new_workflow_through_a_link_meets_the_rules_for_where_it_leads() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-linked-list-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        std::fs::create_dir_all(workspace.join("private/flows")).unwrap();
+        std::fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        std::os::unix::fs::symlink("build", workspace.join("alias")).unwrap();
+        std::os::unix::fs::symlink("../private/flows", workspace.join(".haarness/workflows"))
+            .unwrap();
+        let mut engine = crate::PermissionEngine::new(vec![
+            crate::PermissionRule {
+                pattern: "*".into(),
+                decision: crate::PermissionDecision::Allow,
+            },
+            crate::PermissionRule {
+                pattern: "list:build".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+            crate::PermissionRule {
+                pattern: "edit:private/*".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+        ]);
+        engine.set_workspace(&workspace);
+        let denied = |plan: &super::AskPlan| {
+            plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+        };
+        let list = super::ask_plans("list", &json!({"path":"alias"}), &workspace).remove(0);
+        assert_eq!(list.patterns, vec!["alias", "build"]);
+        assert!(denied(&list));
+        let plain = super::ask_plans("list", &json!({"path":"src"}), &workspace).remove(0);
+        assert_eq!(plain.patterns, vec!["src"]);
+        assert!(!denied(&plain));
+        let create = super::ask_plans(
+            "workflow",
+            &json!({"action":"create","name":"audit","source":"x"}),
+            &workspace,
+        );
+        let edit = create
+            .iter()
+            .find(|plan| plan.permission == "edit")
+            .unwrap();
+        assert_eq!(
+            edit.patterns,
+            vec![".haarness/workflows/audit.ts", "private/flows/audit.ts"]
+        );
+        assert!(denied(edit));
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

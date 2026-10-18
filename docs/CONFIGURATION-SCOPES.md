@@ -39,7 +39,7 @@ Explicitly supported compatibility resources remain readable. These are imports,
 
 ## Instruction files
 
-`AGENTS.md` in the global configuration directory loads first, then `AGENTS.md` from the Git worktree root down to the selected workspace. Each file may `@import` other files: bare `@docs/rules.md`, or `@"path with spaces.md"`, `@'path.md'` and `@<path.md>` for paths containing spaces; references inside fenced code blocks and inline code spans stay literal. Imports follow at most five hops, twenty files and 200 KiB per assembly, 40 KiB per file; project files cannot import from outside the workspace.
+`AGENTS.md` in the global configuration directory loads first, then `AGENTS.md` from the Git worktree root down to the selected workspace. Each file may `@import` other files: bare `@docs/rules.md`, or `@"path with spaces.md"`, `@'path.md'` and `@<path.md>` for paths containing spaces; references inside fenced code blocks and inline code spans stay literal. Imports follow at most five hops, twenty files and 200 KiB per assembly, 40 KiB per file; project files cannot import from outside the workspace. Instructions load without asking anyone, so an import never reads a secret-named file (`.env`, `prod.env`; see [secret files](PERMISSIONS-AND-EXECUTION.md#secret-files)) or a file a configured `read` rule denies, judged by where a link really leads: `[Instruction import omitted: <path> (it is a secret file)]` or `(a read rule denies it)` takes its place. A remote instruction URL is named in the prompt and in notices without its user name, password or credential-named query parameters.
 
 The `instructions` key in `haarness.json{,c}` and its legacy filename aliases appends more sources, in layer order:
 
