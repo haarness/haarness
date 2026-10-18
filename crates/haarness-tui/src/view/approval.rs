@@ -225,6 +225,23 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
                     text.push_str(&language.text("Leads to {path}").replace("{path}", target));
                 }
             }
+            // A command Haarness could not read all of asks because a rule
+            // might be about the part it did not read.
+            if let Some(rule) = pending.detail["__readLimit"]
+                .as_str()
+                .filter(|_| key == "command")
+            {
+                text.push('\n');
+                if rule.is_empty() {
+                    text.push_str(language.text("Haarness could not read all of this command."));
+                } else {
+                    text.push_str(
+                        &language
+                            .text("Haarness could not read all of this command; a rule for {rule} may apply.")
+                            .replace("{rule}", rule),
+                    );
+                }
+            }
             return Some(text);
         }
     }

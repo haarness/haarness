@@ -456,7 +456,10 @@ impl Tool for BatchTool {
             async move {
                 let result = match check {
                     Ok(_) => invoker.invoke(&name, parameters).await,
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        invoker.skip_call();
+                        Err(error)
+                    }
                 };
                 batch_result(&name, result)
             }

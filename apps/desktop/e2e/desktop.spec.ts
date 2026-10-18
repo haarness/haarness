@@ -9156,6 +9156,10 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   await expect(batch.locator(":scope > summary")).toContainText(
     "Listed files, searched files, read files",
   );
+  // Collapsed, the row still names what its steps acted on.
+  await expect(batch.locator(":scope > summary .tool-target")).toHaveText(
+    "src, **/*.ts in src +2",
+  );
   await expect(batch).toHaveAttribute("data-status", "failed");
   await expect(batch).not.toHaveAttribute("open");
   await batch.locator(":scope > summary").press("Enter");

@@ -13,6 +13,10 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 
+/// Sent by browsers on every request: `none` for the user's own navigation,
+/// `same-origin`, `same-site` or `cross-site` for what a page started.
+const SEC_FETCH_SITE: &str = "sec-fetch-site";
+
 #[derive(Clone, Default)]
 pub enum ServerAccess {
     #[default]
@@ -121,6 +125,17 @@ impl AuthState {
             return;
         };
         let headers = request.headers();
+        // A refused browser request names the site that sent it.
+        let forbidden = reason == Rejection::Forbidden;
+        let origin = forbidden.then(|| origin_host(headers));
+        let site = headers
+            .get(SEC_FETCH_SITE)
+            .filter(|_| forbidden)
+            .and_then(|site| {
+                ["none", "same-origin", "same-site", "cross-site"]
+                    .into_iter()
+                    .find(|known| site.as_bytes() == known.as_bytes())
+            });
         let agent = headers
             .get(header::USER_AGENT)
             .map(|agent| crate::hooks::log_text(&String::from_utf8_lossy(agent.as_bytes()), 120));
@@ -134,6 +149,8 @@ impl AuthState {
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ConnectInfo(address)| tracing::field::display(address)),
             user_agent = agent.as_deref(),
+            origin = origin.as_deref(),
+            fetch_site = site,
             suppressed = (suppressed > 0).then_some(suppressed),
             "request rejected"
         );
@@ -217,15 +234,11 @@ pub async fn require_auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if auth.loopback_only
-        && (!valid_loopback_host(request.headers()) || !valid_loopback_origin(request.headers()))
-    {
+    // Before the credential check: a browser sends a saved password, and an
+    // open server has none, along with any request a page makes.
+    if let Some(refusal) = refuse_browser_request(request.headers(), auth.loopback_only) {
         auth.log_rejection(&request, Rejection::Forbidden);
-        return (StatusCode::FORBIDDEN, "loopback host/origin required").into_response();
-    }
-    if !auth.loopback_only && !valid_network_origin(request.headers()) {
-        auth.log_rejection(&request, Rejection::Forbidden);
-        return (StatusCode::FORBIDDEN, "same-host origin required").into_response();
+        return (StatusCode::FORBIDDEN, refusal).into_response();
     }
     let verdict = if auth.anonymous {
         Ok(())
@@ -251,50 +264,143 @@ pub async fn require_auth(
     next.run(request).await
 }
 
-fn request_host(headers: &HeaderMap) -> Option<&str> {
+/// Why a request must not reach the routes, judged from what browsers add.
+/// The CLI, TUI, Desktop (whose main process makes every request) and the
+/// Cloud relay send neither Origin nor Sec-Fetch-Site, so only Host applies
+/// to them.
+fn refuse_browser_request(headers: &HeaderMap, loopback_only: bool) -> Option<&'static str> {
+    let origin = headers.get(header::ORIGIN);
+    let site = headers.get(SEC_FETCH_SITE).map(HeaderValue::as_bytes);
+    // An image, link, frame or no-cors fetch from another site carries no
+    // Origin; the browser still says where it came from.
+    if origin.is_none() && !matches!(site, None | Some(b"none" | b"same-origin")) {
+        return Some("cross-site request refused");
+    }
+    if loopback_only {
+        return (!valid_loopback_host(headers) || !valid_loopback_origin(headers))
+            .then_some("loopback host/origin required");
+    }
+    (!valid_network_origin(headers)).then_some("same-host origin required")
+}
+
+/// The Host header split into a lowercase name (IPv6 without brackets) and
+/// its port, if one is written.
+fn request_host(headers: &HeaderMap) -> Option<(String, Option<u16>)> {
     let host = headers
         .get(header::HOST)
-        .and_then(|value| value.to_str().ok())?;
-    Some(
-        host.rsplit_once(':')
-            .map_or(host, |(host, _)| host)
-            .trim_matches(['[', ']']),
-    )
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    let (name, port) = if let Some(rest) = host.strip_prefix('[') {
+        let (name, rest) = rest.split_once(']')?;
+        match rest {
+            "" => (name, None),
+            rest => (name, Some(rest.strip_prefix(':')?)),
+        }
+    } else {
+        match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        }
+    };
+    let port = port.map(str::parse).transpose().ok()?;
+    Some((name.to_ascii_lowercase(), port))
 }
 
 fn valid_loopback_host(headers: &HeaderMap) -> bool {
-    request_host(headers).is_some_and(|host| matches!(host, "127.0.0.1" | "::1" | "localhost"))
+    request_host(headers).is_some_and(|(host, _)| is_loopback_name(&host))
 }
 
+fn is_loopback_name(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
+}
+
+/// A browser's Origin on a loopback listener: a loopback name on the
+/// server's own port. Another local port is another web site (a dev server, a
+/// page some program serves), which must not drive this one.
 fn valid_loopback_origin(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|origin| {
-            url::Url::parse(origin)
-                .ok()
-                .and_then(|url| url.host_str().map(ToOwned::to_owned))
-                .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost"))
-        })
-}
-
-/// Terminal clients do not send Origin. If a browser frontend connects to an
-/// explicitly network-bound server, require its Origin host to match the HTTP
-/// Host header so an unrelated web page cannot drive the authenticated API.
-fn valid_network_origin(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return request_host(headers).is_some_and(|host| !host.trim().is_empty());
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
     };
-    let Some(host) = request_host(headers) else {
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| url::Url::parse(origin).ok())
+    else {
         return false;
     };
-    url::Url::parse(origin)
+    let port = request_host(headers).and_then(|(_, port)| port);
+    origin
+        .host_str()
+        .is_some_and(|host| is_loopback_name(host.trim_matches(['[', ']'])))
+        && same_port(&origin, port)
+}
+
+/// Whether an Origin's port is the one the Host header names, a missing one
+/// being the Origin scheme's default.
+fn same_port(origin: &url::Url, port: Option<u16>) -> bool {
+    let default = url::Url::parse(&format!("{}://h", origin.scheme()))
         .ok()
-        .and_then(|url| url.host_str().map(ToOwned::to_owned))
-        .is_some_and(|origin| origin.eq_ignore_ascii_case(host))
+        .and_then(|url| url.port_or_known_default());
+    origin.port_or_known_default() == port.or(default)
+}
+
+/// Terminal clients send no browser headers, and any Host they name is
+/// accepted (a reverse proxy may rename it). A browser request (an Origin, or
+/// a Sec-Fetch-Site other than the user's own navigation) must name the server
+/// by address, so a web site whose name was re-pointed at this server (DNS
+/// rebinding) is refused, and its Origin must match that Host, port included.
+fn valid_network_origin(headers: &HeaderMap) -> bool {
+    let Some((host, port)) = request_host(headers) else {
+        return false;
+    };
+    if host.is_empty() {
+        return false;
+    }
+    let origin = headers.get(header::ORIGIN);
+    let browser = origin.is_some()
+        || headers
+            .get(SEC_FETCH_SITE)
+            .is_some_and(|site| site.as_bytes() != b"none");
+    if !browser {
+        return true;
+    }
+    if !is_loopback_name(&host) && host.parse::<std::net::IpAddr>().is_err() {
+        return false;
+    }
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| url::Url::parse(origin).ok())
+    else {
+        return false;
+    };
+    let named = origin
+        .host_str()
+        .is_some_and(|name| name.trim_matches(['[', ']']).eq_ignore_ascii_case(&host));
+    named && same_port(&origin, port)
+}
+
+/// What a refused browser request names as its site, for the log: the Origin's
+/// host, `opaque` for `null` or an unreadable one, or `none`.
+fn origin_host(headers: &HeaderMap) -> String {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return "none".into();
+    };
+    origin
+        .to_str()
+        .ok()
+        .and_then(|origin| url::Url::parse(origin).ok())
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            })
+        })
+        .map_or_else(|| "opaque".into(), |host| crate::hooks::log_text(&host, 80))
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -317,17 +423,87 @@ mod tests {
         assert!(!constant_time_equal(b"same", b"sand"));
     }
 
-    #[test]
-    fn network_origin_must_match_the_requested_host() {
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "192.0.2.10:4096".parse().unwrap());
-        assert!(valid_network_origin(&headers));
+        for (name, value) in pairs {
+            headers.insert(
+                header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        headers
+    }
 
-        headers.insert(header::ORIGIN, "http://192.0.2.10:3000".parse().unwrap());
-        assert!(valid_network_origin(&headers));
+    #[test]
+    fn network_origin_must_match_the_requested_host_and_port() {
+        let valid = |pairs: &[(&str, &str)]| valid_network_origin(&headers(pairs));
+        assert!(valid(&[("host", "192.0.2.10:4096")]));
+        assert!(valid(&[
+            ("host", "192.0.2.10:4096"),
+            ("origin", "http://192.0.2.10:4096")
+        ]));
+        assert!(valid(&[
+            ("host", "[2001:db8::1]:4096"),
+            ("origin", "http://[2001:DB8::1]:4096")
+        ]));
+        assert!(valid(&[
+            ("host", "192.0.2.10"),
+            ("origin", "http://192.0.2.10")
+        ]));
+        assert!(valid(&[
+            ("host", "192.0.2.10:443"),
+            ("origin", "https://192.0.2.10")
+        ]));
+        assert!(valid(&[
+            ("host", "localhost:4096"),
+            ("origin", "http://localhost:4096")
+        ]));
+        assert!(valid(&[
+            ("host", "[::1]"),
+            ("sec-fetch-site", "same-origin")
+        ]));
+        // Another port is another web site.
+        assert!(!valid(&[
+            ("host", "192.0.2.10:4096"),
+            ("origin", "http://192.0.2.10:3000")
+        ]));
+        assert!(!valid(&[
+            ("host", "192.0.2.10"),
+            ("origin", "http://192.0.2.10:8080")
+        ]));
+        assert!(!valid(&[
+            ("host", "192.0.2.10:4096"),
+            ("origin", "https://example.test")
+        ]));
+        assert!(!valid(&[("host", "192.0.2.10:4096"), ("origin", "null")]));
+        assert!(!valid(&[("origin", "http://192.0.2.10:4096")]));
+        // DNS rebinding: the attacker's name now points at this server, so
+        // Host and Origin agree; only a name that is an address is trusted.
+        assert!(!valid(&[
+            ("host", "attacker.example:4096"),
+            ("origin", "http://attacker.example:4096")
+        ]));
+        assert!(!valid(&[
+            ("host", "attacker.example:4096"),
+            ("sec-fetch-site", "same-origin")
+        ]));
+        // Terminal clients behind a proxy, and the user's own navigation.
+        assert!(valid(&[("host", "haarness.internal:4096")]));
+        assert!(valid(&[
+            ("host", "haarness.internal:4096"),
+            ("sec-fetch-site", "none")
+        ]));
+        assert!(!valid(&[("host", "192.0.2.10:port")]));
+        assert!(!valid(&[("host", "[2001:db8::1")]));
+    }
 
-        headers.insert(header::ORIGIN, "https://example.test".parse().unwrap());
-        assert!(!valid_network_origin(&headers));
+    #[test]
+    fn host_header_keeps_ipv6_addresses_whole() {
+        let host = |value: &str| request_host(&headers(&[("host", value)]));
+        assert_eq!(host("[::1]:4096"), Some(("::1".into(), Some(4096))));
+        assert_eq!(host("[fe80::1]"), Some(("fe80::1".into(), None)));
+        assert_eq!(host("LocalHost:80"), Some(("localhost".into(), Some(80))));
+        assert_eq!(host("[::1]4096"), None);
     }
 }
 
@@ -342,20 +518,26 @@ mod access_tests {
         authorization: Option<&str>,
         origin: Option<&str>,
     ) -> StatusCode {
+        let mut headers = vec![("host", "127.0.0.1:4096")];
+        headers.extend(authorization.map(|value| ("authorization", value)));
+        headers.extend(origin.map(|value| ("origin", value)));
+        status_on(access, true, &headers).await
+    }
+
+    async fn status_on(
+        access: ServerAccess,
+        loopback_only: bool,
+        headers: &[(&str, &str)],
+    ) -> StatusCode {
         let router = Router::new()
             .route("/", get(|| async { "ok" }))
             .route_layer(middleware::from_fn_with_state(
-                AuthState::with_access("internal", true, &access),
+                AuthState::with_access("internal", loopback_only, &access),
                 require_auth,
             ));
-        let mut request = Request::builder()
-            .uri("/")
-            .header(header::HOST, "127.0.0.1:4096");
-        if let Some(value) = authorization {
-            request = request.header(header::AUTHORIZATION, value);
-        }
-        if let Some(value) = origin {
-            request = request.header(header::ORIGIN, value);
+        let mut request = Request::builder().uri("/");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
         }
         router
             .oneshot(request.body(Body::empty()).unwrap())
@@ -369,6 +551,109 @@ mod access_tests {
         assert_eq!(
             status(ServerAccess::Open, None, Some("https://unrelated.example")).await,
             StatusCode::FORBIDDEN
+        );
+    }
+    /// A page on another local port (`http://localhost:3000`) is another web
+    /// site: on a plain open `haarness serve` it could otherwise POST
+    /// `/v1/shutdown` with `mode: "no-cors"`.
+    #[tokio::test]
+    async fn loopback_server_refuses_an_origin_on_another_local_port() {
+        let host = ("host", "127.0.0.1:4096");
+        for (origin, expected) in [
+            ("http://localhost:3000", StatusCode::FORBIDDEN),
+            ("http://127.0.0.1:3000", StatusCode::FORBIDDEN),
+            ("http://[::1]:4097", StatusCode::FORBIDDEN),
+            ("http://127.0.0.1", StatusCode::FORBIDDEN),
+            ("null", StatusCode::FORBIDDEN),
+            ("http://127.0.0.1:4096", StatusCode::OK),
+            ("http://localhost:4096", StatusCode::OK),
+        ] {
+            let status = status_on(ServerAccess::Open, true, &[host, ("origin", origin)]).await;
+            assert_eq!(status, expected, "{origin}");
+        }
+        // Terminal clients, Desktop's main process and the SDKs send no Origin.
+        for host in ["127.0.0.1:4096", "localhost:4096"] {
+            let status = status_on(ServerAccess::Open, true, &[("host", host)]).await;
+            assert_eq!(status, StatusCode::OK, "{host}");
+        }
+    }
+
+    /// An image, link or no-cors fetch from a web page carries no Origin, and
+    /// on an open server, or with a saved password, it would be admitted.
+    #[tokio::test]
+    async fn requests_a_page_started_without_origin_are_refused_before_credentials() {
+        let basic = format!("Basic {}", STANDARD.encode("alex:secret"));
+        let password = ServerAccess::Password {
+            username: "alex".into(),
+            password: "secret".into(),
+        };
+        for (access, authorization) in
+            [(ServerAccess::Open, None), (password, Some(basic.as_str()))]
+        {
+            for (loopback_only, host) in [(true, "127.0.0.1:4096"), (false, "192.0.2.10:4096")] {
+                let mut base = vec![("host", host)];
+                base.extend(authorization.map(|value| ("authorization", value)));
+                for (site, expected) in [
+                    (None, StatusCode::OK),
+                    (Some("none"), StatusCode::OK),
+                    (Some("same-origin"), StatusCode::OK),
+                    (Some("same-site"), StatusCode::FORBIDDEN),
+                    (Some("cross-site"), StatusCode::FORBIDDEN),
+                    (Some("Cross-Site"), StatusCode::FORBIDDEN),
+                ] {
+                    let mut headers = base.clone();
+                    headers.extend(site.map(|site| ("sec-fetch-site", site)));
+                    assert_eq!(
+                        status_on(access.clone(), loopback_only, &headers).await,
+                        expected,
+                        "{host} {site:?}"
+                    );
+                }
+            }
+        }
+    }
+    /// `--anonymous --host 0.0.0.0`: after DNS rebinding a page's Host and
+    /// Origin both name the attacker's site, so their agreeing is not enough.
+    #[tokio::test]
+    async fn anonymous_network_server_refuses_a_rebound_web_site() {
+        let open = |headers: &'static [(&'static str, &'static str)]| {
+            status_on(ServerAccess::Open, false, headers)
+        };
+        assert_eq!(
+            open(&[
+                ("host", "attacker.example:4096"),
+                ("origin", "http://attacker.example:4096"),
+            ])
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            open(&[
+                ("host", "attacker.example:4096"),
+                ("sec-fetch-site", "same-origin"),
+            ])
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            open(&[
+                ("host", "192.0.2.10:4096"),
+                ("origin", "http://192.0.2.10:8080"),
+            ])
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            open(&[
+                ("host", "192.0.2.10:4096"),
+                ("origin", "http://192.0.2.10:4096"),
+            ])
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            open(&[("host", "attacker.example:4096")]).await,
+            StatusCode::OK
         );
     }
     #[tokio::test]
@@ -427,14 +712,15 @@ mod access_tests {
         // A C1 control is valid header obs-text once UTF-8 encoded.
         let agent = format!("fixture-client/1.0 \u{9b}[31m {}", "agent ".repeat(60));
         let wrong_basic = format!("Basic {}", STANDARD.encode("alex:PRIVATE_WRONG"));
-        for (authorization, origin, path, expected) in [
+        // The extra header is what a browser adds.
+        for (authorization, extra, path, expected) in [
             (None, None, "/v1/threads/a?token=PRIVATE_QUERY", 401),
             (Some("Bearer PRIVATE_STALE"), None, "/v1/threads/b", 401),
             (Some(wrong_basic.as_str()), None, "/v1/sessions/c", 401),
             (Some("PRIVATE_BARE_CREDENTIAL"), None, "/v1/threads/d", 401),
             (
                 Some("Bearer PRIVATE_TOKEN"),
-                Some("https://PRIVATE-ORIGIN.example"),
+                Some(("origin", "https://unrelated.example:8443")),
                 "/v1/threads/e",
                 403,
             ),
@@ -446,6 +732,12 @@ mod access_tests {
                 401,
             ),
             (Some("Bearer PRIVATE_TOKEN"), None, "/v1/threads/g", 200),
+            (
+                Some("Bearer PRIVATE_TOKEN"),
+                Some(("sec-fetch-site", "cross-site")),
+                "/v1/sessions/h",
+                403,
+            ),
         ] {
             let mut request = Request::builder()
                 .uri(path)
@@ -455,8 +747,8 @@ mod access_tests {
             if let Some(value) = authorization {
                 request = request.header(header::AUTHORIZATION, value);
             }
-            if let Some(value) = origin {
-                request = request.header(header::ORIGIN, value);
+            if let Some((name, value)) = extra {
+                request = request.header(name, value);
             }
             let response = router
                 .clone()
@@ -466,29 +758,42 @@ mod access_tests {
             assert_eq!(response.status().as_u16(), expected, "{path}");
         }
         let lines = capture.matching("request rejected");
-        assert_eq!(lines.len(), 5, "{:#?}", capture.lines());
+        assert_eq!(lines.len(), 6, "{:#?}", capture.lines());
         for (line, expected) in lines.iter().zip([
-            ["path=/v1/threads/a ", "reason=missing", "scheme=none"],
-            [
+            &["path=/v1/threads/a ", "reason=missing", "scheme=none"][..],
+            &[
                 "path=/v1/threads/b",
                 "reason=bad_credential",
                 "scheme=Bearer",
             ],
-            [
+            &[
                 "path=/v1/sessions/c",
                 "reason=bad_credential",
                 "scheme=Basic",
             ],
-            [
+            &[
                 "path=/v1/threads/d",
                 "reason=wrong_scheme",
                 "scheme=unrecognized",
             ],
-            ["path=/v1/threads/e", "reason=forbidden", "scheme=Bearer"],
+            // A refused browser request names the site that sent it.
+            &[
+                "path=/v1/threads/e",
+                "reason=forbidden",
+                "scheme=Bearer",
+                " origin=unrelated.example:8443",
+            ],
+            &[
+                "path=/v1/sessions/h",
+                "reason=forbidden",
+                " origin=none",
+                " fetch_site=cross-site",
+            ],
         ]) {
             assert!(line.starts_with("WARN "), "{line}");
             for expected in expected
-                .into_iter()
+                .iter()
+                .copied()
                 .chain([" method=GET", " remote=127.0.0.1:50123"])
             {
                 assert!(line.contains(expected), "{expected}: {line}");
@@ -496,6 +801,10 @@ mod access_tests {
             assert!(line.contains(" user_agent=fixture-client/1.0 [31m agent agent"));
             assert!(line.contains('…') && !line.contains('\u{9b}'), "{line}");
             assert!(!line.contains("PRIVATE") && !line.contains('?'), "{line}");
+            assert!(
+                line.contains("reason=forbidden") || !line.contains(" origin="),
+                "{line}"
+            );
         }
     }
 

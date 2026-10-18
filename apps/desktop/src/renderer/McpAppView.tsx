@@ -19,6 +19,7 @@ import {
   createBridge,
   document as pageDocument,
   granted,
+  linkScheme,
   recall,
   remember,
   resource,
@@ -82,6 +83,8 @@ export function McpAppView(props: {
   const [height, setHeight] = createSignal(recall(heights, props.callKey) ?? 0);
   const [request, setRequest] = createSignal<{ url: string; answer: (open: boolean) => void }>();
   const [message, setMessage] = createSignal<{ text: string; answer: (insert: boolean) => void }>();
+  /** The scheme of the last link Haarness refused after a press in the page ("" when it has none). */
+  const [refused, setRefused] = createSignal<string>();
   const [render, setRender] = createSignal(0);
   let root!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
@@ -163,6 +166,13 @@ export function McpAppView(props: {
         const next = Math.max(48, Math.min(MAX_HEIGHT, Math.ceil(height)));
         remember(heights, props.callKey, next, HEIGHT_LIMIT);
         setHeight(next);
+      },
+      // The page hears why; the person, who may have clicked it, sees it under the page.
+      // Only a press in the page earns the notice, once per press, so a page
+      // cannot repeat it by itself; and it names only the link's scheme,
+      // never the page's own text.
+      refusedLink: (url, active) => {
+        if (take(active)) setRefused(linkScheme(url) ?? "");
       },
       openLink: (url, active) => {
         if (take(active)) return open(url);
@@ -395,6 +405,21 @@ export function McpAppView(props: {
         <div class="notice-inline mcp-app-notice" role="status">
           <Icon name="alert" size="sm" />
           <span>{t("This result is too large to show in the app.")}</span>
+        </div>
+      </Show>
+      <Show when={refused() !== undefined}>
+        <div class="notice-inline mcp-app-notice mcp-app-refused" role="status">
+          <Icon name="alert" size="sm" />
+          <span>
+            {refused()
+              ? t("This app tried to open a {scheme} link. Apps may open only http, https and mailto links.", {
+                  scheme: refused()!,
+                })
+              : t("This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.")}
+          </span>
+          <button class="mcp-app-action" onClick={() => setRefused(undefined)}>
+            {t("Dismiss")}
+          </button>
         </div>
       </Show>
       <Show when={message()}>

@@ -16,6 +16,7 @@ import { createCdp } from "./browser/cdp";
 import { createBrowserFiles } from "./browser/files";
 import { createProfiling } from "./browser/profiling";
 import { createCornerImages } from "./browser/corners";
+import { returnKeyboard } from "./browser-keyboard";
 import type { BrowserNetwork } from "./browser/network";
 
 /** Any stable id outside Electron's own worlds, for the agent cursor; one per page document. */
@@ -62,6 +63,7 @@ export function createBrowserPage(
   const detachNetwork = options.network?.attach(contents);
   contents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
+    page.personActed();
     if (
       input.key === "F5" &&
       !input.meta &&
@@ -89,6 +91,11 @@ export function createBrowserPage(
     contents.setZoomLevel(
       input.key === "0" ? 0 : contents.getZoomLevel() + step,
     );
+  });
+  // A press of the person's in the page ends any hold on file choosers the
+  // agent's last action left (an agent's own input arrives during its action).
+  contents.on("before-mouse-event", (_event, mouse) => {
+    if (mouse.type === "mouseDown") page.personActed();
   });
   const cdp = createCdp(contents);
   // Electron reports loadURL's navigation start synchronously, before
@@ -331,6 +338,7 @@ export function createBrowserPage(
     corner.setVisible(false);
     win.contentView.addChildView(corner);
   });
+  const giveBackKeyboard = () => void returnKeyboard(win, contents);
   page = createPage<Browser.File>(surface, cdp, {
     id: options.id,
     publish: () => options.publish(),
@@ -411,6 +419,7 @@ export function createBrowserPage(
       });
     },
     setVisible(visible: boolean) {
+      if (!visible) giveBackKeyboard();
       view.setVisible(visible);
       corners.forEach((corner) => corner.setVisible(visible && !!cornerKey));
     },
@@ -425,6 +434,7 @@ export function createBrowserPage(
       contents.session.off("will-download", download);
       await profiling.dispose();
       cdp.dispose();
+      giveBackKeyboard();
       if (!win.isDestroyed()) {
         corners.forEach((corner) => win.contentView.removeChildView(corner));
         win.contentView.removeChildView(view);

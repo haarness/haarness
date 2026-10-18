@@ -323,6 +323,47 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   max-height: 420px;
   border-radius: var(--r-md);
 }
+/* An image from another host waits for a click (remote-images.ts): framed
+   like inline code, sized to its text, and inline like the image it stands
+   for, so a badge in a sentence stays in it. */
+.markdown .remote-image {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  max-width: 100%;
+  margin-block: var(--s1);
+  padding-block: var(--s1);
+  padding-inline: var(--s3) var(--s1);
+  vertical-align: middle;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  font-size: var(--ui-sm);
+  line-height: 1.4;
+  color: var(--muted);
+}
+.markdown .remote-image-alt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  unicode-bidi: plaintext;
+}
+/* The button names the host and is never cut short: the end of a host name
+   says who gets the request. */
+.markdown .remote-image-load {
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: var(--control-sm);
+  padding: 0 var(--s2);
+  font-size: var(--ui-sm);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: start;
+  background: var(--raised);
+}
 .markdown table {
   display: block;
   overflow: auto;

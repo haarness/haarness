@@ -123,7 +123,9 @@ printf '%s\n' "$output" | grep -F 'Tool write =>' >/dev/null
 test -f "$server_workspace/server-owned.txt"
 test ! -e "$client_workspace/server-owned.txt"
 
-printf 'png fixture' > "$client_workspace/client image.png"
+# A real 1x1 PNG: attachments are checked to be images Haarness can read.
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
+    base64 -d > "$client_workspace/client image.png"
 output=$(run run --attach "$url" --provider echo --model echo-1 \
     --title 'Attached media proof' --file "$client_workspace/client image.png" 'media probe')
 printf '%s\n' "$output" | grep -F '[attachments: 1]' >/dev/null

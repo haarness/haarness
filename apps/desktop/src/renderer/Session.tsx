@@ -2712,6 +2712,14 @@ function Permission(props: {
     if (typeof path !== "string" || !["read", "edit"].includes(category())) return [];
     return (props.permission.patterns ?? []).filter((pattern) => pattern !== path);
   };
+  // A command Haarness could not read all of asks because a rule might be
+  // about the part it did not read; the server names that rule, or none when
+  // the whole line was too large to read.
+  const readLimit = () => {
+    const value = props.permission.detail;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    return typeof value.__readLimit === "string" ? value.__readLimit : undefined;
+  };
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
   const changes = () =>
@@ -2809,6 +2817,22 @@ function Permission(props: {
             </p>
           )}
         </For>
+        <Show when={readLimit() !== undefined}>
+          <p class="approval-target">
+            <Show
+              when={readLimit()}
+              fallback={t("Haarness could not read all of this command.")}
+            >
+              {(rule) =>
+                splitAround(
+                  t("Haarness could not read all of this command; a rule for {rule} may apply."),
+                  () => <bdi><code>{rule()}</code></bdi>,
+                  "{rule}",
+                )
+              }
+            </Show>
+          </p>
+        </Show>
       </Show>
       <Show when={changes().length}>
         <div class="approval-changes">

@@ -2,6 +2,8 @@
 """Real CLI and server, echo provider: MCP settings and connection errors never show the credentials
 in a server's URL or command arguments, while the rest stays readable. Nor do a failed marketplace
 clone, a remote instruction URL that cannot be reached, or the log line of a request Auto approved.
+An MCP entry's `${TOKEN}` reference reaches its server resolved once and stays in the file through
+`haarness mcp disable/enable`.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-redaction.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -15,7 +17,7 @@ workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
 SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret',
            'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
-           'fixture-review-secret']
+           'fixture-review-secret', 'fixture-inner-secret']
 # Port 9 (discard) refuses the connection, so the server reports why it could not connect.
 (state/'config/config.toml').write_text('''[defaults]
 provider = "echo"
@@ -35,11 +37,27 @@ enabled = false
 [permissions]
 bash = "ask"
 ''')
+# A stdio MCP server that writes down the environment value it was started with.
+received = root/'received-token'
+(root/'refs_server.py').write_text('''import json, os, sys
+open(os.environ["FIXTURE_OUT"], "w").write(os.environ["FIXTURE_TOKEN"])
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "refs", "version": "1"}} \\
+        if request.get("method") == "initialize" else {"tools": []}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+''')
 (state/'config/haarness.json').write_text(json.dumps({'instructions': [
-    'http://fixture:fixture-instruction-secret@127.0.0.1:9/rules.md?token=fixture-instruction-secret']}))
+    'http://fixture:fixture-instruction-secret@127.0.0.1:9/rules.md?token=fixture-instruction-secret'],
+    'mcp': {'refs': {'type': 'local', 'command': ['python3', str(root/'refs_server.py')],
+                     'environment': {'FIXTURE_TOKEN': '${FIXTURE_OUTER}', 'FIXTURE_OUT': str(received)}}}}))
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
-           HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
+           HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
+           # The variable's value names another; it must reach the server as written.
+           FIXTURE_OUTER='outer-${FIXTURE_INNER}', FIXTURE_INNER='fixture-inner-secret')
 url = None; token = None; checks = []
 
 def run(args, **kwargs): return subprocess.run(args, check=True, text=True, capture_output=True, timeout=60, **kwargs).stdout
@@ -69,6 +87,17 @@ try:
     identity = next(item['id'] for item in registry['workspaces'] if item['path'] == str(workspace))
     runtime = json.loads((state/'cache/workspaces'/identity/'runtime.json').read_text())
     url, token = runtime['url'], runtime.get('token')
+
+    def received_token(): return received.exists() and received.read_text()
+    assert until(received_token, 'the MCP server was not started') == 'outer-${FIXTURE_INNER}', received.read_text()
+    for action in ('disable', 'enable'):
+        received.unlink(missing_ok=True)
+        cli('mcp', action, 'refs')
+        saved = (state/'config/haarness.json').read_text()
+        assert json.loads(saved)['mcp']['refs']['env']['FIXTURE_TOKEN'] == '${FIXTURE_OUTER}', saved
+        assert 'outer-' not in saved and 'fixture-inner-secret' not in saved, saved
+    assert until(received_token, 'enabling did not start the MCP server') == 'outer-${FIXTURE_INNER}', received.read_text()
+    check("an MCP environment reference is resolved once for the server and stays in the file through disable/enable")
 
     keyed = json.loads(cli('mcp', 'get', 'keyed'))
     clean(json.dumps(keyed), 'mcp get')
