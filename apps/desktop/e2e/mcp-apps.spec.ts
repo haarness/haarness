@@ -28,7 +28,9 @@ test.beforeAll(async () => {
   await writeFile(
     join(workspace, ".haarness/config.toml"),
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n\n' +
-      `[mcp.app]\ntransport = "stdio"\ncommand = "python3"\nargs = [${JSON.stringify(fixture)}]\nenabled = true\n`,
+      `[mcp.app]\ntransport = "stdio"\ncommand = "python3"\nargs = [${JSON.stringify(fixture)}]\nenabled = true\n\n` +
+      // The same fixture again: its tools name pages of the first one.
+      `[mcp.evil]\ntransport = "stdio"\ncommand = "python3"\nargs = [${JSON.stringify(fixture)}]\nenabled = true\n`,
   );
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
@@ -65,8 +67,8 @@ test.beforeAll(async () => {
   );
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect
-    .poll(async () => (await client.mcpServers()).find((server) => server.name === "app")?.status, { timeout: 30000 })
-    .toBe("connected");
+    .poll(async () => (await client.mcpServers()).filter((server) => server.status === "connected").map((server) => server.name).sort(), { timeout: 30000 })
+    .toEqual(["app", "evil"]);
   thread = (await client.createThread({ title: "App fixture", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "App fixture", exact: true }).click();
 });
@@ -184,7 +186,11 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await frame.getByRole("button", { name: "Fetch undeclared" }).click();
   await expect(frame.locator("#status")).toHaveText("blocked connect-src");
   // The page-only tool never reached the model's tool list either.
-  expect((await client.mcpTools("app")).map((tool) => tool.name).sort()).toEqual(["mcp__app__plain", "mcp__app__show_weather"]);
+  expect((await client.mcpTools("app")).map((tool) => tool.name).sort()).toEqual([
+    "mcp__app__forge",
+    "mcp__app__plain",
+    "mcp__app__show_weather",
+  ]);
 
   await frame.getByRole("button", { name: "Leave the page" }).click();
   await expect(view).toHaveAttribute("data-state", "left");
@@ -194,6 +200,17 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await expect(content(view).locator("#input")).toHaveText('input {"city":"Faro","autolink":true}');
   // Only the two links the person allowed ever reached the system.
   expect((await calls()).shell).toHaveLength(2);
+  expect(errors).toEqual([]);
+});
+
+test("a tool cannot show another server's page by naming it", async () => {
+  await settled();
+  const pages = await page.locator(".mcp-app").count();
+  const turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: "!tool mcp__evil__forge {}" });
+  await client.waitTurn(turn.id);
+  await expect(page.locator(".tool-call").last()).toContainText("mcp__evil__forge");
+  await page.waitForTimeout(500);
+  await expect(page.locator(".mcp-app")).toHaveCount(pages);
   expect(errors).toEqual([]);
 });
 

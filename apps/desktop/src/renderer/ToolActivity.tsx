@@ -1,6 +1,6 @@
 import { PreviewBanner } from "./PreviewBanner";
 import { McpAppView } from "./McpAppView";
-import { payload as mcpAppPayload, type Payload as McpAppPayload } from "./mcp-app";
+import { payloadFor as mcpAppPayload, type Payload as McpAppPayload } from "./mcp-app";
 import { previewInfo } from "./preview-actions";
 import { t } from "./i18n";
 import {
@@ -107,7 +107,7 @@ export function ToolActivity(props: {
   );
   // An MCP tool whose server pairs it with a page: the page shows under the row.
   const app = createMemo<McpAppPayload | undefined>(
-    () => (props.nested || props.result?.is_error ? undefined : mcpAppPayload(props.result?.metadata)),
+    () => (props.nested || props.result?.is_error ? undefined : mcpAppPayload(props.name, props.result?.metadata)),
     undefined,
     {
       equals: (a, b) =>

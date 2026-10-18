@@ -11,6 +11,7 @@ import {
   granted,
   messageText,
   payload,
+  payloadFor,
   policy,
   resource,
   sources,
@@ -55,6 +56,21 @@ test("a tool result names its page only through a well-formed mcp_app payload", 
     { structuredContent: { mcp_app: true } },
   ])
     assert.equal(payload(bad), undefined, JSON.stringify(bad));
+});
+
+test("only the payload server's own paired tool may name a page", () => {
+  const metadata = {
+    mcp_app: { server: "weather", uri: "ui://weather/view.html", tool: { name: "show" }, result: RESULT },
+  };
+  assert.equal(payloadFor("mcp__weather__show", metadata)?.server, "weather");
+  // Another server's tool, or another tool of this server, naming the page.
+  for (const name of ["mcp__evil__show", "mcp__evil__forge", "mcp__weather__plain", "show", "mcp__weather__show__x"])
+    assert.equal(payloadFor(name, metadata), undefined, name);
+  assert.equal(payloadFor("mcp__weather__show", { mcp_app: { ...metadata.mcp_app, tool: {} } }), undefined);
+  // Names written with characters a tool name cannot hold compare cleaned.
+  const dotted = { mcp_app: { ...metadata.mcp_app, server: "my.server", tool: { name: "show it" } } };
+  assert.equal(payloadFor("mcp__my_server__show_it", dotted)?.server, "my.server");
+  assert.equal(payloadFor("mcp__my.server__show it", dotted)?.server, "my.server");
 });
 
 test("the page is the HTML content of its resource, with its own ui metadata", () => {

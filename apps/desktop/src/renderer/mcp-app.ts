@@ -76,6 +76,23 @@ export function payload(metadata: unknown): Payload | undefined {
   };
 }
 
+/**
+ * The page for a call to the tool named `name`: only the payload's own tool
+ * on the payload's own server may name a page, so one tool's result cannot
+ * make Desktop read and show another server's page. Names are compared as
+ * written and with the characters a tool name cannot hold replaced.
+ */
+export function payloadFor(name: string, metadata: unknown): Payload | undefined {
+  const value = payload(metadata);
+  if (!value?.tool.name) return undefined;
+  const clean = (text: string) => text.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const own = [
+    `mcp__${value.server}__${value.tool.name}`,
+    `mcp__${clean(value.server)}__${clean(value.tool.name)}`,
+  ];
+  return own.includes(name) ? value : undefined;
+}
+
 /** The HTML and metadata a page renders, from a `resources/read` result. */
 export function resource(result: unknown, uri: string): { html: string; meta: Meta } | undefined {
   const contents = record(result)?.contents;
