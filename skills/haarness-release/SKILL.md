@@ -70,7 +70,8 @@ HAARNESS_BUN=/absolute/path/to/bun-linux-x64-baseline/bun \
 ```
 
 **Windows** links the C runtime statically (`.cargo/config.toml`), so `haarness.exe` starts on a
-clean machine without the Visual C++ Redistributable. Check it:
+clean machine without the Visual C++ Redistributable, and x64 bundles Bun's baseline build as
+Linux does. Check it:
 `llvm-readobj --coff-imports haarness.exe` lists only system DLLs (no `VCRUNTIME140.dll`,
 no `api-ms-win-crt-*`). Always pass `--target`: the `windows-11-arm` runner's host toolchain
 need not match the architecture it publishes.
@@ -165,7 +166,10 @@ verified staged app; Windows unblocks verified bytes.
   returns (a background server must not hold the caller's pipe); the NSIS installer, Start menu
   entry, a `haarness://` link with the app closed, and `haarness upgrade` replacing a running
   binary. Without Windows: Wine runs `--version` and `doctor` (it does not model handle
-  inheritance or cmd.exe quoting), and `pwsh` on Linux/macOS runs the installer tests.
+  inheritance or cmd.exe quoting), `pwsh` on Linux/macOS runs the installer tests, and the NSIS
+  installer builds in a Wine container with the resources staged by hand (`prepare.mjs` stages
+  the host's): `resources/haarness.exe` from `cargo xwin build`, `resources/bun.exe` from
+  `bun-windows-x64-baseline.zip`, then `npx electron-builder --win --x64 --publish never`.
 
 Run the SDK server scenarios against the **installed CLI** (`HAARNESS_BIN=…`) and an owned tmux
 echo-provider chat for the TUI (tmux 3.4+; 3.2a draws ZWJ emoji apart).
