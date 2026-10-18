@@ -1,8 +1,6 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { SCREENSHOT_LIMIT } from "../screenshots";
 import { imageSize, type ImageSize } from "./image-size";
-import { fileIdentity, sameFile, type FileIdentity } from "./screenshot-files";
+import { openListed, type FileIdentity } from "./screenshot-files";
 
 /** A thumbnail's box: two device pixels for each CSS pixel of a tile, in the tile's 4:3 shape. */
 export const THUMBNAIL = { width: 280, height: 210 };
@@ -70,17 +68,16 @@ export function createScreenshotThumbnails(options: {
   /** The thumbnail, or undefined when the file is no longer the listed one (or cannot be read). */
   async function draw(path: string, listed: FileIdentity): Promise<string | undefined> {
     let image: ImageSize | undefined;
-    // Not followed if the name became a link, and read only while it is the listed file.
-    const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    // Its header is read only while it is the listed file, never through a link.
+    const file = await openListed(path, listed);
+    if (!file) return undefined;
     try {
-      const info = await file.stat({ bigint: true });
-      if (!info.isFile() || !sameFile(fileIdentity(info), listed)) return undefined;
-      if (info.size > THUMBNAIL_BYTES) return "";
+      if (listed.size > THUMBNAIL_BYTES) return "";
       image = await imageSize(async (position, length) => {
         const buffer = Buffer.alloc(length);
         const { bytesRead } = await file.read(buffer, 0, length, position);
         return buffer.subarray(0, bytesRead);
-      }, Number(info.size));
+      }, Number(listed.size));
     } finally {
       await file.close();
     }

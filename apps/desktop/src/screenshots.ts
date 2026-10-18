@@ -12,19 +12,21 @@ import { randomUUID } from "node:crypto";
 export const SCREENSHOT_LIMIT = 48;
 /** Images one message can take, as the composer's own attachment limit. */
 export const SCREENSHOT_PICK_LIMIT = 20;
-/** Image types the attachment reader takes. */
-export const SCREENSHOT_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".heic",
-  ".heif",
-  ".bmp",
-  ".tif",
-  ".tiff",
-]);
+/** Image types the attachment reader takes, by extension, named as it names them. */
+export const SCREENSHOT_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  // The server converts these to PNG or JPEG.
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+};
+export const SCREENSHOT_EXTENSIONS = new Set(Object.keys(SCREENSHOT_TYPES));
 
 /**
  * The folder macOS saves screenshots to, from `defaults read

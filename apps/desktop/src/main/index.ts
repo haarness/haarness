@@ -1186,7 +1186,7 @@ function installHandlers() {
       const picks = screenshotListings.resolve(win.id, listing, indexes);
       // Only files that are still the ones listed: a name swapped for a link
       // or another file since is refused, never followed.
-      const values = await readListedScreenshots(picks, attachments);
+      const values = await readListedScreenshots(picks);
       // A listing attaches once: another pick needs the dialog opened again.
       screenshotListings.forget(win.id);
       return values.map((data, index) => ({ data, name: basename(picks[index].path) }));
