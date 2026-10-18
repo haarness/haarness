@@ -346,6 +346,9 @@ struct ServeArgs {
     /// launcher to quote (its own stderr goes nowhere).
     #[arg(long, hide = true, requires = "background_child")]
     start_log: Option<PathBuf>,
+    /// Internal: the mark of this launch on its start-log lines.
+    #[arg(long, hide = true, requires = "start_log")]
+    start_id: Option<String>,
     /// Accept requests without a password or token. A network address needs
     /// this to listen without one: anyone who can reach the port can then run
     /// commands as you.
@@ -1359,10 +1362,11 @@ async fn cli_main() -> Result<()> {
     };
     if let Some(Command::Serve(ServeArgs {
         start_log: Some(path),
+        start_id: Some(id),
         ..
     })) = &cli.command
     {
-        watch_start_failures(path.clone());
+        watch_start_failures(StartLog::new(path.clone(), id.clone()));
     }
     #[cfg(all(unix, not(target_vendor = "apple")))]
     if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
@@ -4047,6 +4051,10 @@ async fn serve_command(
             trace_endpoint: otel::configured_endpoint(),
         },
     )?;
+    // Listening: what goes wrong from here is not a failure to start.
+    if let Some(log) = START_LOG.get() {
+        log.close();
+    }
     if !args.background_child {
         println!("Haarness server listening on http://{}", handle.address);
     }
@@ -7619,47 +7627,62 @@ async fn receive_oauth_callback(
                 .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
         })
         .context("the MCP authorization URL carries no state")?;
-    tokio::time::timeout(Duration::from_secs(300), async {
+    // Each connection is read in a task of its own while the listener keeps
+    // accepting, so idle ones (a browser's spare socket, a page's preconnect)
+    // never hold up the real return.
+    let mut connections = tokio::task::JoinSet::new();
+    let query = tokio::time::timeout(Duration::from_secs(300), async {
         loop {
-            let (mut stream, peer) = listener.accept().await?;
-            if !peer.ip().is_loopback() {
-                continue;
-            }
-            let Ok(Ok(target)) =
-                tokio::time::timeout(Duration::from_secs(10), read_request_target(&mut stream))
-                    .await
-            else {
-                continue;
-            };
-            let (status, body, query) = match mcp_oauth_callback(&target, &state) {
-                McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
-                McpOAuthCallback::Foreign => (
-                    "400 Bad Request",
-                    "This is not the authorization Haarness started.\n",
-                    None,
-                ),
-                McpOAuthCallback::Ours(query) => (
-                    "200 OK",
-                    "Authorization received. You may return to the Haarness CLI.\n",
-                    Some(query),
-                ),
-            };
-            let _ = stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .await;
-            if let Some(query) = query {
-                return Ok(format!("{redirect_uri}{query}"));
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, peer) = accepted?;
+                    if peer.ip().is_loopback() {
+                        connections.spawn(answer_mcp_oauth_callback(stream, state.clone()));
+                    }
+                }
+                Some(Ok(Some(query))) = connections.join_next() => return Ok::<_, anyhow::Error>(query),
             }
         }
     })
     .await
-    .context("timed out waiting for the MCP OAuth callback")?
+    .context("timed out waiting for the MCP OAuth callback")??;
+    Ok(format!("{redirect_uri}{query}"))
+}
+
+/// Reads one connection to the MCP OAuth callback port and answers it: the
+/// callback's `?query` when it is the authorization Haarness opened.
+async fn answer_mcp_oauth_callback(
+    mut stream: tokio::net::TcpStream,
+    state: String,
+) -> Option<String> {
+    let Ok(Ok(target)) =
+        tokio::time::timeout(Duration::from_secs(10), read_request_target(&mut stream)).await
+    else {
+        return None;
+    };
+    let (status, body, query) = match mcp_oauth_callback(&target, &state) {
+        McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
+        McpOAuthCallback::Foreign => (
+            "400 Bad Request",
+            "This is not the authorization Haarness started.\n",
+            None,
+        ),
+        McpOAuthCallback::Ours(query) => (
+            "200 OK",
+            "Authorization received. You may return to the Haarness CLI.\n",
+            Some(query),
+        ),
+    };
+    let _ = stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await;
+    query
 }
 
 /// The request target of one HTTP request head, read up to 32 KiB.
@@ -9206,12 +9229,13 @@ impl Drop for TelemetryGuard {
 /// server it starts.
 static REQUESTED_LOG_LEVEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// `serve --start-log`: the file a detached server writes why it stopped to.
-static START_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// `serve --start-log`: where a detached server writes why it could not start.
+static START_LOG: std::sync::OnceLock<StartLog> = std::sync::OnceLock::new();
 
 /// The file a detached server's launcher reads when the server exits during
-/// startup, in the logs folder. Every server writes only its failure there,
-/// one line each, so it stays small; past 64 KiB a launcher empties it.
+/// startup, in the logs folder. A server writes there only until it listens,
+/// one line per failure marked with its launch's id; past 64 KiB a launcher
+/// moves the file to `server-start.log.old`, which launchers read too.
 const SERVER_START_LOG: &str = "server-start.log";
 const SERVER_START_LOG_LIMIT: u64 = 64 * 1024;
 
@@ -9220,15 +9244,53 @@ fn prepare_start_log(data: &Path) -> Option<PathBuf> {
     fs::create_dir_all(&logs).ok()?;
     let path = logs.join(SERVER_START_LOG);
     if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > SERVER_START_LOG_LIMIT) {
-        fs::write(&path, "").ok()?;
+        let _ = fs::rename(&path, path.with_extension("log.old"));
     }
     Some(path)
 }
 
+/// One launch's lines in the start log.
+struct StartLog {
+    path: PathBuf,
+    id: String,
+    /// Until the server listens: a later failure is no failure to start.
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl StartLog {
+    fn new(path: PathBuf, id: String) -> Self {
+        Self {
+            path,
+            id,
+            open: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// One line, `<id>: <text>`, redacted, appended in a single write so
+    /// concurrent servers' lines do not interleave.
+    fn record(&self, text: &str) {
+        if !self.open.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let line = haarness_core::redact::log_text(text, 2_000);
+            let _ = file.write_all(format!("{}: {line}\n", self.id).as_bytes());
+        }
+    }
+
+    fn close(&self) {
+        self.open.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Record this server's failures, and its panics (which print only to the
-/// stderr it does not have), in its launcher's start log.
-fn watch_start_failures(path: PathBuf) {
-    if START_LOG.set(path).is_err() {
+/// stderr it does not have), in its launcher's start log until it listens.
+fn watch_start_failures(log: StartLog) {
+    if START_LOG.set(log).is_err() {
         return;
     }
     let previous = std::panic::take_hook();
@@ -9238,28 +9300,35 @@ fn watch_start_failures(path: PathBuf) {
     }));
 }
 
-/// One line, `pid <pid>: <text>`, redacted, so concurrent launchers each
-/// find their own server's line.
 fn record_start_failure(text: &str) {
-    let Some(path) = START_LOG.get() else {
-        return;
-    };
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let line = haarness_core::redact::log_text(text, 2_000);
-        let _ = writeln!(file, "pid {}: {line}", std::process::id());
+    if let Some(log) = START_LOG.get() {
+        log.record(text);
     }
 }
 
-/// What the server `pid` wrote to the start log before it exited: its last
-/// lines, joined.
-fn start_failure(path: &Path, pid: u32) -> Option<String> {
-    let mut text = String::new();
-    fs::File::open(path)
-        .ok()?
-        .take(SERVER_START_LOG_LIMIT * 2)
-        .read_to_string(&mut text)
-        .ok()?;
-    let prefix = format!("pid {pid}: ");
+/// What the launch `id` wrote to the start log: its last lines, joined. Read
+/// from the end of the file and of the one it was moved to.
+fn start_failure(path: &Path, id: &str) -> Option<String> {
+    fn tail(path: &Path) -> String {
+        use std::io::Seek as _;
+        let Ok(mut file) = fs::File::open(path) else {
+            return String::new();
+        };
+        let length = file.metadata().map_or(0, |metadata| metadata.len());
+        let start = length.saturating_sub(SERVER_START_LOG_LIMIT);
+        let mut bytes = Vec::new();
+        if file.seek(io::SeekFrom::Start(start)).is_err() || file.read_to_end(&mut bytes).is_err() {
+            return String::new();
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // A read that starts mid-line drops that partial line.
+        match text.split_once('\n') {
+            Some((_, rest)) if start > 0 => rest.to_owned(),
+            _ => text,
+        }
+    }
+    let text = tail(&path.with_extension("log.old")) + &tail(path);
+    let prefix = format!("{id}: ");
     let lines: Vec<&str> = text
         .lines()
         .filter_map(|line| line.strip_prefix(&prefix))
@@ -10325,6 +10394,7 @@ async fn ensure_workspace_server_at(
     let access = access.unwrap_or_default();
     let executable = std::env::current_exe().context("cannot locate the Haarness executable")?;
     let start_log = prepare_start_log(&paths.data);
+    let start_id = random_token();
     let mut command = ProcessCommand::new(executable);
 
     command
@@ -10350,11 +10420,14 @@ async fn ensure_workspace_server_at(
         .arg("--port")
         .arg(address.port().to_string())
         .arg("--background-child")
-        .args(
-            start_log
-                .iter()
-                .flat_map(|path| [OsStr::new("--start-log"), path.as_os_str()]),
-        )
+        .args(start_log.iter().flat_map(|path| {
+            [
+                OsStr::new("--start-log"),
+                path.as_os_str(),
+                OsStr::new("--start-id"),
+                OsStr::new(&start_id),
+            ]
+        }))
         .args(matches!(access, haarness_server::auth::ServerAccess::Open).then_some("--anonymous"))
         .env("HAARNESS_SERVER_TOKEN", token)
         .env_remove("HAARNESS_SERVER_USERNAME")
@@ -10388,7 +10461,7 @@ async fn ensure_workspace_server_at(
             }
             let reason = start_log
                 .as_deref()
-                .and_then(|path| start_failure(path, child.id()))
+                .and_then(|path| start_failure(path, &start_id))
                 .map_or_else(String::new, |reason| format!(": {reason}"));
             anyhow::bail!("Haarness server exited during startup ({status}){reason}");
         }
@@ -10950,15 +11023,15 @@ mod tests {
     use super::{
         AgentRuntime, AuthCommand, BTreeMap, Cli, Command, Credential, FileConfig,
         LiveWorkspaceServer, McpCommand, McpConfigureRequest, McpOAuthCallback, Paths,
-        ProviderSection, RunFormat, RuntimeDiscovery, SessionCommand, assistant_messages_for_turn,
-        configured_mcp, current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from,
-        load_output_style, loaded_mcp_entry, local_server_compatibility_error,
-        mcp_config_for_display, mcp_oauth_callback, migrate_legacy_workspace_database,
-        normalize_natural_language_args, parse_mcp_key_values, prepare_start_log, read_mcp_entry,
-        receive_oauth_callback, replace_incompatible_workspace_server, resolved_credentials,
-        select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
-        start_failure, valid_provider_url, wait_for_goal_client, write_mcp_entry,
-        write_provider_entry, write_runtime,
+        ProviderSection, RunFormat, RuntimeDiscovery, SessionCommand, StartLog,
+        assistant_messages_for_turn, configured_mcp, current_executable_fingerprint,
+        finish_goal_run, goal_idle_timeout_from, load_output_style, loaded_mcp_entry,
+        local_server_compatibility_error, mcp_config_for_display, mcp_oauth_callback,
+        migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
+        prepare_start_log, read_mcp_entry, receive_oauth_callback,
+        replace_incompatible_workspace_server, resolved_credentials, select_run_thread_client,
+        server_compatibility_error, set_goal_for_run_client, start_failure, valid_provider_url,
+        wait_for_goal_client, write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
@@ -11492,24 +11565,93 @@ mod tests {
         );
     }
 
-    /// Launchers sharing the start log each quote only their own server's
-    /// last lines, and the log is emptied once it grows past its limit.
+    /// An idle connection (a browser's spare socket, a page's preconnect)
+    /// does not hold up the real return for its read timeout.
+    #[tokio::test]
+    async fn idle_connections_do_not_delay_the_mcp_callback() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let client = async {
+            let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?code=real&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        };
+        let (callback, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                receive_oauth_callback(
+                    &listener,
+                    &redirect,
+                    "https://auth.example/authorize?state=st-1"
+                ),
+                client
+            )
+        })
+        .await
+        .expect("the callback is read while an idle connection waits");
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
+        );
+    }
+
+    /// Launchers sharing the start log each quote only their own launch's
+    /// last lines, found at the end of a long file or in the file it was moved
+    /// to, and a server stops writing there once it listens.
     #[test]
-    fn the_start_log_is_read_per_server_and_kept_small() {
+    fn the_start_log_is_read_per_launch_and_only_covers_startup() {
         let root =
             std::env::temp_dir().join(format!("haarness-start-log-{}", uuid::Uuid::now_v7()));
         let path = prepare_start_log(&root).unwrap();
         assert_eq!(path, root.join("logs/server-start.log"));
-        fs::write(
-            &path,
-            "pid 7: old\npid 8: other server\npid 7: one\npid 7: two\npid 7: three\npid 70: not mine\n",
-        )
-        .unwrap();
-        assert_eq!(start_failure(&path, 7).as_deref(), Some("one two three"));
-        assert_eq!(start_failure(&path, 9), None);
-        fs::write(&path, "x".repeat(70 * 1024)).unwrap();
+        let mine = StartLog::new(path.clone(), "launch-a".into());
+        let other = StartLog::new(path.clone(), "launch-b".into());
+        // Lines of earlier launches, even of a process with the same pid,
+        // fill the file well past what was once read from its start.
+        fs::write(&path, "launch-z: old\n".repeat(20_000)).unwrap();
+        mine.record("old");
+        other.record("other server");
+        for line in ["one", "two", "three"] {
+            mine.record(line);
+        }
+        StartLog::new(path.clone(), "launch-a2".into()).record("not mine");
+        assert_eq!(
+            start_failure(&path, "launch-a").as_deref(),
+            Some("one two three")
+        );
+        assert_eq!(
+            start_failure(&path, "launch-b").as_deref(),
+            Some("other server")
+        );
+        assert_eq!(start_failure(&path, "launch-c"), None);
+        // Listening ends it.
+        mine.close();
+        mine.record("panicked later");
+        assert_eq!(
+            start_failure(&path, "launch-a").as_deref(),
+            Some("one two three")
+        );
+        // A launcher moves a full file aside; the lines in it are still found.
         prepare_start_log(&root).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert!(!path.exists());
+        assert_eq!(
+            start_failure(&path, "launch-b").as_deref(),
+            Some("other server")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

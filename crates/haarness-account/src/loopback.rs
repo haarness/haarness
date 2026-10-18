@@ -1,5 +1,5 @@
 //! Loopback redirect listener for the PKCE flow (DESIGN.md §5.2, §8.1): a `tokio::net::TcpListener` on
-//! `127.0.0.1:<random port>` that parses exactly one raw HTTP/1.1 request line + headers by hand (no `hyper`),
+//! `127.0.0.1:<random port>` that parses raw HTTP/1.1 request lines + headers by hand (no `hyper`),
 //! answers with a static "You can close this tab" page and hands back `code` + `state`.
 
 use std::time::Duration;
@@ -105,35 +105,49 @@ impl Loopback {
     }
 
     async fn accept_loop(self, expected_state: &str) -> Result<CallbackParams> {
+        // Each connection is read in a task of its own while the listener keeps accepting, so idle
+        // ones (a browser's spare socket, a page's preconnect) never hold up the real return.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (mut stream, peer) = self.listener.accept().await?;
-            if !peer.ip().is_loopback() {
-                let _ = stream.shutdown().await;
-                continue;
+            tokio::select! {
+                accepted = self.listener.accept() => {
+                    let (mut stream, peer) = accepted?;
+                    if !peer.ip().is_loopback() {
+                        let _ = stream.shutdown().await;
+                        continue;
+                    }
+                    connections.spawn(answer(stream, expected_state.to_owned()));
+                }
+                Some(Ok(Some(outcome))) = connections.join_next() => return outcome,
             }
-            let Ok(Ok(head)) = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await
-            else {
-                let _ = stream.shutdown().await;
-                continue;
-            };
-            // A browser that closes the tab early loses only its page.
-            match classify(&head, expected_state) {
-                Callback::Accepted(params) => {
-                    let _ = respond(&mut stream, "200 OK", CLOSE_TAB_HTML).await;
-                    return Ok(params);
-                }
-                Callback::Ignored(_) => {
-                    let _ = respond(&mut stream, "404 Not Found", "not found").await;
-                }
-                Callback::Foreign => {
-                    let page = error_page("This is not the sign-in Haarness started.");
-                    let _ = respond(&mut stream, "400 Bad Request", &page).await;
-                }
-                Callback::Rejected(reason) => {
-                    let _ = respond(&mut stream, "400 Bad Request", &error_page(&reason)).await;
-                    return Err(Error::Other(reason));
-                }
-            }
+        }
+    }
+}
+
+/// Reads one connection and answers it; `Some` when it ends the sign-in. A browser that closes the
+/// tab early loses only its page.
+async fn answer(mut stream: TcpStream, expected_state: String) -> Option<Result<CallbackParams>> {
+    let Ok(Ok(head)) = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await else {
+        let _ = stream.shutdown().await;
+        return None;
+    };
+    match classify(&head, &expected_state) {
+        Callback::Accepted(params) => {
+            let _ = respond(&mut stream, "200 OK", CLOSE_TAB_HTML).await;
+            Some(Ok(params))
+        }
+        Callback::Ignored(_) => {
+            let _ = respond(&mut stream, "404 Not Found", "not found").await;
+            None
+        }
+        Callback::Foreign => {
+            let page = error_page("This is not the sign-in Haarness started.");
+            let _ = respond(&mut stream, "400 Bad Request", &page).await;
+            None
+        }
+        Callback::Rejected(reason) => {
+            let _ = respond(&mut stream, "400 Bad Request", &error_page(&reason)).await;
+            Some(Err(Error::Other(reason)))
         }
     }
 }
@@ -359,6 +373,38 @@ mod tests {
             Callback::Ignored(reason) if reason.contains("only GET")
         ));
         assert!(matches!(classify("", "st-1"), Callback::Ignored(_)));
+    }
+
+    /// An idle connection (a browser's spare socket, a page's preconnect) does not hold up the
+    /// real return for its read timeout.
+    #[tokio::test]
+    async fn idle_connections_do_not_delay_the_callback() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let loopback = Loopback::bind().await.unwrap();
+        let port = loopback.port;
+        let waiting = tokio::spawn(loopback.wait_for_callback("st-1"));
+        let _idle = [
+            TcpStream::connect(("127.0.0.1", port)).await.unwrap(),
+            TcpStream::connect(("127.0.0.1", port)).await.unwrap(),
+        ];
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"GET /callback?code=hcc_abc&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_string(&mut response))
+            .await
+            .expect("answered while idle connections wait")
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let params = tokio::time::timeout(Duration::from_secs(3), waiting)
+            .await
+            .expect("the sign-in ends while idle connections wait")
+            .unwrap()
+            .unwrap();
+        assert_eq!(params.code, "hcc_abc");
     }
 
     #[test]
