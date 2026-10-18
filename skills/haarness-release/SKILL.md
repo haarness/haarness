@@ -158,9 +158,11 @@ verified staged app; Windows unblocks verified bytes.
   x-scheme-handler/haarness` names `haarness-desktop.desktop`). Run Electron tests as a non-root
   user in a desktop session: `scripts/linux-desktop-session.sh` (D-Bus, unlocked gnome-keyring,
   `XDG_CURRENT_DESKTOP`, Xvfb) with `HAARNESS_DESKTOP_EXECUTABLE=/opt/Haarness/haarness-desktop`
-  and `loginctl enable-linger <user>` so schedules reach `systemctl --user`. Specs that launch the
-  development Electron store remote-server credentials as `basic_text` there and fail; the
-  packaged app uses the keyring. Start the AppImage without libfuse2 through `haarness-desktop`.
+  and `loginctl enable-linger <user>` so schedules reach `systemctl --user`. Playwright's loader
+  forces `--password-store=basic` on the development Electron; the session script exports
+  `HAARNESS_DESKTOP_PASSWORD_STORE=gnome-libsecret`, which test runs apply, so remote-server specs
+  use the keyring there too (outside the script they fail on `basic_text`, as Desktop refuses
+  plain-text credentials). Start the AppImage without libfuse2 through `haarness-desktop`.
 - **Windows** (a real machine or VM): `irm …/install.ps1 | iex` in Windows PowerShell 5.1 and in
   PowerShell 7; PATH added; `haarness doctor`; `$x = haarness run --model echo/echo-1 hi`
   returns (a background server must not hold the caller's pipe); the NSIS installer, Start menu

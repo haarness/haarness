@@ -71,6 +71,16 @@ import { createNotifications } from "./notifications";
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
 app.setName("Haarness");
+// Playwright's loader for an unpackaged app appends --password-store=basic,
+// over any store on the command line, and the store refuses plain text for
+// remote-server credentials. A Linux test session that brings its own
+// unlocked keyring (scripts/linux-desktop-session.sh) names that store here.
+if (
+  process.platform === "linux" &&
+  process.env.HAARNESS_DESKTOP_TEST === "1" &&
+  process.env.HAARNESS_DESKTOP_PASSWORD_STORE
+)
+  app.commandLine.appendSwitch("password-store", process.env.HAARNESS_DESKTOP_PASSWORD_STORE);
 let initialized = false;
 let quitting = false;
 // Pending startup work can resume while Electron destroys web contents. Creating
