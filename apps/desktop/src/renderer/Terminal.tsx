@@ -16,11 +16,13 @@ import {
   inputQueue,
   linkWatch,
   reconnects,
+  restoredLine,
   scrollPlaces,
   shownOutput,
   terminalStream,
   writeChunks,
   type Link,
+  type ScrollPlace,
 } from "./terminal-stream";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
@@ -291,6 +293,8 @@ export function TerminalPanel() {
     </section>
   );
 }
+/** Lines a terminal view keeps above its screen. */
+const SCROLLBACK = 5000;
 function TerminalView(props: { id: string; onGone: () => void; onNew: () => void }) {
   const app = useApp();
   const [link, setLink] = createSignal<Link>("connected");
@@ -307,7 +311,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       fontFamily: "SFMono-Regular, Menlo, Consolas, monospace",
       fontSize: app.state.preferences.terminalFontSize,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: SCROLLBACK,
       allowProposedApi: false,
     });
     fit = new FitAddon();
@@ -415,7 +419,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         stream.replay(Math.min(Math.max(requested, data.start), data.end));
         if (replayStart === undefined) {
           replayStart = data.start;
-          place = scrollPlaces.take(key, data.start);
+          place = scrollPlaces.take(key);
         }
       }
       if (data.bytes) stream.bytes(new Uint8Array(data.bytes));
@@ -423,12 +427,22 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         stream.cursor(data.end);
         cursor = data.end;
         loop.reset();
-        // The replay is in: open where the view was scrolled to before.
-        if (place !== undefined) {
-          const line = place;
-          place = undefined;
+        // Once xterm has drawn the replay, open where the view was
+        // scrolled to before, if that line still holds the same text.
+        if (place !== undefined && !restoring) {
+          restoring = true;
+          const end = data.end;
           terminal.write(new Uint8Array(), () => {
-            if (!disposed) terminal.scrollToLine(line);
+            if (disposed) return;
+            const line = restoredLine(place, {
+              start: replayStart!,
+              end,
+              cols: terminal.cols,
+              rows: terminal.rows,
+              trimmed: terminal.buffer.active.length >= terminal.rows + SCROLLBACK,
+            });
+            place = undefined;
+            if (line !== undefined) terminal.scrollToLine(line);
           });
         }
       }
@@ -455,10 +469,11 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     // keeps its keys and the missed output is replayed once.
     let cursor = 0;
     let requested = 0;
-    // Where this view's first replay started, and the line to open at once
-    // it is in (see scrollPlaces).
+    // Where this view's first replay started, and where the view was before,
+    // to open at once xterm has drawn it (see scrollPlaces).
     let replayStart: number | undefined;
-    let place: number | undefined;
+    let place: ScrollPlace | undefined;
+    let restoring = false;
     let focused = false;
     // What the view says while the connection is down; reconnects go on
     // whatever it says.
@@ -519,8 +534,16 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         const buffer = terminal.buffer.active;
         scrollPlaces.save(
           key,
-          replayStart,
-          place ?? (buffer.viewportY < buffer.baseY ? buffer.viewportY : undefined),
+          place ??
+            (buffer.viewportY < buffer.baseY
+              ? {
+                  start: replayStart,
+                  end: cursor,
+                  line: buffer.viewportY,
+                  cols: terminal.cols,
+                  rows: terminal.rows,
+                }
+              : undefined),
         );
       }
       terminal.dispose();
