@@ -25,6 +25,7 @@ import {
 } from "./browser";
 import { approvalLines, badgeText } from "./approvals";
 import { createBridge, RECONNECT_ALARM } from "./bridge";
+import { focusPlan } from "./capture";
 import { isSensitiveHeader } from "@haarness/browser-driver/diagnostics";
 import { createPage as driverCreatePage, lastRef } from "./driver";
 import type { CreatePage, Page } from "./driver-contract";
@@ -54,6 +55,9 @@ interface Server extends ServerEntry {
 }
 
 const OPEN_LIMIT = "Close a browser tab before opening more (32 maximum).";
+/** A focused tab left in the background of the window the user is using, for the model. */
+const KEPT_IN_BACKGROUND =
+  "The user is using this Chrome window, so the tab stays in the background; it is still this chat's focused tab, and browser_snapshot and the other page tools work on it. A screenshot of it needs the user to show the tab; calling browser_tabs_focus again will not bring it forward.";
 const IDLE_DETACH_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REFUSAL_NOTE_MS = 120_000;
@@ -421,11 +425,14 @@ export function createHost(options: HostOptions) {
         await close(entry, [record], false);
         return value(stateOf(entry));
       }
-      await owned(entry, record);
-      await platform.tabs.activate(record.tabId);
+      const live = await owned(entry, record);
+      const focused = await platform.tabs.focusedWindow();
+      const shown = focused === live.windowId ? await platform.tabs.activeTab(live.windowId) : undefined;
+      const plan = focusPlan(live, focused, shown !== undefined && entry.tabs.some((tab) => tab.tabId === shown));
+      if (plan === "activate") await platform.tabs.activate(record.tabId);
       entry.focusedTabID = record.id;
       registry.save();
-      return value(tabOf(record));
+      return value(plan === "keep" ? { ...tabOf(record), note: KEPT_IN_BACKGROUND } : tabOf(record));
     }
     return page(serverId, id, command, entry, record, context, signal);
   }

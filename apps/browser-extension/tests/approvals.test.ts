@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { approvalLines, badgeText, parsePattern } from "../src/core/approvals";
-import { capturePlan } from "../src/core/capture";
+import { capturePlan, focusPlan } from "../src/core/capture";
 import { createAttribution } from "../src/core/downloads";
 import { groupColor, groupTitle, GROUP_COLORS } from "../src/core/groups";
 import { disconnectReason, pill, reconnectDelay } from "../src/core/status";
@@ -63,6 +63,14 @@ test("a background tab is captured only in a window the user is not using", () =
   assert.equal(capturePlan({ active: false, windowId: 1 }, 2), "activate");
   assert.equal(capturePlan({ active: false, windowId: 1 }, undefined), "activate");
   assert.equal(capturePlan({ active: false, windowId: 1 }, 1), "refuse");
+});
+
+test("a focused tab comes forward only in a window the user is not using, or over the chat's own tab", () => {
+  assert.equal(focusPlan({ active: true, windowId: 1 }, 1, false), "ready");
+  assert.equal(focusPlan({ active: false, windowId: 1 }, 2, false), "activate");
+  assert.equal(focusPlan({ active: false, windowId: 1 }, undefined, false), "activate");
+  assert.equal(focusPlan({ active: false, windowId: 1 }, 1, true), "activate");
+  assert.equal(focusPlan({ active: false, windowId: 1 }, 1, false), "keep");
 });
 
 test("a page that fails to load is a navigation failure, with the network error named", async () => {
