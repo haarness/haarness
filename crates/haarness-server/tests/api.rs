@@ -1836,6 +1836,132 @@ async fn a_shutdown_leaves_a_background_task_to_be_reported_on_the_next_start() 
 }
 
 #[tokio::test]
+async fn a_result_still_waiting_for_its_chat_at_a_shutdown_is_recorded_on_the_next_start() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let tool = Arc::new(BlockingWriteTool {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let workspace = std::env::temp_dir();
+    let runtime = |provider: Capturing, tools: Arc<dyn ToolRegistry>| {
+        AgentRuntime::with_config(
+            store.clone(),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            tools,
+            EventBus::new(512),
+            workspace.clone(),
+            String::new(),
+            {
+                let mut config = RuntimeConfig::default();
+                config.base_rules.push(haarness_core::PermissionRule {
+                    pattern: "blocking_write:*".into(),
+                    decision: haarness_core::PermissionDecision::Allow,
+                });
+                config
+            },
+        )
+    };
+    /// The native tools, `task` among them, and the blocking one.
+    struct WithBlocking(haarness_server::NativeToolRegistry, Arc<BlockingWriteTool>);
+    impl ToolRegistry for WithBlocking {
+        fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+            if name == "blocking_write" {
+                Some(self.1.clone() as Arc<dyn Tool>)
+            } else {
+                self.0.get(name)
+            }
+        }
+        fn list(&self) -> Vec<ToolDefinition> {
+            let mut list = self.0.list();
+            list.push(self.1.definition());
+            list
+        }
+    }
+    let first = runtime(
+        Capturing::default(),
+        Arc::new(WithBlocking(
+            haarness_server::NativeToolRegistry::new(workspace.clone()),
+            tool.clone(),
+        )),
+    );
+    let thread = first
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // The subagent finishes at once, but its result waits for the launching
+    // round, which is held by a tool that runs until the server stops.
+    let calls = serde_json::json!([
+        {"name": "blocking_write", "arguments": {}},
+        {"name": "task", "arguments": {"description": "Quick audit", "prompt": "QUICK", "background": true}},
+    ]);
+    first
+        .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), tool.started.acquire())
+        .await
+        .expect("the blocking tool starts")
+        .unwrap()
+        .forget();
+    let states = |items: &[haarness_protocol::Item]| {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                haarness_protocol::ItemData::TaskState { state, .. } => Some(state.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !states(&first.items(thread.id, None).await.unwrap()).contains(&"done".into()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the subagent finishes");
+    let delivered = |items: &[haarness_protocol::Item]| {
+        items.iter().any(|item| {
+            matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, .. }
+                if text.starts_with("<task id="))
+        })
+    };
+    assert!(
+        !delivered(&first.items(thread.id, None).await.unwrap()),
+        "the result is still waiting for its chat"
+    );
+
+    first
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(first);
+
+    let provider = Capturing::default();
+    let second = runtime(provider.clone(), Arc::new(EmptyToolRegistry));
+    second.recover().await.unwrap();
+    let items = second.items(thread.id, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, .. }
+                if text.contains("state=\"completed\"") && text.contains("Echo: QUICK"))),
+        "the waiting result is recorded: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, .. }
+                if message.contains("result of the background task \u{201c}Quick audit\u{201d}"))),
+        "{items:?}"
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn detached_sse_client_and_thread_switch_leave_turn_owned_by_server_until_interrupt() {
     let provider = SlowText::default();
     let runtime = Arc::new(AgentRuntime::new(
