@@ -50,6 +50,19 @@ Every later step reads the one CLI binary through `HAARNESS_BIN`; Desktop packag
 
 Rust from rust-toolchain.toml, Node 22+, **Bun 1.3.14** (never whatever Bun is first on PATH).
 
+First, on every platform, the JavaScript the CLI embeds and Desktop bundles, in `release.yml`'s
+order: the extension's typecheck needs the built SDK (`@haarness/sdk` is a `file:` dependency)
+and the driver's dependencies, and `prepare.mjs` builds the SDK again. Without
+`HAARNESS_EMBED_BROWSER_EXTENSION` (absolute path) the CLI builds fine but ships no Haarness for
+Chrome; only `test-release-package.py` notices.
+
+```sh
+npm --prefix sdks/typescript ci && npm --prefix sdks/typescript run build
+npm --prefix packages/browser-driver ci
+npm --prefix apps/browser-extension ci && npm --prefix apps/browser-extension run build
+export HAARNESS_EMBED_BROWSER_EXTENSION="$PWD/apps/browser-extension/dist/chrome"
+```
+
 ```sh
 # macOS (and Windows, with --win and haarness.exe)
 cargo build --release -p haarness-cli --target aarch64-apple-darwin
@@ -75,6 +88,32 @@ Linux does. Check it:
 `llvm-readobj --coff-imports haarness.exe` lists only system DLLs (no `VCRUNTIME140.dll`,
 no `api-ms-win-crt-*`). Always pass `--target`: the `windows-11-arm` runner's host toolchain
 need not match the architecture it publishes.
+
+### Without GitHub Actions (local cross-builds)
+
+When the workflow cannot run (a blocked billing account), two machines cover all six platforms.
+Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), same steps as above:
+
+- **A Mac** builds both macOS architectures: `--target aarch64-apple-darwin` and
+  `x86_64-apple-darwin`, then `package -- --mac --arm64` / `--x64` with `bun-darwin-aarch64` /
+  `bun-darwin-x64` (`prepare.mjs` runs the x64 Bun under Rosetta to check its version). Set
+  `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder does not pick up a keychain identity;
+  `build.mac.identity` `-` then signs ad hoc (see Signing).
+- **One Linux x64 machine** builds the rest: `cargo zigbuild` for both Linux targets (`.2.17`),
+  `cargo xwin build` for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, `package --
+  --linux --x64` / `--arm64` (electron-builder fetches the arm64 Electron), and each NSIS
+  installer in the Wine container as in section 6.
+- Build from a checkout whose HEAD is the tag commit and whose tracked files are clean:
+  `collect` records both. A `git archive` copy has no `.git`; ship a `git bundle` of the tag and
+  `git fetch` it instead of `git init`-ing a new history (its commit would not match).
+- A cross build cannot run its binary, so label it:
+  `release.py collect --binary <target binary> --os linux --arch arm64 --version <v>
+  --desktop-dir apps/desktop/release --out dist/releases/linux-arm64`, one `--out` per platform
+  (each run writes one `index-*.json`); `publish` refuses indexes whose version or source commit
+  differ.
+- The CI-only gates (stable signing, `cargo test`, the installer and package checks) do not run on
+  their own: run them, and an unsigned stable release is the owner's explicit decision, stated in
+  the final proof.
 
 ## 3. Package checks and collect
 
@@ -137,6 +176,14 @@ python3 scripts/release.py publish --index dist/releases/index-*.json \
 
 The publisher streams each upload with length and SHA-256, publishes the set atomically, then
 downloads every public artifact and verifies hash and size.
+
+**Uploads bypass Cloudflare.** haarness.ai is proxied by Cloudflare, whose Free and Pro plans
+cap request bodies at 100 MB (documented; larger uploads get 413 or a reset); Desktop packages
+are larger. Publish to an
+origin that reaches the Cloud API directly, such as an SSH tunnel to its in-cluster service
+(`--url http://127.0.0.1:<local port>`; loopback HTTP is allowed). Downloads have no such limit,
+so the public verification still goes through `https://haarness.ai`. The same applies to the
+workflow's `HAARNESS_RELEASE_URL`: pointing it at `https://haarness.ai` fails the publish job.
 
 - Public: `/api/v1/releases?channel=preview`, `/api/v1/releases/history?channel=preview`,
   `/api/v1/releases/artifacts/{id}`, and
