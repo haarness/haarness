@@ -7,6 +7,9 @@ ROOT=Path(__file__).resolve().parents[1]
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def do_GET(self):
+        if mode == 'absent':
+            body=b'{"code":"not_found","message":"release not found"}'
+            self.send_response(404);self.send_header('content-type','application/json');self.end_headers();self.wfile.write(body);return
         content=b'corrupt release'
         if mode == 'metadata':
             if parse_qs(urlsplit(self.path).query).get('version') != ['1.2.3+build.4']:
@@ -20,12 +23,14 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-test-') as d:
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     try:
-        for mode in ['corrupt','missing']:
+        for mode in ['corrupt','missing','absent']:
             env={**os.environ,'HAARNESS_INSTALL_DIR':d,'HAARNESS_RELEASE_URL':f'http://127.0.0.1:{server.server_port}','HAARNESS_CHANNEL':'preview'}
             r=subprocess.run(['sh',str(Path(sys.argv[1]).resolve() if len(sys.argv)>1 else ROOT/'install.sh')],env=env,capture_output=True,text=True)
             assert r.returncode!=0,(mode,r.stdout,r.stderr)
             assert installed.read_bytes()==b'existing binary'
             assert sorted(p.name for p in Path(d).iterdir())==['haarness']
+        # A platform without a release says so instead of curl's bare "error: 404".
+        assert 'No preview release of Haarness cli for ' in r.stderr and '404' not in r.stderr,r.stderr
         mode='metadata'
         env['HAARNESS_VERSION']='1.2.3+build.4'
         r=subprocess.run(['sh',str(Path(sys.argv[1]).resolve() if len(sys.argv)>1 else ROOT/'install.sh')],env=env,capture_output=True,text=True)
@@ -38,5 +43,5 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-test-') as d:
             assert r.returncode==0,(r.stdout,r.stderr)
             assert subprocess.check_output([str(installed),'--version'],text=True).strip()=='haarness 1.2.3+build.4'
             print('PASS: built CLI upgrades to a pinned SemVer build-metadata version')
-        print('PASS: corrupt/missing checksum rejected; previous binary and clean staging preserved')
+        print('PASS: corrupt/missing checksum and an unpublished platform rejected; previous binary and clean staging preserved')
     finally: server.shutdown();server.server_close();thread.join()

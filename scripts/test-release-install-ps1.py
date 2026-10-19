@@ -18,6 +18,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
         state['queries'].append(parse_qs(urlsplit(self.path).query))
+        if state['mode'] == 'absent':
+            body = b'{"code":"not_found","message":"release not found"}'
+            self.send_response(404)
+            self.send_header('content-type', 'application/json')
+            self.send_header('content-length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         content = b'corrupt release' if state['mode'] == 'corrupt' else state['payload']
         self.send_response(200)
         if state['mode'] != 'missing':
@@ -48,14 +56,16 @@ def main():
                    'HAARNESS_RELEASE_URL': f'http://127.0.0.1:{server.server_port}', 'HAARNESS_NO_MODIFY_PATH': '1'}
             # Off Windows there is no registry: the architecture comes from the environment.
             env.setdefault('PROCESSOR_ARCHITECTURE', 'AMD64')
-            for mode in ('corrupt', 'missing'):
+            for mode in ('corrupt', 'missing', 'absent'):
                 state['mode'] = mode
                 result = install(env)
                 assert result.returncode != 0, (mode, result.stdout, result.stderr)
                 assert installed.read_bytes() == b'existing binary', mode
                 assert sorted(p.name for p in folder.iterdir()) == ['haarness.exe'], mode
+            # A platform without a release says so instead of a bare HTTP error.
+            assert 'No preview release of Haarness cli for windows x64 yet' in result.stdout + result.stderr, result
             assert state['queries'][-1] == {'os': ['windows'], 'arch': ['x64'], 'kind': ['binary']}, state['queries'][-1]
-            print('PASS: corrupt/missing checksum rejected; previous binary and clean folder preserved')
+            print('PASS: corrupt/missing checksum and an unpublished platform rejected; previous binary and clean folder preserved')
             for name, value in (('HAARNESS_RELEASE_URL', 'http://example.com'), ('HAARNESS_CHANNEL', 'nightly')):
                 result = install({**env, name: value})
                 assert result.returncode != 0 and installed.read_bytes() == b'existing binary', (name, result.stdout)

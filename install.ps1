@@ -26,7 +26,15 @@ try {
     $Url = "$Base/api/v1/releases/$Channel/$Product/download?os=windows&arch=$Arch&kind=$Kind"
     if ($Version -ne 'latest') { $Url += '&version=' + [Uri]::EscapeDataString($Version) }
     $Binary = Join-Path $Temporary 'haarness.exe'
-    $Response = Invoke-WebRequest -UseBasicParsing $Url -OutFile $Binary -PassThru -MaximumRedirection 0 -TimeoutSec 900
+    try {
+        $Response = Invoke-WebRequest -UseBasicParsing $Url -OutFile $Binary -PassThru -MaximumRedirection 0 -TimeoutSec 900
+    } catch {
+        # Windows PowerShell 5.1 and PowerShell 7 both carry the HTTP status on the exception's response.
+        $Status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        if ($Status -ne 404) { throw }
+        if ($Version -eq 'latest') { throw "No $Channel release of Haarness $Product for windows $Arch yet; installation left unchanged" }
+        throw "Haarness $Product $Version is not on the $Channel channel for windows $Arch; installation left unchanged"
+    }
     $Expected = [string]$Response.Headers['x-content-sha256']
     $Released = [string]$Response.Headers['x-haarness-version']
     if ($Expected -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -Algorithm SHA256 -LiteralPath $Binary).Hash.ToLowerInvariant() -ne $Expected) { throw 'Checksum mismatch; installation left unchanged' }
