@@ -107,30 +107,55 @@ jobs:
       - name: macOS quarantine regression
         if: runner.os == 'macOS'
         run: python scripts/test-release-quarantine.py
+      # Each OS takes only its own certificate. `macOS && MAC_CSC_LINK || WIN_CSC_LINK` handed a Mac runner the
+      # Windows certificate whenever MAC_CSC_LINK was empty, so this check passed with the wrong one.
       - name: Require public distribution signing for stable
         shell: bash
         env:
           CHANNEL: ${{ inputs.channel }}
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK }}
-          CSC_NAME: ${{ secrets.CSC_NAME }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        run: |
-          if [ "$CHANNEL" = stable ] && [ "$RUNNER_OS" != Linux ]; then
-            test -n "$CSC_LINK" || { echo 'Stable Desktop requires a signing certificate'; exit 1; }
-            if [ "$RUNNER_OS" = macOS ]; then
-              test -n "$CSC_NAME" && test -n "$APPLE_API_KEY" || { echo 'Stable macOS requires Developer ID and notarization credentials'; exit 1; }
-            fi
-          fi
-      - name: Package CLI and Desktop
-        shell: bash
-        env:
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ (runner.os == 'macOS' && secrets.MAC_CSC_LINK) || (runner.os == 'Windows' && secrets.WIN_CSC_LINK) || '' }}
           CSC_NAME: ${{ secrets.CSC_NAME }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
+          if [ "$CHANNEL" = stable ] && [ "$RUNNER_OS" != Linux ]; then
+            test -n "$CSC_LINK" || { echo "Stable Desktop on $RUNNER_OS requires its own signing certificate"; exit 1; }
+            if [ "$RUNNER_OS" = macOS ]; then
+              test -n "$CSC_NAME" && test -n "$APPLE_API_KEY" && test -n "$APPLE_API_KEY_ID" && test -n "$APPLE_API_ISSUER" ||
+                { echo 'Stable macOS requires Developer ID and notarization credentials'; exit 1; }
+            fi
+          fi
+      # electron-builder hands APPLE_API_KEY to @electron/notarize as the PATH of the App Store Connect .p8 key, not
+      # its contents. The secret holds the key itself (its PEM, or base64 of it); the file lives in the runner's
+      # temporary directory, which is wiped with the job.
+      - name: Write the notarization key
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          if [ -z "$APPLE_API_KEY_CONTENT" ]; then exit 0; fi
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID:-notarization}.p8"
+          umask 077
+          case "$APPLE_API_KEY_CONTENT" in
+            *'-----BEGIN PRIVATE KEY-----'*) printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key" ;;
+            *) printf '%s' "$APPLE_API_KEY_CONTENT" | base64 --decode > "$key" 2>/dev/null || true ;;
+          esac
+          grep -q -- '-----BEGIN PRIVATE KEY-----' "$key" ||
+            { rm -f "$key"; echo 'APPLE_API_KEY is neither a .p8 key nor base64 of one'; exit 1; }
+          echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+      - name: Package CLI and Desktop
+        shell: bash
+        env:
+          CSC_LINK: ${{ (runner.os == 'macOS' && secrets.MAC_CSC_LINK) || (runner.os == 'Windows' && secrets.WIN_CSC_LINK) || '' }}
+          CSC_KEY_PASSWORD: ${{ (runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD) || (runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD) || '' }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -n "${APPLE_API_KEY_PATH:-}" ]; then export APPLE_API_KEY="$APPLE_API_KEY_PATH"; fi
           args=()
           if [ "$RUNNER_OS" = macOS ] && [ -n "$CSC_NAME" ]; then args+=("--config.mac.identity=$CSC_NAME"); fi
           npm --prefix apps/desktop run package -- --${{ matrix.platform }} --${{ matrix.arch }} "${args[@]}"
