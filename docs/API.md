@@ -27,6 +27,13 @@ policy. Failed password authentication returns `401` and a Basic challenge.
 Managed local daemons and existing integrations retain `Authorization: Bearer <token>`;
 their private runtime token also lets a password-protected host route internally.
 
+A `haarness serve` started while the folder's server runs is a front for it: it
+judges Host, Origin and credentials for its own address, then forwards `/v1` requests
+with the server's token (and the paths that need none without it). `POST /v1/shutdown`
+at a front closes the front only. A request a front admitted without credentials
+reaches the server with `x-haarness-anonymous: 1`, and the server treats it as
+anonymous; any client may send that header to give up access.
+
 Every mode retains Host/Origin validation, judged before credentials (a browser
 sends a saved password, and an open server needs none). Loopback listeners require
 a loopback Host, and a browser Origin on a loopback name with the server's own port:

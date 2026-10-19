@@ -212,6 +212,16 @@ headless clients accept the same options. `--token` / `HAARNESS_SERVER_TOKEN`
 remain supported for existing integrations. Stop a running server before
 changing its authentication settings; `serve --daemon` never silently changes them.
 
+`haarness serve` listens on port 4096, or on a free port (it says so) while another
+program holds 4096; a `--port` you give must be free. A folder has one server, which
+owns its chats, terminals and schedules. When the terminal UI, Desktop or another
+`serve` already started it, `haarness serve` listens at its own address with its own
+credentials and passes every request to that server, which keeps its runtime record,
+so clients go on finding it. Stopping that `serve` (Ctrl-C, or `POST /v1/shutdown` at
+its address) closes only its address; `haarness serve --stop` stops the folder's
+server. `serve --yolo` refuses while a server runs: it cannot change how that server
+approves.
+
 Desktop's **Connect to server** form requires only a Server URL. Name is optional,
 and **Username and password** expands to optional username/password fields. Saved
 credentials are encrypted by the operating system. Private local servers started
