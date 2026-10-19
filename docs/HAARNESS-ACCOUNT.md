@@ -145,12 +145,12 @@ Create/start/stop return once the operation is accepted. Use `list` to check its
 
 CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
 
-Release builds sign in to `https://app.haarness.ai`. **Development builds** (`cargo build`, the `target/debug/haarness` that Desktop's `npm run dev` and the TUI use) sign in to the local Cloud stack at `http://127.0.0.1:18080`, the address `haarness-cloud/scripts/dev-up.sh` starts, so trying a change never touches production accounts or billing. Desktop needs nothing extra: its account dialog, billing and Cloud sessions all go through that binary.
+Release builds sign in to `https://haarness.ai`. **Development builds** (`cargo build`, the `target/debug/haarness` that Desktop's `npm run dev` and the TUI use) sign in to the local Cloud stack at `http://127.0.0.1:18080`, the address `haarness-cloud/scripts/dev-up.sh` starts, so trying a change never touches production accounts or billing. Desktop needs nothing extra: its account dialog, billing and Cloud sessions all go through that binary.
 
 | To | Do |
 | --- | --- |
 | Use another local stack for every dev build | Build with `HAARNESS_CLOUD_DEV_API_URL=http://127.0.0.1:29080` and, when the web app runs on its own dev server, `HAARNESS_CLOUD_DEV_WEB_ORIGIN=http://127.0.0.1:29173` (`cargo` rebuilds the account crate when they change; `~/.cargo/config.toml` `[env]` keeps them) |
-| Point one run anywhere | `HAARNESS_CLOUD_API_URL` (and `HAARNESS_CLOUD_WEB_ORIGIN`) at run time, for any build; `HAARNESS_CLOUD_API_URL=https://app.haarness.ai` sends a dev build to production |
+| Point one run anywhere | `HAARNESS_CLOUD_API_URL` (and `HAARNESS_CLOUD_WEB_ORIGIN`) at run time, for any build; `HAARNESS_CLOUD_API_URL=https://haarness.ai` sends a dev build to production |
 
 Production credentials live in `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/haarness-cloud`), shared with the `haarness-cloud` CLI. Any other Cloud service keeps its own sign-in in `~/.config/haarness-cloud/services/<host>-<port>` (for example `services/127.0.0.1-18080`), so signing in to a local stack never signs a production install out. An explicit `HAARNESS_CLOUD_CONFIG_DIR` overrides both; when `HAARNESS_DATA_DIR` is set, native Haarness defaults to its `config/account` directory for isolated development. Set the explicit Cloud config directory when mixing both CLIs against a local stack. `--data-dir` changes runtime data, not the global account.
 

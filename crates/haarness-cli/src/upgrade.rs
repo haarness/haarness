@@ -12,7 +12,7 @@ pub struct UpgradeArgs {
     #[arg(
         long,
         env = "HAARNESS_RELEASE_URL",
-        default_value = "https://app.haarness.ai"
+        default_value = "https://haarness.ai"
     )]
     release_url: String,
 }

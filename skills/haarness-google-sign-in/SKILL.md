@@ -19,7 +19,7 @@ production. The Google callback belongs to the Cloud API, not the frontend dev s
 | Native development API | `http://127.0.0.1:18080/auth/google/callback` |
 | Docker development proxy | `http://localhost:18000/auth/google/callback` |
 | Separate Stripe sandbox stack | `http://127.0.0.1:19080/auth/google/callback` |
-| Production | `https://app.haarness.ai/auth/google/callback` |
+| Production | `https://haarness.ai/auth/google/callback` |
 
 Verify those ports against the active configuration. Keep local callbacks out of the
 production client. External audience supports commercial customers outside the company's

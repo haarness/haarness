@@ -25,7 +25,7 @@ test("a server answer is checked before the dialog trusts it", () => {
   const share = parseShare({
     data: {
       state: "on",
-      url: "https://app.haarness.ai/app/remote/sessions/1",
+      url: "https://haarness.ai/app/remote/sessions/1",
       computer: "Desk",
       chat: "Release",
       error: null,
@@ -34,7 +34,7 @@ test("a server answer is checked before the dialog trusts it", () => {
   });
   assert.deepEqual(share, {
     state: "on",
-    url: "https://app.haarness.ai/app/remote/sessions/1",
+    url: "https://haarness.ai/app/remote/sessions/1",
     computer: "Desk",
     chat: "Release",
     error: undefined,

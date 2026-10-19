@@ -8039,7 +8039,7 @@ fn cloud_billing_balances_and_panel_fit_narrow_terminals() {
             "accountId":"test-account","accountName":"Test workspace","plan":"power","accountStatus":"active",
             "subscriptionStatus":"active","includedCredits":"100.123456","purchasedCredits":"500.000000","heldCredits":"1.500000",
             "cloudUnits":"2.00","cloudUnitsHeld":"0.10","resetsAt":"2026-10-27T00:00:00Z","periodEndsAt":"2026-10-27T00:00:00Z",
-            "cancelAtPeriodEnd":false,"overageOptIn":false,"billingUrl":"https://app.haarness.ai/app/billing","usageUrl":"https://app.haarness.ai/app/billing/usage"
+            "cancelAtPeriodEnd":false,"overageOptIn":false,"billingUrl":"https://haarness.ai/app/billing","usageUrl":"https://haarness.ai/app/billing/usage"
         }
     })).unwrap();
     assert!(frame_text(&app, (160, 46)).contains("100.12 included · 500 purchased"));
@@ -17312,7 +17312,7 @@ fn remote_control_text(app: &App, size: (u32, u32)) -> String {
 async fn remote_control_shows_the_link_and_a_scannable_code_while_live() {
     let mut app = connect_fixture();
     let client = offline_client();
-    let url = "https://app.haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5";
+    let url = "https://haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5";
     app.remote.thread = Some(app.thread.id);
     app.remote.share = Some(crate::remote_control::Share {
         state: "on".into(),

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install a checksum-verified CLI or Desktop from Haarness Cloud. No sudo required.
 set -eu
-base=${HAARNESS_RELEASE_URL:-https://app.haarness.ai}
+base=${HAARNESS_RELEASE_URL:-https://haarness.ai}
 channel=${HAARNESS_CHANNEL:-stable}
 version=${HAARNESS_VERSION:-latest}
 product=${HAARNESS_PRODUCT:-cli}
