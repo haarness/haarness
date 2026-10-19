@@ -23,7 +23,7 @@ use url::Url;
 pub const SCOPE: &str = "account workspaces billing keys offline_access";
 pub const CLIENT_ID: &str = "haarness-cli";
 /// Production Haarness Cloud.
-pub const PRODUCTION_API_URL: &str = "https://app.haarness.ai";
+pub const PRODUCTION_API_URL: &str = "https://haarness.ai";
 /// The local Cloud stack that `haarness-cloud/scripts/dev-up.sh` starts. Building with
 /// `HAARNESS_CLOUD_DEV_API_URL` (and `HAARNESS_CLOUD_DEV_WEB_ORIGIN` for a separate web dev
 /// server) bakes in another local stack.

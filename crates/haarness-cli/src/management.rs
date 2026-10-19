@@ -3707,7 +3707,7 @@ mod tests {
     #[test]
     fn remote_control_qr_codes_are_square_with_finder_patterns() {
         let rows = ui::qr_rows(
-            "https://app.haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5",
+            "https://haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5",
         );
         let size = rows.len();
         assert!(size >= 21 && (size - 21) % 4 == 0, "{size}");

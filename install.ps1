@@ -1,11 +1,11 @@
 # Install a checksum-verified CLI or Desktop from Haarness Cloud. No administrator rights required.
-# Runs in its own scope, so `irm https://app.haarness.ai/install.ps1 | iex` leaves no variables behind.
+# Runs in its own scope, so `irm https://haarness.ai/install.ps1 | iex` leaves no variables behind.
 & {
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 draws a progress bar per chunk (very slow downloads) and may not offer TLS 1.2.
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$Base = if ($env:HAARNESS_RELEASE_URL) { $env:HAARNESS_RELEASE_URL.TrimEnd('/') } else { 'https://app.haarness.ai' }
+$Base = if ($env:HAARNESS_RELEASE_URL) { $env:HAARNESS_RELEASE_URL.TrimEnd('/') } else { 'https://haarness.ai' }
 $Uri = [Uri]$Base
 if ($Uri.Scheme -ne 'https' -and -not ($Uri.Scheme -eq 'http' -and $Uri.IsLoopback)) { throw 'Release URL requires HTTPS' }
 $Channel = if ($env:HAARNESS_CHANNEL) { $env:HAARNESS_CHANNEL } else { 'stable' }

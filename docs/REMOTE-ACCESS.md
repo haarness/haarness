@@ -37,7 +37,7 @@ The connector watches only project servers that already run. It finds them throu
 ## SDKs
 
 ```typescript
-const cloud = new HaarnessCloud({ baseUrl: "https://app.haarness.ai", token });
+const cloud = new HaarnessCloud({ baseUrl: "https://haarness.ai", token });
 const hosts = await cloud.listRemoteHosts();
 const host = cloud.remoteHost(hosts.items[0].id);
 const projects = await host.hostProjects();

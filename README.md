@@ -93,15 +93,15 @@ SHA-256 before it replaces anything, and needs no administrator rights.
 **macOS and Linux**
 
 ```sh
-curl -fsSL https://app.haarness.ai/install.sh | sh                           # CLI and terminal UI
-curl -fsSL https://app.haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh  # Desktop app
+curl -fsSL https://haarness.ai/install.sh | sh                           # CLI and terminal UI
+curl -fsSL https://haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh  # Desktop app
 ```
 
 **Windows** (PowerShell)
 
 ```powershell
-irm https://app.haarness.ai/install.ps1 | iex                                  # CLI and terminal UI
-$env:HAARNESS_PRODUCT='desktop'; irm https://app.haarness.ai/install.ps1 | iex # Desktop app
+irm https://haarness.ai/install.ps1 | iex                                  # CLI and terminal UI
+$env:HAARNESS_PRODUCT='desktop'; irm https://haarness.ai/install.ps1 | iex # Desktop app
 ```
 
 <table>
