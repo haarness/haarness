@@ -102,7 +102,13 @@ Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), s
 - **One Linux x64 machine** builds the rest: `cargo zigbuild` for both Linux targets (`.2.17`),
   `cargo xwin build` for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, `package --
   --linux --x64` / `--arm64` (electron-builder fetches the arm64 Electron), and each NSIS
-  installer in the Wine container as in section 6.
+  installer in the Wine container as in section 6. `prepare.mjs` runs the bundled Bun to check
+  its version, so the arm64 Linux package needs `qemu-user-static` and `libc6-arm64-cross` with
+  `QEMU_LD_PREFIX=/usr/aarch64-linux-gnu`; the same setup runs the arm64 CLI, and Docker's
+  `--platform linux/arm64` gives an arm64 distribution for the smoke turn.
+- Add Rust targets from inside the checkout (`rustup target add …`): run elsewhere, they go to the
+  default toolchain instead of the one `rust-toolchain.toml` pins, and the build fails with
+  "can't find crate for `core`".
 - Build from a checkout whose HEAD is the tag commit and whose tracked files are clean:
   `collect` records both. A `git archive` copy has no `.git`; ship a `git bundle` of the tag and
   `git fetch` it instead of `git init`-ing a new history (its commit would not match).
