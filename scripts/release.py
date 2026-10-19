@@ -18,11 +18,13 @@ def collect(args):
     revision = subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip()
     dirty = subprocess.check_output(['git','status','--porcelain','--untracked-files=no'], cwd=ROOT, text=True).strip()
     if dirty and not args.allow_dirty: raise ValueError('Commit build sources before collecting a publishable release (or --allow-dirty for local proof).')
-    os_name = {'Darwin':'macos','Linux':'linux','Windows':'windows'}[platform.system()]
+    # The build host's platform, unless --os/--arch name the target of a cross build (Linux arm64 or Windows from
+    # a Linux x64 host when CI is unavailable). A cross-built binary cannot run here: --version names it then.
+    os_name = args.os or {'Darwin':'macos','Linux':'linux','Windows':'windows'}[platform.system()]
     # Windows reports ARM64 in capitals (and AMD64), macOS arm64, Linux aarch64.
-    arch = {'arm64':'arm64','aarch64':'arm64','amd64':'x64','x86_64':'x64'}[platform.machine().lower()]
+    arch = args.arch or {'arm64':'arm64','aarch64':'arm64','amd64':'x64','x86_64':'x64'}[platform.machine().lower()]
     binary = Path(args.binary).resolve()
-    version = subprocess.check_output([str(binary),'--version'],text=True).strip().removeprefix('haarness ')
+    version = args.version or subprocess.check_output([str(binary),'--version'],text=True).strip().removeprefix('haarness ')
     desktop = json.loads((ROOT/'apps/desktop/package.json').read_text())
     if desktop['version'] != version: raise ValueError('CLI and Desktop versions differ')
     out = Path(args.out).resolve(); out.mkdir(parents=True, exist_ok=True)
@@ -38,7 +40,7 @@ def collect(args):
     # electron-builder names Linux packages by each format's word for the CPU
     # (x86_64 for AppImage, amd64 for .deb); publish every package as x64/arm64.
     arch_names = {'x64':{'x64','x86_64','amd64'},'arm64':{'arm64','aarch64'}}[arch]
-    for path in sorted((ROOT/'apps/desktop/release').iterdir()):
+    for path in sorted(Path(args.desktop_dir).iterdir()):
         kind = path.suffix.lstrip('.')
         name = f'Haarness-{version}-{build_os}-{arch}.{kind}'
         if path.is_file() and kind in extensions and any(path.name == f'Haarness-{version}-{build_os}-{a}.{kind}' for a in arch_names): add(path,'desktop',kind,name)
@@ -104,6 +106,6 @@ def publish(args):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
-    c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.set_defaults(run=collect)
+    c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.set_defaults(run=collect)
     c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.set_defaults(run=publish)
     args=p.parse_args();args.run(args)
