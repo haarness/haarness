@@ -105,10 +105,22 @@ python3 scripts/test-release-quarantine.py           # macOS only
 Public macOS DMG/ZIP needs commercial Developer ID signing and notarization; ad-hoc signing is
 local preview proof only. Never use unrelated employer identities. Secrets: MAC_CSC_LINK,
 MAC_CSC_KEY_PASSWORD, CSC_NAME, APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER; Windows
-WIN_CSC_LINK, WIN_CSC_KEY_PASSWORD. Stable packaging fails closed without them. New Windows code
+WIN_CSC_LINK, WIN_CSC_KEY_PASSWORD. Stable packaging fails closed without them, and each OS
+reads only its own certificate (a Mac never falls back to WIN_CSC_LINK). APPLE_API_KEY holds the
+App Store Connect `.p8` key itself (its PEM, or base64 of it): the workflow writes it to
+`$RUNNER_TEMP/AuthKey_<key id>.p8` and passes that path, which is what electron-builder and
+`@electron/notarize` expect in `APPLE_API_KEY`. Locally, set `APPLE_API_KEY` to the file's path,
+never its contents. New Windows code
 signing certificates need hardware keys (plan for a cloud signing service); the standalone
 `haarness-windows-*.exe` is not signed today, so SmartScreen warns on browser downloads (the
 PowerShell installer unblocks verified bytes).
+
+**Open launch item: Desktop has no update feed.** Installed Desktop apps check for updates only
+when `HAARNESS_UPDATE_URL` is set in their environment at runtime
+(`apps/desktop/src/main/index.ts`, the `update` handler); nothing sets it, no release publishes
+an electron-updater feed (`latest*.yml`), and macOS auto-update would also need the signed ZIP.
+Until a feed exists and the packaged app knows its URL, every Desktop upgrade is a manual
+download: say so in the final proof and on the download page, and do not claim auto-update.
 
 ## 5. Publish through the Cloud release service
 
