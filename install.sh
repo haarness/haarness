@@ -22,7 +22,16 @@ if [ "$version" != latest ]; then
   encoded_version=$(printf '%s' "$version" | sed 's/+/%2B/g')
   url="$url&version=$encoded_version"
 fi
-curl --fail --silent --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' "$url" -D "$stage/headers" -o "$stage/payload"
+status=$(curl --silent --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' "$url" -D "$stage/headers" -o "$stage/payload" -w '%{http_code}') ||
+  { echo 'Could not reach the Haarness release service; installation left unchanged.' >&2; exit 1; }
+case "$status" in
+  200) ;;
+  404)
+    if [ "$version" = latest ]; then echo "No $channel release of Haarness $product for $os $arch yet; installation left unchanged." >&2
+    else echo "Haarness $product $version is not on the $channel channel for $os $arch; installation left unchanged." >&2; fi
+    exit 1;;
+  *) echo "The Haarness release service answered HTTP $status; installation left unchanged." >&2; exit 1;;
+esac
 expected=$(awk 'tolower($1)=="x-content-sha256:" {gsub("\r", "", $2); print $2}' "$stage/headers")
 released=$(awk 'tolower($1)=="x-haarness-version:" {gsub("\r", "", $2); print $2}' "$stage/headers")
 case "$expected" in *[!a-f0-9]*|'') echo 'Missing or invalid SHA-256' >&2; exit 1;; esac
