@@ -9,9 +9,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::{
+    ffi::OsStr,
     fs,
-    io::{Read as _, Write as _},
+    io::{IsTerminal as _, Read as _, Write as _},
     path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
 };
 
 const LIMIT: u64 = 4 * 1024 * 1024;
@@ -57,6 +59,11 @@ enum Request {
 }
 
 pub async fn run(paths: &Paths, workspace: &Path, trust: bool) -> Result<()> {
+    // Typed at a terminal, `haarness desktop` opens Haarness Desktop. Desktop
+    // itself runs it with a request on standard input, which never is one.
+    if std::io::stdin().is_terminal() {
+        return open_desktop();
+    }
     let mut bytes = Vec::new();
     std::io::stdin().take(LIMIT + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 <= LIMIT, "Desktop request exceeds 4 MiB");
@@ -283,6 +290,146 @@ fn read(path: &Path) -> Result<String> {
     file.read_to_string(&mut text)?;
     ensure!(text.len() as u64 <= LIMIT, "Configuration exceeds 4 MiB");
     Ok(text)
+}
+
+/// Open the installed Haarness Desktop, installing it first (as the
+/// installer would) when it is missing.
+fn open_desktop() -> Result<()> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    ensure!(
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        "Haarness Desktop needs a graphical session: DISPLAY and WAYLAND_DISPLAY are not set"
+    );
+    let app = match installed_desktop() {
+        Some(app) => app,
+        None if open_registered_desktop() => {
+            println!("Opening Haarness Desktop");
+            return Ok(());
+        }
+        None => {
+            install_desktop()?;
+            installed_desktop().context("Haarness Desktop was installed but cannot be found")?
+        }
+    };
+    println!("Opening Haarness Desktop: {}", app.display());
+    launch_desktop(&app)
+}
+
+/// Where the installers and packages put Desktop, the usual place first.
+fn desktop_candidates(
+    home: &Path,
+    search_path: Option<&OsStr>,
+    local_app_data: Option<&Path>,
+    program_files: Option<&Path>,
+) -> Vec<PathBuf> {
+    let _ = (home, search_path, local_app_data, program_files);
+    #[cfg(target_os = "macos")]
+    return vec![
+        PathBuf::from("/Applications/Haarness.app"),
+        home.join("Applications/Haarness.app"),
+    ];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return search_path
+        .map(|value| std::env::split_paths(value).map(|directory| directory.join("haarness-desktop")).collect())
+        .unwrap_or_else(Vec::new)
+        .into_iter()
+        .chain([
+            home.join(".local/bin/haarness-desktop"),
+            PathBuf::from("/opt/Haarness/haarness-desktop"),
+        ])
+        .collect();
+    #[cfg(windows)]
+    return [
+        local_app_data.map(|root| root.join("Programs").join("Haarness").join("Haarness.exe")),
+        program_files.map(|root| root.join("Haarness").join("Haarness.exe")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+}
+
+fn find_desktop(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates.into_iter().find(|candidate| {
+        if cfg!(target_os = "macos") {
+            candidate.join("Contents/Info.plist").is_file()
+        } else {
+            candidate.is_file()
+        }
+    })
+}
+
+fn installed_desktop() -> Option<PathBuf> {
+    let home = crate::browser::discovery::home_dir().unwrap_or_default();
+    let path = std::env::var_os("PATH");
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let programs = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    find_desktop(desktop_candidates(
+        &home,
+        path.as_deref(),
+        local.as_deref(),
+        programs.as_deref(),
+    ))
+}
+
+/// macOS also finds an app moved anywhere else by its bundle identifier.
+fn open_registered_desktop() -> bool {
+    cfg!(target_os = "macos")
+        && ProcessCommand::new("open")
+            .args(["-b", "dev.haarness.desktop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+fn launch_desktop(app: &Path) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        let status = ProcessCommand::new("open").arg("-a").arg(app).status()?;
+        ensure!(status.success(), "Could not open {}", app.display());
+        return Ok(());
+    }
+    let mut command = ProcessCommand::new(app);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::detach_from_caller(&mut command);
+    command
+        .spawn()
+        .with_context(|| format!("Could not start {}", app.display()))?;
+    Ok(())
+}
+
+/// The installer `haarness upgrade` also embeds, asked for Desktop only, in
+/// its default place, where [`installed_desktop`] looks.
+fn install_desktop() -> Result<()> {
+    let release_url =
+        std::env::var("HAARNESS_RELEASE_URL").unwrap_or_else(|_| "https://haarness.ai".to_string());
+    println!("Haarness Desktop is not installed yet; installing it from {release_url}.");
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = ProcessCommand::new("sh");
+        command.arg("-c").arg(include_str!("../../../install.sh"));
+        command
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = ProcessCommand::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            include_str!("../../../install.ps1"),
+        ]);
+        command
+    };
+    let status = command
+        .env("HAARNESS_PRODUCT", "desktop")
+        .env("HAARNESS_RELEASE_URL", &release_url)
+        .env_remove("HAARNESS_INSTALL_DIR")
+        .status()?;
+    ensure!(status.success(), "Installing Haarness Desktop failed; see the installer output above");
+    Ok(())
 }
 
 /// Register `directories` in a detached copy of this command, so the
@@ -574,6 +721,49 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["linked", "plain", "repository"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finds_desktop_where_the_installers_put_it() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-desktop-find-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        let local = root.join("local");
+        let programs = root.join("programs");
+        let candidates = || desktop_candidates(&home, None, Some(&local), Some(&programs));
+        let user_install = if cfg!(target_os = "macos") {
+            home.join("Applications/Haarness.app")
+        } else if cfg!(windows) {
+            local.join("Programs").join("Haarness").join("Haarness.exe")
+        } else {
+            home.join(".local/bin/haarness-desktop")
+        };
+        // Nothing in the per-user place (macOS still looks in /Applications).
+        assert!(find_desktop(candidates()).is_none_or(|found| found != user_install));
+        if cfg!(target_os = "macos") {
+            fs::create_dir_all(user_install.join("Contents")).unwrap();
+            fs::write(user_install.join("Contents/Info.plist"), "").unwrap();
+        } else {
+            fs::create_dir_all(user_install.parent().unwrap()).unwrap();
+            fs::write(&user_install, "").unwrap();
+        }
+        assert!(candidates().contains(&user_install));
+        assert!(find_desktop(vec![user_install.clone()]).is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn finds_the_desktop_command_on_the_search_path() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-desktop-path-find-{}", uuid::Uuid::now_v7()));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("haarness-desktop"), "").unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+        let found = find_desktop(desktop_candidates(&root.join("home"), Some(&path), None, None));
+        assert_eq!(found, Some(bin.join("haarness-desktop")));
         fs::remove_dir_all(root).unwrap();
     }
 

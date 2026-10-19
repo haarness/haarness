@@ -152,8 +152,10 @@ enum Command {
     Cloud(account::CloudArgs),
     /// Access this machine and selected chats through Haarness Cloud.
     Remote(remote_cloud::RemoteArgs),
-    /// Private, versioned desktop bridge. Requests are read from standard input.
-    #[command(hide = true)]
+    /// Open Haarness Desktop, installing it first if needed.
+    ///
+    /// Desktop also runs this command as its private, versioned bridge, with
+    /// a request on standard input.
     Desktop,
     /// Use your own Chrome with Haarness: set up, check or remove Haarness for Chrome.
     Browser(browser::BrowserArgs),
