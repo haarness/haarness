@@ -233,37 +233,10 @@ async fn forward(
             Ok((socket, _)) => socket,
             Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
         };
-        return ws.on_upgrade(move |socket| async move {
-            let (mut client_sink, mut client_stream) = socket.split();
-            let (mut upstream_sink, mut upstream_stream) = upstream.split();
-            let outgoing = async {
-                while let Some(Ok(message)) = client_stream.next().await {
-                    let message = match message {
-                        Message::Text(value) => UpstreamMessage::Text(value.to_string().into()),
-                        Message::Binary(value) => UpstreamMessage::Binary(value),
-                        Message::Ping(value) => UpstreamMessage::Ping(value),
-                        Message::Pong(value) => UpstreamMessage::Pong(value),
-                        Message::Close(_) => break,
-                    };
-                    if upstream_sink.send(message).await.is_err() { break; }
-                }
-                let _ = upstream_sink.close().await;
-            };
-            let incoming = async {
-                while let Some(Ok(message)) = upstream_stream.next().await {
-                    let message = match message {
-                        UpstreamMessage::Text(value) => Message::Text(value.to_string().into()),
-                        UpstreamMessage::Binary(value) => Message::Binary(value),
-                        UpstreamMessage::Ping(value) => Message::Ping(value),
-                        UpstreamMessage::Pong(value) => Message::Pong(value),
-                        UpstreamMessage::Close(_) | UpstreamMessage::Frame(_) => break,
-                    };
-                    if client_sink.send(message).await.is_err() { break; }
-                }
-                let _ = client_sink.close().await;
-            };
-            tokio::select! { () = outgoing => {}, () = incoming => {}, () = gateway.shutdown.cancelled() => {} }
-        }).into_response();
+        let shutdown = gateway.shutdown.clone();
+        return ws
+            .on_upgrade(move |socket| pipe_websocket(socket, upstream, shutdown))
+            .into_response();
     }
     let (parts, body) = request.into_parts();
     let mut upstream = gateway
@@ -307,6 +280,50 @@ async fn forward(
         }
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
+}
+
+/// Carry one client WebSocket to its upstream and back until either side
+/// closes or `shutdown` fires.
+pub(crate) async fn pipe_websocket(
+    socket: axum::extract::ws::WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let (mut client_sink, mut client_stream) = socket.split();
+    let (mut upstream_sink, mut upstream_stream) = upstream.split();
+    let outgoing = async {
+        while let Some(Ok(message)) = client_stream.next().await {
+            let message = match message {
+                Message::Text(value) => UpstreamMessage::Text(value.to_string().into()),
+                Message::Binary(value) => UpstreamMessage::Binary(value),
+                Message::Ping(value) => UpstreamMessage::Ping(value),
+                Message::Pong(value) => UpstreamMessage::Pong(value),
+                Message::Close(_) => break,
+            };
+            if upstream_sink.send(message).await.is_err() {
+                break;
+            }
+        }
+        let _ = upstream_sink.close().await;
+    };
+    let incoming = async {
+        while let Some(Ok(message)) = upstream_stream.next().await {
+            let message = match message {
+                UpstreamMessage::Text(value) => Message::Text(value.to_string().into()),
+                UpstreamMessage::Binary(value) => Message::Binary(value),
+                UpstreamMessage::Ping(value) => Message::Ping(value),
+                UpstreamMessage::Pong(value) => Message::Pong(value),
+                UpstreamMessage::Close(_) | UpstreamMessage::Frame(_) => break,
+            };
+            if client_sink.send(message).await.is_err() {
+                break;
+            }
+        }
+        let _ = client_sink.close().await;
+    };
+    tokio::select! { () = outgoing => {}, () = incoming => {}, () = shutdown.cancelled() => {} }
 }
 
 #[derive(OpenApi)]
