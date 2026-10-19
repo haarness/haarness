@@ -326,7 +326,9 @@ struct ServeArgs {
     /// Address to listen on: an IP address, or `localhost`.
     #[arg(long, default_value = "127.0.0.1", value_parser = parse_listen_host)]
     host: IpAddr,
-    /// Port to listen on (default: 4096; 0 picks a free port).
+    /// Port to listen on (default: 4096, or a free port while another
+    /// program holds that one; 0 picks a free port). A port given here must
+    /// be free.
     #[arg(long)]
     port: Option<u16>,
     /// Bearer token clients must send. Without one, a local server makes a
@@ -3970,7 +3972,8 @@ async fn serve_command(
             &workspace,
             trust,
             yolo,
-            SocketAddr::new(args.host, port),
+            args.host,
+            args.port,
             token.unwrap_or_else(random_token),
             Some(access),
             BusyServer::Refuse,
@@ -3991,28 +3994,45 @@ async fn serve_command(
         }
         return Ok(());
     }
+    let token = token.unwrap_or_else(random_token);
     // A running server is named before the lease it holds is tried, which
     // could only say that one is "running or starting".
-    if let Some(live) = inspect_workspace_server(paths, &workspace).await? {
-        let discovery = live.discovery;
-        anyhow::bail!(
-            "Haarness server {} is already running at {} for {}",
-            discovery.pid,
-            discovery.url,
-            workspace.display()
+    let live = inspect_workspace_server(paths, &workspace).await?;
+    let lease = match &live {
+        Some(_) => None,
+        None => try_server_lease(paths)?,
+    };
+    let Some(_server_lease) = lease else {
+        if args.background_child {
+            // Its launcher finds the server that won, and reports that one.
+            if let Some(live) = live {
+                let discovery = live.discovery;
+                anyhow::bail!(
+                    "Haarness server {} is already running at {} for {}",
+                    discovery.pid,
+                    discovery.url,
+                    workspace.display()
+                );
+            }
+            anyhow::bail!(
+                "Another Haarness server is starting for this project. Wait a moment, or stop it with `haarness serve --stop`."
+            );
+        }
+        return serve_through(
+            paths, workspace, trust, yolo, args.host, args.port, &token, &access,
+        )
+        .await;
+    };
+    let (listener, took_free_port) =
+        bind_serve_listener(args.host, args.port, DEFAULT_SERVE_PORT).await?;
+    if took_free_port && !args.background_child {
+        eprintln!(
+            "haarness: port {DEFAULT_SERVE_PORT} on {} is in use, so this server took a free port.",
+            args.host
         );
     }
-    let _server_lease = acquire_server_lease(paths)?;
-    let token = token.unwrap_or_else(random_token);
-    let (listener, state, hot_reload) = application_at(
-        paths,
-        &workspace,
-        trust,
-        yolo,
-        SocketAddr::new(args.host, port),
-        true,
-    )
-    .await?;
+    let (listener, state, hot_reload) =
+        application_at(paths, &workspace, trust, yolo, listener, true).await?;
     let address = listener.local_addr()?;
     let upstream_address = if address.ip().is_unspecified() {
         SocketAddr::new(
@@ -4065,6 +4085,111 @@ async fn serve_command(
     remove_runtime_if_owner(paths, std::process::id());
     result?;
     Ok(())
+}
+
+/// `serve` for a folder whose server already runs: the one the TUI or
+/// Desktop started in the background, or another `serve`. That server owns
+/// the folder's store, chats, terminals and schedules, and a second owner
+/// would race it for them, so this command listens where it was asked to,
+/// with its own credentials, and hands every request to that server. Stopping
+/// it closes only this address: the TUI, Desktop and their work keep the
+/// server, which keeps its runtime record.
+#[allow(clippy::too_many_arguments)]
+async fn serve_through(
+    paths: &Paths,
+    workspace: PathBuf,
+    trust: bool,
+    yolo: bool,
+    host: IpAddr,
+    port: Option<u16>,
+    token: &str,
+    access: &haarness_server::auth::ServerAccess,
+) -> Result<()> {
+    if yolo {
+        let running = match inspect_workspace_server(paths, &workspace).await? {
+            Some(live) => format!(
+                "Haarness server {} is already running at {}",
+                live.discovery.pid, live.discovery.url
+            ),
+            None => "Another Haarness server is starting".to_owned(),
+        };
+        anyhow::bail!(
+            "{running} for {}, and --yolo cannot change how it approves requests. Stop it with `haarness --workspace '{}' serve --stop`, then start `haarness serve --yolo` again.",
+            workspace.display(),
+            workspace.display()
+        );
+    }
+    // The TUI's own check: an idle server of another build or setting is
+    // replaced, a busy one used as it is (or refused, if it cannot be).
+    let discovery = ensure_workspace_server(paths, &workspace, trust).await?;
+    let (listener, took_free_port) = bind_serve_listener(host, port, DEFAULT_SERVE_PORT).await?;
+    let upstream = Arc::new(FrontUpstream {
+        expected: comparable_workspace(&workspace),
+        paths: paths.clone(),
+        workspace: workspace.clone(),
+        trust,
+    });
+    let front = haarness_server::front::serve(listener, token, access, upstream)?;
+    if took_free_port {
+        eprintln!(
+            "haarness: port {DEFAULT_SERVE_PORT} on {host} is in use, so this server took a free port."
+        );
+    }
+    eprintln!(
+        "haarness: Haarness server {} already runs {}; this address serves it too, and stopping this command leaves that server running.",
+        discovery.pid,
+        workspace.display()
+    );
+    println!("Haarness server listening on http://{}", front.address);
+    let shutdown = front.shutdown_signal();
+    wait_for_shutdown(shutdown.clone()).await?;
+    shutdown.cancel();
+    front.wait().await
+}
+
+/// The folder's server for [`serve_through`]: the one its runtime record
+/// names (a replacement included), else the one a client would start.
+struct FrontUpstream {
+    paths: Paths,
+    workspace: PathBuf,
+    expected: PathBuf,
+    trust: bool,
+}
+
+fn front_target(discovery: RuntimeDiscovery) -> haarness_server::remote::WorkspaceTarget {
+    haarness_server::remote::WorkspaceTarget {
+        url: discovery.url,
+        token: discovery.token,
+    }
+}
+
+#[async_trait::async_trait]
+impl haarness_server::front::Upstream for FrontUpstream {
+    async fn current(&self) -> Result<haarness_server::remote::WorkspaceTarget> {
+        // Read for every request, which costs less than asking the server:
+        // the record follows a server that replaced this one.
+        match read_runtime(&self.paths) {
+            Ok(discovery)
+                if discovery.workspace.as_deref().is_some_and(|actual| {
+                    comparable_workspace(Path::new(actual)) == self.expected
+                }) =>
+            {
+                Ok(front_target(discovery))
+            }
+            _ => ensure_workspace_server(&self.paths, &self.workspace, self.trust)
+                .await
+                .map(front_target),
+        }
+    }
+
+    async fn recover(
+        &self,
+        _unreachable: &haarness_server::remote::WorkspaceTarget,
+    ) -> Result<haarness_server::remote::WorkspaceTarget> {
+        ensure_workspace_server(&self.paths, &self.workspace, self.trust)
+            .await
+            .map(front_target)
+    }
 }
 
 /// A scheduled run's chat title: the schedule and when it ran, in local time
@@ -6798,24 +6923,40 @@ fn auth_reload_inputs(bytes: &[u8]) -> Vec<u8> {
     serde_json::to_vec(&entries).unwrap_or_else(|_| bytes.to_vec())
 }
 
+/// The listener `serve` asked for: `--port`, which must be free, else the
+/// default port, else any free port when another program holds that one
+/// (the second value is then `true`).
+async fn bind_serve_listener(
+    host: IpAddr,
+    port: Option<u16>,
+    default: u16,
+) -> Result<(TcpListener, bool)> {
+    let address = SocketAddr::new(host, port.unwrap_or(default));
+    match TcpListener::bind(address).await {
+        Ok(listener) => Ok((listener, false)),
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse && port.is_none() => {
+            let listener = TcpListener::bind(SocketAddr::new(host, 0))
+                .await
+                .with_context(|| format!("cannot listen on {host}"))?;
+            Ok((listener, true))
+        }
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => anyhow::bail!(
+            "Port {} on {} is already in use. Choose another with --port, or leave it out to take a free one.",
+            address.port(),
+            address.ip()
+        ),
+        Err(error) => Err(anyhow::Error::new(error).context(format!("cannot listen on {address}"))),
+    }
+}
+
 async fn application_at(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
     yolo: bool,
-    address: SocketAddr,
+    listener: TcpListener,
     recover: bool,
 ) -> Result<(TcpListener, ServerState, HotReloadController)> {
-    let listener = TcpListener::bind(address)
-        .await
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                "Port {} on {} is already in use. Choose another with --port.",
-                address.port(),
-                address.ip()
-            ),
-            _ => anyhow::Error::new(error).context(format!("cannot listen on {address}")),
-        })?;
     let workspace_manager = Arc::new(paths.workspace_manager()?);
     let registered_workspace = workspace_manager
         .register_local(workspace)
@@ -10252,7 +10393,8 @@ async fn ensure_workspace_server(
         workspace,
         trust,
         false,
-        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        Ipv4Addr::LOCALHOST.into(),
+        Some(0),
         random_token(),
         None,
         BusyServer::Reuse,
@@ -10275,7 +10417,8 @@ pub(crate) async fn ensure_workspace_server_for_remote(
         workspace,
         trust,
         false,
-        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        Ipv4Addr::LOCALHOST.into(),
+        Some(0),
         random_token(),
         None,
         BusyServer::Refuse,
@@ -10325,7 +10468,9 @@ async fn ensure_workspace_server_at(
     workspace: &Path,
     trust: bool,
     yolo: bool,
-    address: SocketAddr,
+    host: IpAddr,
+    // Without one, the server takes the default port, or a free one.
+    port: Option<u16>,
     token: String,
     access: Option<haarness_server::auth::ServerAccess>,
     busy: BusyServer,
@@ -10423,9 +10568,11 @@ async fn ensure_workspace_server_at(
         )
         .arg("serve")
         .arg("--host")
-        .arg(address.ip().to_string())
-        .arg("--port")
-        .arg(address.port().to_string())
+        .arg(host.to_string())
+        .args(
+            port.into_iter()
+                .flat_map(|port| ["--port".to_owned(), port.to_string()]),
+        )
         .arg("--background-child")
         .args(start_log.iter().flat_map(|path| {
             [
@@ -10546,7 +10693,8 @@ async fn acquire_connection_lease(paths: &Paths) -> Result<fs::File> {
     }
 }
 
-fn acquire_server_lease(paths: &Paths) -> Result<fs::File> {
+/// The project's server lease, or `None` while another server holds it.
+fn try_server_lease(paths: &Paths) -> Result<Option<fs::File>> {
     let file = fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -10555,10 +10703,8 @@ fn acquire_server_lease(paths: &Paths) -> Result<fs::File> {
         .open(&paths.server_lock)
         .with_context(|| format!("cannot open {}", paths.server_lock.display()))?;
     match file.try_lock_exclusive() {
-        Ok(()) => Ok(file),
-        Err(error) if lock_busy(&error) => anyhow::bail!(
-            "Another Haarness server is starting for this project. Wait a moment, or stop it with `haarness serve --stop`."
-        ),
+        Ok(()) => Ok(Some(file)),
+        Err(error) if lock_busy(&error) => Ok(None),
         Err(error) => Err(error).with_context(|| {
             format!(
                 "cannot lock {} for this project's server",
@@ -11518,6 +11664,36 @@ mod tests {
             mcp_oauth_callback("/mcp/oauth/callback?error=access_denied&state=st-1", "st-1"),
             McpOAuthCallback::Ours("?error=access_denied&state=st-1".into())
         );
+    }
+
+    #[tokio::test]
+    async fn serve_takes_a_free_port_only_when_the_default_one_is_taken() {
+        let host: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+        let occupied = std::net::TcpListener::bind((host, 0)).unwrap();
+        let busy = occupied.local_addr().unwrap().port();
+
+        // The default port, while another program holds it.
+        let (listener, took_free_port) =
+            super::bind_serve_listener(host, None, busy).await.unwrap();
+        assert!(took_free_port);
+        assert_ne!(listener.local_addr().unwrap().port(), busy);
+
+        // A port asked for by name is that port or an error saying so.
+        let error = super::bind_serve_listener(host, Some(busy), super::DEFAULT_SERVE_PORT)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("Port {busy} on 127.0.0.1 is already in use.")),
+            "{error}"
+        );
+
+        // A free default port is used as it is.
+        drop(occupied);
+        let (listener, took_free_port) =
+            super::bind_serve_listener(host, None, busy).await.unwrap();
+        assert!(!took_free_port);
+        assert_eq!(listener.local_addr().unwrap().port(), busy);
     }
 
     /// A request a web page sends to the port first is answered, and the

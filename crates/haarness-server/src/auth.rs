@@ -47,6 +47,12 @@ impl ServerAccess {
 #[derive(Clone, Copy, Debug)]
 pub struct AnonymousAccess;
 
+/// Sent by a front ([`crate::front`]) on a request it admitted without
+/// credentials: the server behind it, which sees the front's token, treats
+/// the request as anonymous all the same. It can only take access away, so
+/// any client may send it.
+pub const ANONYMOUS_HEADER: &str = "x-haarness-anonymous";
+
 #[derive(Clone)]
 pub struct AuthState {
     token_digest: [u8; 32],
@@ -258,7 +264,7 @@ pub async fn require_auth(
         }
         return response;
     }
-    if auth.anonymous {
+    if auth.anonymous || request.headers().contains_key(ANONYMOUS_HEADER) {
         request.extensions_mut().insert(AnonymousAccess);
     }
     next.run(request).await
@@ -544,6 +550,44 @@ mod access_tests {
             .await
             .unwrap()
             .status()
+    }
+    /// A front admits an anonymous caller and comes back with this server's
+    /// token: what must never be anonymous stays closed to that caller.
+    #[tokio::test]
+    async fn a_front_marked_request_counts_as_anonymous_despite_its_token() {
+        let router = Router::new()
+            .route(
+                "/",
+                get(
+                    |anonymous: Option<axum::Extension<AnonymousAccess>>| async move {
+                        if anonymous.is_some() {
+                            "anonymous"
+                        } else {
+                            "named"
+                        }
+                    },
+                ),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                AuthState::with_access("internal", true, &ServerAccess::Private),
+                require_auth,
+            ));
+        let call = |marked: bool| {
+            let mut request = Request::builder()
+                .uri("/")
+                .header("host", "127.0.0.1:4096")
+                .header("authorization", "Bearer internal");
+            if marked {
+                request = request.header(ANONYMOUS_HEADER, "1");
+            }
+            router.clone().oneshot(request.body(Body::empty()).unwrap())
+        };
+        for (marked, expected) in [(false, "named"), (true, "anonymous")] {
+            let body = axum::body::to_bytes(call(marked).await.unwrap().into_body(), 64)
+                .await
+                .unwrap();
+            assert_eq!(body, expected);
+        }
     }
     #[tokio::test]
     async fn open_access_still_rejects_cross_origin_requests() {
