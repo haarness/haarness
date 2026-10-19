@@ -1,17 +1,21 @@
-# Install a checksum-verified CLI or Desktop from Haarness Cloud. No administrator rights required.
+# Install checksum-verified Haarness from Haarness Cloud: the CLI, then Desktop. No administrator rights required.
 # Runs in its own scope, so `irm https://haarness.ai/install.ps1 | iex` leaves no variables behind.
+# $env:HAARNESS_NO_DESKTOP='1' installs only the CLI; HAARNESS_PRODUCT='cli' or 'desktop' installs only that one
+# (`haarness upgrade` installs the CLI this way).
 & {
 $ErrorActionPreference = 'Stop'
-# Windows PowerShell 5.1 draws a progress bar per chunk (very slow downloads) and may not offer TLS 1.2.
-$ProgressPreference = 'SilentlyContinue'
+# Windows PowerShell 5.1 draws a progress bar per chunk (very slow downloads) and may not offer TLS 1.2;
+# PowerShell 7 shows download progress without that cost.
+$ProgressPreference = if ($PSVersionTable.PSVersion.Major -ge 7) { 'Continue' } else { 'SilentlyContinue' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $Base = if ($env:HAARNESS_RELEASE_URL) { $env:HAARNESS_RELEASE_URL.TrimEnd('/') } else { 'https://haarness.ai' }
 $Uri = [Uri]$Base
 if ($Uri.Scheme -ne 'https' -and -not ($Uri.Scheme -eq 'http' -and $Uri.IsLoopback)) { throw 'Release URL requires HTTPS' }
 $Channel = if ($env:HAARNESS_CHANNEL) { $env:HAARNESS_CHANNEL } else { 'stable' }
 $Version = if ($env:HAARNESS_VERSION) { $env:HAARNESS_VERSION } else { 'latest' }
-$Product = if ($env:HAARNESS_PRODUCT) { $env:HAARNESS_PRODUCT } else { 'cli' }
-if ($Channel -notin @('stable','preview') -or $Version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._+-]*$' -or $Product -notin @('cli','desktop')) { throw 'Invalid release selection' }
+$Product = if ($env:HAARNESS_PRODUCT) { $env:HAARNESS_PRODUCT } else { 'all' }
+$NoDesktop = $env:HAARNESS_NO_DESKTOP -and $env:HAARNESS_NO_DESKTOP -notin @('0','false','no')
+if ($Channel -notin @('stable','preview') -or $Version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._+-]*$' -or $Product -notin @('all','cli','desktop')) { throw 'Invalid release selection' }
 # The machine's own architecture: an x64 PowerShell emulated on ARM64 reports AMD64 everywhere else.
 $Native = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue).PROCESSOR_ARCHITECTURE
 if (-not $Native) { $Native = $env:PROCESSOR_ARCHITECTURE }
@@ -21,19 +25,20 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $InstallDir = (Get-Item -LiteralPath $InstallDir).FullName
 $Temporary = Join-Path $InstallDir ('.haarness-install-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $Temporary | Out-Null
-try {
-    $Kind = if ($Product -eq 'cli') { 'binary' } else { 'exe' }
-    $Url = "$Base/api/v1/releases/$Channel/$Product/download?os=windows&arch=$Arch&kind=$Kind"
+function Install-HaarnessProduct([string]$Item) {
+    $Kind = if ($Item -eq 'cli') { 'binary' } else { 'exe' }
+    $Url = "$Base/api/v1/releases/$Channel/$Item/download?os=windows&arch=$Arch&kind=$Kind"
     if ($Version -ne 'latest') { $Url += '&version=' + [Uri]::EscapeDataString($Version) }
-    $Binary = Join-Path $Temporary 'haarness.exe'
+    $Binary = Join-Path $Temporary $(if ($Item -eq 'cli') { 'haarness.exe' } else { 'Haarness-Setup.exe' })
+    Write-Host "Downloading Haarness $(if ($Item -eq 'cli') { 'CLI' } else { 'Desktop' }) for windows $Arch..."
     try {
         $Response = Invoke-WebRequest -UseBasicParsing $Url -OutFile $Binary -PassThru -MaximumRedirection 0 -TimeoutSec 900
     } catch {
         # Windows PowerShell 5.1 and PowerShell 7 both carry the HTTP status on the exception's response.
         $Status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
         if ($Status -ne 404) { throw }
-        if ($Version -eq 'latest') { throw "No $Channel release of Haarness $Product for windows $Arch yet; installation left unchanged" }
-        throw "Haarness $Product $Version is not on the $Channel channel for windows $Arch; installation left unchanged"
+        if ($Version -eq 'latest') { throw "No $Channel release of Haarness $Item for windows $Arch yet; installation left unchanged" }
+        throw "Haarness $Item $Version is not on the $Channel channel for windows $Arch; installation left unchanged"
     }
     $Expected = [string]$Response.Headers['x-content-sha256']
     $Released = [string]$Response.Headers['x-haarness-version']
@@ -41,7 +46,8 @@ try {
     if (-not $Released -or ($Version -ne 'latest' -and $Version -ne $Released)) { throw 'Release version mismatch' }
     # Mark of the Web exists only on Windows ($IsWindows is unset in Windows PowerShell 5.1).
     if ($IsWindows -ne $false) { Unblock-File -LiteralPath $Binary }
-    if ($Product -eq 'desktop') {
+    if ($Item -eq 'desktop') {
+        # The setup wizard; the script waits for it. (Its silent /S mode could not be shown to work.)
         $Process = Start-Process -FilePath $Binary -Wait -PassThru
         if ($Process.ExitCode -ne 0) { throw "Desktop installer exited $($Process.ExitCode)" }
         Write-Host "Installed Haarness Desktop $Released. Start it from the Start menu."
@@ -69,6 +75,17 @@ try {
                 $env:Path = "$env:Path;$InstallDir"
                 Write-Host "Added $InstallDir to your user PATH; open a new terminal to run haarness."
             }
+        }
+    }
+}
+try {
+    if ($Product -ne 'desktop') { Install-HaarnessProduct 'cli' }
+    if ($Product -eq 'desktop') {
+        Install-HaarnessProduct 'desktop'
+    } elseif ($Product -eq 'all' -and -not $NoDesktop) {
+        # The CLI is installed whatever happens to Desktop; a Desktop failure is reported, not fatal.
+        try { Install-HaarnessProduct 'desktop' } catch {
+            Write-Warning "Haarness Desktop was not installed (the CLI is): $($_.Exception.Message). To retry: `$env:HAARNESS_PRODUCT='desktop'; irm $Base/install.ps1 | iex"
         }
     }
 } finally { Remove-Item -LiteralPath $Temporary -Recurse -Force -ErrorAction SilentlyContinue }

@@ -18,7 +18,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
         state['queries'].append(parse_qs(urlsplit(self.path).query))
-        if state['mode'] == 'absent':
+        if state['mode'] == 'absent' or (state.get('no_desktop_release') and '/desktop/' in self.path):
             body = b'{"code":"not_found","message":"release not found"}'
             self.send_response(404)
             self.send_header('content-type', 'application/json')
@@ -52,7 +52,7 @@ def main():
             folder = Path(folder)
             installed = folder / 'haarness.exe'
             installed.write_bytes(b'existing binary')
-            env = {**os.environ, 'HAARNESS_INSTALL_DIR': str(folder), 'HAARNESS_CHANNEL': 'preview',
+            env = {**os.environ, 'HAARNESS_INSTALL_DIR': str(folder), 'HAARNESS_CHANNEL': 'preview', 'HAARNESS_PRODUCT': 'cli',
                    'HAARNESS_RELEASE_URL': f'http://127.0.0.1:{server.server_port}', 'HAARNESS_NO_MODIFY_PATH': '1'}
             # Off Windows there is no registry: the architecture comes from the environment.
             env.setdefault('PROCESSOR_ARCHITECTURE', 'AMD64')
@@ -75,6 +75,13 @@ def main():
             assert result.returncode != 0 and 'does not run on this computer' in result.stdout + result.stderr, result.stdout + result.stderr
             assert installed.read_bytes() == b'existing binary'
             print('PASS: a download that cannot run is refused with a plain message')
+            # The default installs the CLI, then Desktop; a CLI that fails stops before Desktop is downloaded.
+            default = {k: v for k, v in env.items() if k != 'HAARNESS_PRODUCT'}
+            state['mode'], state['queries'] = 'corrupt', []
+            result = install(default)
+            assert result.returncode != 0 and installed.read_bytes() == b'existing binary', result.stdout + result.stderr
+            assert all(q.get('kind') == ['binary'] for q in state['queries']), state['queries']
+            print('PASS: by default a failed CLI install stops before Desktop')
             binary = os.environ.get('HAARNESS_BIN')
             if os.name == 'nt' and binary:
                 state['payload'] = Path(binary).read_bytes()
@@ -86,6 +93,15 @@ def main():
                 assert reported == f"haarness {state['version']}", reported
                 assert not (folder / 'haarness.previous.exe').exists()
                 print('PASS: the release binary installs over a previous copy and runs')
+                # By default Desktop follows; without a Desktop release the CLI stays installed and a warning says so.
+                state['no_desktop_release'], state['queries'] = True, []
+                result = install({**default, 'HAARNESS_VERSION': state['version']})
+                state['no_desktop_release'] = False
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert 'Haarness Desktop was not installed (the CLI is)' in result.stdout + result.stderr, result.stdout + result.stderr
+                assert [q.get('kind') for q in state['queries']] == [['binary'], ['exe']], state['queries']
+                assert subprocess.check_output([str(installed), '--version'], text=True).strip() == f"haarness {state['version']}"
+                print('PASS: the default install reports a missing Desktop and keeps the CLI')
     finally:
         server.shutdown()
         server.server_close()

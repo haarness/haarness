@@ -203,17 +203,27 @@ workflow's `HAARNESS_RELEASE_URL`: pointing it at `https://haarness.ai` fails th
 
 ```sh
 curl -fsSL http://127.0.0.1:19080/install.sh | HAARNESS_RELEASE_URL=http://127.0.0.1:19080 \
-  HAARNESS_CHANNEL=preview HAARNESS_INSTALL_DIR="$PWD/dist/releases/installed-cli" sh
+  HAARNESS_CHANNEL=preview HAARNESS_INSTALL_DIR="$PWD/dist/releases/installed-cli" \
+  HAARNESS_DESKTOP_DIR="$PWD/dist/releases/installed-desktop" sh
 ./dist/releases/installed-cli/haarness --version
 ./dist/releases/installed-cli/haarness upgrade --channel preview --release-url http://127.0.0.1:19080
 ```
 
-Destinations: CLI `~/.local/bin`; macOS Desktop `~/Applications`; Linux Desktop
-`~/.local/bin/Haarness.AppImage` plus a `haarness-desktop` command, menu entry and icon under
-`~/.local/share`; Windows CLI `%LOCALAPPDATA%\Haarness\bin`, added to the user PATH unless
-`HAARNESS_NO_MODIFY_PATH=1` (`haarness upgrade` sets it). The installer checks SHA-256 before
-replacing or running anything; macOS clears quarantine (`/usr/bin/xattr -dr`) only on the
-verified staged app; Windows unblocks verified bytes.
+By default the installers put in the CLI, then Desktop (`--no-desktop` / `HAARNESS_NO_DESKTOP=1`
+skip it, `HAARNESS_PRODUCT=cli|desktop` installs one; `haarness upgrade` passes `cli`); a Desktop
+failure is a warning, not a failed CLI install, and Linux without `DISPLAY`/`WAYLAND_DISPLAY`
+skips Desktop. Destinations: CLI `~/.local/bin` (`HAARNESS_INSTALL_DIR`); macOS Desktop
+`/Applications` when writable, else `~/Applications` (an app already there is updated in place;
+`HAARNESS_DESKTOP_DIR`); Linux Desktop `~/.local/bin/Haarness.AppImage` plus a `haarness-desktop`
+command, menu entry and icon under `~/.local/share`; Windows CLI `%LOCALAPPDATA%\Haarness\bin`,
+added to the user PATH unless `HAARNESS_NO_MODIFY_PATH=1` (`haarness upgrade` sets it), and
+Desktop through its NSIS setup wizard, which the script waits for (`/S` exited 2 without
+installing under Wine; prove it on real Windows before switching to it). The installer checks SHA-256
+before replacing or running anything; macOS clears quarantine (`/usr/bin/xattr -dr`) only on the
+verified staged copy and signs it ad hoc only if its signature does not verify, so an unsigned
+release opens without a Gatekeeper prompt (a browser-downloaded DMG still gets one); Windows
+unblocks verified bytes. On a terminal each download is named and shows curl's progress bar.
+`haarness desktop` at a terminal opens the installed Desktop, installing it first if missing.
 
 - **macOS**: launch the installed app (not a mounted DMG, not the development Electron) and run
   `HAARNESS_DESKTOP_EXECUTABLE=…/Haarness.app/Contents/MacOS/Haarness npm --prefix apps/desktop
