@@ -8,6 +8,7 @@ pub mod browser_policy;
 mod cloud_tools;
 mod command;
 pub mod files;
+pub mod front;
 pub mod hooks;
 pub mod plugins;
 pub mod preview;
