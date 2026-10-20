@@ -519,6 +519,10 @@ impl Client {
         let _lock = self.config.lock().await?;
         let generation = pkce::random_urlsafe(16);
         fs::write(self.config.config_dir.join("login-generation"), &generation)?;
+        let device_label = device_label(
+            std::env::var(LOGIN_APP_ENV).is_ok_and(|app| app == "desktop"),
+            &computer_name(),
+        );
         if device {
             let response = self
                 .http
@@ -535,6 +539,7 @@ impl Client {
                 url: value.verification_uri_complete.clone(),
                 code: Some(value.user_code.clone()),
                 generation,
+                device_label,
                 flow: Flow::Device(value),
                 client: self.clone(),
             });
@@ -557,6 +562,7 @@ impl Client {
             url: url.to_string(),
             code: None,
             generation,
+            device_label,
             flow: Flow::Browser {
                 callback,
                 redirect,
@@ -626,10 +632,57 @@ enum Flow {
     },
     Device(Device),
 }
+/// Set to `desktop` by Desktop when it runs `haarness login`, so the sign-in
+/// is named after Desktop rather than the CLI.
+pub const LOGIN_APP_ENV: &str = "HAARNESS_LOGIN_APP";
+/// The most Cloud keeps of a sign-in's name (`cloud_domain::push::MAX_DEVICE_LABEL`).
+const MAX_DEVICE_LABEL: usize = 100;
+
+/// How Settings → Devices in Cloud names a sign-in from this computer:
+/// `Haarness CLI on Studio`, or `Haarness Desktop on Studio` when Desktop signs
+/// in through the CLI.
+pub fn device_label(desktop: bool, computer: &str) -> String {
+    let app = if desktop {
+        "Haarness Desktop"
+    } else {
+        "Haarness CLI"
+    };
+    format!("{app} on {}", computer.trim())
+        .chars()
+        .take(MAX_DEVICE_LABEL)
+        .collect()
+}
+
+/// The name Cloud shows for this computer, next to its sign-ins and its
+/// shared chats: the macOS computer name, else the host name.
+pub fn computer_name() -> String {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && !name.is_empty() {
+            return name.chars().take(MAX_DEVICE_LABEL).collect();
+        }
+    }
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .chain(fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_owned())
+        .find(|name| !name.is_empty())
+        .map_or_else(
+            || "My computer".into(),
+            |name| name.chars().take(MAX_DEVICE_LABEL).collect(),
+        )
+}
+
 pub struct Login {
     pub url: String,
     pub code: Option<String>,
     generation: String,
+    device_label: String,
     flow: Flow,
     client: Client,
 }
@@ -651,6 +704,7 @@ impl Login {
                         ("code", &result.code),
                         ("redirect_uri", &redirect),
                         ("code_verifier", &verifier),
+                        ("device_label", &self.device_label),
                     ])
                     .await?
             }
@@ -667,6 +721,7 @@ impl Login {
                             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                             ("client_id", &client.config.client_id),
                             ("device_code", &device.device_code),
+                            ("device_label", &self.device_label),
                         ])
                         .await
                     {
@@ -709,6 +764,22 @@ mod tests {
         assert_eq!(DEFAULT_API_URL, LOCAL_API_URL);
         assert!(safe_url(LOCAL_API_URL).is_ok());
         assert!(safe_url(PRODUCTION_API_URL).is_ok());
+    }
+
+    #[test]
+    fn sign_ins_are_named_after_the_app_and_the_computer() {
+        assert_eq!(device_label(false, "Studio"), "Haarness CLI on Studio");
+        assert_eq!(
+            device_label(true, " Studio\n"),
+            "Haarness Desktop on Studio"
+        );
+        // Cloud keeps 100 characters; the label never runs past them.
+        let long = device_label(true, &"é".repeat(120));
+        assert_eq!(long.chars().count(), MAX_DEVICE_LABEL);
+        assert!(long.starts_with("Haarness Desktop on éé"), "{long}");
+        let computer = computer_name();
+        assert!(!computer.trim().is_empty());
+        assert!(computer.chars().count() <= MAX_DEVICE_LABEL);
     }
 
     #[test]

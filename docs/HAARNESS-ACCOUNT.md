@@ -30,6 +30,8 @@ An exhausted pending-request allowance is reported separately from upstream
 provider quota. Provider outages, retired models and API-account restrictions
 can still prevent a listed model from serving a request.
 
+Each sign-in is named after the app and the computer in Cloud's **Settings → Devices**: `Haarness CLI on Studio`, or `Haarness Desktop on Studio` when Desktop signs in (it runs `haarness login` with `HAARNESS_LOGIN_APP=desktop`). The computer name is the one Remote control shows: macOS's computer name, else the host name.
+
 `haarness account` shows the signed-in user and selected account; `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud sessions; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
 
 ## Cloud agents and sessions

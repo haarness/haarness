@@ -285,3 +285,88 @@ async fn a_renewal_cloud_cannot_answer_is_transient_and_a_refused_one_is_not() {
     server.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn both_sign_in_flows_name_this_computer_in_their_token_request() {
+    let forms = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let app = Router::new()
+        .route(
+            "/oauth/device_authorization",
+            post(|| async {
+                Json(json!({"device_code": "dc-1", "user_code": "ABCD-EFGH",
+                    "verification_uri_complete": "http://127.0.0.1/device?code=ABCD-EFGH",
+                    "expires_in": 60, "interval": 1}))
+            }),
+        )
+        .route(
+            "/oauth/token",
+            post(
+                |State(forms): State<Arc<std::sync::Mutex<Vec<String>>>>, body: String| async move {
+                    forms.lock().unwrap().push(body);
+                    Json(json!({"access_token": "access", "refresh_token": "refresh", "expires_in": 600}))
+                },
+            ),
+        )
+        .with_state(forms.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+    let config = Config::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        dir.clone(),
+        "haarness-cli",
+    )
+    .unwrap();
+    let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(config.clone()).unwrap();
+
+    client
+        .begin_login(true)
+        .await
+        .unwrap()
+        .finish()
+        .await
+        .unwrap();
+
+    let login = client.begin_login(false).await.unwrap();
+    let url = url::Url::parse(&login.url).unwrap();
+    let query = |name: &str| {
+        url.query_pairs()
+            .find(|(key, _)| key == name)
+            .unwrap()
+            .1
+            .into_owned()
+    };
+    let (redirect, state) = (query("redirect_uri"), query("state"));
+    let finished = tokio::spawn(login.finish());
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{redirect}?code=hcc_1&state={state}"))
+        .send()
+        .await
+        .unwrap();
+    finished.await.unwrap().unwrap();
+
+    let label = haarness_account::device_label(false, &haarness_account::computer_name());
+    assert!(label.starts_with("Haarness CLI on "), "{label}");
+    let forms = forms.lock().unwrap().clone();
+    let fields = |form: &str| -> std::collections::HashMap<String, String> {
+        url::form_urlencoded::parse(form.as_bytes())
+            .into_owned()
+            .collect()
+    };
+    assert_eq!(forms.len(), 2, "{forms:?}");
+    let device = fields(&forms[0]);
+    assert_eq!(
+        device["grant_type"],
+        "urn:ietf:params:oauth:grant-type:device_code"
+    );
+    assert_eq!(device["device_label"], label);
+    let browser = fields(&forms[1]);
+    assert_eq!(browser["grant_type"], "authorization_code");
+    assert_eq!(browser["device_label"], label);
+    assert!(credentials::load(&config.path()).unwrap().is_some());
+    server.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}

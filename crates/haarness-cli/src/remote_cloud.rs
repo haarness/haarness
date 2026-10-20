@@ -1406,30 +1406,6 @@ pub(crate) fn chat_url(client: &haarness_account::Client, publication: &str) -> 
         .to_string())
 }
 
-/// The name Cloud shows for this computer next to its shared chats.
-pub(crate) fn computer_name() -> String {
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-    {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if output.status.success() && !name.is_empty() {
-            return name.chars().take(100).collect();
-        }
-    }
-    ["COMPUTERNAME", "HOSTNAME"]
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(std::fs::read_to_string("/etc/hostname").ok())
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
-        .map_or_else(
-            || "My computer".into(),
-            |name| name.chars().take(100).collect(),
-        )
-}
-
 /// Whether one chat can be continued from Cloud, as `/remote-control`
 /// reports it in the TUI and Desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1614,7 +1590,8 @@ pub(crate) async fn share_chat(paths: &Paths, workspace: &Path, thread: Uuid) ->
             }
         }
     }
-    let start = spawn_connector(paths, workspace, &file, &computer_name(), Some(thread)).await?;
+    let computer = haarness_account::computer_name();
+    let start = spawn_connector(paths, workspace, &file, &computer, Some(thread)).await?;
     // The connector registers and publishes as soon as it holds its lock.
     for _ in 0..150 {
         let published = std::fs::read(&file)
