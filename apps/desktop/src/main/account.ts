@@ -84,7 +84,8 @@ export async function accountLogin(
       binary,
       ["login", "--json", "--no-browser", ...(device ? ["--device"] : [])],
       {
-        env: environment(),
+        // Settings → Devices in Cloud names the sign-in "Haarness Desktop on …".
+        env: { ...environment(), HAARNESS_LOGIN_APP: "desktop" },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       },
