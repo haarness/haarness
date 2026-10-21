@@ -83,10 +83,27 @@ install_product() (
     case "$product" in cli) label='Haarness CLI';; *) label='Haarness Desktop';; esac
     printf 'Downloading %s for %s %s...\n' "$label" "$os" "$arch" >&2
   fi
-  status=$(curl "$progress" --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' "$url" -D "$stage/headers" -o "$stage/payload" -w '%{http_code}') ||
-    { echo 'Could not reach the Haarness release service; installation left unchanged.' >&2; exit 1; }
+  # Three tries. A try after an interruption asks for only the rest (-C -); If-Range with the file's ETag has the
+  # service send its current file whole instead if that changed meanwhile, which curl refuses (33), so the try
+  # after that starts over. A response with no ETag cannot be continued, so its partial file is dropped.
+  etag='' try=1
+  while :; do
+    if status=$(curl "$progress" --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' -C - -H "If-Range: $etag" "$url" -D "$stage/headers" -o "$stage/payload" -w '%{http_code}'); then
+      case "$status" in 5??) rm -f "$stage/payload" "$stage/headers"; etag='';; *) break;; esac
+    elif [ $? -eq 33 ]; then
+      rm -f "$stage/payload" "$stage/headers"; etag=''
+    else
+      etag=$(awk 'tolower($1)=="etag:" {gsub("\r", "", $2); print $2}' "$stage/headers" 2>/dev/null) || etag=''
+      [ -n "$etag" ] || rm -f "$stage/payload"
+    fi
+    [ "$try" -lt 3 ] || { echo 'Could not reach the Haarness release service; installation left unchanged.' >&2; exit 1; }
+    try=$((try + 1))
+    echo "The download was interrupted; trying again ($try of 3)..." >&2
+    sleep 2
+  done
   case "$status" in
-    200) ;;
+    # 206 and 416 answer a try that continued; the checksum below covers the whole file.
+    200|206|416) ;;
     404)
       if [ "$version" = latest ]; then echo "No $channel release of Haarness $product for $os $arch yet; installation left unchanged." >&2
       else echo "Haarness $product $version is not on the $channel channel for $os $arch; installation left unchanged." >&2; fi
