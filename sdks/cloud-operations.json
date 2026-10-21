@@ -798,6 +798,65 @@
     }
   },
   {
+    "name": "account_deletion_preview",
+    "method": "GET",
+    "path": "/api/v1/me/deletion",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AccountDeletionPreviewDto"
+    }
+  },
+  {
+    "name": "account_deletion",
+    "method": "POST",
+    "path": "/api/v1/me/deletion",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AccountDeletionResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/AccountDeletionRequest"
+    }
+  },
+  {
+    "name": "sign_in_methods",
+    "method": "GET",
+    "path": "/api/v1/me/sign-in-methods",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SignInMethodsDto"
+    }
+  },
+  {
+    "name": "connect_sign_in_method",
+    "method": "POST",
+    "path": "/api/v1/me/sign-in-methods/connect",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ConnectSignInMethodResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/ConnectSignInMethodRequest"
+    }
+  },
+  {
+    "name": "remove_sign_in_method",
+    "method": "POST",
+    "path": "/api/v1/me/sign-in-methods/{id}/remove",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/SignInMethodsDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/RemoveSignInMethodRequest"
+    }
+  },
+  {
     "name": "mfa_status",
     "method": "GET",
     "path": "/api/v1/mfa",
@@ -1327,6 +1386,19 @@
     ],
     "response": {},
     "stream": "runtime_adapter"
+  },
+  {
+    "name": "report_ai_output",
+    "method": "POST",
+    "path": "/api/v1/reports/ai-output",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AiOutputReportDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/AiOutputReportRequest"
+    }
   },
   {
     "name": "list_router_keys",
@@ -1898,6 +1970,73 @@
     }
   },
   {
+    "name": "apple_callback",
+    "method": "GET",
+    "path": "/auth/apple/callback",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HttpRedirect"
+    },
+    "query": {
+      "$ref": "#/components/schemas/AppleCallbackQuery"
+    },
+    "redirectResponse": true
+  },
+  {
+    "name": "apple_callback_post",
+    "method": "POST",
+    "path": "/auth/apple/callback",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HttpRedirect"
+    },
+    "contentType": "application/x-www-form-urlencoded",
+    "body": {
+      "$ref": "#/components/schemas/AppleCallbackPostBody"
+    },
+    "redirectResponse": true
+  },
+  {
+    "name": "apple_start",
+    "method": "GET",
+    "path": "/auth/apple/start",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HttpRedirect"
+    },
+    "query": {
+      "$ref": "#/components/schemas/AppleStartQuery"
+    },
+    "redirectResponse": true
+  },
+  {
+    "name": "pending_sign_in",
+    "method": "GET",
+    "path": "/auth/connect",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PendingSignInDto"
+    }
+  },
+  {
+    "name": "pending_sign_in_cancel",
+    "method": "POST",
+    "path": "/auth/connect/cancel",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "pending_sign_in_separate",
+    "method": "POST",
+    "path": "/auth/connect/separate",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SignInResponse"
+    }
+  },
+  {
     "name": "email_confirm",
     "method": "POST",
     "path": "/auth/email/confirm",
@@ -2138,6 +2277,33 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/ReviewVersionRequest"
+    }
+  },
+  {
+    "name": "internal_ai_output_reports",
+    "method": "GET",
+    "path": "/internal/ops/reports/ai-output",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AiOutputReportsOpsResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/InternalAiOutputReportsQuery"
+    }
+  },
+  {
+    "name": "internal_resolve_ai_output_report",
+    "method": "POST",
+    "path": "/internal/ops/reports/ai-output/{id}/resolve",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AiOutputReportOpsDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/ResolveAiOutputReportRequest"
     }
   },
   {
