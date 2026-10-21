@@ -22,7 +22,13 @@ def gatekeeper(package):
     def run(*cmd): r=subprocess.run(cmd,capture_output=True,text=True);return r.returncode,(r.stdout+r.stderr).strip()
     with tempfile.TemporaryDirectory(prefix='haarness-gatekeeper-') as d:
         root=Path(d)/'contents';mounted=package.suffix=='.dmg'
-        if mounted: subprocess.run(['hdiutil','attach','-nobrowse','-readonly','-noautoopen','-mountpoint',str(root),str(package)],check=True,stdout=subprocess.DEVNULL)
+        # The disk image is assessed on its own when a browser-downloaded copy opens: signed, notarized, stapled too.
+        if mounted:
+            code,out=run('spctl','--assess','--type','open','--context','context:primary-signature','-vv',str(package))
+            if code or 'source=Notarized Developer ID' not in out: raise ValueError(f'{package.name}: Gatekeeper rejects the disk image: {out}')
+            code,out=run('xcrun','stapler','validate',str(package))
+            if code: raise ValueError(f'{package.name}: no notarization ticket stapled to the disk image: {out}')
+            subprocess.run(['hdiutil','attach','-nobrowse','-readonly','-noautoopen','-mountpoint',str(root),str(package)],check=True,stdout=subprocess.DEVNULL)
         else: subprocess.run(['ditto','-x','-k',str(package),str(root)],check=True)
         try:
             apps=sorted(root.glob('*.app'))
