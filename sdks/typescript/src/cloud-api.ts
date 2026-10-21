@@ -262,6 +262,26 @@ export class CloudApi extends Transport {
   me(options: RequestOptions = {}): Promise<T.MeResponse> {
     return this.request("GET", `/api/v1/me`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/me/deletion */
+  accountDeletionPreview(options: RequestOptions = {}): Promise<T.AccountDeletionPreviewDto> {
+    return this.request("GET", `/api/v1/me/deletion`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/me/deletion */
+  accountDeletion(body: T.AccountDeletionRequest, options: RequestOptions = {}): Promise<T.AccountDeletionResponse> {
+    return this.request("POST", `/api/v1/me/deletion`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/me/sign-in-methods */
+  signInMethods(options: RequestOptions = {}): Promise<T.SignInMethodsDto> {
+    return this.request("GET", `/api/v1/me/sign-in-methods`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/me/sign-in-methods/connect */
+  connectSignInMethod(body: T.ConnectSignInMethodRequest, options: RequestOptions = {}): Promise<T.ConnectSignInMethodResponse> {
+    return this.request("POST", `/api/v1/me/sign-in-methods/connect`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/me/sign-in-methods/{id}/remove */
+  removeSignInMethod(id: string, body: T.RemoveSignInMethodRequest, options: RequestOptions = {}): Promise<T.SignInMethodsDto> {
+    return this.request("POST", `/api/v1/me/sign-in-methods/${this.segment(id)}/remove`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/mfa */
   mfaStatus(options: RequestOptions = {}): Promise<T.MfaStatusDto> {
     return this.request("GET", `/api/v1/mfa`, { binaryBody: false, binaryResponse: false, ...options });
@@ -421,6 +441,10 @@ export class CloudApi extends Transport {
   /** DELETE /api/v1/remote-sessions/{id} */
   unpublishRemoteSession(id: string, options: RequestOptions = {}): Promise<void> {
     return this.request("DELETE", `/api/v1/remote-sessions/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/reports/ai-output */
+  reportAiOutput(body: T.AiOutputReportRequest, options: RequestOptions = {}): Promise<T.AiOutputReportDto> {
+    return this.request("POST", `/api/v1/reports/ai-output`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/router/keys */
   listRouterKeys(query: T.ListRouterKeysQuery = {}, options: RequestOptions = {}): Promise<T.Items_RouterKeyDto> {
@@ -610,6 +634,30 @@ export class CloudApi extends Transport {
   revokeWorkspaceTickets(id: string, options: RequestOptions = {}): Promise<void> {
     return this.request("POST", `/api/v1/workspaces/${this.segment(id)}/tickets/revoke`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /auth/apple/callback */
+  appleCallback(query: T.AppleCallbackQuery, options: RequestOptions = {}): Promise<T.HttpRedirect> {
+    return this.request("GET", `/auth/apple/callback`, { query, redirectResponse: true, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/apple/callback */
+  appleCallbackPost(body: T.AppleCallbackPostBody, options: RequestOptions = {}): Promise<T.HttpRedirect> {
+    return this.request("POST", `/auth/apple/callback`, { body, contentType: "application/x-www-form-urlencoded", redirectResponse: true, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /auth/apple/start */
+  appleStart(query: T.AppleStartQuery = {}, options: RequestOptions = {}): Promise<T.HttpRedirect> {
+    return this.request("GET", `/auth/apple/start`, { query, redirectResponse: true, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /auth/connect */
+  pendingSignIn(options: RequestOptions = {}): Promise<T.PendingSignInDto> {
+    return this.request("GET", `/auth/connect`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/connect/cancel */
+  pendingSignInCancel(options: RequestOptions = {}): Promise<void> {
+    return this.request("POST", `/auth/connect/cancel`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/connect/separate */
+  pendingSignInSeparate(options: RequestOptions = {}): Promise<T.SignInResponse> {
+    return this.request("POST", `/auth/connect/separate`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /auth/email/confirm */
   emailConfirm(body: T.EmailConfirmRequest, options: RequestOptions = {}): Promise<T.SignInResponse> {
     return this.request("POST", `/auth/email/confirm`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
@@ -697,6 +745,14 @@ export class CloudApi extends Transport {
   /** POST /internal/ops/marketplace/versions/{id}/review */
   internalReviewVersion(id: string, body: T.ReviewVersionRequest, options: RequestOptions = {}): Promise<T.ReviewVersionResponse> {
     return this.request("POST", `/internal/ops/marketplace/versions/${this.segment(id)}/review`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /internal/ops/reports/ai-output */
+  internalAiOutputReports(query: T.InternalAiOutputReportsQuery = {}, options: RequestOptions = {}): Promise<T.AiOutputReportsOpsResponse> {
+    return this.request("GET", `/internal/ops/reports/ai-output`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /internal/ops/reports/ai-output/{id}/resolve */
+  internalResolveAiOutputReport(id: string, body: T.ResolveAiOutputReportRequest, options: RequestOptions = {}): Promise<T.AiOutputReportOpsDto> {
+    return this.request("POST", `/internal/ops/reports/ai-output/${this.segment(id)}/resolve`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /internal/ops/telemetry/usage */
   internalUsageSummary(query: T.InternalUsageSummaryQuery = {}, options: RequestOptions = {}): Promise<T.UsageOpsResponse> {

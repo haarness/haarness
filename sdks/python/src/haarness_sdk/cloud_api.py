@@ -259,6 +259,26 @@ class CloudApi(Transport):
         """GET /api/v1/me."""
         return cast("T.MeResponse", self.request('GET', f'/api/v1/me', binary_body=False, binary_response=False, options=options))
 
+    def account_deletion_preview(self, *, options: RequestOptions | None = None) -> T.AccountDeletionPreviewDto:
+        """GET /api/v1/me/deletion."""
+        return cast("T.AccountDeletionPreviewDto", self.request('GET', f'/api/v1/me/deletion', binary_body=False, binary_response=False, options=options))
+
+    def account_deletion(self, body: T.AccountDeletionRequest, *, options: RequestOptions | None = None) -> T.AccountDeletionResponse:
+        """POST /api/v1/me/deletion."""
+        return cast("T.AccountDeletionResponse", self.request('POST', f'/api/v1/me/deletion', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def sign_in_methods(self, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
+        """GET /api/v1/me/sign-in-methods."""
+        return cast("T.SignInMethodsDto", self.request('GET', f'/api/v1/me/sign-in-methods', binary_body=False, binary_response=False, options=options))
+
+    def connect_sign_in_method(self, body: T.ConnectSignInMethodRequest, *, options: RequestOptions | None = None) -> T.ConnectSignInMethodResponse:
+        """POST /api/v1/me/sign-in-methods/connect."""
+        return cast("T.ConnectSignInMethodResponse", self.request('POST', f'/api/v1/me/sign-in-methods/connect', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def remove_sign_in_method(self, id: str, body: T.RemoveSignInMethodRequest, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
+        """POST /api/v1/me/sign-in-methods/{id}/remove."""
+        return cast("T.SignInMethodsDto", self.request('POST', f'/api/v1/me/sign-in-methods/{self.segment(id)}/remove', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def mfa_status(self, *, options: RequestOptions | None = None) -> T.MfaStatusDto:
         """GET /api/v1/mfa."""
         return cast("T.MfaStatusDto", self.request('GET', f'/api/v1/mfa', binary_body=False, binary_response=False, options=options))
@@ -418,6 +438,10 @@ class CloudApi(Transport):
     def unpublish_remote_session(self, id: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /api/v1/remote-sessions/{id}."""
         return cast("None", self.request('DELETE', f'/api/v1/remote-sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def report_ai_output(self, body: T.AiOutputReportRequest, *, options: RequestOptions | None = None) -> T.AiOutputReportDto:
+        """POST /api/v1/reports/ai-output."""
+        return cast("T.AiOutputReportDto", self.request('POST', f'/api/v1/reports/ai-output', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def list_router_keys(self, query: T.ListRouterKeysQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_RouterKeyDto:
         """GET /api/v1/router/keys."""
@@ -607,6 +631,30 @@ class CloudApi(Transport):
         """POST /api/v1/workspaces/{id}/tickets/revoke."""
         return cast("None", self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/tickets/revoke', binary_body=False, binary_response=False, options=options))
 
+    def apple_callback(self, query: T.AppleCallbackQuery, *, options: RequestOptions | None = None) -> T.HttpRedirect:
+        """GET /auth/apple/callback."""
+        return cast("T.HttpRedirect", self.request('GET', f'/auth/apple/callback', query=query, redirect_response=True, binary_body=False, binary_response=False, options=options))
+
+    def apple_callback_post(self, body: T.AppleCallbackPostBody, *, options: RequestOptions | None = None) -> T.HttpRedirect:
+        """POST /auth/apple/callback."""
+        return cast("T.HttpRedirect", self.request('POST', f'/auth/apple/callback', body=body, content_type='application/x-www-form-urlencoded', redirect_response=True, binary_body=False, binary_response=False, options=options))
+
+    def apple_start(self, query: T.AppleStartQuery | None = None, *, options: RequestOptions | None = None) -> T.HttpRedirect:
+        """GET /auth/apple/start."""
+        return cast("T.HttpRedirect", self.request('GET', f'/auth/apple/start', query=query, redirect_response=True, binary_body=False, binary_response=False, options=options))
+
+    def pending_sign_in(self, *, options: RequestOptions | None = None) -> T.PendingSignInDto:
+        """GET /auth/connect."""
+        return cast("T.PendingSignInDto", self.request('GET', f'/auth/connect', binary_body=False, binary_response=False, options=options))
+
+    def pending_sign_in_cancel(self, *, options: RequestOptions | None = None) -> None:
+        """POST /auth/connect/cancel."""
+        return cast("None", self.request('POST', f'/auth/connect/cancel', binary_body=False, binary_response=False, options=options))
+
+    def pending_sign_in_separate(self, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/connect/separate."""
+        return cast("T.SignInResponse", self.request('POST', f'/auth/connect/separate', binary_body=False, binary_response=False, options=options))
+
     def email_confirm(self, body: T.EmailConfirmRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
         """POST /auth/email/confirm."""
         return cast("T.SignInResponse", self.request('POST', f'/auth/email/confirm', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
@@ -694,6 +742,14 @@ class CloudApi(Transport):
     def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def internal_ai_output_reports(self, query: T.InternalAiOutputReportsQuery | None = None, *, options: RequestOptions | None = None) -> T.AiOutputReportsOpsResponse:
+        """GET /internal/ops/reports/ai-output."""
+        return cast("T.AiOutputReportsOpsResponse", self.request('GET', f'/internal/ops/reports/ai-output', query=query, binary_body=False, binary_response=False, options=options))
+
+    def internal_resolve_ai_output_report(self, id: str, body: T.ResolveAiOutputReportRequest, *, options: RequestOptions | None = None) -> T.AiOutputReportOpsDto:
+        """POST /internal/ops/reports/ai-output/{id}/resolve."""
+        return cast("T.AiOutputReportOpsDto", self.request('POST', f'/internal/ops/reports/ai-output/{self.segment(id)}/resolve', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def internal_usage_summary(self, query: T.InternalUsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageOpsResponse:
         """GET /internal/ops/telemetry/usage."""
@@ -1020,6 +1076,26 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/me."""
         return cast("T.MeResponse", await self.request('GET', f'/api/v1/me', binary_body=False, binary_response=False, options=options))
 
+    async def account_deletion_preview(self, *, options: RequestOptions | None = None) -> T.AccountDeletionPreviewDto:
+        """GET /api/v1/me/deletion."""
+        return cast("T.AccountDeletionPreviewDto", await self.request('GET', f'/api/v1/me/deletion', binary_body=False, binary_response=False, options=options))
+
+    async def account_deletion(self, body: T.AccountDeletionRequest, *, options: RequestOptions | None = None) -> T.AccountDeletionResponse:
+        """POST /api/v1/me/deletion."""
+        return cast("T.AccountDeletionResponse", await self.request('POST', f'/api/v1/me/deletion', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def sign_in_methods(self, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
+        """GET /api/v1/me/sign-in-methods."""
+        return cast("T.SignInMethodsDto", await self.request('GET', f'/api/v1/me/sign-in-methods', binary_body=False, binary_response=False, options=options))
+
+    async def connect_sign_in_method(self, body: T.ConnectSignInMethodRequest, *, options: RequestOptions | None = None) -> T.ConnectSignInMethodResponse:
+        """POST /api/v1/me/sign-in-methods/connect."""
+        return cast("T.ConnectSignInMethodResponse", await self.request('POST', f'/api/v1/me/sign-in-methods/connect', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def remove_sign_in_method(self, id: str, body: T.RemoveSignInMethodRequest, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
+        """POST /api/v1/me/sign-in-methods/{id}/remove."""
+        return cast("T.SignInMethodsDto", await self.request('POST', f'/api/v1/me/sign-in-methods/{self.segment(id)}/remove', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     async def mfa_status(self, *, options: RequestOptions | None = None) -> T.MfaStatusDto:
         """GET /api/v1/mfa."""
         return cast("T.MfaStatusDto", await self.request('GET', f'/api/v1/mfa', binary_body=False, binary_response=False, options=options))
@@ -1179,6 +1255,10 @@ class AsyncCloudApi(AsyncTransport):
     async def unpublish_remote_session(self, id: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /api/v1/remote-sessions/{id}."""
         return cast("None", await self.request('DELETE', f'/api/v1/remote-sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def report_ai_output(self, body: T.AiOutputReportRequest, *, options: RequestOptions | None = None) -> T.AiOutputReportDto:
+        """POST /api/v1/reports/ai-output."""
+        return cast("T.AiOutputReportDto", await self.request('POST', f'/api/v1/reports/ai-output', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def list_router_keys(self, query: T.ListRouterKeysQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_RouterKeyDto:
         """GET /api/v1/router/keys."""
@@ -1368,6 +1448,30 @@ class AsyncCloudApi(AsyncTransport):
         """POST /api/v1/workspaces/{id}/tickets/revoke."""
         return cast("None", await self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/tickets/revoke', binary_body=False, binary_response=False, options=options))
 
+    async def apple_callback(self, query: T.AppleCallbackQuery, *, options: RequestOptions | None = None) -> T.HttpRedirect:
+        """GET /auth/apple/callback."""
+        return cast("T.HttpRedirect", await self.request('GET', f'/auth/apple/callback', query=query, redirect_response=True, binary_body=False, binary_response=False, options=options))
+
+    async def apple_callback_post(self, body: T.AppleCallbackPostBody, *, options: RequestOptions | None = None) -> T.HttpRedirect:
+        """POST /auth/apple/callback."""
+        return cast("T.HttpRedirect", await self.request('POST', f'/auth/apple/callback', body=body, content_type='application/x-www-form-urlencoded', redirect_response=True, binary_body=False, binary_response=False, options=options))
+
+    async def apple_start(self, query: T.AppleStartQuery | None = None, *, options: RequestOptions | None = None) -> T.HttpRedirect:
+        """GET /auth/apple/start."""
+        return cast("T.HttpRedirect", await self.request('GET', f'/auth/apple/start', query=query, redirect_response=True, binary_body=False, binary_response=False, options=options))
+
+    async def pending_sign_in(self, *, options: RequestOptions | None = None) -> T.PendingSignInDto:
+        """GET /auth/connect."""
+        return cast("T.PendingSignInDto", await self.request('GET', f'/auth/connect', binary_body=False, binary_response=False, options=options))
+
+    async def pending_sign_in_cancel(self, *, options: RequestOptions | None = None) -> None:
+        """POST /auth/connect/cancel."""
+        return cast("None", await self.request('POST', f'/auth/connect/cancel', binary_body=False, binary_response=False, options=options))
+
+    async def pending_sign_in_separate(self, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/connect/separate."""
+        return cast("T.SignInResponse", await self.request('POST', f'/auth/connect/separate', binary_body=False, binary_response=False, options=options))
+
     async def email_confirm(self, body: T.EmailConfirmRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
         """POST /auth/email/confirm."""
         return cast("T.SignInResponse", await self.request('POST', f'/auth/email/confirm', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
@@ -1455,6 +1559,14 @@ class AsyncCloudApi(AsyncTransport):
     async def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", await self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def internal_ai_output_reports(self, query: T.InternalAiOutputReportsQuery | None = None, *, options: RequestOptions | None = None) -> T.AiOutputReportsOpsResponse:
+        """GET /internal/ops/reports/ai-output."""
+        return cast("T.AiOutputReportsOpsResponse", await self.request('GET', f'/internal/ops/reports/ai-output', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def internal_resolve_ai_output_report(self, id: str, body: T.ResolveAiOutputReportRequest, *, options: RequestOptions | None = None) -> T.AiOutputReportOpsDto:
+        """POST /internal/ops/reports/ai-output/{id}/resolve."""
+        return cast("T.AiOutputReportOpsDto", await self.request('POST', f'/internal/ops/reports/ai-output/{self.segment(id)}/resolve', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def internal_usage_summary(self, query: T.InternalUsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageOpsResponse:
         """GET /internal/ops/telemetry/usage."""

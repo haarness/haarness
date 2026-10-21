@@ -67,6 +67,11 @@
 | `create_submission` | `createSubmission` | `POST /api/v1/marketplace/submissions` |
 | `get_submission` | `getSubmission` | `GET /api/v1/marketplace/submissions/{id}` |
 | `me` | `me` | `GET /api/v1/me` |
+| `account_deletion_preview` | `accountDeletionPreview` | `GET /api/v1/me/deletion` |
+| `account_deletion` | `accountDeletion` | `POST /api/v1/me/deletion` |
+| `sign_in_methods` | `signInMethods` | `GET /api/v1/me/sign-in-methods` |
+| `connect_sign_in_method` | `connectSignInMethod` | `POST /api/v1/me/sign-in-methods/connect` |
+| `remove_sign_in_method` | `removeSignInMethod` | `POST /api/v1/me/sign-in-methods/{id}/remove` |
 | `mfa_status` | `mfaStatus` | `GET /api/v1/mfa` |
 | `mfa_disable` | `mfaDisable` | `POST /api/v1/mfa/disable` |
 | `mfa_recovery_codes` | `mfaRecoveryCodes` | `POST /api/v1/mfa/recovery-codes` |
@@ -110,6 +115,7 @@
 | `get_remote_session` | `getRemoteSession` | `GET /api/v1/remote-sessions/{id}` |
 | `unpublish_remote_session` | `unpublishRemoteSession` | `DELETE /api/v1/remote-sessions/{id}` |
 | `remote_session` | `remoteSession` | `GET /api/v1/remote-sessions/{id}/runtime/{path}` |
+| `report_ai_output` | `reportAiOutput` | `POST /api/v1/reports/ai-output` |
 | `list_router_keys` | `listRouterKeys` | `GET /api/v1/router/keys` |
 | `create_router_key` | `createRouterKey` | `POST /api/v1/router/keys` |
 | `revoke_router_key` | `revokeRouterKey` | `DELETE /api/v1/router/keys/{keyId}` |
@@ -157,6 +163,12 @@
 | `start_workspace` | `startWorkspace` | `POST /api/v1/workspaces/{id}/start` |
 | `stop_workspace` | `stopWorkspace` | `POST /api/v1/workspaces/{id}/stop` |
 | `revoke_workspace_tickets` | `revokeWorkspaceTickets` | `POST /api/v1/workspaces/{id}/tickets/revoke` |
+| `apple_callback` | `appleCallback` | `GET /auth/apple/callback` |
+| `apple_callback_post` | `appleCallbackPost` | `POST /auth/apple/callback` |
+| `apple_start` | `appleStart` | `GET /auth/apple/start` |
+| `pending_sign_in` | `pendingSignIn` | `GET /auth/connect` |
+| `pending_sign_in_cancel` | `pendingSignInCancel` | `POST /auth/connect/cancel` |
+| `pending_sign_in_separate` | `pendingSignInSeparate` | `POST /auth/connect/separate` |
 | `email_confirm` | `emailConfirm` | `POST /auth/email/confirm` |
 | `email_forgot` | `emailForgot` | `POST /auth/email/forgot-password` |
 | `email_link` | `emailLink` | `POST /auth/email/link` |
@@ -179,6 +191,8 @@
 | `internal_retry_job` | `internalRetryJob` | `POST /internal/ops/jobs/{id}/retry` |
 | `internal_ledger_check` | `internalLedgerCheck` | `GET /internal/ops/ledger-check` |
 | `internal_review_version` | `internalReviewVersion` | `POST /internal/ops/marketplace/versions/{id}/review` |
+| `internal_ai_output_reports` | `internalAiOutputReports` | `GET /internal/ops/reports/ai-output` |
+| `internal_resolve_ai_output_report` | `internalResolveAiOutputReport` | `POST /internal/ops/reports/ai-output/{id}/resolve` |
 | `internal_usage_summary` | `internalUsageSummary` | `GET /internal/ops/telemetry/usage` |
 | `internal_mfa_reset` | `internalMfaReset` | `POST /internal/ops/users/{id}/mfa/reset` |
 | `publish_release` | `publishRelease` | `POST /internal/releases` |
