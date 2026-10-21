@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -25,6 +27,7 @@ class PublicationTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.public_requests = []
         self.operator_gets = []
+        self.operator_posts = []
         self.public_status = 200
         self.public_payload = PAYLOAD
         owner = self
@@ -41,6 +44,7 @@ class PublicationTest(unittest.TestCase):
             def log_message(self, *args): pass
             def do_POST(self):
                 self.rfile.read(int(self.headers['content-length']))
+                owner.operator_posts.append(self.path)
                 if self.path.startswith('/internal/releases/artifacts?'):
                     value = {'id': 'artifact-id'}
                 else:
@@ -79,7 +83,8 @@ class PublicationTest(unittest.TestCase):
         }]}
         (self.root / 'index.json').write_text(json.dumps(index))
         self.args = argparse.Namespace(index=[str(self.root / 'index.json')], url=operator,
-            channel='preview', allow_dirty=False, notes_url=None, receipt=str(self.root / 'receipt.json'))
+            channel='preview', allow_dirty=False, allow_unsigned=False, notes_url=None,
+            receipt=str(self.root / 'receipt.json'))
         env = patch.dict(os.environ, HAARNESS_RELEASE_TOKEN='test-operator-secret')
         env.start()
         self.addCleanup(env.stop)
@@ -106,6 +111,58 @@ class PublicationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'HTTPS'):
             release.publish(self.args)
         self.assertEqual(self.operator_gets, [])
+
+    def desktop(self, **fields):
+        index = json.loads((self.root / 'index.json').read_text())
+        index['artifacts'][0].update(product='desktop', kind='dmg', **fields)
+        (self.root / 'index.json').write_text(json.dumps(index))
+
+    def test_publisher_off_mac_refuses_mac_desktop_without_gatekeeper_record(self):
+        self.desktop()
+        with patch.object(release.platform, 'system', return_value='Linux'):
+            with self.assertRaisesRegex(ValueError, 'no Gatekeeper record'):
+                release.publish(self.args)
+        self.assertEqual(self.operator_posts, [])
+
+    def test_publisher_off_mac_accepts_collect_record(self):
+        self.desktop(gatekeeper={'signer': 'Developer ID Application: Test (TEAM)', 'source': 'Notarized Developer ID'})
+        with patch.object(release.platform, 'system', return_value='Linux'):
+            release.publish(self.args)
+        self.assertEqual(len(self.operator_posts), 2)
+
+    def test_mac_publisher_checks_uploaded_bytes_despite_record(self):
+        self.desktop(gatekeeper={'signer': 'Developer ID Application: Test (TEAM)', 'source': 'Notarized Developer ID'})
+        with patch.object(release.platform, 'system', return_value='Darwin'), \
+                patch.object(release, 'gatekeeper', side_effect=ValueError('Gatekeeper rejects it')) as check:
+            with self.assertRaisesRegex(ValueError, 'Gatekeeper rejects it'):
+                release.publish(self.args)
+        check.assert_called_once_with(self.root / 'haarness')
+        self.assertEqual(self.operator_posts, [])
+
+    def test_stable_refuses_unsigned_mac_desktop(self):
+        self.args.channel, self.args.allow_unsigned = 'stable', True
+        with self.assertRaisesRegex(ValueError, 'Stable never ships'):
+            release.publish(self.args)
+        self.assertEqual(self.operator_posts, [])
+
+
+@unittest.skipUnless(platform.system() == 'Darwin', 'codesign and Gatekeeper are macOS-only')
+class GatekeeperTest(unittest.TestCase):
+    def test_rejects_ad_hoc_signed_app(self):
+        # How 0.1.1 and 0.1.2 shipped: a browser download of it was "damaged" and went to the Trash.
+        with tempfile.TemporaryDirectory() as d:
+            app = Path(d) / 'Haarness.app'
+            (app / 'Contents/MacOS').mkdir(parents=True)
+            (app / 'Contents/Info.plist').write_text('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+                '<key>CFBundleExecutable</key><string>Haarness</string>'
+                '<key>CFBundleIdentifier</key><string>dev.haarness.test</string></dict></plist>')
+            (app / 'Contents/MacOS/Haarness').write_bytes(Path('/usr/bin/true').read_bytes())
+            (app / 'Contents/MacOS/Haarness').chmod(0o755)
+            subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True, capture_output=True)
+            package = Path(d) / 'Haarness-1.0.0-mac-arm64.zip'
+            subprocess.run(['ditto', '-c', '-k', '--keepParent', str(app), str(package)], check=True)
+            with self.assertRaisesRegex(ValueError, 'signed ad-hoc, not with a Developer ID'):
+                release.gatekeeper(package)
 
 
 if __name__ == '__main__':
