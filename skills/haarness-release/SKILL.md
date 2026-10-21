@@ -11,11 +11,16 @@ description: Build, verify, publish and present Haarness CLI and Electron Deskto
   [build/run guidance](../../.skills/haarness-build-run/SKILL.md). Preserve existing work and
   unrelated app instances. Use an isolated Cloud checkout if its primary is dirty.
 - One version for the CLI and Desktop (Cargo workspace = `apps/desktop/package.json`). Uploaded
-  filenames and published versions are immutable: use a fresh preview version per attempt.
+  filenames and published versions are immutable: use a fresh preview version per attempt. The
+  service keys an upload by version, product and file name on **every** channel: once any
+  publish of a version has carried a file, every later publish of that version must carry the
+  same bytes. A preview publish of the real release version fixes its packages for stable too,
+  so do it only with the final, signed and notarized files.
 - Commit before a publishable build. `release.py collect --allow-dirty` is local proof only and
   its index says so; never call a dirty build an exact SHA release.
 - The workflow builds all six platforms and publishes only when every one passed. Never publish
-  a partial matrix to stable.
+  a partial matrix to stable: downloads read only the channel's newest release, so a platform
+  missing from it answers "release platform not found" instead of falling back to an older one.
 - The installers live twice: `install.sh`/`install.ps1` here and
   `haarness-cloud/assets/install.{sh,ps1}`, which the Cloud serves. Keep them identical.
 - Do not limit testing to this recipe. Chase undocumented paths and failures, fix causes, add
@@ -94,12 +99,19 @@ need not match the architecture it publishes.
 When the workflow cannot run (a blocked billing account), two machines cover all six platforms.
 Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), same steps as above:
 
-- **A Mac** builds both macOS architectures: `--target aarch64-apple-darwin` and
+- **A Mac** builds both macOS architectures with `VERSION=<v>
+  ~/work/haarness/haarness-deploy/scripts/release-macos.sh`: a clean worktree of the tag in
+  `~/work/haarness/release-<v>/haarness`, `--target aarch64-apple-darwin` and
   `x86_64-apple-darwin`, then `package -- --mac --arm64` / `--x64` with `bun-darwin-aarch64` /
-  `bun-darwin-x64` (`prepare.mjs` runs the x64 Bun under Rosetta to check its version). Set
-  `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder does not pick up a keychain identity;
-  `build.mac.identity` `-` then signs ad hoc (see Signing).
-- **One Linux x64 machine** builds the rest: `cargo zigbuild` for both Linux targets (`.2.17`),
+  `bun-darwin-x64` (`prepare.mjs` runs the x64 Bun under Rosetta to check its version), and one
+  index per architecture in `release-<v>/dist/macos-*`. It signs and notarizes as Signing
+  describes and fails closed: no Developer ID or notarization key, or a package Gatekeeper does
+  not call "Notarized Developer ID", stops the build (`ALLOW_UNSIGNED=1` builds ad hoc, the
+  owner's explicit call only). It holds the build lock; the run takes about 45 minutes, most of
+  it Apple's notarization.
+- **One Linux x64 machine** builds the rest (`haarness-deploy/scripts/release-linux-windows.sh`
+  on the Ubuntu box; haarness-deploy's README, "Binary releases", has the exact commands):
+  `cargo zigbuild` for both Linux targets (`.2.17`),
   `cargo xwin build` for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, `package --
   --linux --x64` / `--arm64` (electron-builder fetches the arm64 Electron), and each NSIS
   installer in the Wine container as in section 6. `prepare.mjs` runs the bundled Bun to check
@@ -155,7 +167,53 @@ reads only its own certificate (a Mac never falls back to WIN_CSC_LINK). APPLE_A
 App Store Connect `.p8` key itself (its PEM, or base64 of it): the workflow writes it to
 `$RUNNER_TEMP/AuthKey_<key id>.p8` and passes that path, which is what electron-builder and
 `@electron/notarize` expect in `APPLE_API_KEY`. Locally, set `APPLE_API_KEY` to the file's path,
-never its contents. New Windows code
+never its contents.
+
+**macOS, locally (`release-macos.sh`).** The identity is "Developer ID Application: STACK FORWARD
+LLC (J63GND4Q8A)" (expires 2027-11-19); its `.p12` and password, and `notarization.env`
+(`APPLE_API_KEY` = path of the App Store Connect `.p8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`) are
+in `~/.config/haarness-deploy/apple/`, outside every repository. The script imports the `.p12` into
+a keychain of its own and passes `CSC_NAME`, because electron-builder 26 given the `.p12` as
+`CSC_LINK` hands its password to `security set-key-partition-list` and prints that command,
+password included, when it fails. electron-builder signs, notarizes and staples the **app** (the
+ZIP carries it) but leaves the **DMG** unsigned, so a DMG downloaded in a browser would open with
+a Gatekeeper prompt. The script then signs the DMG (`codesign --timestamp`), notarizes it
+(`xcrun notarytool submit --wait`), staples it, and only then runs `collect`, which records the
+final SHA-256. The gate, per architecture, before collect:
+
+```sh
+spctl -a -vv -t open --context context:primary-signature Haarness-<v>-mac-<arch>.dmg
+xcrun stapler validate Haarness-<v>-mac-<arch>.dmg
+# and the app inside the mounted DMG and inside the extracted ZIP:
+spctl -a -vv -t exec Haarness.app && xcrun stapler validate Haarness.app
+```
+
+Each `spctl` must say `accepted`, `source=Notarized Developer ID` and the team `J63GND4Q8A`.
+
+The standalone CLI (`haarness-macos-<arch>`) is a download of its own. Linked, it carries only
+the linker's ad-hoc signature, which Gatekeeper rejects for a browser-downloaded binary (curl
+installs add no quarantine, so `install.sh` never noticed). The script signs it with the
+Developer ID and hardened runtime, checks that it still starts (x64 through Rosetta), and
+notarizes it as a zip. A bare binary cannot be stapled: Gatekeeper fetches its ticket online
+when a quarantined copy first runs. `spctl -t exec` and `codesign --test-requirement '=notarized'`
+do not look tickets up, so they say "Unnotarized Developer ID" even for a notarized CLI. Prove it
+with the lookup Gatekeeper makes instead (`FOUND` with a `signedTicket` field; an ad-hoc binary
+gives `NOT_FOUND`):
+
+```sh
+h=$(codesign -dvvv haarness-macos-arm64 2>&1 | sed -n 's/^CDHash=//p')
+curl -sS -X POST -H 'Content-Type: application/json' -d "{\"records\":[{\"recordName\":\"2/2/$h\"}]}" \
+  https://api.apple-cloudkit.com/database/1/com.apple.gk.ticket-delivery/production/public/records/lookup
+```
+
+Releases up to 0.1.3 shipped an ad-hoc CLI; their bytes are fixed.
+
+**macOS in the workflow: open item.** `release.yml` notarizes the app but does not seal the DMG.
+electron-builder deletes its temporary keychain when packaging ends, so a later `codesign` there
+needs the identity again (its own keychain as the script does, or `--config.dmg.sign=true` during
+packaging), then notarytool, stapler and the gate above. Add and prove it once Actions runs.
+
+New Windows code
 signing certificates need hardware keys (plan for a cloud signing service); the standalone
 `haarness-windows-*.exe` is not signed today, so SmartScreen warns on browser downloads (the
 PowerShell installer unblocks verified bytes).
@@ -182,6 +240,12 @@ python3 scripts/release.py publish --index dist/releases/index-*.json \
 
 The publisher streams each upload with length and SHA-256, publishes the set atomically, then
 downloads every public artifact and verifies hash and size.
+
+Production (haarness.ai): `~/work/haarness/haarness-deploy/scripts/publish-release.sh <channel>
+~/work/haarness/haarness <dist>/*/index-*.json` opens the SSH tunnel, reads the internal token
+from the vault and runs the same `publish`; the receipt lands next to the indexes. To prove one
+platform's packages end to end without touching stable, publish them to `preview` (only with
+the final bytes, see Ground rules), then install with `HAARNESS_CHANNEL=preview`.
 
 **Uploads bypass Cloudflare.** haarness.ai is proxied by Cloudflare, whose Free and Pro plans
 cap request bodies at 100 MB (documented; larger uploads get 413 or a reset); Desktop packages
@@ -228,6 +292,11 @@ unblocks verified bytes. On a terminal each download is named and shows curl's p
 - **macOS**: launch the installed app (not a mounted DMG, not the development Electron) and run
   `HAARNESS_DESKTOP_EXECUTABLE=…/Haarness.app/Contents/MacOS/Haarness npm --prefix apps/desktop
   run test:e2e -- e2e/desktop.spec.ts --grep 'real workspace: conversations, files, review and terminal'`.
+  Then do what a browser does: download the DMG from the public URL, mark it
+  (`xattr -w com.apple.quarantine "0083;<hex time>;Safari;<uuid>" Haarness.dmg`) and run the
+  Signing gate on it and on the app inside. After `install.sh`, `codesign -dvv` on the installed
+  app must still name the Developer ID: the installer signs ad hoc only when a signature fails
+  to verify.
 - **Linux** (a real machine, not only containers): `sudo apt install ./Haarness-<v>-linux-x64.deb`
   (dependencies resolve; `/usr/bin/haarness-desktop`; `xdg-mime query default
   x-scheme-handler/haarness` names `haarness-desktop.desktop`). Run Electron tests as a non-root
@@ -288,4 +357,6 @@ Report, in this order:
 - Installer results per OS (sh, PowerShell 5.1/7), upgrade, quarantine/unblock.
 - Desktop test results per OS, with known environment failures named and why.
 - Download page, README, profile and docs checks (screenshots or rendered previews).
-- Signing and notarization state, CI state, and anything left unverified or skipped.
+- Signing and notarization state, CI state, and anything left unverified or skipped. For macOS,
+  the gate's `spctl` verdicts on the DMG, the app in the DMG and the app in the ZIP, from the
+  public download with quarantine set, and the CLI's ticket lookup.
