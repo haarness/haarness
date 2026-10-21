@@ -155,9 +155,64 @@ def publish(args):
             print(f'Verified public download: {a["file"]} ({size} bytes)')
     print('Release ID:',result['id'])
 
+def gh(*args):
+    r=subprocess.run(['gh',*args],capture_output=True,text=True)
+    if r.returncode: raise RuntimeError(f'gh {" ".join(args[:3])}: {r.stderr.strip()[:1500]}')
+    return json.loads(r.stdout) if r.stdout.strip() else None
+
+def github(args):
+    # Mirrors a publication onto the tag's GitHub release, with the bytes the indexes record and a SHA256SUMS file.
+    # The release stays a draft until GitHub reports every asset uploaded with the expected size and SHA-256, so it
+    # never shows a partial set; a published release is never changed, only checked (and a preview made stable).
+    indexes=[(Path(p),json.loads(Path(p).read_text())) for p in args.index]
+    first=indexes[0][1];files={}
+    for path,index in indexes:
+        if index.get('dirty'): raise ValueError('Dirty artifacts are not released on GitHub')
+        if any(index[k]!=first[k] for k in ('version','sourceRevision')): raise ValueError('All builds must share version and source commit')
+        for a in index['artifacts']:
+            file=path.parent/a['file']
+            if file.parent.resolve()!=path.parent.resolve() or digest(file)!=a['sha256'] or file.stat().st_size!=a['size']: raise ValueError(f'Artifact changed: {file}')
+            if a['file'] in files or a['file']=='SHA256SUMS': raise ValueError(f'Duplicate asset name: {a["file"]}')
+            files[a['file']]=(file,a['size'],a['sha256'])
+    repo,tag=args.repo,f'v{first["version"]}'
+    if gh('api',f'repos/{repo}/commits/{tag}')['sha']!=first['sourceRevision']: raise ValueError(f'{repo} {tag} is not {first["sourceRevision"]}')
+    with tempfile.TemporaryDirectory(prefix='haarness-github-') as d:
+        sums=Path(d)/'SHA256SUMS';sums.write_text(''.join(f'{h}  {n}\n' for n,(_,_,h) in sorted(files.items())))
+        files['SHA256SUMS']=(sums,sums.stat().st_size,digest(sums))
+        found=[r for page in gh('api','--paginate','--slurp',f'repos/{repo}/releases') for r in page if r['tag_name']==tag]
+        if len(found)>1: raise ValueError(f'{repo} has {len(found)} releases for {tag}')
+        release=found[0] if found else None
+        if release is None:
+            notes=f'Haarness {first["version"]}, built from {first["sourceRevision"]}. The same files as https://haarness.ai/download; SHA-256 sums in SHA256SUMS.'+(f'\n\n{args.notes_url}' if args.notes_url else '')
+            release=gh('api','-X','POST',f'repos/{repo}/releases','-f',f'tag_name={tag}','-f',f'name=Haarness {first["version"]}','-f',f'body={notes}','-F','draft=true','-F',f'prerelease={str(args.channel!="stable").lower()}')
+            print(f'Created draft release {tag}')
+        def check(assets):
+            # GitHub computes each asset's digest on upload: the check reads GitHub's copy, not this disk.
+            assets={x['name']:x for x in assets};bad=[]
+            for n,(_,size,h) in files.items():
+                x=assets.get(n)
+                if not x or x['state']!='uploaded' or x['size']!=size or x.get('digest')!=f'sha256:{h}': bad.append(n)
+            return bad,sorted(set(assets)-set(files))
+        if release['draft']:
+            for x in release['assets']:
+                if x['name'] not in files or x['state']!='uploaded' or x.get('digest')!=f'sha256:{files[x["name"]][2]}':
+                    gh('api','-X','DELETE',f'repos/{repo}/releases/assets/{x["id"]}');print(f'Removed stale asset {x["name"]}')
+            have={x['name'] for x in gh('api',f'repos/{repo}/releases/{release["id"]}')['assets']}
+            for n,(file,_,_) in sorted(files.items()):
+                if n not in have: gh('release','upload',tag,str(file),'--repo',repo);print(f'Uploaded {n}')
+            release=gh('api',f'repos/{repo}/releases/{release["id"]}')
+        bad,extra=check(release['assets'])
+        if bad or extra: raise ValueError(f'GitHub release {tag} differs: wrong or missing {bad}, unexpected {extra}')
+        print(f'Verified on GitHub: {len(files)} assets, sizes and SHA-256 as recorded')
+        if release['draft'] or (args.channel=='stable' and release['prerelease']):
+            release=gh('api','-X','PATCH',f'repos/{repo}/releases/{release["id"]}','-F','draft=false','-F',f'prerelease={str(args.channel!="stable").lower()}','-f',f'make_latest={str(args.channel=="stable").lower()}')
+        if not release.get('immutable'): print(f'Warning: {repo} releases are not immutable; enable release immutability in the repository settings')
+        print('GitHub release:',release['html_url'])
+
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
     c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.set_defaults(run=collect)
     c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.add_argument('--allow-unsigned',action='store_true',help='preview only: publish a Mac Desktop that Gatekeeper rejects');c.set_defaults(run=publish)
+    c=sub.add_parser('github',help='release the published artifacts on the tag\'s GitHub release');c.add_argument('--index',nargs='+',required=True);c.add_argument('--repo',default=os.environ.get('GITHUB_REPOSITORY','haarness/haarness'));c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.set_defaults(run=github)
     c=sub.add_parser('check-macos',help='check that Gatekeeper accepts the app in each downloaded .dmg/.zip');c.add_argument('packages',nargs='+');c.set_defaults(run=check_macos)
     args=p.parse_args();args.run(args)

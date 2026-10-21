@@ -179,6 +179,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: releases
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with: { ref: '${{ inputs.tag }}' }
@@ -192,6 +194,12 @@ jobs:
         # publish refuses a Mac Desktop without collect's Gatekeeper record (Developer ID, notarized); a preview built
         # without the Mac secrets may still go out unsigned, stable never.
         run: python scripts/release.py publish --index dist/releases/index-*.json --url "$HAARNESS_RELEASE_URL" --channel "$CHANNEL" --receipt dist/releases/receipt.json ${{ inputs.channel != 'stable' && '--allow-unsigned' || '' }}
+      # The same files on the tag's GitHub release: a draft until GitHub reports every size and SHA-256.
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+        run: python scripts/release.py github --index dist/releases/index-*.json --repo "$GITHUB_REPOSITORY" --channel "$CHANNEL"
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: release-receipt, path: dist/releases/receipt.json }
