@@ -31,14 +31,32 @@ function Install-HaarnessProduct([string]$Item) {
     if ($Version -ne 'latest') { $Url += '&version=' + [Uri]::EscapeDataString($Version) }
     $Binary = Join-Path $Temporary $(if ($Item -eq 'cli') { 'haarness.exe' } else { 'Haarness-Setup.exe' })
     Write-Host "Downloading Haarness $(if ($Item -eq 'cli') { 'CLI' } else { 'Desktop' }) for windows $Arch..."
+    # Asked with HEAD, the service names the file's checksum, version and, in Content-Location, its address on the
+    # release domain, which serves it from Cloudflare's edge. Without that address (an older service, one that
+    # refuses HEAD) or when the edge does not deliver, the file comes from the service itself.
+    $Response = $null
+    $Edge = ''
     try {
-        $Response = Invoke-WebRequest -UseBasicParsing $Url -OutFile $Binary -PassThru -MaximumRedirection 0 -TimeoutSec 900
+        $Resolved = Invoke-WebRequest -UseBasicParsing $Url -Method Head -MaximumRedirection 0 -TimeoutSec 60
+        $Edge = [string]$Resolved.Headers['Content-Location']
+        # Plain HTTP only from a loopback service, which is all the check above lets through (tests).
+        if ($Edge -match '^https://' -or ($Uri.Scheme -eq 'http' -and $Edge -match '^http://(127\.0\.0\.1|localhost):')) {
+            Invoke-WebRequest -UseBasicParsing $Edge -OutFile $Binary -MaximumRedirection 0 -TimeoutSec 900
+            $Response = $Resolved
+        }
     } catch {
-        # Windows PowerShell 5.1 and PowerShell 7 both carry the HTTP status on the exception's response.
-        $Status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-        if ($Status -ne 404) { throw }
-        if ($Version -eq 'latest') { throw "No $Channel release of Haarness $Item for windows $Arch yet; installation left unchanged" }
-        throw "Haarness $Item $Version is not on the $Channel channel for windows $Arch; installation left unchanged"
+        if ($Edge) { Write-Host 'The release download site did not deliver; downloading from the release service instead.' }
+    }
+    if (-not $Response) {
+        try {
+            $Response = Invoke-WebRequest -UseBasicParsing $Url -OutFile $Binary -PassThru -MaximumRedirection 0 -TimeoutSec 900
+        } catch {
+            # Windows PowerShell 5.1 and PowerShell 7 both carry the HTTP status on the exception's response.
+            $Status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            if ($Status -ne 404) { throw }
+            if ($Version -eq 'latest') { throw "No $Channel release of Haarness $Item for windows $Arch yet; installation left unchanged" }
+            throw "Haarness $Item $Version is not on the $Channel channel for windows $Arch; installation left unchanged"
+        }
     }
     $Expected = [string]$Response.Headers['x-content-sha256']
     $Released = [string]$Response.Headers['x-haarness-version']

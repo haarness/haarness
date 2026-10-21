@@ -5619,6 +5619,7 @@
           "releases"
         ],
         "summary": "Download immutable published bytes. Verify x-content-sha256 before execution.",
+        "description": "HEAD answers the headers alone. Content-Location, when present, is the same file on the public release domain\n(Cloudflare's edge).",
         "operationId": "download_release_artifact",
         "parameters": [
           {
@@ -5633,7 +5634,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Binary artifact; SHA-256 in x-content-sha256",
+            "description": "Binary artifact; SHA-256 in x-content-sha256, its public address in Content-Location",
             "content": {
               "application/octet-stream": {
                 "schema": {
@@ -5761,6 +5762,7 @@
           "releases"
         ],
         "summary": "Select the current or pinned release binary for a platform.",
+        "description": "HEAD answers the headers alone, so an installer learns the SHA-256, version and Content-Location (the file on the\npublic release domain) before downloading.",
         "operationId": "download_release",
         "parameters": [
           {
@@ -5814,7 +5816,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Binary artifact; SHA-256 and version response headers",
+            "description": "Binary artifact; SHA-256 and version response headers, its public address in Content-Location",
             "content": {
               "application/octet-stream": {
                 "schema": {
@@ -20188,7 +20190,7 @@
       },
       "ReleaseUpload": {
         "type": "object",
-        "description": "An immutable, checksum-verified payload. Uploads are private until published.",
+        "description": "An immutable, checksum-verified payload. The API serves uploads only once published; `url` is where the\npublished file downloads: the public release domain for files in the release bucket, else the API.",
         "required": [
           "id",
           "version",
