@@ -60,16 +60,26 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
         desktop_payload=(d/'desktop.zip').read_bytes()
     else:
         desktop_payload=b'#!/bin/sh\nexit 1\n'
-    state={'queries':[],'desktop':200}
+    # cuts and etags apply to the next responses in turn: where each stops early, and what it names its file
+    # (None: no ETag).
+    state={'queries':[],'desktop':200,'cuts':[],'etags':[],'ranges':[]}
     class Both(http.server.BaseHTTPRequestHandler):
         def log_message(self,*args): pass
         def do_GET(self):
-            path=urlsplit(self.path).path;state['queries'].append(path)
+            path=urlsplit(self.path).path;state['queries'].append(path);state['ranges'].append(self.headers.get('range'))
             content=desktop_payload if '/desktop/' in path else cli_payload
             if '/desktop/' in path and state['desktop']!=200:
                 self.send_response(state['desktop']);self.end_headers();self.wfile.write(b'{}');return
-            self.send_response(200);self.send_header('x-content-sha256',hashlib.sha256(content).hexdigest())
-            self.send_header('x-haarness-version','2.0.0');self.send_header('content-length',str(len(content)));self.end_headers();self.wfile.write(content)
+            sha=hashlib.sha256(content).hexdigest();etag=state['etags'].pop(0) if state['etags'] else f'"{sha}"'
+            start=0
+            if self.headers.get('range') and self.headers.get('if-range') in (None,etag):
+                start=int(self.headers['range'].removeprefix('bytes=').rstrip('-'))
+            self.send_response(206 if start else 200);self.send_header('x-content-sha256',sha)
+            if etag: self.send_header('etag',etag)
+            if start: self.send_header('content-range',f'bytes {start}-{len(content)-1}/{len(content)}')
+            self.send_header('x-haarness-version','2.0.0');self.send_header('content-length',str(len(content)-start));self.end_headers()
+            cut=state['cuts'].pop(0) if state['cuts'] else len(content)
+            self.wfile.write(content[start:start+cut])
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Both)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     def run(name,args=(),extra=None,piped=False):
@@ -121,6 +131,20 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
             assert (root/'bin'/'haarness').is_file() and not (root/'apps').exists(),name
             assert all('/desktop/' not in q for q in state['queries']),(name,state['queries'])
         print('PASS: --no-desktop (also through sh -s --) and HAARNESS_NO_DESKTOP=1 install only the CLI')
+        # An interrupted download continues from where it stopped; a file that changed meanwhile, or one the service
+        # named no ETag for, is downloaded again from the start.
+        for name,etags,ranges in (('resume',[],[None,'bytes=10-']),('changed',['"old"'],[None,'bytes=10-',None]),('no-etag',[None],[None,None])):
+            state['cuts']=[10];state['etags']=etags;state['ranges'].clear()
+            root,r=run(name,extra={'HAARNESS_PRODUCT':'cli'})
+            assert r.returncode==0,(name,r.stdout,r.stderr)
+            assert subprocess.check_output([str(root/'bin'/'haarness'),'--version'],text=True).strip()=='haarness 2.0.0',name
+            assert state['ranges']==ranges and 'trying again (2 of 3)' in r.stderr,(name,state['ranges'],r.stderr)
+        print('PASS: an interrupted download continues where it stopped, or starts over for a changed or unnamed file')
+        state['cuts']=[10,10,10]
+        root,r=run('interrupted',extra={'HAARNESS_PRODUCT':'cli'})
+        assert r.returncode!=0 and 'Could not reach the Haarness release service' in r.stderr,(r.stdout,r.stderr)
+        assert len(state['queries'])==3 and not (root/'bin'/'haarness').exists(),state['queries']
+        print('PASS: three interrupted tries give up and install nothing')
         state['desktop']=404
         root,r=run('desktop-missing')
         state['desktop']=200
