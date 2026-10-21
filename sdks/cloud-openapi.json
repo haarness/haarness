@@ -3896,6 +3896,315 @@
         }
       }
     },
+    "/api/v1/me/deletion": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "What deleting the caller's account would do: the address to type, whether a two-factor code is needed, the\nsessions destroyed, the plan cancelled, the purchased credits forfeited and each team's outcome.",
+        "description": "Auth: `cookie|bearer` with the `account` scope (not API keys).",
+        "operationId": "account_deletion_preview",
+        "responses": {
+          "200": {
+            "description": "The preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDeletionPreviewDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session or token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing the `account` scope, or an API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Delete the caller's account, at once and for good. Every sign-in ends (a browser's cookies are cleared), the\nCloud sessions and their files are destroyed, a paid plan is cancelled and the personal account closes with any\nteam nobody else belongs to; the person leaves their other teams. Invoices, payments and the ledger are kept.",
+        "description": "Auth: `cookie+csrf|bearer` with the `account` scope (not API keys), plus the typed confirmation and, when the\naccount uses two-factor authentication, a current code.",
+        "operationId": "account_deletion",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountDeletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDeletionResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing the `account` scope, or an API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A team needs another owner first, or the teams changed since the preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The confirmation does not match, or the two-factor code is missing or wrong",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sign-in-methods": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "The caller's sign-in methods (Google and Apple identities, the email credential), which providers this Cloud can\nconnect, and whether removing one asks for a two-factor code (ADR-0016).",
+        "description": "Auth: `cookie|bearer` with the `account` scope (not API keys).",
+        "operationId": "sign_in_methods",
+        "responses": {
+          "200": {
+            "description": "The methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInMethodsDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session or token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing the `account` scope, or an API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sign-in-methods/connect": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Start connecting Google or Apple to the signed-in account: the answer names the provider page to open and sets\nthe login-state cookie. The provider's callback adds the identity to this account and returns to\n`/app/settings?connected=<provider>`, or `?connect_error=taken&provider=<provider>` when the identity already\nsigns in to another account (accounts are never merged).",
+        "description": "Auth: `cookie+csrf` (browser sessions only).",
+        "operationId": "connect_sign_in_method",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectSignInMethodRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Open `redirectTo`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectSignInMethodResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`email` is not a provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This Cloud does not offer that provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sign-in-methods/{id}/remove": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Remove a Google or Apple identity from the caller's account while another way to sign in remains. Removing Apple\nalso revokes Haarness's Apple token. Answers the remaining methods.",
+        "description": "Auth: `cookie+csrf` (browser sessions only), plus a current two-factor code when `mfaRequired`.",
+        "operationId": "remove_sign_in_method",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The method's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveSignInMethodRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Removed; the remaining methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInMethodsDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such method on this account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "It is the account's last way to sign in (`details.reason = last_method`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The two-factor code is missing or wrong",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/mfa": {
       "get": {
         "tags": [
@@ -6245,6 +6554,98 @@
           },
           "409": {
             "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reports/ai-output": {
+      "post": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "Report an agent's reply: why (a fixed reason and an optional note), where it appeared and its text. Google Play\nasks chat apps to let people report offensive AI output without leaving the app; the Haarness apps send it here.",
+        "description": "Auth: `cookie+csrf|bearer` (scope `workspaces`; a member of the chat's account, viewer or above). An API key needs\n`remote:read` for a computer's chat and `workspaces:read` for a Cloud session's. `Idempotency-Key` supported. At\nmost 20 reports per person per hour.",
+        "operationId": "report_ai_output",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiOutputReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Received",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiOutputReportDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation_failed`: an empty or too long excerpt, note or id, or a place without its id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session or token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `workspaces` scope, an API key without read access to the place, or `csrf_mismatch`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such computer, shared chat or Cloud session in an account of the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`idempotency_mismatch`, or the first request with this key is still in flight",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "20 reports in the last hour (`Retry-After`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9612,12 +10013,213 @@
         }
       }
     },
+    "/auth/apple/callback": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Finish Sign in with Apple: creates the user on first login and sets `hc_session` + `hc_csrf`, or asks for the\nsecond factor.",
+        "description": "Auth: public (the `state` is the credential, bound to the browser by its cookie). Errors render\n`login_error.html`.",
+        "operationId": "apple_callback",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "description": "Authorization code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Opaque state of the login attempt",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to `{web_origin}{return_to}` or the second-factor page"
+          },
+          "400": {
+            "description": "Replayed or unknown state, or another browser",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "401": {
+            "description": "Apple refused the code, or the identity token is not valid",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Apple's form post: keeps the name the person shared (first sign-in only) on the attempt, then sends the browser\nto the GET below, which carries its login-state cookie.",
+        "description": "Auth: public (the `state` is the credential).",
+        "operationId": "apple_callback_post",
+        "requestBody": {
+          "description": "`code`, `state`, `user`, or `error`",
+          "content": {
+            "application/x-www-form-urlencoded": {}
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "Redirect to `GET /auth/apple/callback?code&state`"
+          }
+        }
+      }
+    },
+    "/auth/apple/start": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Start Sign in with Apple (when `HAARNESS_CLOUD_APPLE_SIGNIN_*` configures it; `/auth/options` says `appleEnabled`).",
+        "description": "Auth: public. Redirects to Apple with `response_mode=form_post`.",
+        "operationId": "apple_start",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "description": "Relative path, sanitised to `/app` when unsafe",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to Apple's authorization endpoint"
+          },
+          "409": {
+            "description": "Sign in with Apple is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/connect": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "The first Google or Apple sign-in waiting in this browser (`hc_link` cookie) because its verified address already\nbelongs to an account: the sign-in page offers that account's methods, which take the new identity along.",
+        "description": "Auth: public (the `hc_link` cookie).",
+        "operationId": "pending_sign_in",
+        "responses": {
+          "200": {
+            "description": "What waits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingSignInDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing waits in this browser, or it expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/connect/cancel": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Forget the waiting identity.",
+        "description": "Auth: public (the `hc_link` cookie), from the Haarness sign-in page (exact `Origin`).",
+        "operationId": "pending_sign_in_cancel",
+        "responses": {
+          "204": {
+            "description": "Forgotten"
+          },
+          "403": {
+            "description": "Not from the sign-in page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/connect/separate": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Use the waiting identity for a new, separate account instead, and sign in to it.",
+        "description": "Auth: public (the `hc_link` cookie), from the Haarness sign-in page (exact `Origin`).",
+        "operationId": "pending_sign_in_separate",
+        "responses": {
+          "200": {
+            "description": "Signed in, or the second factor is next",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not from the sign-in page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing waits in this browser, or it expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/email/confirm": {
       "post": {
         "tags": [
           "identity"
         ],
-        "summary": "Sign in with an emailed link or code (creating the account for a new address); sets `HttpOnly` session and CSRF\ncookies.",
+        "summary": "Sign in with an emailed link, or a code with the address it was sent to (creating the account for a new address);\nsets `HttpOnly` session and CSRF cookies.",
         "operationId": "email_confirm",
         "requestBody": {
           "content": {
@@ -9641,10 +10243,10 @@
             }
           },
           "400": {
-            "description": "Invalid, expired or used link"
+            "description": "Invalid, expired or used link, or a code without its address"
           },
           "401": {
-            "description": "No code is waiting in this browser"
+            "description": "No code for this address is waiting in this browser"
           },
           "422": {
             "description": "Wrong code"
@@ -9675,6 +10277,9 @@
         "responses": {
           "200": {
             "description": "Same message for known and unknown email addresses"
+          },
+          "429": {
+            "description": "Rate limited: this network, or the service's hourly email budget"
           }
         }
       }
@@ -9799,7 +10404,7 @@
             "description": "Check your inbox, independent of account existence"
           },
           "429": {
-            "description": "Rate limited"
+            "description": "Rate limited: this network, or the service's hourly email budget"
           },
           "503": {
             "description": "Email could not be sent"
@@ -10048,7 +10653,7 @@
         "operationId": "auth_options",
         "responses": {
           "200": {
-            "description": "googleEnabled and emailEnabled"
+            "description": "googleEnabled, appleEnabled and emailEnabled"
           }
         }
       }
@@ -10349,6 +10954,164 @@
           },
           "404": {
             "description": "Unknown version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ops/reports/ai-output": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Reports of agents' replies for review, newest first, with the reply's text and the open count.",
+        "description": "Auth: `internal` (an ops route, available in every environment; the metrics token does not open it).",
+        "operationId": "internal_ai_output_reports",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`open` (the default), `resolved` or `all`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AiOutputReportStatus"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The `nextCursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–200, default 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of reports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiOutputReportsOpsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`limit` outside 1..=200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong internal token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ops/reports/ai-output/{id}/resolve": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Mark a report reviewed, with what was done about it.",
+        "description": "Auth: `internal`.",
+        "operationId": "internal_resolve_ai_output_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Report id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveAiOutputReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiOutputReportOpsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation_failed`: an empty or too long resolution",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong internal token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`invalid_state`: resolved already",
             "content": {
               "application/json": {
                 "schema": {
@@ -11381,6 +12144,113 @@
           }
         }
       },
+      "AccountDeletionPreviewDto": {
+        "type": "object",
+        "description": "`GET /api/v1/me/deletion`: what deleting the caller's account does, shown before they confirm. Deleted: the\nperson's sign-ins, devices, keys, computers, Cloud sessions with their files, backups and exports, and the\npersonal account with any team nobody else belongs to. Kept: invoices, payments and the ledger, which the law\nrequires, and the audit trail.",
+        "required": [
+          "confirmation",
+          "mfaRequired",
+          "sessions",
+          "subscriptionCancelled",
+          "purchasedCredits",
+          "teams",
+          "allowed"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean",
+            "description": "False while a team is `blocked`."
+          },
+          "confirmation": {
+            "type": "string",
+            "description": "What to type to confirm: the account's email address, or `DELETE` for an account without one."
+          },
+          "mfaRequired": {
+            "type": "boolean",
+            "description": "Whether a code from the authenticator app (or a recovery code) is required too."
+          },
+          "purchasedCredits": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "Purchased credits, forfeited with the account."
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Cloud sessions destroyed with their files.",
+            "minimum": 0
+          },
+          "subscriptionCancelled": {
+            "type": "boolean",
+            "description": "Whether a paid plan is cancelled at once."
+          },
+          "teams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountDeletionTeamDto"
+            }
+          }
+        }
+      },
+      "AccountDeletionRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/me/deletion`.",
+        "required": [
+          "confirmation"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required when the preview says `mfaRequired`: an authenticator or recovery code."
+          },
+          "confirmation": {
+            "type": "string",
+            "description": "The preview's `confirmation`, typed by the person (case and surrounding spaces do not matter)."
+          }
+        }
+      },
+      "AccountDeletionResponse": {
+        "type": "object",
+        "required": [
+          "deletedAt"
+        ],
+        "properties": {
+          "deletedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AccountDeletionTeamDto": {
+        "type": "object",
+        "required": [
+          "accountId",
+          "name",
+          "outcome"
+        ],
+        "properties": {
+          "accountId": {
+            "$ref": "#/components/schemas/AccountId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/AccountDeletionTeamOutcome"
+          }
+        }
+      },
+      "AccountDeletionTeamOutcome": {
+        "type": "string",
+        "description": "What becomes of a team when its member deletes their account.",
+        "enum": [
+          "deleted",
+          "left",
+          "blocked"
+        ]
+      },
       "AccountDto": {
         "type": "object",
         "required": [
@@ -11664,6 +12534,278 @@
           },
           "workspace": {
             "$ref": "#/components/schemas/WorkspaceDto"
+          }
+        }
+      },
+      "AiOutputReason": {
+        "type": "string",
+        "description": "Why a reply is reported: the fixed list the apps offer.",
+        "enum": [
+          "harmful",
+          "hateful",
+          "sexual",
+          "malicious_code",
+          "misleading",
+          "other"
+        ]
+      },
+      "AiOutputReportDto": {
+        "type": "object",
+        "description": "`201` of `POST /api/v1/reports/ai-output`: the report was received.",
+        "required": [
+          "id",
+          "reason",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/AiOutputReason"
+          }
+        }
+      },
+      "AiOutputReportOpsDto": {
+        "type": "object",
+        "description": "One report as operators review it. The reporter is named by user id only.",
+        "required": [
+          "id",
+          "reporterId",
+          "accountId",
+          "client",
+          "source",
+          "threadId",
+          "excerpt",
+          "excerptTruncated",
+          "reason",
+          "createdAt"
+        ],
+        "properties": {
+          "accountId": {
+            "$ref": "#/components/schemas/AccountId"
+          },
+          "client": {
+            "type": "string",
+            "description": "The app: a native sign-in's OAuth client id (`haarness-ios`, `haarness-android`, …), `web` or `api_key`."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "excerpt": {
+            "type": "string"
+          },
+          "excerptTruncated": {
+            "type": "boolean"
+          },
+          "hostId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "$ref": "#/components/schemas/AiOutputReason"
+          },
+          "remoteSessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reporterId": {
+            "$ref": "#/components/schemas/UserId"
+          },
+          "resolution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolvedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source": {
+            "$ref": "#/components/schemas/AttentionSource"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        }
+      },
+      "AiOutputReportRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/reports/ai-output`: one reply of an agent, why it is reported, and where it is. The place takes the\nshape of a Live Activity's target: a computer's chat (`source` `host`, with `hostId` or the shared chat's\n`remoteSessionId`, and the runtime's `projectId`), or a Cloud session's (`source` `session`, `sessionId`).\nUnknown fields are ignored, so newer apps may send more.",
+        "required": [
+          "reason",
+          "source",
+          "threadId",
+          "excerpt"
+        ],
+        "properties": {
+          "excerpt": {
+            "type": "string",
+            "description": "The reply's text as the app showed it: 1–8,000 characters (Unicode scalar values). Apps cut a longer reply\nthere and set `excerptTruncated`."
+          },
+          "excerptTruncated": {
+            "type": "boolean"
+          },
+          "hostId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The reply (runtime item id), 1–200 characters when given."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model that wrote it, when the app knows: 1–200 characters."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the person adds in their own words: 1–1,000 characters when given."
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The runtime workspace on the computer."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its provider, when the app knows: 1–100 characters."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/AiOutputReason"
+          },
+          "remoteSessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source": {
+            "$ref": "#/components/schemas/AttentionSource"
+          },
+          "threadId": {
+            "type": "string",
+            "description": "The chat (runtime thread id), 1–200 characters."
+          }
+        }
+      },
+      "AiOutputReportStatus": {
+        "type": "string",
+        "description": "Which reports `GET /internal/ops/reports/ai-output` lists.",
+        "enum": [
+          "open",
+          "resolved",
+          "all"
+        ]
+      },
+      "AiOutputReportsOpsResponse": {
+        "type": "object",
+        "description": "`GET /internal/ops/reports/ai-output`: a page of reports, newest first, and how many wait for review.",
+        "required": [
+          "items",
+          "open"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiOutputReportOpsDto"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "open": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Open reports in all.",
+            "minimum": 0
           }
         }
       },
@@ -12988,6 +14130,38 @@
           }
         }
       },
+      "ConnectSignInMethodRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/me/sign-in-methods/connect`.",
+        "required": [
+          "provider"
+        ],
+        "properties": {
+          "loginHint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Passed to the provider as `login_hint` (Google preselects that account; the local fixture issuer picks its\ntest identity from it)."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/SignInProvider",
+            "description": "`google` or `apple`."
+          }
+        }
+      },
+      "ConnectSignInMethodResponse": {
+        "type": "object",
+        "description": "Where the browser goes to connect the provider; the response also sets the login-state cookie.",
+        "required": [
+          "redirectTo"
+        ],
+        "properties": {
+          "redirectTo": {
+            "type": "string"
+          }
+        }
+      },
       "ConsentDecisionRequest": {
         "type": "object",
         "required": [
@@ -13880,13 +15054,20 @@
       },
       "EmailConfirmRequest": {
         "type": "object",
-        "description": "`POST /auth/email/confirm`: the emailed link's token, or its 6-digit code in the browser that asked for it.",
+        "description": "`POST /auth/email/confirm`: the emailed link's token, or its 6-digit code with the address it was sent to, in the\nbrowser that asked for it. Only the newest email's code for that address works there.",
         "properties": {
           "code": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The address the code was sent to; required with `code`."
           },
           "token": {
             "type": [
@@ -16095,6 +17276,34 @@
                 }
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "What a deleted account still has outside the database, and what it still holds in it: it cancels the\naccount's Stripe subscription at once, waits for its Cloud sessions to be destroyed, then deletes their backups\nand exports and the account's profile archives from object storage and erases its sessions' records, Cloud\nagents, schedules, projects, routers and marketplace listings, keeping only nameless rows the ledger names\n(queued by `cloud_store::account_deletion::execute`).",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "account_purge"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "What a deleted account still has outside the database, and what it still holds in it: it cancels the\naccount's Stripe subscription at once, waits for its Cloud sessions to be destroyed, then deletes their backups\nand exports and the account's profile archives from object storage and erases its sessions' records, Cloud\nagents, schedules, projects, routers and marketplace listings, keeping only nameless rows the ledger names\n(queued by `cloud_store::account_deletion::execute`).",
+                "required": [
+                  "account_id"
+                ],
+                "properties": {
+                  "account_id": {
+                    "$ref": "#/components/schemas/AccountId"
+                  }
+                }
+              }
+            }
           }
         ],
         "description": "Payload = JSON of the variant content: `{\"kind\":\"meter_compute\",\"payload\":{}}`."
@@ -16527,7 +17736,8 @@
         "enum": [
           "google",
           "password",
-          "email"
+          "email",
+          "apple"
         ]
       },
       "MfaRecoveryCodesResponse": {
@@ -18262,6 +19472,37 @@
       "PaymentOperationId": {
         "type": "string"
       },
+      "PendingSignInDto": {
+        "type": "object",
+        "description": "`GET /auth/connect`: a first Google or Apple sign-in whose verified address already belongs to an account, waiting\nin this browser while the person signs in to that account (which then gains it) or chooses a separate one.",
+        "required": [
+          "provider",
+          "email",
+          "methods",
+          "returnTo"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The address it verified, which the existing account signs in with."
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignInProvider"
+            },
+            "description": "How the existing account signs in."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/SignInProvider",
+            "description": "The provider just used."
+          },
+          "returnTo": {
+            "type": "string",
+            "description": "Where the sign-in was going: a web page, or `/oauth/authorize?request=…` for an app's consent."
+          }
+        }
+      },
       "PlanCode": {
         "type": "string",
         "description": "A plan in the catalogue: `\"pro\" | \"max\" | \"ultra\" | \"team\"`."
@@ -19112,6 +20353,32 @@
           }
         }
       },
+      "RemoveSignInMethodRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/me/sign-in-methods/{id}/remove`.",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required when `mfaRequired`: an authenticator or recovery code."
+          }
+        }
+      },
+      "ResolveAiOutputReportRequest": {
+        "type": "object",
+        "description": "`POST /internal/ops/reports/ai-output/{id}/resolve`: what was done about it, 1–1,000 characters when given.",
+        "properties": {
+          "resolution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "ResourceClass": {
         "type": "string",
         "description": "Wire form equals [`ResourceClass::id`] (`\"shared-2cpu-4gb\"` …), the `cloud_classes[].id` of the plan catalogue.",
@@ -19801,6 +21068,91 @@
           }
         },
         "additionalProperties": false
+      },
+      "SignInMethodDto": {
+        "type": "object",
+        "description": "One of the caller's sign-in methods.",
+        "required": [
+          "id",
+          "provider"
+        ],
+        "properties": {
+          "addedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hasPassword": {
+            "type": "boolean",
+            "description": "The email credential has a password (links and codes work either way)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The identity's id, or `email` for the email credential."
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "privateEmail": {
+            "type": "boolean",
+            "description": "An Apple private relay address (\"Hide My Email\")."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/SignInProvider"
+          }
+        }
+      },
+      "SignInMethodsDto": {
+        "type": "object",
+        "description": "`GET /api/v1/me/sign-in-methods`: how the caller signs in, and what this Cloud can add.",
+        "required": [
+          "methods",
+          "googleEnabled",
+          "appleEnabled",
+          "mfaRequired"
+        ],
+        "properties": {
+          "appleEnabled": {
+            "type": "boolean",
+            "description": "This Cloud offers Sign in with Apple."
+          },
+          "googleEnabled": {
+            "type": "boolean",
+            "description": "This Cloud offers Continue with Google."
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignInMethodDto"
+            },
+            "description": "Google and Apple identities (oldest first), then the email credential."
+          },
+          "mfaRequired": {
+            "type": "boolean",
+            "description": "Removing a method asks for a current two-factor code."
+          }
+        }
+      },
+      "SignInProvider": {
+        "type": "string",
+        "description": "A way to sign in to an account (ADR-0016).",
+        "enum": [
+          "google",
+          "apple",
+          "email"
+        ]
       },
       "SignInResponse": {
         "type": "object",
@@ -21996,6 +23348,10 @@
     {
       "name": "telemetry",
       "description": "Usage statistics of the desktop and CLI apps"
+    },
+    {
+      "name": "reports",
+      "description": "Reports of an agent's reply, sent from the Haarness apps"
     },
     {
       "name": "internal",
