@@ -263,6 +263,22 @@ workflow's `HAARNESS_RELEASE_URL`: pointing it at `https://haarness.ai` fails th
   `/internal/releases/{id}/promote` (same-channel rollback), DELETE `/internal/releases/{id}`
   (withdraw; never silently selects an older release). Roll back by promoting a known-good receipt.
 
+**GitHub release.** After haarness.ai, the same indexes go to the tag's GitHub release:
+
+```sh
+python3 scripts/release.py github --index dist/releases/index-*.json --channel stable
+```
+
+It refuses unless the tag on GitHub is the indexes' `sourceRevision` and every local file still
+has its recorded SHA-256. It creates (or resumes) a **draft**, removes draft assets with other
+bytes, uploads every artifact plus `SHA256SUMS`, and publishes only once GitHub's own `digest`
+and size of every asset match. Stable becomes Latest, preview a prerelease (a later stable run
+promotes it without uploading). A published release is never changed: different bytes fail.
+`publish-release.sh` runs it after `publish`, the workflow's publish job too. Release immutability
+(repository settings) must be on, so a published release's tag and assets cannot change; the
+command warns otherwise. The repository is private, so its release assets reach members only;
+haarness.ai stays the public download.
+
 ## 6. Install and run the downloaded bytes, per platform
 
 ```sh
