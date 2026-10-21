@@ -189,7 +189,9 @@ jobs:
           HAARNESS_RELEASE_TOKEN: ${{ secrets.HAARNESS_RELEASE_TOKEN }}
           HAARNESS_RELEASE_URL: ${{ vars.HAARNESS_RELEASE_URL }}
           CHANNEL: ${{ inputs.channel }}
-        run: python scripts/release.py publish --index dist/releases/index-*.json --url "$HAARNESS_RELEASE_URL" --channel "$CHANNEL" --receipt dist/releases/receipt.json
+        # publish refuses a Mac Desktop without collect's Gatekeeper record (Developer ID, notarized); a preview built
+        # without the Mac secrets may still go out unsigned, stable never.
+        run: python scripts/release.py publish --index dist/releases/index-*.json --url "$HAARNESS_RELEASE_URL" --channel "$CHANNEL" --receipt dist/releases/receipt.json ${{ inputs.channel != 'stable' && '--allow-unsigned' || '' }}
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: release-receipt, path: dist/releases/receipt.json }
