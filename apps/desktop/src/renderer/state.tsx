@@ -147,6 +147,9 @@ interface State extends Live {
     action?: "file" | "folder";
     /** Opened from a link in a reply or a Markdown file; `line` is where to put the cursor. */
     link?: boolean;
+    /** The agent's preview tool opened it, not the person: it does not come
+     * in front of a side chat that shares its place. */
+    automatic?: boolean;
     line?: number;
   } | null;
   terminal: boolean;
@@ -2061,7 +2064,7 @@ function createApp(saved?: Preferences) {
       const data = entry.data;
       if (data?.type === "tool_result" && data.name === "preview" && !data.is_error) {
         const info = previewInfo(data.metadata);
-        if (info) set("fileRequest", { connection: state.connection!.id, path: info.path, mode: info.mode, thread: state.selected, preview: true, sequence: envelope.eventId });
+        if (info) set("fileRequest", { connection: state.connection!.id, path: info.path, mode: info.mode, thread: state.selected, preview: true, automatic: true, sequence: envelope.eventId });
       }
     }
 

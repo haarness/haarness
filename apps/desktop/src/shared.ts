@@ -371,6 +371,12 @@ export interface Bridge {
     | { type: "error"; code: string; message: string; retryable: boolean }
     | undefined
   >;
+  /** The keyboard came into (or left) the side chat, where ⌘W closes the
+   * thread in front instead of the window. */
+  sideChatFocus(focused: boolean): Promise<void>;
+  /** A chat's stored side chats (`key` is its project and chat), or with
+   * `value` saves them; null forgets them. Kept in files of their own. */
+  sideChats(key: string, value?: unknown): Promise<unknown>;
   preferences(input: Partial<Preferences>): Promise<Preferences>;
   storage(key: string, value?: unknown): Promise<unknown>;
   review(input: import("./review-drafts").ReviewRequest): Promise<import("./review-drafts").ReviewResponse>;

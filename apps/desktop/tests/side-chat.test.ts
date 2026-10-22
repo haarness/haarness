@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  HISTORY_BLOCK,
+  HISTORY_SIZE,
   CHAT_MIN,
   DOCK_MIN,
   SIDE_MAX,
@@ -37,10 +39,22 @@ test("a follow-up sends only the finished questions, the newest forty", () => {
     { question: "one", answer: "A: one" },
     { question: "two", answer: "A: two" },
   ]);
-  const many = Array.from({ length: MAX_HISTORY + 5 }, (_, at) => turn(`q${at}`));
-  const sent = sideHistory(many);
-  assert.equal(sent.length, MAX_HISTORY);
-  assert.equal(sent[0].question, "q5");
+});
+
+test("a long thread drops its oldest questions in blocks, so its prefix holds between trims", () => {
+  const thread = (count: number, answer = "a") =>
+    sideHistory(Array.from({ length: count }, (_, at) => turn(`q${at}`, "done", answer)));
+  assert.equal(thread(MAX_HISTORY).length, MAX_HISTORY);
+  assert.equal(thread(MAX_HISTORY)[0].question, "q0");
+  // Past the limit a whole block goes, and the first question sent then stays put.
+  for (const count of [MAX_HISTORY + 1, MAX_HISTORY + 7, MAX_HISTORY + HISTORY_BLOCK])
+    assert.equal(thread(count)[0].question, `q${HISTORY_BLOCK}`);
+  assert.equal(thread(MAX_HISTORY + HISTORY_BLOCK + 1)[0].question, `q${2 * HISTORY_BLOCK}`);
+  // Long answers give way by size too, still a block at a time.
+  const long = thread(30, "x".repeat(HISTORY_SIZE / 25));
+  assert.equal(long[0].question, `q${HISTORY_BLOCK}`);
+  // One answer larger than the whole budget is not sent at all.
+  assert.deepEqual(thread(1, "x".repeat(HISTORY_SIZE + 1)), []);
 });
 
 test("a tab is named after its first question, shortened", () => {
@@ -99,13 +113,20 @@ test("stored side chats come back with a lost answer stopped and anything damage
   assert.equal(sideRestore({ front: "gone", threads: [{ id: "a", turns: [] }] }).front, undefined);
 });
 
+test("threads with nothing asked and nothing typed are not stored", () => {
+  assert.equal(sideStored({ threads: [thread("a")], front: "a" }), null);
+  const kept = sideStored({ threads: [thread("a"), { ...thread("b"), draft: "half a question" }, thread("c", [turn("q")])], front: "a" })!;
+  assert.deepEqual(kept.threads.map((item) => item.id), ["b", "c"]);
+  assert.equal(kept.front, undefined);
+});
+
 test("what is stored stays within its size, the oldest questions going first", () => {
-  const big = "x".repeat(200_000);
+  const big = "x".repeat(50_000);
   const chat = {
     front: "new",
     threads: [thread("old", [turn("1", "done", big), turn("2", "done", big), turn("3", "done", big)]), thread("new", [turn("4", "done", big), turn("5", "done", big), turn("6", "done", big)])],
   };
-  const stored = sideStored(chat);
+  const stored = sideStored(chat)!;
   assert.ok(JSON.stringify(stored).length <= MAX_STORED);
   assert.equal(stored.threads.at(-1)!.turns.at(-1)!.question, "6");
   assert.equal(stored.threads[0].turns[0].question, "2");
