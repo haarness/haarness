@@ -157,6 +157,14 @@ impl AcceptFailures {
         }
         *last = Some(error.to_string());
     }
+
+    /// The port took a connection again: an earlier failure no longer explains a timeout.
+    fn clear(&self) {
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 
 /// The next connection `accept` hands over. A failed accept belongs to one connection, not to the
@@ -164,7 +172,7 @@ impl AcceptFailures {
 /// descriptor left (`EMFILE`), is skipped and the wait goes on, so it cannot end a sign-in the
 /// browser has yet to return to. Other failures than a connection's own are retried after a short
 /// pause, within the caller's overall timeout, and kept in `failures` (the first is logged as a
-/// warning), so a sign-in that times out can say why.
+/// warning) until a connection is accepted again, so a sign-in that times out can say why.
 pub async fn next_connection<F, A, S>(mut accept: F, failures: &AcceptFailures) -> S
 where
     F: FnMut() -> A,
@@ -172,7 +180,10 @@ where
 {
     loop {
         match accept().await {
-            Ok(accepted) => return accepted,
+            Ok(accepted) => {
+                failures.clear();
+                return accepted;
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -615,6 +626,28 @@ mod tests {
         );
         assert_eq!(
             AcceptFailures::default().explain("timed out waiting for the browser redirect"),
+            "timed out waiting for the browser redirect"
+        );
+    }
+
+    /// A port that took connections again after a failure is not blamed for a sign-in the
+    /// browser never came back to.
+    #[tokio::test]
+    async fn a_port_that_accepts_again_is_not_blamed_for_a_timeout() {
+        let failures = AcceptFailures::default();
+        let mut results = vec![Ok(7), Err(std::io::Error::other("Too many open files"))];
+        let accepted = next_connection(
+            move || {
+                let result = results.pop().unwrap();
+                async move { result }
+            },
+            &failures,
+        )
+        .await;
+        assert_eq!(accepted, 7);
+        assert_eq!(failures.last(), None);
+        assert_eq!(
+            failures.explain("timed out waiting for the browser redirect"),
             "timed out waiting for the browser redirect"
         );
     }
