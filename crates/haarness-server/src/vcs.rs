@@ -1356,6 +1356,12 @@ mod tests {
         );
     }
 
+    fn sorted_names(diffs: &HashMap<String, ReviewFile>) -> Vec<&str> {
+        let mut names: Vec<_> = diffs.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
     fn by_file(diffs: Vec<ReviewFile>) -> HashMap<String, ReviewFile> {
         diffs
             .into_iter()
@@ -1804,7 +1810,7 @@ mod tests {
                 .await
                 .expect("untrusted review"),
         );
-        assert_eq!(untrusted.keys().collect::<Vec<_>>(), ["a.txt", "b.dat"]);
+        assert_eq!(sorted_names(&untrusted), ["a.txt", "b.dat"]);
         assert!(
             untrusted["a.txt"]
                 .diff
@@ -1818,7 +1824,7 @@ mod tests {
         // run, while the monitor and the hooks still do not.
         touch_later(&repo.path, "same.md");
         let trusted = by_file(working_tree_diff(&repo.path).await.expect("trusted review"));
-        assert_eq!(trusted.keys().collect::<Vec<_>>(), ["a.txt", "b.dat"]);
+        assert_eq!(sorted_names(&trusted), ["a.txt", "b.dat"]);
         assert_eq!(marks.left(), ["clean", "empty"]);
     }
 
