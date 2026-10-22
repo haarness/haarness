@@ -34,6 +34,8 @@ import { registerCyclePanel } from "./tab-cycle";
 
 // A quick hide/reopen can remount the panel before shell creation returns.
 // Share startup by connection so that gesture still opens exactly one shell.
+// Other windows on the project ask too (all at once after the server was
+// replaced): `ifNone` lets the server hand them all the same new shell.
 const openings = new Map<string, Promise<void>>();
 async function ensureTerminal(connection: string) {
   let pending = openings.get(connection);
@@ -45,10 +47,14 @@ async function ensureTerminal(connection: string) {
         [],
       );
       if (!tabs.length) {
+        // Only the window whose create started the shell has all of its
+        // output new; another one adopts it, as any terminal it did not start,
+        // so it never answers the queries a replay brings back. A server too
+        // old to say always started one.
         const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
-          { cols: 100, rows: 20 },
+          { cols: 100, rows: 20, ifNone: true },
         ]);
-        shownOutput.started(connection + ":" + item.id);
+        if (item.created !== false) shownOutput.started(connection + ":" + item.id);
       }
     })();
     openings.set(connection, pending);
@@ -368,11 +374,13 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     let live = false;
     let order = 0;
     const waiting = inputQueue();
-    const send = (bytes: Uint8Array) => {
+    // An answer to a program's query goes on from one window only, when
+    // the terminal is shown in several (see main's terminalAnswers).
+    const send = (bytes: Uint8Array, answer = false) => {
       const position = order++;
       if (!live) return waiting.add(position, bytes);
       void window.haarness
-        .terminal(connection, "write", props.id, Array.from(bytes))
+        .terminal(connection, answer ? "answer" : "write", props.id, Array.from(bytes))
         .then((sent) => {
           if (sent !== false) return;
           live = false;
@@ -381,9 +389,10 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         .catch((error) => app.set("error", String(error)));
     };
     const input = terminal.onData((data) => {
-      if (!typing() && !stream.open()) return;
+      const answer = !typing();
+      if (answer && !stream.open()) return;
       // A long paste goes in several writes; IPC keeps them in order.
-      for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk);
+      for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk, answer);
     });
     // The PTY learns every size xterm takes: a panel resize, and a font size
     // change, which refits without the panel changing size. A push waits for
@@ -509,12 +518,16 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
           return disposed;
         }
         if (disposed) return true;
+        // The shell has this view's size before a key reaches it: a new one
+        // starts at 100 columns, and a line typed first would be drawn for
+        // those, wrapping and clearing in the wrong places here.
+        await sizes.now({ cols: terminal.cols, rows: terminal.rows });
+        if (disposed) return true;
         if (!focused) terminal.focus();
         focused = true;
         live = true;
         watch.connected();
         for (const bytes of waiting.take()) send(bytes);
-        sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
         return true;
       },
     });

@@ -1,4 +1,5 @@
 import { measureRow } from "./measure-row";
+import { toastAnchor } from "./toast-anchors";
 import { t, splitAround, parseLanguage } from "./i18n";
 import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
@@ -58,6 +59,7 @@ import {
   on,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
@@ -67,6 +69,7 @@ import { attachable, attachmentName, relabelAttachments, type Attachment } from 
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
+import { createReplySelection } from "./reply-selection";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
 import {
@@ -344,7 +347,7 @@ export function Session() {
   );
   let providerSetup = "";
   createEffect(() => {
-    if (!state.ready || !state.connection) return;
+    if (!state.ready || !state.connection || state.catalogLoading) return;
     if (selectedModel()) {
       providerSetup = "";
       return;
@@ -593,27 +596,6 @@ export function Session() {
       scrolling.removeEventListener("scrollend", settle);
       cancelAnimationFrame(scrollFrame);
     });
-  });
-  /* Toasts sit in the window's bottom corner, where the composer keeps Send,
-     Stop and a waiting approval; lift them above that dock. Its top moves when
-     the dock grows and when the window or the terminal resizes the chat. */
-  let dock: HTMLDivElement | undefined;
-  const liftToasts = () => {
-    const root = document.documentElement.style;
-    if (!dock?.isConnected) return root.removeProperty("--composer-clearance");
-    const clearance = window.innerHeight - dock.getBoundingClientRect().top;
-    root.setProperty("--composer-clearance", Math.max(0, Math.round(clearance)) + "px");
-  };
-  const dockResize = new ResizeObserver(liftToasts);
-  const observeDock = (element: HTMLDivElement) => {
-    dock = element;
-    dockResize.disconnect();
-    dockResize.observe(element);
-    if (element.parentElement) dockResize.observe(element.parentElement);
-  };
-  onCleanup(() => {
-    dockResize.disconnect();
-    document.documentElement.style.removeProperty("--composer-clearance");
   });
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let draftSave: { key: string; text: string } | undefined;
@@ -1138,10 +1120,18 @@ export function Session() {
       revealTarget = undefined;
     });
   }
+  // Text the person selected in a streaming reply stays selected when the
+  // saved reply takes its place (see reply-selection.ts).
+  const replySelection = createReplySelection();
+  onCleanup(() => replySelection.dispose());
+  const replyDrawn = (event: Event) =>
+    replySelection.drawn(event.target as Element);
   onMount(() => {
     scrolling.addEventListener("markdown-ready", settleReveal);
+    scrolling.addEventListener("markdown-ready", replyDrawn);
     onCleanup(() => {
       scrolling.removeEventListener("markdown-ready", settleReveal);
+      scrolling.removeEventListener("markdown-ready", replyDrawn);
       cancelAnimationFrame(revealFrame);
     });
   });
@@ -1308,7 +1298,9 @@ export function Session() {
       draftTimer = setTimeout(persistDraft, 500);
     }
   }
-  async function send(delivery?: T.InputDelivery) {
+  /** The chats whose Enter waits for the model choices. */
+  const waitingForModels = new Set<string>();
+  async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
       await queue.save({ text: draft(), attachments: attachments() });
       return;
@@ -1382,6 +1374,24 @@ export function Session() {
         !app.promptContext().length)
     )
       return;
+    // A chat started while the model choices load would take a model chosen
+    // from an incomplete (or the last project's) catalog: send once they are
+    // in, checking again then, and only once however often Enter is pressed.
+    // Another chat or project shown meanwhile gives it up: its draft is not
+    // what Enter was pressed on, and this one stays unsent where it was.
+    if (state.catalogLoading) {
+      const pressed = owner();
+      const connection = state.connection?.id;
+      if (waitingForModels.has(pressed)) return;
+      waitingForModels.add(pressed);
+      try {
+        await app.catalogsSettled();
+      } finally {
+        waitingForModels.delete(pressed);
+      }
+      if (owner() !== pressed || state.connection?.id !== connection) return;
+      return send(delivery);
+    }
     if (!selectedModel()) {
       app.openConnect({ onboarding: true });
       return;
@@ -1828,9 +1838,35 @@ export function Session() {
             </div>
           </Show>
           <Show when={stream()?.text}>
-            <div class="message assistant" data-testid="streaming-reply">
-              <Markdown text={stream()!.text} live />
-            </div>
+            {(() => {
+              let reply!: HTMLDivElement;
+              // Read untracked: Show draws this once per live reply.
+              const turn = untrack(() => active()?.id);
+              const saved = () =>
+                state.items.filter(
+                  (item) =>
+                    item.turnId === turn &&
+                    item.data.type === "assistant_message",
+                );
+              const earlier = new Set(untrack(saved).map((item) => item.id));
+              // The live reply goes when its text is saved as a message of
+              // the turn: that message keeps what the person selected.
+              onCleanup(() =>
+                replySelection.keep(
+                  reply,
+                  saved().findLast((item) => !earlier.has(item.id))?.id,
+                ),
+              );
+              return (
+                <div
+                  ref={reply}
+                  class="message assistant"
+                  data-testid="streaming-reply"
+                >
+                  <Markdown text={stream()!.text} live />
+                </div>
+              );
+            })()}
           </Show>
           <Show when={active() && !pending()}>
             <div class="assistant-activity" role="status" aria-live="polite">
@@ -1851,7 +1887,7 @@ export function Session() {
         </Show>
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
-        <div class="composer-area" ref={observeDock}>
+        <div class="composer-area" ref={toastAnchor("composer")}>
           <Show when={empty()}>
             <div class="composer-project">
               <ProjectPicker />
@@ -2253,14 +2289,14 @@ export function Session() {
                       {cycledAgent() && t("Agent: {agent}", { agent: cycledAgent() })}
                     </span>
                     <Show
-                      when={selectedModel()}
+                      when={!state.catalogLoading && selectedModel()}
                       fallback={
                         <button
                           class="pill-select composer-model"
-                          disabled={!state.ready}
+                          disabled={!state.ready || state.catalogLoading}
                           onClick={() => app.openConnect({ onboarding: true })}
                         >
-                          {state.ready
+                          {state.ready && !state.catalogLoading
                             ? t("Connect a provider")
                             : t("Loading models…")}
                         </button>
@@ -2941,14 +2977,24 @@ function chromeRequestText(category: ChromeField) {
       return t("Run scripts on {origin} in Chrome");
   }
 }
+/** Enter that confirms an input method's composition belongs to the input method. */
+const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
+
 function Question(props: { question: T.PendingQuestionInfo }) {
   const app = useApp();
   const [answer, setAnswer] = createSignal(""),
     [choices, setChoices] = createSignal<string[]>([]),
     [answered, setAnswered] = createSignal(false);
   let dock!: HTMLElement, input: HTMLInputElement | undefined;
+  // A question that takes several answers sends the marked choices and then
+  // what was typed; one that takes a single answer sends the one shown,
+  // typed or chosen (typing unmarks a choice, and choosing clears the text).
+  const reply = () =>
+    props.question.multiple
+      ? [...choices(), answer().trim()].filter(Boolean).join(", ")
+      : answer().trim() || choices()[0] || "";
   const submit = () => {
-    const value = answer() || choices().join(", ");
+    const value = reply();
     if (!value || answered()) return;
     setAnswered(true);
     void app.run(async () => {
@@ -2984,6 +3030,21 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       ref={dock}
       class="prompt-dock question"
       aria-label={t("A question for you")}
+      onKeyDown={(event) => {
+        // Cmd/Ctrl+Enter replies from anywhere in the card, with what is
+        // typed or chosen; a plain Enter keeps its own meaning there.
+        if (
+          event.defaultPrevented ||
+          event.key !== "Enter" ||
+          !(event.metaKey || event.ctrlKey) ||
+          event.altKey ||
+          event.shiftKey ||
+          composing(event)
+        )
+          return;
+        event.preventDefault();
+        if (!event.repeat) submit();
+      }}
     >
       <header class="prompt-head">
         <Icon name="chat" size="sm" />
@@ -2995,15 +3056,36 @@ function Question(props: { question: T.PendingQuestionInfo }) {
           {(choice) => (
             <button
               classList={{ active: choices().includes(choice) }}
+              aria-pressed={choices().includes(choice)}
               onClick={() => {
+                if (!props.question.multiple) {
+                  setChoices([choice]);
+                  setAnswer("");
+                  return;
+                }
                 setChoices((old) =>
-                  props.question.multiple
-                    ? old.includes(choice)
-                      ? old.filter((c) => c !== choice)
-                      : [...old, choice]
-                    : [choice],
+                  old.includes(choice) ? old.filter((c) => c !== choice) : [...old, choice],
                 );
+              }}
+              onKeyDown={(event) => {
+                // Enter on a choice of a single-answer question picks it and
+                // replies, as in the TUI. On a question that takes several,
+                // Enter only marks or unmarks it, as a click does.
+                if (
+                  props.question.multiple ||
+                  event.key !== "Enter" ||
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.altKey ||
+                  event.shiftKey ||
+                  composing(event)
+                )
+                  return;
+                event.preventDefault();
+                if (event.repeat) return;
+                setChoices([choice]);
                 setAnswer("");
+                submit();
               }}
             >
               {choice}
@@ -3016,15 +3098,18 @@ function Question(props: { question: T.PendingQuestionInfo }) {
           <input
             ref={input}
             aria-label={t("Answer")}
-            placeholder={t("Or write your answer…")}
+            placeholder={props.question.multiple ? t("Add another answer…") : t("Or write your answer…")}
             value={answer()}
-            onInput={(event) => setAnswer(event.currentTarget.value)}
+            onInput={(event) => {
+              setAnswer(event.currentTarget.value);
+              if (!props.question.multiple && answer().trim()) setChoices([]);
+            }}
             onKeyDown={(event) => {
               if (
                 event.key !== "Enter" ||
                 event.shiftKey ||
-                event.isComposing ||
-                !answer()
+                composing(event) ||
+                !answer().trim()
               )
                 return;
               event.preventDefault();
@@ -3034,7 +3119,7 @@ function Question(props: { question: T.PendingQuestionInfo }) {
         </Show>
         <button
           class="primary"
-          disabled={answered() || (!answer() && !choices().length)}
+          disabled={answered() || !reply()}
           onClick={submit}
         >
           {t("Reply")}

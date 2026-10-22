@@ -34,6 +34,13 @@ export function cloudServers(recent: Recent[]): SavedServer[] {
   return [...servers.values()];
 }
 
+/** The server a window shows once it leaves a removed project: its own while
+ * it is still listed, else this computer (a Cloud account's entry goes with
+ * its last project). */
+export function serverAfterRemoval(servers: SavedServer[], active: string) {
+  return servers.some((item) => item.id === active) ? active : localServer.id;
+}
+
 export function migrateServers(recent: Recent[], saved: SavedServer[] = []) {
   // Earlier versions saved a Cloud gateway as a remote server the first time a
   // Cloud session opened. Drop those unless a real remote project uses them.

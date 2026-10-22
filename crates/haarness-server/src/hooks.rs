@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use haarness_core::shell_text::{ShellKind, place_placeholders};
 use haarness_core::{HookDecision, HookPort, PermissionDecision};
 use haarness_protocol::ThreadId;
 use serde_json::{Value, json};
@@ -304,6 +305,17 @@ impl ConfiguredHooks {
                 if let Some(input) = specific.get("updatedInput").and_then(Value::as_object) {
                     outcome.updated_input = Some(Value::Object(input.clone()));
                 }
+                // Claude Code's PermissionRequest answer carries its rewrite
+                // inside the decision. The runtime reads it only to know that
+                // an allow was for other input (see `permission_hook_answer`).
+                if entry.event == "PermissionRequest"
+                    && let Some(input) = specific
+                        .get("decision")
+                        .and_then(|decision| decision.get("updatedInput"))
+                        .and_then(Value::as_object)
+                {
+                    outcome.updated_input = Some(Value::Object(input.clone()));
+                }
                 match specific
                     .get("decision")
                     .and_then(|decision| decision.get("behavior"))
@@ -421,16 +433,6 @@ fn hook_invocation(entry: &HookEntry, workspace: &std::path::Path) -> (String, V
     (shell.to_owned(), arguments)
 }
 
-/// The shells whose script text a hook's placeholders must not be pasted
-/// into. `cmd` is not one: it expands `%NAME%` before it parses, so a value
-/// holding `&` splits the command either way, and its scripts keep the
-/// value filled in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ShellKind {
-    Posix,
-    PowerShell,
-}
-
 fn shell_kind(program: &str) -> Option<ShellKind> {
     let name = program
         .rsplit(['/', '\\'])
@@ -504,152 +506,18 @@ fn powershell_command(command: &str, value: &dyn Fn(&str) -> String) -> String {
     quoted_placeholders(ShellKind::PowerShell, command, value)
 }
 
-/// The placeholder `rest` starts with, if any.
-fn placeholder_at(rest: &str) -> Option<&'static str> {
+/// The length of the hook placeholder `rest` starts with, if any.
+fn placeholder_at(rest: &str) -> Option<usize> {
     HOOK_PLACEHOLDERS
         .iter()
-        .copied()
         .find(|name| rest.starts_with(&format!("${{{name}}}")))
-}
-
-/// Whether a value can be written inside PowerShell single quotes as it is:
-/// only characters no PowerShell reads specially there.
-fn powershell_plain(value: &str) -> bool {
-    value.chars().all(|character| {
-        character.is_ascii_alphanumeric()
-            || matches!(character, ' ' | '_' | '.' | '/' | ':' | '\\' | '-')
-    })
+        .map(|name| name.len() + 3)
 }
 
 /// `command` with each placeholder left for the shell to expand from the
-/// environment the hook gets, as the scanner reads the shell's quotes:
-/// - outside single quotes a POSIX shell's `${NAME}` stays and PowerShell's
-///   becomes `${env:NAME}`;
-/// - inside single quotes, where nothing expands, POSIX gets `'"${NAME}"'`
-///   (close, expand in double quotes, reopen), which stays safe even where
-///   the scanner misjudges the quotes (a comment, a here-document, `$'…'`);
-///   PowerShell gets the value itself only when it is made of plain
-///   characters, every single-quote character (ASCII and U+2018–U+201B)
-///   doubled, and `${env:NAME}` otherwise, which is then read literally:
-///   wrong, but never run.
+/// environment the hook gets (see [`place_placeholders`]).
 fn quoted_placeholders(kind: ShellKind, command: &str, value: &dyn Fn(&str) -> String) -> String {
-    use std::fmt::Write as _;
-    #[derive(PartialEq)]
-    enum Quote {
-        None,
-        Single,
-        Double,
-    }
-    let escape = if kind == ShellKind::Posix { '\\' } else { '`' };
-    let single = |character: char| {
-        character == '\''
-            || (kind == ShellKind::PowerShell && ('\u{2018}'..='\u{201b}').contains(&character))
-    };
-    let mut out = String::with_capacity(command.len());
-    let mut quote = Quote::None;
-    let mut statement_start = true;
-    // After PowerShell's own `&` or `.` the word is already called.
-    let mut called = false;
-    let mut rest = command;
-    while let Some(character) = rest.chars().next() {
-        if let Some(name) = placeholder_at(rest) {
-            match (&quote, kind) {
-                (Quote::None, ShellKind::PowerShell) if statement_start => {
-                    // A path to run: quote the whole word and call it. The
-                    // word ends at a space or a statement or block end that
-                    // is not part of a placeholder.
-                    let mut end = 0;
-                    while end < rest.len() {
-                        if let Some(inner) = placeholder_at(&rest[end..]) {
-                            end += inner.len() + 3;
-                            continue;
-                        }
-                        let next = rest[end..].chars().next().expect("not at the end");
-                        if next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')' | '}') {
-                            break;
-                        }
-                        end += next.len_utf8();
-                    }
-                    let word = HOOK_PLACEHOLDERS.iter().fold(
-                        rest[..end].replace('"', "`\""),
-                        |word, name| {
-                            word.replace(&format!("${{{name}}}"), &format!("${{env:{name}}}"))
-                        },
-                    );
-                    let call = if called { "" } else { "& " };
-                    let _ = write!(out, "{call}\"{word}\"");
-                    rest = &rest[end..];
-                    statement_start = false;
-                    called = false;
-                    continue;
-                }
-                (Quote::Single, ShellKind::Posix) => {
-                    let _ = write!(out, "'\"${{{name}}}\"'");
-                }
-                (Quote::Single, ShellKind::PowerShell) => {
-                    let text = value(name);
-                    if powershell_plain(&text) {
-                        for character in text.chars() {
-                            out.push(character);
-                            if single(character) {
-                                out.push(character);
-                            }
-                        }
-                    } else {
-                        let _ = write!(out, "${{env:{name}}}");
-                    }
-                }
-                (_, ShellKind::Posix) => {
-                    let _ = write!(out, "${{{name}}}");
-                }
-                (_, ShellKind::PowerShell) => {
-                    let _ = write!(out, "${{env:{name}}}");
-                }
-            }
-            rest = &rest[name.len() + 3..];
-            statement_start = false;
-            continue;
-        }
-        if quote == Quote::None && (rest.starts_with("&&") || rest.starts_with("||")) {
-            out.push_str(&rest[..2]);
-            rest = &rest[2..];
-            statement_start = true;
-            called = false;
-            continue;
-        }
-        let mut length = character.len_utf8();
-        match (&quote, character) {
-            (Quote::None, _) if single(character) => quote = Quote::Single,
-            (Quote::Single, _) if single(character) => quote = Quote::None,
-            (Quote::Double, '"') => quote = Quote::None,
-            (Quote::None, '"') => quote = Quote::Double,
-            (Quote::None | Quote::Double, _) if character == escape => {
-                // The escaped character goes with it, whatever it is.
-                length += rest[length..].chars().next().map_or(0, char::len_utf8);
-            }
-            _ => {}
-        }
-        if quote == Quote::None {
-            if matches!(character, ';' | '|' | '\n' | '{') {
-                statement_start = true;
-                called = false;
-            } else if statement_start
-                && matches!(character, '&' | '.')
-                && rest[1..].starts_with(char::is_whitespace)
-            {
-                called = true;
-            } else if !(character.is_whitespace() || (character == '&' && statement_start)) {
-                statement_start = false;
-                called = false;
-            }
-        } else {
-            statement_start = false;
-            called = false;
-        }
-        out.push_str(&rest[..length]);
-        rest = &rest[length..];
-    }
-    out
+    place_placeholders(kind, command, &placeholder_at, value)
 }
 
 /// What `${name}` stands for in a hook of `entry` run for `workspace`.
@@ -1732,6 +1600,28 @@ mod tests {
             .await;
         assert_eq!(decision.permission, Some(PermissionDecision::Allow));
         assert!(decision.block.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_permission_request_allow_says_when_it_rewrote_the_input() {
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PermissionRequest": [{"matcher": "bash", "hooks": [{
+                    "command": r#"echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"command":"npm ci"}}}}'"#
+                }]}]
+            })),
+            std::env::temp_dir(),
+        );
+        let decision = hooks
+            .permission_request(
+                ThreadId::new(),
+                "bash",
+                &["npm install".to_owned()],
+                &json!({"command": "npm install"}),
+            )
+            .await;
+        assert_eq!(decision.permission, Some(PermissionDecision::Allow));
+        assert_eq!(decision.updated_input, Some(json!({"command": "npm ci"})));
     }
 
     #[tokio::test]

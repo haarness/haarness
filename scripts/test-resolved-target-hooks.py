@@ -9,6 +9,10 @@
   `external_directory`.
 - Agents: a running agent keeps its definition when its file is deleted, and the deletion
   applies to new turns while that turn is still running.
+- Rewrites: a PermissionRequest hook that allows only a rewritten command does not answer the
+  prompt; the person is asked and the command as written never runs on the hook's word.
+- Background results: a subagent's result whose chat lost its agent meanwhile is kept in the
+  chat as a hidden message with a notice, not dropped.
 Every daemon runs on isolated data under one temporary root and is stopped at the end.
 """
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.error, urllib.request, uuid
@@ -211,6 +215,42 @@ export default () => ({
           and "'edit:out.txt' is denied" in items, result)
     again = agent_chat.turn('hello', agent='reviewer')
     check('a new turn sees the deletion', 'Unknown agent' in json.dumps(again), again)
+    # --- Rewrites ---------------------------------------------------------------------------
+    rewrite = root / 'rewrite-hook.py'
+    write(rewrite, '''import json, sys
+json.load(sys.stdin)
+print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+                  'decision': {'behavior': 'allow', 'updatedInput': {'command': 'true'}}}}))
+''')
+    rewrite_ws = workspace('rewrite', {'permission': {'bash': 'ask'}, 'hooks': {'PermissionRequest': [
+        {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': shlex.join(['python3', str(rewrite)])}]}]}})
+    rc = connect(rewrite_ws)
+    rewrite_chat = Chat(rc, 'Rewriting hook')
+    t = rewrite_chat.turn('!tool bash ' + json.dumps({'command': 'touch hook-rewrote-this'}))
+    pending = rewrite_chat.pending()
+    check('a hook allowing only a rewritten command leaves the prompt to the person',
+          pending['permission'] == 'bash' and not (rewrite_ws / 'hook-rewrote-this').exists(), pending)
+    rewrite_chat.reject(pending)
+    rewrite_chat.finish(t)
+    check('the rejected command did not run', not (rewrite_ws / 'hook-rewrote-this').exists())
+    # --- Background results -----------------------------------------------------------------
+    background_ws = workspace('background', {})
+    helper = background_ws / '.haarness/agents/helper.md'
+    write(helper, '---\ndescription: Delegates checks\nmode: all\n---\nHELPER_PROMPT\n')
+    bc = connect(background_ws)
+    until(lambda: any(a.get('id', a.get('name')) == 'helper' for a in api(bc, '/agents')), 'helper agent listed')
+    thread = api(bc, '/threads', {'title': 'Background keep', 'provider': 'echo', 'model': 'echo-1', 'agent': 'helper'})
+    background_chat = Chat.__new__(Chat)
+    background_chat.c, background_chat.thread = bc, thread
+    task = {'prompt': '!tool bash {"command":"sleep 3"}', 'agent': 'general', 'description': 'slow check', 'background': True}
+    t = background_chat.turn('!tool task ' + json.dumps(task))
+    check('the background task launches', background_chat.finish(t)['status'] == 'completed')
+    helper.unlink()
+    until(lambda: not any(a.get('id', a.get('name')) == 'helper' for a in api(bc, '/agents')), 'helper removal applied', 6)
+    items = until(lambda: (v if 'could not start a turn in this chat' in (v := background_chat.transcript()) else None),
+                  'the refused result is kept', 30)
+    check('a result its chat cannot take is kept with a notice',
+          'state=\\"completed\\"' in items and 'Unknown agent: helper' in items, items[-2000:])
     print('PASS', len(checks), 'checks.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)

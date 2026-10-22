@@ -4555,6 +4555,163 @@ test("an open-ended question opens in its answer field unless a draft is being t
   expect(errors).toEqual([]);
 });
 
+test("a question answers from the keyboard, and only a deliberate key sends it", async () => {
+  const thread = await client.createThread({
+    title: "Keyboard question",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title!);
+  await page.getByRole("option").filter({ hasText: thread.title! }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title!);
+  const question = page.locator(".question");
+  const choice = (name: string) => question.getByRole("button", { name, exact: true });
+  const answer = question.getByRole("textbox", { name: "Answer", exact: true });
+  const ask = (input: Record<string, unknown>) =>
+    client.startTurn(thread.id, {
+      text: "!tool question " + JSON.stringify(input),
+      requestId: crypto.randomUUID(),
+    });
+  const settled = async () => {
+    await expect.poll(() => client.listQuestions().then((v) => v.length)).toBe(0);
+    await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  };
+  // What the question's tool call returned: the answer it was given.
+  const replied = async () => {
+    const results = (await client.listItems(thread.id)).filter((item) => item.data.type === "tool_result");
+    const last = results.at(-1)?.data;
+    return last?.type === "tool_result" ? last.output : "";
+  };
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
+
+  // Enter on a choice of a single-answer question picks it and replies.
+  await ask({ prompt: "Which color ships?", choices: ["Green", "Blue"] });
+  await expect(question).toContainText("Which color ships?");
+  await choice("Green").focus();
+  await page.keyboard.press("Tab");
+  await expect(choice("Blue")).toBeFocused();
+  await page.screenshot({ path: test.info().outputPath("question-keyboard-light.png") });
+  await page.keyboard.press("Enter");
+  await settled();
+  expect(await replied()).toContain("Blue");
+
+  // A click marks a choice and Enter on it then replies with it; Space only marks.
+  await ask({ prompt: "Which size?", choices: ["Small", "Large"] });
+  await choice("Large").press(" ");
+  await expect(choice("Large")).toHaveAttribute("aria-pressed", "true");
+  expect(await client.listQuestions()).toHaveLength(1);
+  await choice("Small").click();
+  await expect(choice("Small")).toHaveAttribute("aria-pressed", "true");
+  await expect(choice("Large")).toHaveAttribute("aria-pressed", "false");
+  await choice("Small").press("Enter");
+  await settled();
+  expect(await replied()).toContain("Small");
+
+  // On a question that takes several answers, Enter marks and unmarks and never
+  // sends; Cmd/Ctrl+Enter replies with what is marked, from a choice or the field.
+  await ask({ prompt: "Which platforms?", choices: ["macOS", "Linux", "Windows"], multiple: true });
+  await choice("macOS").press("Enter");
+  await choice("Linux").press("Enter");
+  await choice("Windows").press("Enter");
+  await choice("Windows").press("Enter");
+  await expect(choice("macOS")).toHaveAttribute("aria-pressed", "true");
+  await expect(choice("Windows")).toHaveAttribute("aria-pressed", "false");
+  await answer.press("Enter");
+  await page.waitForTimeout(300);
+  expect(await client.listQuestions()).toHaveLength(1);
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.screenshot({ path: test.info().outputPath("question-keyboard-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  await choice("Linux").press(modifier + "+Enter");
+  await settled();
+  expect(await replied()).toMatch(/macOS.*Linux/);
+
+  // Marked choices and typed text go together on a question that takes several answers.
+  await ask({ prompt: "Which platforms else?", choices: ["macOS", "Linux"], multiple: true });
+  await choice("macOS").click();
+  await answer.fill("BSD");
+  await expect(choice("macOS")).toHaveAttribute("aria-pressed", "true");
+  await question.getByRole("button", { name: "Reply", exact: true }).click();
+  await settled();
+  expect(await replied()).toMatch(/macOS, BSD/);
+
+  // A single-answer question sends what it shows: typing unmarks a choice, choosing clears the text.
+  await ask({ prompt: "Which tier?", choices: ["Free", "Pro"] });
+  await choice("Pro").click();
+  await answer.fill("Team");
+  await expect(choice("Pro")).toHaveAttribute("aria-pressed", "false");
+  await choice("Free").click();
+  await expect(answer).toHaveValue("");
+  await answer.fill("Team");
+  await answer.press("Enter");
+  await settled();
+  expect(await replied()).toContain("Team");
+  expect(await replied()).not.toContain("Free");
+
+  // Text an input method is still composing does not send, even with Cmd/Ctrl.
+  await ask({ prompt: "A name, please", choices: ["Keep"] });
+  await answer.fill("候補");
+  await answer.evaluate((field, key) => {
+    for (const options of [{}, { [key === "Meta" ? "metaKey" : "ctrlKey"]: true }])
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true, ...options }));
+  }, modifier);
+  await page.waitForTimeout(300);
+  expect(await client.listQuestions()).toHaveLength(1);
+  await answer.press(modifier + "+Enter");
+  await settled();
+  expect(await replied()).toContain("候補");
+  expect(errors).toEqual([]);
+});
+
+test("Haarness's own tools read as what they did, in every language", async () => {
+  const thread = await client.createThread({ title: "Own tool rows", provider: "echo", model: "echo-1" });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title!);
+  await page.getByRole("option").filter({ hasText: thread.title! }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title!);
+  for (const text of [
+    '!tool session_manage {"action":"list"}',
+    '!tool load_tool {"queries":["browser"]}',
+    '!tool memory_search {"query":"release"}',
+    "!tool memory_list {}",
+  ]) {
+    const turn = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text });
+    await client.waitTurn(turn.id);
+  }
+  // Every tool the server defines itself has wording of its own, so a new one without it fails here.
+  const { describeTool, toolVerbKeys } = await import("../src/renderer/transcript");
+  const catalog = await client.toolCatalog({ threadId: thread.id });
+  const own = catalog.tools.filter((tool) => tool.source === "native" && !tool.id.startsWith("browser_"));
+  expect(own.length).toBeGreaterThan(30);
+  for (const { id } of own) {
+    const shape = describeTool(id, {});
+    expect(shape.verb, id).not.toBe(id);
+    expect(toolVerbKeys, id).toContain(shape.verb);
+  }
+  // A management tool reads as what it manages, not the delegation or command its name once suggested.
+  const rows = page.locator(".message.step > .tool-call > summary");
+  await expect(rows).toHaveText([
+    /^Managed chats$/,
+    // No tools wait to be loaded in this chat, so the call failed.
+    /^Tried to load tools\s*browser$/,
+    /^Looked through memories\s*release$/,
+    /^Looked through memories$/,
+  ]);
+  await page.screenshot({ path: test.info().outputPath("own-tools-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.screenshot({ path: test.info().outputPath("own-tools-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light", language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(rows.last()).toHaveText("تصفّح الذاكرة");
+  await page.screenshot({ path: test.info().outputPath("own-tools-rtl.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+  expect(errors).toEqual([]);
+});
+
 test("SSE cross-client updates and durable recovery after window reload and server restart", async () => {
   const external = await client.createThread({
     title: "External session",
@@ -11269,6 +11426,26 @@ test("conversation context inspector shows measured usage, retained estimates an
   await expect(metric(totals,"Cache read tokens")).toHaveText("600");
   await expect(metric(totals,"Cache write tokens")).toHaveText("100");
   await expect(metric(totals,"Known cost")).toHaveText("$0.0250");
+  // Numbers follow the display language, as the labels around them do.
+  const { translate } = await import("../src/localization");
+  const translatedTotals = (code: string) =>
+    page
+      .getByRole("region", { name: translate(code, "Chat context"), exact: true })
+      .getByRole("region", { name: translate(code, "Chat usage totals"), exact: true });
+  await page.evaluate(() => window.haarness.preferences({ language: "de" }));
+  await expect(page.locator("html")).toHaveAttribute("lang", "de");
+  await expect(metric(translatedTotals("de"), translate("de", "Input tokens"))).toHaveText("1.700");
+  await expect(metric(translatedTotals("de"), translate("de", "Known cost"))).toHaveText("0,0250\u00a0$");
+  await page.screenshot({ path: test.info().outputPath("context-numbers-de-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.screenshot({ path: test.info().outputPath("context-numbers-de-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light", language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(metric(translatedTotals("ar"), translate("ar", "Known cost"))).not.toHaveText("Not available");
+  await page.screenshot({ path: test.info().outputPath("context-numbers-rtl.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(metric(latest,"Input")).toHaveText("500");
   // Its pace: 1.24 s to the first content, then 80 streamed tokens over 2 s;
   // the other 20 output tokens never streamed.
@@ -11614,6 +11791,26 @@ test("memory dialog manages project files, retains conflicting edits and reloads
   await expect(edit).not.toBeVisible();
   await expect(memory.getByRole("button", { name: "Edit memory desktop-memory-proof", exact: true })).not.toBeVisible();
   expect(await readFile(path, "utf8").catch(() => "missing")).toBe("missing");
+  await memory.getByRole("button", { name: "Close", exact: true }).click();
+
+  // A settings file Haarness cannot read keeps memory off, and says so.
+  const settings = join(status.directory, "settings.json");
+  await writeFile(settings, '{"enabled": true,}');
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill("Manage memory");
+  await page.getByRole("option", { name: "Manage memory", exact: true }).click();
+  const unreadable = "Memory is off because its settings file could not be read. Saving replaces it.";
+  await expect(memory.getByRole("status")).toHaveText(unreadable);
+  await expect(memory.getByRole("switch", { name: "Enable project memory" })).not.toBeChecked();
+  await page.screenshot({ path: test.info().outputPath("memory-dialog-unreadable.png") });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.screenshot({ path: test.info().outputPath("memory-dialog-unreadable-dark.png") });
+  await page.emulateMedia({ colorScheme: null });
+  await memory.getByRole("switch", { name: "Enable project memory" }).check();
+  await memory.getByRole("button", { name: "Save memory settings", exact: true }).click();
+  await expect(memory.getByRole("status")).toContainText("Memory settings saved");
+  await expect(memory).not.toContainText(unreadable);
+  expect(JSON.parse(await readFile(settings, "utf8")).enabled).toBe(true);
   await memory.getByRole("button", { name: "Close", exact: true }).click();
   expect(errors).toEqual([]);
 });
@@ -12352,6 +12549,91 @@ test("display languages default to English and switch persistently across all sh
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
 });
 
+test("the window opens in its saved theme, palette, text size and language, never the defaults first", async () => {
+  const before = await page.evaluate(() => window.haarness.boot().then((value) => value.preferences));
+  await page.evaluate(() => window.haarness.preferences({ theme: "light", palette: "ocean", fontSize: 18, language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  // The window itself paints the saved theme's page colour before its page draws anything.
+  const { themeColors } = await import("../src/themes");
+  expect((await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBackgroundColor())).toLowerCase())
+    .toBe(themeColors("ocean", "light").page);
+  // From this page's next document on (and only this one), every look the document has once the app has drawn anything.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Page.enable");
+  const { identifier } = await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => {
+      const seen = [];
+      window.appearance = seen;
+      // The document has no root element yet when this runs.
+      const observer = new MutationObserver(() => {
+        const root = document.documentElement;
+        if (!document.getElementById("root")?.childElementCount) return;
+        const look = [root.lang, root.dir, root.dataset.theme, root.dataset.palette, root.style.getPropertyValue("--font-size")].join(" ");
+        if (seen.at(-1) !== look) seen.push(look);
+      });
+      observer.observe(document, { attributes: true, childList: true, subtree: true });
+      setTimeout(() => observer.disconnect(), 5000);
+    })()`,
+  });
+  try {
+    await page.reload();
+    await expect(page.locator(".application")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { appearance: string[] }).appearance.length)).toBeGreaterThan(0);
+    await page.waitForTimeout(1000);
+    expect(await page.evaluate(() => (window as unknown as { appearance: string[] }).appearance)).toEqual(["ar rtl light ocean 18px"]);
+  } finally {
+    await cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    await cdp.detach();
+  }
+
+  // Before the app applies the theme, the page lets that window colour show, not its stylesheet's dark defaults.
+  const empty = await page.evaluate(() => {
+    const root = document.documentElement;
+    const saved = { theme: root.dataset.theme, palette: root.dataset.palette, style: root.getAttribute("style") };
+    delete root.dataset.theme;
+    delete root.dataset.palette;
+    root.removeAttribute("style");
+    (document.getElementById("root") as HTMLElement).style.visibility = "hidden";
+    const look = { body: getComputedStyle(document.body).backgroundColor, scheme: getComputedStyle(root).colorScheme };
+    (window as unknown as { restore: () => void }).restore = () => {
+      root.dataset.theme = saved.theme!;
+      root.dataset.palette = saved.palette!;
+      root.setAttribute("style", saved.style ?? "");
+      (document.getElementById("root") as HTMLElement).style.visibility = "";
+    };
+    return look;
+  });
+  expect(empty).toEqual({ body: "rgba(0, 0, 0, 0)", scheme: "normal" });
+  await page.screenshot({ path: test.info().outputPath("first-frame-light.png") });
+  await page.evaluate(() => (window as unknown as { restore: () => void }).restore());
+
+  // A main process busy elsewhere (a native dialog in another window) does not leave the window empty.
+  await app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> })._invokeHandlers;
+    const original = handlers.get("haarness:boot")!;
+    (globalThis as unknown as { bootHandler: unknown }).bootHandler = original;
+    handlers.set("haarness:boot", async (...args: unknown[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      return original(...args);
+    });
+  });
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator(".application")).toBeVisible({ timeout: 1500 });
+  } finally {
+    await app.evaluate(({ ipcMain }) => {
+      const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, unknown> })._invokeHandlers;
+      handlers.set("haarness:boot", (globalThis as unknown as { bootHandler: unknown }).bootHandler);
+    });
+  }
+  await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+  await page.evaluate(
+    (value) => window.haarness.preferences({ theme: value.theme, palette: value.palette, fontSize: value.fontSize, language: value.language }),
+    before,
+  );
+  await expect(page.locator("html")).toHaveAttribute("lang", before.language);
+});
+
 test("incremental Markdown retains live selection and completed blocks", async () => {
   await newSession();
   await send("::mdslow");
@@ -12362,20 +12644,72 @@ test("incremental Markdown retains live selection and completed blocks", async (
     range.selectNodeContents(element);
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
-    (window as any).__markdownSelected = element;
+    // Read as the next block lands, in the page: the turn ends half a second
+    // later and its saved reply replaces the live one, which a check made
+    // from the test afterwards could see on a loaded machine.
+    const reply = element.closest('[data-testid="streaming-reply"]')!;
+    const read = () => ({
+      landedAfterSelection: true,
+      sameNode: reply.querySelector("strong") === element,
+      selected: window.getSelection()?.toString(),
+    });
+    (window as any).__markdownEvidence = new Promise((resolve) => {
+      if (reply.querySelector("li")) return resolve({ ...read(), landedAfterSelection: false });
+      const observer = new MutationObserver(() => {
+        if (reply.querySelector("li")?.textContent !== "streams while working") return;
+        observer.disconnect();
+        resolve(read());
+      });
+      observer.observe(reply, { subtree: true, childList: true, characterData: true });
+    });
   });
-  await expect(live.locator("li")).toHaveText("streams while working");
-  const evidence = await live.evaluate((element) => ({
-    sameNode: element.querySelector("strong") === (window as any).__markdownSelected,
-    selected: window.getSelection()?.toString(),
-  }));
+  // The list lives in the live reply for half a second at most: wait for the
+  // page's own reading of it rather than for a poll to catch it there.
+  const evidence = await page.evaluate(() => (window as any).__markdownEvidence);
   await test.info().attach("live-selection", { body: JSON.stringify(evidence), contentType: "application/json" });
+  expect(evidence.landedAfterSelection).toBe(true);
   if (process.env.HAARNESS_MARKDOWN_BASELINE !== "1") {
     expect(evidence.sameNode).toBe(true);
     expect(evidence.selected).toBe("Live markdown");
   }
   await expect(live).toHaveCount(0);
   await expect(page.locator(".transcript article.assistant").last().locator("strong")).toHaveText("Live markdown");
+  expect(errors).toEqual([]);
+});
+
+test("text selected in a streaming reply stays selected, backward as made, when the saved reply takes its place, and copies", async () => {
+  await newSession();
+  await send("::mdslow");
+  const live = page.getByTestId("streaming-reply");
+  await expect(live.locator("strong")).toHaveText("Live markdown");
+  // "markdown", dragged from its end back to its start.
+  const before = await live.locator("strong").evaluate((element) => {
+    const text = element.firstChild as Text;
+    window.getSelection()!.setBaseAndExtent(text, 13, text, 5);
+    return document.activeElement?.outerHTML.slice(0, 80);
+  });
+  await app.evaluate(({ clipboard }) => clipboard.writeText("clipboard before copy"));
+  await expect(live).toHaveCount(0);
+  const saved = page.locator(".transcript article.assistant").last();
+  await expect(saved.locator("li")).toHaveText("streams while working");
+  await expect
+    .poll(() =>
+      saved.evaluate((element) => {
+        const selection = window.getSelection()!;
+        return {
+          text: selection.toString(),
+          inSaved: element.contains(selection.anchorNode) && element.contains(selection.focusNode),
+          anchor: selection.anchorOffset,
+          focus: selection.focusOffset,
+          active: document.activeElement?.outerHTML.slice(0, 80),
+        };
+      }),
+    )
+    .toEqual({ text: "markdown", inSaved: true, anchor: 13, focus: 5, active: before });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+C" : "Control+C");
+  await expect
+    .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe("markdown");
   expect(errors).toEqual([]);
 });
 

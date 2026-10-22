@@ -356,15 +356,18 @@ fn manifest_of(root: &Path) -> Result<MarketplaceManifest> {
     Ok(serde_json::from_str(&content)?)
 }
 
+/// A marketplace or plugin name becomes one folder under the plugins folder.
+/// A `:` is refused on every system: on Windows `C:` or `C:x` names a drive,
+/// and joining it replaces the whole path, so a marketplace's text could have
+/// pointed an install, or the removal before one, at another folder.
 fn safe_name(name: &str, kind: &str) -> Result<()> {
     if name.is_empty()
         || name == "."
         || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
+        || name.contains(['/', '\\', ':'])
         || name.chars().any(char::is_control)
     {
-        bail!("invalid {kind} name {name:?}");
+        bail!("invalid {kind} name {name:?}: use one folder name without /, \\ or :");
     }
     Ok(())
 }
@@ -999,6 +1002,41 @@ mod tests {
         remove(&data, "demo").unwrap();
         assert!(installed(&data).is_empty());
 
+        let _ = fs::remove_dir_all(&data);
+        let _ = fs::remove_dir_all(&market);
+    }
+
+    #[test]
+    fn a_marketplace_or_plugin_name_is_one_plain_folder_name() {
+        for name in ["C:", "C:x", "a:b", "..", ".", "a/b", "a\\b", "", "a\nb"] {
+            assert!(safe_name(name, "plugin").is_err(), "{name:?}");
+        }
+        for name in ["demo", "demo-plugin_2", "with.dot", "Ünïcode"] {
+            assert!(safe_name(name, "plugin").is_ok(), "{name:?}");
+        }
+        // A marketplace that names itself after a drive is not added, and a
+        // plugin named like one is not installed.
+        let data = std::env::temp_dir().join(format!("haarness-plugins-{}", uuid::Uuid::now_v7()));
+        let market = std::env::temp_dir().join(format!("haarness-market-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(market.join(".claude-plugin")).unwrap();
+        fs::write(
+            market.join(".claude-plugin/marketplace.json"),
+            r#"{"name": "C:", "plugins": []}"#,
+        )
+        .unwrap();
+        let error = marketplace_add(&data, market.to_str().unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid marketplace name \"C:\""),
+            "{error}"
+        );
+        assert!(marketplaces(&data).is_empty());
+        fixture_marketplace(&market);
+        marketplace_add(&data, market.to_str().unwrap()).unwrap();
+        let error = install(&data, "C:demo@fixture").unwrap_err();
+        assert!(error.to_string().contains("invalid plugin name"), "{error}");
+        assert!(!plugins_root(&data).join("cache").exists());
         let _ = fs::remove_dir_all(&data);
         let _ = fs::remove_dir_all(&market);
     }

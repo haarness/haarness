@@ -316,12 +316,16 @@ impl ModelProvider for AnthropicProvider {
         }
         let mut tools: Vec<_> = requested_tools.into_iter().map(|tool| json!({"name":tool.name,"description":tool.description,"input_schema":tool.input_schema})).collect();
         // Prompt caching: mark the stable prefix (tools + system) and the last
-        // two non-assistant messages so multi-round loops reuse the cache.
-        if let Some(last) = tools.last_mut() {
+        // two non-assistant messages so multi-round loops reuse the cache. A
+        // request nothing reads back (a compaction summary) writes no entry.
+        let cached = !request.parameters.uncached;
+        if cached && let Some(last) = tools.last_mut() {
             last["cache_control"] = json!({"type":"ephemeral"});
         }
-        let system =
-            json!([{"type":"text","text":request.system,"cache_control":{"type":"ephemeral"}}]);
+        let mut system = json!([{"type":"text","text":request.system}]);
+        if cached {
+            system[0]["cache_control"] = json!({"type":"ephemeral"});
+        }
         let mut messages: Vec<_> = request
             .messages
             .into_iter()
@@ -410,7 +414,7 @@ impl ModelProvider for AnthropicProvider {
             })
             .collect::<CoreResult<_>>()?;
         let mut marked = 0;
-        for message in messages.iter_mut().rev() {
+        for message in messages.iter_mut().rev().filter(|_| cached) {
             if marked == 2 {
                 break;
             }
@@ -1493,6 +1497,61 @@ mod tests {
             messages[3]["content"][0]["cache_control"]["type"], "ephemeral",
             "the cache breakpoint lands on a block that is sent"
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_nothing_reads_back_marks_no_cache_breakpoints() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/messages", post(messages))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        for uncached in [false, true] {
+            let request = ProviderRequest {
+                model: "claude-test".into(),
+                system: "summarize".into(),
+                messages: vec![
+                    ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "the conversation".into(),
+                    },
+                    ProviderMessage::Text {
+                        role: "assistant".into(),
+                        content: "a reply".into(),
+                    },
+                    ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "Summarize this conversation".into(),
+                    },
+                ],
+                tools: vec![haarness_core::ToolDefinition {
+                    name: "read".into(),
+                    description: "read".into(),
+                    input_schema: json!({"type": "object"}),
+                }],
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters {
+                    uncached,
+                    ..haarness_core::RequestParameters::default()
+                },
+                output_schema: None,
+            };
+            provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+        }
+        let requests = state.0.lock();
+        let marks = |request: &Value| request.to_string().matches("cache_control").count();
+        // Tools, system and the two user turns.
+        assert_eq!(marks(&requests[0]), 4, "{}", requests[0]);
+        assert_eq!(marks(&requests[1]), 0, "{}", requests[1]);
+        assert_eq!(requests[1]["system"][0]["text"], "summarize");
     }
 
     #[tokio::test]

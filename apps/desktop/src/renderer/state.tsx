@@ -1,4 +1,10 @@
 import { previewInfo } from "./preview-actions";
+import {
+  RECONNECT_BASE_MS,
+  createReconnectWait,
+  isWake,
+  onReconnectHint,
+} from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
@@ -42,7 +48,13 @@ import {
   type DesktopEvent,
   type NotificationTarget,
 } from "../shared";
-import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
+import {
+  cloudServers,
+  localServer,
+  serverAfterRemoval,
+  serverKey,
+  serverProjects,
+} from "../servers";
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
 import {
   archivedByReader,
@@ -139,6 +151,9 @@ interface State extends Live {
   } | null;
   terminal: boolean;
   ready: boolean;
+  /** The project's model choices are still on their way: the server may
+   * wait up to 10 s for a signed-in provider's list. */
+  catalogLoading: boolean;
   openingProject: string;
   /** A switch to another project or checkout is under way, from the click
    * on, before `openingProject` names it. */
@@ -161,7 +176,8 @@ interface State extends Live {
   drafts: Record<string, string>;
   catalogVersion: number;
 }
-function createApp() {
+/** `saved` is the settings index.tsx read before the first render. */
+function createApp(saved?: Preferences) {
   const [state, set] = createStore<State>({
     modelRecents: [],
     approvalModes: {},
@@ -177,7 +193,9 @@ function createApp() {
     servers: [],
     activeServer: "local",
     remoteProjectRequest: null,
-    preferences: { ...defaults },
+    // The window opens in its saved theme, palette, text size and language,
+    // never the defaults first.
+    preferences: { ...defaults, ...saved },
     version: "",
     platform: "",
     selected: "",
@@ -204,6 +222,7 @@ function createApp() {
     fileRequest: null,
     terminal: false,
     ready: false,
+    catalogLoading: false,
     openingProject: "",
     switching: false,
     openingChat: 0,
@@ -225,8 +244,18 @@ function createApp() {
   let navigation = 0;
   let hydration = 0,
     connectAttempt = 0,
-    reconnectAttempt = 0,
     stopped = false;
+  const reconnectWait = createReconnectWait();
+  /** A reconnect waits for its timer, due at `retryDue`. */
+  let retryPending = false,
+    retryDue = 0;
+  /** The open project lost its connection and is connecting again (not the
+   * first connection of a project being opened). */
+  let recovering = false;
+  /** A quiet subscription is being asked for (`resubscribe`). */
+  let renewing = false;
+  /** A stream main said opened before its subscription was known here. */
+  let openedEarly = "";
   const journals = new Set<T.EventEnvelope[]>();
   // The latest history read of the open chat after a revert or compaction;
   // an older one landing later is dropped.
@@ -470,7 +499,24 @@ function createApp() {
     },
   });
   let catalogRequest = 0;
-  async function catalogs(force = false, knownInfo?: T.ServerInfo) {
+  /** The newest catalog read, settled or not. */
+  let latestCatalog: Promise<void> = Promise.resolve();
+  /** The catalog an opening project is still loading. */
+  let catalogLoad: Promise<void> | undefined;
+  function catalogs(force = false, knownInfo?: T.ServerInfo) {
+    const read = readCatalogs(force, knownInfo);
+    latestCatalog = read.catch(() => {});
+    return read;
+  }
+  /** Settles once the newest catalog read has: a read overtaken by a later
+   * one (an `assets.updated` meanwhile) sets nothing itself. */
+  async function catalogsIn() {
+    for (let seen; seen !== latestCatalog; ) {
+      seen = latestCatalog;
+      await seen;
+    }
+  }
+  async function readCatalogs(force: boolean, knownInfo?: T.ServerInfo) {
     const request = ++catalogRequest;
     const current = generation;
     const values = await Promise.all([
@@ -604,20 +650,106 @@ function createApp() {
         await window.haarness.storage("session:" + state.connection.id, "");
     }
   }
-  function reconnect() {
+  /** Connects the open project again after `reconnectWait`'s wait. One wait
+   * at a time: the end of a stream and the server's resync ask for the same
+   * reconnect. `restart` begins a new wait, after a wake or a reset. */
+  function reconnect(restart = false) {
     if (stopped || !state.connection) return;
+    recovering = true;
     set("connectionStatus", "Reconnecting…");
+    if (retryPending && !restart) return;
     clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(
-      () => {
-        void hydrate().catch((error) => {
-          set("error", String(error));
-          reconnectAttempt++;
-          reconnect();
-        });
-      },
-      Math.min(30000, 500 * 2 ** Math.min(reconnectAttempt, 6)),
-    );
+    retryPending = true;
+    const delay = reconnectWait.next();
+    retryDue = Date.now() + delay;
+    reconnectTimer = setTimeout(() => {
+      retryPending = false;
+      const attempt = hydrate();
+      // A later attempt (a signal's, or another project's) replaced this one:
+      // its late failure says nothing about the connection now.
+      const operation = hydration;
+      void attempt.catch((error) => {
+        if (stopped || operation !== hydration) return;
+        set("error", String(error));
+        reconnect();
+      });
+    }, delay);
+  }
+  /** A wake (`wake`), the network coming back or the window showing again.
+   * A project connecting again tries again within half a second, superseding
+   * an attempt still in flight (the network may only now be back); a retry
+   * already due sooner is kept. A connected project is left alone, except
+   * that a wake subscribes it again quietly (`resubscribe`): its stream may
+   * have died while the computer slept. */
+  function hint(wake: boolean) {
+    if (stopped || !state.connection) return;
+    if (recovering) {
+      if (retryPending && retryDue - Date.now() <= RECONNECT_BASE_MS) return;
+      reconnectWait.reset();
+      reconnect(true);
+      return;
+    }
+    if (wake && state.connectionStatus === "Connected" && subscription)
+      void resubscribe();
+  }
+  onCleanup(onReconnectHint(() => hint(false)));
+  /** Subscribes the connected open project again from its last event, and
+   * keeps everything it shows: it stays Connected and nothing is read again.
+   * Another server instance, or a server out of reach, reconnects as a
+   * dropped stream does. */
+  async function resubscribe() {
+    if (renewing) return;
+    renewing = true;
+    const current = generation,
+      operation = ++hydration,
+      connection = state.connection!.id;
+    // A drop meanwhile has a full reconnect of its own waiting.
+    const valid = () =>
+      current === generation &&
+      operation === hydration &&
+      !stopped &&
+      !retryPending;
+    try {
+      const info = await api<T.ServerInfo>("info");
+      if (!valid()) return;
+      if (info.serverInstanceId !== lastInstance) {
+        forceSnapshot = true;
+        reconnectWait.ended();
+        reconnect();
+        return;
+      }
+      const previous = subscription;
+      // Events of both streams meanwhile are taken once, by event ID.
+      const id = await window.haarness.subscribe(connection, lastCursor);
+      if (!valid()) {
+        await window.haarness.unsubscribe(id);
+        return;
+      }
+      subscription = id;
+      if (openedEarly === id) reconnectWait.opened();
+      openedEarly = "";
+      if (previous) await window.haarness.unsubscribe(previous);
+    } catch {
+      if (!valid()) return;
+      reconnectWait.ended();
+      reconnect();
+    } finally {
+      renewing = false;
+    }
+  }
+  /** Leaves an open project that was removed from the sidebar (in another
+   * window, or with its server) while it reconnected: the project home of its
+   * server, or of this computer when the server is gone too. Unsaved file
+   * edits are asked about once; kept, they stay on screen with the project,
+   * which no longer reconnects, and the next project chosen leaves it. */
+  async function leaveRemovedProject() {
+    recovering = false;
+    clearTimeout(reconnectTimer);
+    retryPending = false;
+    const generationNow = generation;
+    if (!(await leaveSettings()) || !(await leaveWorkspace())) return;
+    if (generationNow !== generation) return;
+    await clearWorkspace(serverAfterRemoval(servers(), state.activeServer));
   }
   async function hydrate(knownInfo?: T.ServerInfo) {
     const current = generation,
@@ -625,6 +757,7 @@ function createApp() {
     const valid = () =>
       current === generation && operation === hydration && !stopped;
     clearTimeout(reconnectTimer);
+    retryPending = false;
     set("connectionStatus", "Connecting…");
     const previous = subscription;
     subscription = "";
@@ -635,10 +768,14 @@ function createApp() {
     } catch (error) {
       if (!valid()) return;
       if (!state.connection) throw error;
-      const view = await window.haarness.connect({
-        recent: state.connection.id,
-      });
-      if (!view || !valid()) return;
+      // Removed from the sidebar meanwhile (here or in another window), the
+      // project is left as a removal leaves it, not reconnected forever.
+      const gone = () => void leaveRemovedProject();
+      const id = state.connection.id;
+      if (!state.recent.some((item) => item.id === id)) return gone();
+      const view = await window.haarness.connect({ recent: id });
+      if (!valid()) return;
+      if (!view) return gone();
       set("connection", view);
       info = view.info;
     }
@@ -666,7 +803,12 @@ function createApp() {
       return;
     }
     subscription = id;
-    reconnectAttempt = 0;
+    if (openedEarly === id) reconnectWait.opened();
+    openedEarly = "";
+    // Connected: a retry a signal asked for meanwhile is not needed.
+    clearTimeout(reconnectTimer);
+    retryPending = false;
+    recovering = false;
     set("connectionStatus", "Connected");
   }
   createEffect(() => applyLanguage(state.preferences.language));
@@ -771,6 +913,8 @@ function createApp() {
     ++hydration;
     activation = undefined;
     clearTimeout(reconnectTimer);
+    retryPending = false;
+    recovering = false;
     const previous = subscription;
     subscription = "";
     tabHistory = [];
@@ -1338,6 +1482,11 @@ function createApp() {
       forceSnapshot = true;
       lastCursor = 0;
       lastInstance = "";
+      reconnectWait.reset();
+      // The project before had a reconnect of its own waiting.
+      recovering = false;
+      clearTimeout(reconnectTimer);
+      retryPending = false;
       selection++;
       batch(() => {
         set("ready", false);
@@ -1380,9 +1529,25 @@ function createApp() {
       if (state.expandedProjects[projectKey(view)] === undefined)
         await expandProject(projectKey(view), true);
       if (!valid()) return false;
-      // establish() has just verified this connection. Reuse that snapshot
-      // and load chat state and model choices together on remote connections.
-      await Promise.all([hydrate(view.info), catalogs(false, view.info)]);
+      // establish() has just verified this connection. Reuse that snapshot.
+      // The model choices come when they come: the project opens without
+      // them, and the composer says it is loading models meanwhile.
+      set("catalogLoading", true);
+      const loading: Promise<void> = (catalogLoad = catalogs(false, view.info)
+        .then(catalogsIn)
+        .catch((error) => {
+          if (valid()) set("error", String(error));
+        })
+        .finally(() => {
+          if (catalogLoad === loading) set("catalogLoading", false);
+        }));
+      await hydrate(view.info);
+      // On a quick network the choices are in by now: the composer shows the
+      // model at once, as before, instead of a "Loading models…" flash.
+      await Promise.race([
+        loading,
+        new Promise((resolve) => setTimeout(resolve, 300)),
+      ]);
       if (!valid()) return false;
       const remembered = await rememberedTabs;
       if (!valid()) return false;
@@ -1826,8 +1991,22 @@ function createApp() {
       event.kind === "connection" &&
       (!event.connection || event.connection === state.connection?.id)
     ) {
+      // Main says when a stream's response arrived: only a stream that stayed
+      // open from then counts as working (see `createReconnectWait`).
+      if (event.data === "opened" && event.id) {
+        if (event.id === subscription) reconnectWait.opened();
+        else openedEarly = event.id;
+        return;
+      }
+      if (isWake(event)) {
+        hint(true);
+        return;
+      }
       if (event.id && event.id !== subscription) return;
-      reconnect();
+      // The stream ended, or (with no stream named) a reconnect was asked for.
+      if (event.id) reconnectWait.ended();
+      else reconnectWait.reset();
+      reconnect(!event.id);
       return;
     }
     if (event.kind !== "server" || event.connection !== state.connection?.id)
@@ -1835,12 +2014,14 @@ function createApp() {
     const item = event.data as T.EventEnvelope | { type: "resync_required" };
     if (item.type === "resync_required") {
       forceSnapshot = true;
+      reconnectWait.ended();
       reconnect();
       return;
     }
     const envelope = item as T.EventEnvelope;
     if (envelope.serverInstanceId !== lastInstance) {
       forceSnapshot = true;
+      reconnectWait.ended();
       reconnect();
       return;
     }
@@ -2012,6 +2193,8 @@ function createApp() {
     hydrate,
     rememberModel,
     catalogs,
+    /** Settles once an opening project's model choices are in. */
+    catalogsSettled: () => catalogLoad ?? Promise.resolve(),
     settings,
     boot,
     ordered,
@@ -2069,8 +2252,8 @@ function createApp() {
 }
 type AppContext = ReturnType<typeof createApp>;
 const Context = createContext<AppContext>();
-export const AppProvider = (props: ParentProps) => (
-  <Context.Provider value={createApp()}>{props.children}</Context.Provider>
+export const AppProvider = (props: ParentProps<{ preferences?: Preferences }>) => (
+  <Context.Provider value={createApp(props.preferences)}>{props.children}</Context.Provider>
 );
 export function useApp() {
   return useContext(Context)!;

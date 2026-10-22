@@ -71,6 +71,8 @@ pub(crate) async fn run(
             .id()
             .ok_or_else(|| CoreError::Tool("shell process did not start".into()))?,
     );
+    // Stopped by the next server should this one die before it can.
+    let _recorded = haarness_core::process_groups::recorded(child.id());
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut tail = Vec::new();

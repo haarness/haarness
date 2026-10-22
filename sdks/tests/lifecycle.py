@@ -95,20 +95,21 @@ try:
             server.client.chat(thread["id"], "Owned server")["text"]
             == "Echo: Owned server"
         )
-        pid = server._process.pid
-        # Ownership conflict must not stop the already-running server.
-        try:
-            LocalServer.start(
-                str(fixture.workspace),
-                executable=str(BINARY),
-                data_dir=str(fixture.data),
-                env=fixture.env,
-                startup_timeout=5,
+        # A second start in the same folder is a front for its server: the
+        # same chats at its own address, and closing it stops only the front.
+        with LocalServer.start(
+            str(fixture.workspace),
+            executable=str(BINARY),
+            data_dir=str(fixture.data),
+            env=fixture.env,
+            startup_timeout=5,
+        ) as front:
+            assert front.client.base_url != server.client.base_url
+            assert (
+                front.client.chat(thread["id"], "Through the front")["text"]
+                == "Echo: Through the front"
             )
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("Unexpected duplicate server")
+        assert front._process.poll() is not None
         assert server.client.info()["name"] == "haarness"
     assert server._process.poll() is not None
 

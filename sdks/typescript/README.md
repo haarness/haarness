@@ -33,16 +33,21 @@ are never automatically retried. Reuse a requestId for an intentional idempotent
 turn retry. ApiError exposes status/code/retryable/body; network and decoding
 failures use TransportError. Cancellation preserves AbortError/TimeoutError.
 
-`events({after, reconnect, signal})` is an async iterator. Capture
+`events({after, reconnect, signal, idleTimeoutMs})` is an async iterator. Capture
 `info().eventCursor` before hydrating REST snapshots. A `resync_required` event
-ends iteration; rehydrate and reconnect with a fresh cursor. Closing a client
+ends iteration; rehydrate and reconnect with a fresh cursor. With
+`idleTimeoutMs`, a stream that sends nothing for that long (the server sends a
+keepalive every 15 s, so 45000 suits) counts as lost: it connects again from its
+cursor with `reconnect`, or ends with a TransportError; a wait that ran far past
+its time while the machine slept first gets one more window. Closing a client
 or event stream does not cancel server work. Use interruptTurn or
 interruptThreadTree explicitly. Handle approvals/questions concurrently through
 listPermissions/replyPermission and listQuestions/replyQuestion; no approvals
 are automatic.
 
-`connectPty(id, {cursor})` returns an async-iterable socket with send/close and
-cursor. Messages are binary output or replay/cursor control objects. Save
+`connectPty(id, {cursor})` returns an async-iterable socket with send/close,
+`ping(timeoutMs)` (false, and the socket closed, when the server does not
+answer in time: a connection that died without closing) and cursor. Messages are binary output or replay/cursor control objects. Save
 the last consumed cursor control's `end` value for replay. Closing detaches;
 deletePty terminates the process.
 
@@ -51,7 +56,8 @@ to 20 MiB total. Profile upload/download accepts/returns Uint8Array ZIP bytes.
 
 `await LocalServer.start({workspace, executable, dataDir})` returns an owned
 server with `.client`; `await server.close()` stops only that child. Existing
-workspace servers are never replaced. Project configuration loads by default; automatic tool approval remains a
+workspace servers are never replaced: in a folder whose server already runs, the
+child is a front for it at its own address. Project configuration loads by default; automatic tool approval remains a
 separate explicit choice.
 
 See [OPERATIONS.md](OPERATIONS.md) for every method. Server command execution is

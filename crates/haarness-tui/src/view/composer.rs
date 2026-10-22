@@ -581,6 +581,22 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         (variants, last)
     };
 
+    if app.following_stopped {
+        return detail(vec![
+            plain(
+                app.language
+                    .text(
+                        "not following the server · trying again in a minute, or restart Haarness",
+                    )
+                    .to_owned(),
+                theme.danger,
+            ),
+            plain(
+                app.language.text("not following the server").to_owned(),
+                theme.danger,
+            ),
+        ]);
+    }
     if let Some(attempt) = app.connection_lost {
         let reconnecting = app.language.text("reconnecting").to_owned();
         // Counting attempts forever explains nothing: once a few have

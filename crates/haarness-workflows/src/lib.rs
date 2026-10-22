@@ -314,6 +314,8 @@ impl WorkflowExecutor {
             .spawn()
             .map_err(ExecutionErrorKind::Spawn)
             .map_err(bare_error)?;
+        // Stopped by the next server should this one die before it can.
+        let _recorded = haarness_core::process_groups::recorded(child.id());
         let stdout = child.stdout.take().ok_or_else(|| {
             bare_error(ExecutionErrorKind::Protocol(
                 "workflow child stdout was not piped".to_owned(),

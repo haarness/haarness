@@ -22,6 +22,8 @@ request into the shared chat so each connection proves itself at once.
    attempt, never as one of the drops that earn waits of minutes, and the
    attempts stay a heartbeat plus at most 10 s apart (the wait between
    attempts for five minutes after a working connection ends).
+6. Let Cloud refuse the host with a reason (403 and its error message): the
+   connector stops, and its output and `remote status` quote what Cloud said.
 """
 
 import datetime
@@ -92,6 +94,14 @@ def serve(port: int, chat: str, events: str, project: str) -> None:
 
     async def relay(request):
         bearer = request.headers.get("authorization", "")
+        # While this flag exists Cloud refuses the host, saying why, as it
+        # does for a computer signed in as someone else than its publisher.
+        if os.path.exists(os.path.join(os.path.dirname(events), "refuse")):
+            log("relay_refused")
+            return web.json_response(
+                {"code": "forbidden", "message": "Only the registered publisher can connect this host", "requestId": "r1", "retryable": False},
+                status=403,
+            )
         ws = web.WebSocketResponse(autoping=True)
         await ws.prepare(request)
         state["connected"] += 1
@@ -309,6 +319,20 @@ def main() -> None:
         # A heartbeat (25 s) and a wait of at most 10 s apart; a drop's cooldown would add a minute.
         assert max(gaps) < 50, gaps
         assert connector.poll() is None
+
+        # Cloud refuses the host and says why: the connector stops, naming it.
+        (root / "refuse").write_text("")
+        marker = len(connector_log.read_text())
+        cloud.kill()
+        cloud.wait()
+        cloud = start_cloud()
+        wait_for(lambda: connector.poll() is not None, 120, "the refused connector to stop")
+        reason = "Haarness Cloud refused this computer's connection: Only the registered publisher can connect this host"
+        refused_lines = [line for line in connector_log.read_text()[marker:].splitlines() if line.strip()]
+        listed = json.loads(subprocess.run(base + ["remote", "status", "--json"], capture_output=True, text=True, env=env, timeout=30).stdout)
+        result.update(refused_lines=refused_lines, refused_status=[item.get("error") for item in listed["items"]])
+        assert any(reason in line for line in refused_lines), refused_lines
+        assert any(reason in (item.get("error") or "") for item in listed["items"]), listed
         result["verdict"] = "PASS"
     finally:
         print(json.dumps(result, indent=2))

@@ -5,7 +5,7 @@ import { SettingRow as Row } from "./SettingRow";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
-import { t, languages } from "./i18n";
+import { formatNumber, t, languages } from "./i18n";
 import { InputSettings } from "./InputSettings";
 import { openServerConnection } from "./ServerConnect";
 import { ManagementPanel } from "./ManagementPanel";
@@ -997,7 +997,7 @@ function Providers() {
                       {modelName(provider.id, model.id, app.state.providers)}
                     </strong>{" "}
                     <code>{model.id}</code> ·{" "}
-                    {t("{count} context", { count: model.contextWindow?.toLocaleString() ?? t("Unknown") })}
+                    {t("{count} context", { count: model.contextWindow != null ? formatNumber(model.contextWindow) : t("Unknown") })}
                   </p>
                 )}
               </For>
@@ -1061,7 +1061,7 @@ function Models() {
                     {provider.name}
                   </ProviderLabel>
                 </td>
-                <td>{model.contextWindow?.toLocaleString() ?? "—"}</td>
+                <td>{model.contextWindow != null ? formatNumber(model.contextWindow) : "—"}</td>
                 <td>
                   {[
                     model.tools ? t("Tools") : "",
@@ -1315,8 +1315,8 @@ function Tools() {
       </Row>
       <p class="muted">
         {t("{advertised} advertised tokens · {saved} saved", {
-          advertised: catalog()?.estimatedAdvertisedTokens.toLocaleString() ?? "",
-          saved: catalog()?.estimatedSavedTokens.toLocaleString() ?? "",
+          advertised: catalog() ? formatNumber(catalog()!.estimatedAdvertisedTokens) : "",
+          saved: catalog() ? formatNumber(catalog()!.estimatedSavedTokens) : "",
         })}
       </p>
       <input

@@ -524,6 +524,154 @@ fn export(files: &[(PathBuf, u64)], output: &Path, full: bool) -> Result<(usize,
     Ok((packed.len(), skipped.len()))
 }
 
+/// What a server's stderr log may hold while its reader is behind.
+pub const STDERR_QUEUE_LIMIT: usize = 4 * 1024 * 1024;
+/// How long a stopping server waits for its queued stderr lines to go out.
+const STDERR_DRAIN: Duration = Duration::from_secs(1);
+
+/// A server's stderr log, written out by a thread of its own. A write to a
+/// pipe or terminal nobody reads (a paused terminal, a stalled SSH session,
+/// `serve 2>&1 | …` whose reader stopped) waits until it is read, and every
+/// request the server answered waited behind it: one stalled reader froze
+/// the server for every client. Lines now wait here instead, up to `limit`
+/// bytes; past it they are left out and counted, and the next line written
+/// says how many, so the log file (which has them all) explains the gap.
+pub struct StderrQueue {
+    sender: std::sync::mpsc::Sender<Vec<u8>>,
+    state: std::sync::Arc<QueueState>,
+}
+
+struct QueueState {
+    /// Bytes waiting to be written.
+    queued: std::sync::atomic::AtomicUsize,
+    /// Lines left out since the last one taken.
+    skipped: std::sync::atomic::AtomicUsize,
+    limit: usize,
+    /// Named in the line that reports left-out lines.
+    logs: String,
+}
+
+/// Whether this process's stderr log goes through a [`StderrQueue`]: a
+/// panic's message then reaches stderr through it (as a log line) and not
+/// by a write that could wait for a reader that stopped.
+pub static STDERR_QUEUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The queue's state, for [`stderr_drained`].
+static QUEUE: std::sync::OnceLock<std::sync::Arc<QueueState>> = std::sync::OnceLock::new();
+
+/// Whether nothing waits in the stderr queue, waiting up to `within` for it
+/// to go out. A reader that is there reads it within that; one that stopped
+/// leaves it waiting.
+pub fn stderr_drained(within: Duration) -> bool {
+    let Some(state) = QUEUE.get() else {
+        return true;
+    };
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if state.queued.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Held for the life of the process: dropped, it gives what is still
+/// queued up to a second to go out.
+pub struct StderrQueueGuard(std::sync::Arc<QueueState>);
+
+impl Drop for StderrQueueGuard {
+    fn drop(&mut self) {
+        let deadline = std::time::Instant::now() + STDERR_DRAIN;
+        while self.0.queued.load(std::sync::atomic::Ordering::Acquire) > 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// `writer` behind a queue of at most `limit` bytes; `None` when its
+/// thread cannot start, and the caller writes in place. `logs` is named in
+/// the line that reports left-out lines.
+pub fn stderr_queue<W: std::io::Write + Send + 'static>(
+    mut writer: W,
+    limit: usize,
+    logs: &Path,
+) -> Option<(StderrQueue, StderrQueueGuard)> {
+    use std::sync::atomic::Ordering;
+    let state = std::sync::Arc::new(QueueState {
+        queued: 0.into(),
+        skipped: 0.into(),
+        limit,
+        logs: logs.display().to_string(),
+    });
+    let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+    let _ = QUEUE.set(state.clone());
+    let worker = state.clone();
+    std::thread::Builder::new()
+        .name("haarness-stderr-log".into())
+        .spawn(move || {
+            for line in receiver {
+                // A reader that is gone for good fails every write; what is
+                // queued still drains, so the server never waits on it.
+                let _ = writer.write_all(&line);
+                let _ = writer.flush();
+                worker.queued.fetch_sub(line.len(), Ordering::AcqRel);
+            }
+        })
+        .ok()?;
+    Some((
+        StderrQueue {
+            sender,
+            state: state.clone(),
+        },
+        StderrQueueGuard(state),
+    ))
+}
+
+impl std::io::Write for &StderrQueue {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use std::sync::atomic::Ordering;
+        let state = &self.state;
+        if state.queued.fetch_add(buf.len(), Ordering::AcqRel) + buf.len() > state.limit {
+            state.queued.fetch_sub(buf.len(), Ordering::AcqRel);
+            state.skipped.fetch_add(1, Ordering::AcqRel);
+            return Ok(buf.len());
+        }
+        // The first line taken after a gap says how many were left out, so
+        // the notice stands where the gap is.
+        let mut line = Vec::with_capacity(buf.len());
+        let skipped = state.skipped.swap(0, Ordering::AcqRel);
+        if skipped > 0 {
+            let notice = format!(
+                "haarness: {skipped} log lines were left out here while this output was not read; {} has them all\n",
+                state.logs
+            );
+            state.queued.fetch_add(notice.len(), Ordering::AcqRel);
+            line.extend_from_slice(notice.as_bytes());
+        }
+        line.extend_from_slice(buf);
+        let length = line.len();
+        if self.sender.send(line).is_err() {
+            state.queued.fetch_sub(length, Ordering::AcqRel);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for StderrQueue {
+    type Writer = &'a StderrQueue;
+    fn make_writer(&'a self) -> Self::Writer {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +878,7 @@ mod tests {
             data.join("logs/haarness.log.2026-10-18"),
             "INFO request failed Authorization: Bearer sk-live-1234567890abcdef\n\
              WARN mcp: cannot reach https://mcp.example.com/sse?X-Amz-Signature=QUERYSECRET42 (refused)\n\
+             DEBUG discovery url: Url { scheme: \"https\", cannot_be_a_base: false, username: \"DEBUGUSER\", password: Some(\"DEBUGPASS\"), host: Some(Domain(\"mcp.example.com\")), port: None, path: \"/\", query: None, fragment: None }\n\
              ERROR key read failed: \"-----BEGIN RSA PRIVATE KEY-----\\nMIIEINLINEKEY\\n-----END RSA PRIVATE KEY-----\" rest\n\
              DEBUG loaded -----BEGIN PRIVATE KEY-----\n\
              MIIBLOCKLINEONE\n\
@@ -761,6 +910,8 @@ mod tests {
             "MIIBLOCKLINETWO",
             "lQPGBPGPLINE",
             "MHcCUTOFFLINE",
+            "DEBUGUSER",
+            "DEBUGPASS",
         ] {
             assert!(!log.contains(secret), "{secret} in {log}");
         }
@@ -797,5 +948,80 @@ mod tests {
             readme.contains("Mode: scrubbed") && readme.contains("logs/haarness.log.2026-10-18")
         );
         fs::remove_dir_all(data).unwrap();
+    }
+
+    /// A writer that takes nothing until it is let go, like a pipe or a
+    /// terminal nobody reads.
+    struct Stalled {
+        open: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for Stalled {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let (open, changed) = &*self.open;
+            let mut open = open.lock().unwrap();
+            while !*open {
+                open = changed.wait(open).unwrap();
+            }
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stalled_stderr_reader_never_holds_a_log_line_and_hears_what_it_missed() {
+        use std::io::Write as _;
+        let open = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let written = std::sync::Arc::default();
+        let stalled = Stalled {
+            open: open.clone(),
+            written: std::sync::Arc::clone(&written),
+        };
+        let (queue, guard) = stderr_queue(stalled, 64, Path::new("/data/logs")).unwrap();
+        let started = std::time::Instant::now();
+        // Far more than the queue holds, while nothing is read.
+        for line in 0..10_000 {
+            (&queue)
+                .write_all(format!("line {line:05}\n").as_bytes())
+                .unwrap();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a log write waited for the reader: {:?}",
+            started.elapsed()
+        );
+        // The reader catches up.
+        *open.0.lock().unwrap() = true;
+        open.1.notify_all();
+        (&queue).write_all(b"after\n").unwrap();
+        drop(guard);
+        let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        // The lines from before the gap, in order, then the notice, then
+        // the line after it.
+        let kept = lines
+            .iter()
+            .take_while(|line| line.starts_with("line "))
+            .count();
+        for (index, line) in lines[..kept].iter().enumerate() {
+            assert_eq!(*line, format!("line {index:05}"), "{text}");
+        }
+        assert_eq!(lines.len(), kept + 2, "{text}");
+        let notice = lines[kept];
+        assert!(notice.ends_with("/data/logs has them all"), "{notice}");
+        let skipped: usize = notice
+            .trim_start_matches("haarness: ")
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(kept + skipped, 10_000, "{text}");
+        assert_eq!(lines[kept + 1], "after");
+        assert!(text.ends_with("after\n"), "{text}");
     }
 }

@@ -17505,6 +17505,14 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
         )),
         "This folder isn’t a Git repository · /diff last shows the last turn’s changes"
     );
+    assert_eq!(
+        crate::commands::diff_error(&server(
+            422,
+            "tool_error",
+            "tool error: Git diff failed: this clone has not downloaded the files the review needs, and the review does not download them while project configuration is not trusted; run git backfill (Git 2.49 or later), then try again"
+        )),
+        "Review needs files this clone hasn’t downloaded yet · project configuration isn’t trusted; run git backfill (Git 2.49+), then /diff again"
+    );
     assert!(
         !crate::commands::diff_error(&server(422, "tool_error", "tool error: boom"))
             .contains("HTTP")
@@ -17588,6 +17596,7 @@ async fn ctrl_five_detaches_the_terminal_view() {
             pid: None,
             cols: 80,
             rows: 24,
+            created: false,
         },
     ]));
     crate::input::handle_key(
@@ -17613,6 +17622,7 @@ fn a_new_terminal_tab_can_take_focus() {
         pid: None,
         cols: 20,
         rows: 4,
+        created: false,
     };
     let (first, second, third) = (info("first"), info("second"), info("third"));
     let mut terminal =
@@ -18172,4 +18182,274 @@ fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
     // Once a provider of the user's own is connected, the hint goes away.
     app.providers[1].authenticated = true;
     assert!(!home(&app).contains("Replies come from"));
+}
+
+/// A model list that came after the first frame (Haarness Cloud, or an
+/// endpoint that lists its models only when asked, on a slow network): the
+/// TUI said it was loading models, not that nothing is connected, and the
+/// chat it opened meanwhile on a model it chose takes the model the list
+/// offers, instead of staying on a provider nobody connected.
+#[tokio::test]
+async fn a_model_list_that_comes_after_the_first_frame_gives_the_new_chat_its_model() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let thread = fixture_thread();
+    let slow = |models: Vec<haarness_protocol::ModelInfo>| ProviderInfo {
+        id: "slowlist".into(),
+        name: "Slow list".into(),
+        authenticated: true,
+        models,
+    };
+    let late = serde_json::to_string(&vec![slow(vec![haarness_protocol::ModelInfo {
+        id: "late-model".into(),
+        display_name: "Late model".into(),
+        reasoning: false,
+        reasoning_efforts: Vec::new(),
+        images: false,
+        video: false,
+        tools: true,
+        context_window: None,
+        max_output_tokens: None,
+        pricing: None,
+    }])])
+    .unwrap();
+    let updated = serde_json::to_string(&Thread {
+        provider: "slowlist".into(),
+        model: "late-model".into(),
+        ..thread.clone()
+    })
+    .unwrap();
+    let (asked, mut patches) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let body = if text.starts_with("GET /v1/providers ") {
+                late.as_str()
+            } else if text.starts_with("PATCH /v1/threads/") {
+                let _ = asked.send(text.clone());
+                updated.as_str()
+            } else {
+                "[]"
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    // As the first frame left it: the catalog had not come, and the TUI
+    // opened a chat on the server's default.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.models_loading = true;
+    app.auto_model = Some((thread.id, thread.provider.clone(), thread.model.clone()));
+    app.notice = "Loading models…".into();
+    let home = crate::view::home::masthead(&app, 100, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!home.contains("no provider connected"), "{home}");
+
+    app.reduce(
+        fixture_event(
+            "assets.updated",
+            thread.id,
+            thread.id,
+            serde_json::json!({"resource": "provider", "action": "models"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    let patch = patches.recv().await.unwrap();
+    assert!(
+        patch.contains(r#""provider":"slowlist""#) && patch.contains(r#""model":"late-model""#),
+        "{patch}"
+    );
+    assert_eq!(
+        (app.thread.provider.as_str(), app.thread.model.as_str()),
+        ("slowlist", "late-model")
+    );
+    assert!(app.any_provider_connected());
+    assert!(!app.models_loading);
+    assert_eq!(app.notice, "Ready");
+    server.abort();
+}
+
+/// A proxy that drops the event stream over and over: the status line says
+/// so each time, the toast once in 30 s.
+#[test]
+fn the_connection_lost_toast_shows_at_most_every_thirty_seconds() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.connection_dropped(1);
+    assert!(app.notification_toast.is_some());
+    assert_eq!(app.connection_lost, Some(1));
+    // Back, and dropped again at once.
+    app.notification_toast = None;
+    app.connection_lost = None;
+    app.connection_dropped(1);
+    assert_eq!(app.connection_lost, Some(1));
+    assert!(app.notification_toast.is_none(), "the toast flickered");
+    // Long enough after the last one.
+    app.connection_lost = None;
+    app.lost_toast_at = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(31));
+    app.connection_dropped(1);
+    assert!(app.notification_toast.is_some());
+}
+
+#[test]
+fn the_event_task_is_started_again_three_times_a_minute_at_most() {
+    let mut restarts = crate::Restarts::default();
+    assert_eq!(
+        (0..4)
+            .map(|_| restarts.again().is_some())
+            .collect::<Vec<_>>(),
+        [true, true, true, false]
+    );
+}
+
+/// The composer's temporary file reaches `$EDITOR` as one word, however its
+/// folder is named.
+#[cfg(unix)]
+#[test]
+fn the_external_editor_gets_its_file_as_one_word() {
+    let root = std::env::temp_dir().join(format!(
+        "haarness-editor-{} a b $(touch marker) it's",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("compose.md");
+    let status = crate::editor_command("printf '%s' edited >", &file)
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited");
+    assert!(!root.join("marker").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// After the task following the server's events ended by itself and started
+/// again, its first answer clears the red indicator; when it keeps ending,
+/// the status line says nothing retries, never "reconnecting".
+#[test]
+fn a_restarted_event_task_clears_the_indicator_and_one_that_stopped_says_so() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let status = |app: &App| {
+        app.lines((140, 30))
+            .last()
+            .map(line_text)
+            .unwrap_or_default()
+    };
+    app.connection_dropped(1);
+    assert!(status(&app).contains("reconnecting"), "{}", status(&app));
+    app.reconnected();
+    assert!(app.connection_lost.is_none());
+    assert!(!status(&app).contains("reconnecting"), "{}", status(&app));
+
+    app.connection_dropped(1);
+    app.stopped_following();
+    let text = status(&app);
+    assert!(!text.contains("reconnecting"), "{text}");
+    assert!(
+        text.contains("not following the server · trying again in a minute, or restart Haarness"),
+        "{text}"
+    );
+    // Tried again and answering: back to normal.
+    app.following_stopped = false;
+    app.connection_dropped(1);
+    app.reconnected();
+    assert!(!status(&app).contains("not following"), "{}", status(&app));
+}
+
+/// A configuration reload announces itself with `assets.updated`; the
+/// provider catalog the TUI then reads may wait up to 10 s on the server (a
+/// list being fetched). The TUI once waited for it inside its event loop:
+/// keys, redraws and streaming stalled.
+#[tokio::test]
+async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let thread = fixture_thread();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = vec![0_u8; 4096];
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                let slow =
+                    String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/providers ");
+                if slow {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+                let body = "[]";
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut catalogs) = tokio::sync::mpsc::channel(4);
+    app.catalog_tx = Some(sender);
+    let started = std::time::Instant::now();
+    app.reduce(
+        fixture_event(
+            "assets.updated",
+            thread.id,
+            thread.id,
+            serde_json::json!({"resource": "configuration", "action": "reload"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the loop waited {:?} for the catalog",
+        started.elapsed()
+    );
+    let arrived = tokio::time::timeout(std::time::Duration::from_secs(5), catalogs.recv())
+        .await
+        .expect("the catalog came")
+        .unwrap();
+    assert_eq!(arrived.map(|providers| providers.len()), Some(0));
+    server.abort();
 }

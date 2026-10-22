@@ -109,12 +109,17 @@ pub(crate) async fn run_diff_load(
 }
 
 /// A failed review in words that say what to do. A folder that is not a Git
-/// repository has no working-tree review, but its last turn still has one.
+/// repository has no working-tree review, but its last turn still has one. A
+/// partial clone missing files the review needs gets them with
+/// `git backfill`: the review never downloads them itself.
 pub(crate) fn diff_error(error: &anyhow::Error) -> String {
     let text = format!("{error:#}");
     if text.contains("not inside a Git worktree") {
         return "This folder isn’t a Git repository · /diff last shows the last turn’s changes"
             .into();
+    }
+    if text.contains("has not downloaded the files the review needs") {
+        return "Review needs files this clone hasn’t downloaded yet · project configuration isn’t trusted; run git backfill (Git 2.49+), then /diff again".into();
     }
     format!("Diff failed: {text}")
 }
@@ -2590,7 +2595,14 @@ impl App {
                     let _ = client.delete_pty(info.id).await;
                 }
                 let created = if create || terminals.is_empty() {
-                    let info = client.create_pty(&PtyCreateRequest::default()).await?;
+                    // `/terminal new` always opens one; a first terminal is
+                    // shared with a window that opens one at the same time.
+                    let info = client
+                        .create_pty(&PtyCreateRequest {
+                            if_none: !create,
+                            ..PtyCreateRequest::default()
+                        })
+                        .await?;
                     terminals.push(info.clone());
                     Some(info.id)
                 } else {

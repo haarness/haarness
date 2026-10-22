@@ -17,6 +17,8 @@ interface Memory {
 }
 interface Status {
   config: { enabled: boolean; indexLimit: number };
+  /** The settings file is there but could not be read: memory stays off. */
+  settingsUnreadable?: boolean;
   directory: string;
   revision: string;
   memories: Memory[];
@@ -98,6 +100,13 @@ export function MemoryDialog(props: { close: () => void }) {
                 </p>
               }
             >
+              <Show when={state()?.settingsUnreadable}>
+                <p class="muted" role="status">
+                  {t(
+                    "Memory is off because its settings file could not be read. Saving replaces it.",
+                  )}
+                </p>
+              </Show>
               <label class="memory-setting">
                 <span>
                   <strong>{t("Enable project memory")}</strong>

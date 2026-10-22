@@ -47,7 +47,7 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
             ),
             theme.muted,
         ));
-        if !app.any_provider_connected() {
+        if !app.any_provider_connected() && !app.models_loading {
             // The one thing standing between a fresh install and a first
             // prompt, said where the eye lands first.
             let language = app.language;
