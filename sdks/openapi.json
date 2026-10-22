@@ -3495,6 +3495,13 @@
       },
       "McpConfigureRequest": {
         "properties": {
+          "apps": {
+            "description": "Interactive apps (MCP App pages). `Some(false)` makes it a plain MCP\nserver to Haarness: it is not told that pages render, its results\ncarry no page and its `ui://` pages are not served. On when absent.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "args": {
             "items": {
               "type": "string"
@@ -3591,6 +3598,22 @@
       },
       "McpServerInfo": {
         "properties": {
+          "appTools": {
+            "description": "How many of the server's tools pair with an interactive page, while\nit is connected with its apps on.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "apps": {
+            "description": "`false` when the server's interactive apps (MCP App pages) are\nturned off in its configuration; absent while they are on.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "detail": {
             "type": [
               "string",

@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "MCP リソースを読み取り中",
   "Tried to read an MCP resource": "MCP リソースの読み取りを試みました",
   "List an MCP server's resources": "MCP サーバーのリソースを一覧表示",
-  "Read a resource from an MCP server": "MCP サーバーのリソースを読み取る"
+  "Read a resource from an MCP server": "MCP サーバーのリソースを読み取る",
+  "Interactive apps": "インタラクティブアプリ",
+  "Interactive apps for {name}": "{name} のインタラクティブアプリ",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "チャットでこのサーバーのページをツールの下に表示します。オフにするとツールはテキストで表示されます。",
+  "{name} app options": "{name} アプリのオプション",
+  "Turn off interactive apps for {server}": "{server} のインタラクティブアプリをオフにする",
+  "Interactive apps are off for {server}. Its tools show as text.": "{server} のインタラクティブアプリはオフです。ツールはテキストで表示されます。"
 }

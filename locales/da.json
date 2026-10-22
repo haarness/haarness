@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "Læser en MCP-ressource",
   "Tried to read an MCP resource": "Forsøgte at læse en MCP-ressource",
   "List an MCP server's resources": "Vis en MCP-servers ressourcer",
-  "Read a resource from an MCP server": "Læs en ressource fra en MCP-server"
+  "Read a resource from an MCP server": "Læs en ressource fra en MCP-server",
+  "Interactive apps": "Interaktive apps",
+  "Interactive apps for {name}": "Interaktive apps for {name}",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "Vis serverens sider under dens værktøjer i chats. Når det er slået fra, vises værktøjerne som tekst.",
+  "{name} app options": "Indstillinger for appen {name}",
+  "Turn off interactive apps for {server}": "Slå interaktive apps fra for {server}",
+  "Interactive apps are off for {server}. Its tools show as text.": "Interaktive apps er slået fra for {server}. Dens værktøjer vises som tekst."
 }

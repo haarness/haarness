@@ -2443,6 +2443,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled,
+            apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
         },
         "remote" => McpConfigureRequest {
             transport: "streamable_http".into(),
@@ -2458,6 +2459,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_client_id: optional_string(input, "oauthClientId").map(ToOwned::to_owned),
             oauth_scopes: string_array(input, "oauthScopes")?,
             enabled,
+            apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
         },
         _ => bail!("MCP type must be local or remote"),
     };
@@ -2505,6 +2507,14 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
     }
     if input.get("oauthScopes").is_some() {
         entry.oauth_scopes = string_array(input, "oauthScopes")?;
+    }
+    if let Some(apps) = input.get("apps") {
+        // On is the default and is saved as no setting at all.
+        entry.apps = match apps {
+            Value::Bool(false) => Some(false),
+            Value::Bool(true) | Value::Null => None,
+            _ => bail!("apps must be true or false"),
+        };
     }
     Ok(())
 }
@@ -3784,6 +3794,60 @@ mod tests {
             error.contains("\"mcp.twice.enabled\" is written more than once"),
             "{error}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interactive_apps_turn_off_as_a_setting_and_back_on_as_none() {
+        let (root, workspace, _, service) = isolated_service("mcp-apps-switch");
+        let file = workspace.join("haarness.json");
+        fs::write(
+            &file,
+            r#"{
+  // Servers for this project.
+  "mcp": {
+    "weather": {"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}"}}
+  }
+}
+"#,
+        )
+        .unwrap();
+        let read = || -> Value {
+            jsonc_parser::parse_to_serde_value(
+                &fs::read_to_string(&file).unwrap(),
+                &jsonc_parser::ParseOptions::default(),
+            )
+            .unwrap()
+        };
+        service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": false}))
+            .await
+            .unwrap();
+        // Only the switch is written; the reference stays as written.
+        assert_eq!(
+            read()["mcp"]["weather"],
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}"}, "apps": false})
+        );
+        assert_eq!(read_mcp_entry(&file, "weather").unwrap().apps, Some(false));
+        service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            read()["mcp"]["weather"],
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}"}})
+        );
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains("// Servers for this project.")
+        );
+        let error = service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": "no"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("apps must be true or false"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 

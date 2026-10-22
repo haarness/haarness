@@ -14,6 +14,7 @@ import { modelName } from "../model-names";
 import { Schedules } from "./Schedules";
 import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
+import { appsOff, noteMcpServers, offersApps, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
@@ -1360,8 +1361,11 @@ function Tools() {
 function Mcp(props: { cli: Cli }) {
   const app = useApp();
   const [rows, setRows] = createSignal<T.McpServerInfo[]>([]);
+  const connection = () => app.state.connection?.id ?? "";
   async function refresh() {
-    setRows(await app.api("mcpServers"));
+    const servers = await app.api<T.McpServerInfo[]>("mcpServers");
+    setRows(servers);
+    noteMcpServers(connection(), servers);
   }
   createEffect(() => {
     app.state.catalogVersion;
@@ -1464,6 +1468,25 @@ function Mcp(props: { cli: Cli }) {
                       }),
                   }))}
                 />
+                <Show when={offersApps(connection(), server)}>
+                  {/* Pages this server shows under its tools; off, it is a plain MCP server. */}
+                  <label
+                    class="mcp-apps-switch"
+                    title={t("Show this server's pages under its tools in chats. Off, its tools show as text.")}
+                  >
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      aria-label={t("Interactive apps for {name}", { name: server.name })}
+                      checked={!appsOff(connection(), server.name)}
+                      onChange={(event) => {
+                        const on = event.currentTarget.checked;
+                        void app.run(() => setApps(connection(), server.name, on));
+                      }}
+                    />
+                    <span>{t("Interactive apps")}</span>
+                  </label>
+                </Show>
               </Show>
             </div>
           </div>

@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "Čitanje MCP resursa",
   "Tried to read an MCP resource": "Pokušaj čitanja MCP resursa",
   "List an MCP server's resources": "Izlistati resurse MCP servera",
-  "Read a resource from an MCP server": "Pročitati resurs sa MCP servera"
+  "Read a resource from an MCP server": "Pročitati resurs sa MCP servera",
+  "Interactive apps": "Interaktivne aplikacije",
+  "Interactive apps for {name}": "Interaktivne aplikacije za {name}",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "Prikaži stranice ovog servera ispod njegovih alata u razgovorima. Kad je isključeno, alati se prikazuju kao tekst.",
+  "{name} app options": "Opcije aplikacije {name}",
+  "Turn off interactive apps for {server}": "Isključi interaktivne aplikacije za {server}",
+  "Interactive apps are off for {server}. Its tools show as text.": "Interaktivne aplikacije za {server} su isključene. Njegovi alati se prikazuju kao tekst."
 }

@@ -358,6 +358,13 @@ requires. Requests to Claude (Anthropic Messages, Bedrock, and Haarness Cloud
 routers) omit any tool whose root input schema has `oneOf`, `anyOf`, or `allOf`,
 or a root `type` other than `object`, which Claude rejects for the whole
 request. A WARN line names each such tool once per process.
+`apps: false` turns a server's interactive apps (MCP App pages) off: it is not
+told that pages render, its results carry no `mcp_app` page and a read of one
+of its `ui://` resources is refused (403); on is the default and is saved as
+no key. A server's status (`GET /v1/mcp`) carries `apps: false` while they are
+off and `appTools`, how many of its tools pair with a page, while it is
+connected with them on; both are absent otherwise, so older clients see the
+shape they knew.
 Connected servers expose tool list/call, resource and resource-template lists,
 resource reads, prompt lists, and prompt resolution through the corresponding
 `/v1/mcp/{name}/...` routes. Unsupported prompt/resource capabilities return

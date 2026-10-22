@@ -13,6 +13,8 @@ import {
 } from "solid-js";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
+import { useApp } from "./state";
+import { appsOff, loadMcpServers, mcpServersKnown, setApps } from "./mcp-servers";
 import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
 import {
   batchLabel,
@@ -107,8 +109,12 @@ export function ToolActivity(props: {
   const output = createMemo(
     () => props.result && toolOutput(props.name, props.result.output),
   );
-  // An MCP tool whose server pairs it with a page: the page shows under the row.
-  const app = createMemo<McpAppPayload | undefined>(
+  // An MCP tool whose server pairs it with a page: the page shows under the
+  // row, once its server's apps are known to be on. With them off the row is
+  // the plain tool, also for a result from before they were turned off.
+  const store = useApp();
+  const connection = () => store.state.connection?.id ?? "";
+  const payload = createMemo<McpAppPayload | undefined>(
     () => (props.nested || props.result?.is_error ? undefined : mcpAppPayload(props.name, props.result?.metadata)),
     undefined,
     {
@@ -116,6 +122,21 @@ export function ToolActivity(props: {
         a === b || (!!a && !!b && a.server === b.server && a.uri === b.uri && a.result === b.result),
     },
   );
+  const off = () => {
+    const value = payload();
+    if (!value) return false;
+    loadMcpServers(connection(), store.state.catalogVersion);
+    return !mcpServersKnown(connection()) || appsOff(connection(), value.server);
+  };
+  const app = createMemo(() => (off() ? undefined : payload()));
+  /** This row's own menu turned the apps off: it says so where the page was, with Undo. */
+  const [turnedOff, setTurnedOff] = createSignal(false);
+  const apps = (on: boolean) => {
+    const server = payload()?.server;
+    if (!server) return;
+    setTurnedOff(!on);
+    void store.run(() => setApps(connection(), server, on));
+  };
   return (
     <>
     <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<details
@@ -265,7 +286,29 @@ export function ToolActivity(props: {
       </Show>
     </details>}><PreviewBanner metadata={props.result?.metadata} /></Show>
     <Show when={app()} keyed>
-      {(value) => <McpAppView payload={value} arguments={props.args} callKey={props.id ?? value.uri} />}
+      {(value) => (
+        <McpAppView
+          payload={value}
+          arguments={props.args}
+          callKey={props.id ?? value.uri}
+          turnOff={store.state.connection?.remote ? undefined : () => apps(false)}
+        />
+      )}
+    </Show>
+    <Show when={turnedOff() && payload() && off() && mcpServersKnown(connection())}>
+      <div class="mcp-app mcp-app-off">
+        <div class="notice-inline mcp-app-notice" role="status">
+          <Icon name="eye-off" size="sm" />
+          <span>
+            {t("Interactive apps are off for {server}. Its tools show as text.", {
+              server: payload()!.server,
+            })}
+          </span>
+          <button class="mcp-app-action" onClick={() => apps(true)}>
+            {t("Undo")}
+          </button>
+        </div>
+      </div>
     </Show>
     </>
   );

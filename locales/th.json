@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "กำลังอ่านทรัพยากร MCP",
   "Tried to read an MCP resource": "พยายามอ่านทรัพยากร MCP",
   "List an MCP server's resources": "แสดงรายการทรัพยากรของเซิร์ฟเวอร์ MCP",
-  "Read a resource from an MCP server": "อ่านทรัพยากรจากเซิร์ฟเวอร์ MCP"
+  "Read a resource from an MCP server": "อ่านทรัพยากรจากเซิร์ฟเวอร์ MCP",
+  "Interactive apps": "แอปแบบโต้ตอบ",
+  "Interactive apps for {name}": "แอปแบบโต้ตอบของ {name}",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "แสดงหน้าของเซิร์ฟเวอร์นี้ใต้เครื่องมือในแชท เมื่อปิด เครื่องมือจะแสดงเป็นข้อความ",
+  "{name} app options": "ตัวเลือกของแอป {name}",
+  "Turn off interactive apps for {server}": "ปิดแอปแบบโต้ตอบของ {server}",
+  "Interactive apps are off for {server}. Its tools show as text.": "แอปแบบโต้ตอบของ {server} ปิดอยู่ เครื่องมือแสดงเป็นข้อความ"
 }

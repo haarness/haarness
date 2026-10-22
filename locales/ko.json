@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "MCP 리소스 읽는 중",
   "Tried to read an MCP resource": "MCP 리소스 읽기 시도",
   "List an MCP server's resources": "MCP 서버의 리소스 나열",
-  "Read a resource from an MCP server": "MCP 서버의 리소스 읽기"
+  "Read a resource from an MCP server": "MCP 서버의 리소스 읽기",
+  "Interactive apps": "인터랙티브 앱",
+  "Interactive apps for {name}": "{name}의 인터랙티브 앱",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "채팅에서 이 서버의 페이지를 도구 아래에 표시합니다. 끄면 도구가 텍스트로 표시됩니다.",
+  "{name} app options": "{name} 앱 옵션",
+  "Turn off interactive apps for {server}": "{server}의 인터랙티브 앱 끄기",
+  "Interactive apps are off for {server}. Its tools show as text.": "{server}의 인터랙티브 앱이 꺼져 있습니다. 도구가 텍스트로 표시됩니다."
 }

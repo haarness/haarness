@@ -1,6 +1,7 @@
 import { t, language } from "./i18n";
 import { useApp } from "./state";
 import { Icon } from "./ui";
+import { MenuButton } from "./MenuButton";
 import {
   Show,
   createEffect,
@@ -69,6 +70,8 @@ export function McpAppView(props: {
   arguments: unknown;
   /** Identifies the call, for the page's remembered height. */
   callKey: string;
+  /** Turns this server's interactive apps off; absent where that cannot be changed (a remote host). */
+  turnOff?: () => void;
 }) {
   const app = useApp();
   const connection = app.state.connection?.id ?? "";
@@ -359,6 +362,22 @@ export function McpAppView(props: {
       classList={{ bordered: page()?.meta.prefersBorder !== false }}
     >
       <span ref={probe} class="mcp-app-probe" aria-hidden="true" />
+      <Show when={props.turnOff}>
+        {(turnOff) => (
+          <div class="mcp-app-menu">
+            <MenuButton
+              icon="more"
+              label={t("{name} app options", { name: label() })}
+              items={[
+                {
+                  label: t("Turn off interactive apps for {server}", { server: props.payload.server }),
+                  run: turnOff(),
+                },
+              ]}
+            />
+          </div>
+        )}
+      </Show>
       <Show when={!failure() && !left()}>
         <div class="mcp-app-frame" style={{ height: `${height() || DEFAULT_HEIGHT}px` }}>
           <iframe
