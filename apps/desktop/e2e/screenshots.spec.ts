@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, symlink, utimes } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -25,6 +25,11 @@ const answer = (response: number) =>
 const click = () => page.getByRole("textbox", { name: "Message", exact: true }).click();
 const tile = (name: string) => dialog().getByRole("button", { name, exact: true });
 const chips = () => page.locator(".composer-attachments .attachment-name");
+/** A folder as the picker names it: from `~` when it is under the HOME Desktop runs with. */
+const shown = (folder: string) => {
+  const home = env.HOME || homedir();
+  return folder === home || folder.startsWith(home + "/") ? "~" + folder.slice(home.length) : folder;
+};
 
 test.beforeAll(async () => {
   test.setTimeout(240000);
@@ -121,7 +126,7 @@ test("picked screenshots are numbered and attach in the order they were picked",
   await expect(page.getByRole("menuitem", { name: "Attach files", exact: true })).toBeVisible();
   await page.getByRole("menuitem", { name: "Attach screenshots", exact: true }).click();
   await expect(dialog()).toBeVisible();
-  await expect(dialog().locator(".screenshot-folder-name")).toHaveText(shots.replace(/^\/Users\/[^/]+/, "~"));
+  await expect(dialog().locator(".screenshot-folder-name")).toHaveText(shown(shots));
   // Newest first; the hidden image and the text file are not offered.
   await expect(dialog().locator(".screenshot-name")).toHaveText(["Screenshot 3.png", "Screenshot 2.png", "Screenshot 1.png"]);
   await expect(tile("Screenshot 3.png")).toHaveAttribute("aria-description", "1 minute ago");
@@ -168,7 +173,7 @@ test("another folder can be picked from once, and Escape adds nothing", async ()
   await expect(dialog().locator(".screenshot-name")).toHaveText(["Screenshot 3.png", "Screenshot 2.png", "Screenshot 1.png"]);
   await dialog().getByRole("button", { name: "Choose folder…", exact: true }).click();
   await expect(dialog().locator(".screenshot-name")).toHaveText(["Elsewhere.png"]);
-  await expect(dialog().locator(".screenshot-folder-name")).toHaveText(other.replace(/^\/Users\/[^/]+/, "~"));
+  await expect(dialog().locator(".screenshot-folder-name")).toHaveText(shown(other));
   await tile("Elsewhere.png").click();
   await dialog().getByRole("button", { name: "Add 1 screenshot", exact: true }).click();
   await expect(chips()).toHaveText(["Screenshot 1.png", "Screenshot 3.png", "Elsewhere.png"]);
