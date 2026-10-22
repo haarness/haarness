@@ -452,6 +452,9 @@ impl OpenAiOAuthClient {
             .map_err(request_error)?;
         let device: DeviceCodeResponse =
             decode_response(response, "start device authorization").await?;
+        if device.user_code.contains(char::is_control) {
+            return Err(AuthError::OpenAi(DEVICE_CODE_REFUSED.into()));
+        }
         let interval = device.interval.parse::<u64>().unwrap_or(5).max(1);
         Ok(OpenAiDeviceLogin {
             client: self.clone(),
@@ -1781,6 +1784,29 @@ mod tests {
         assert_eq!(
             copilot,
             "GitHub Copilot sign-in failed: the sign-in server sent a link that is not http or https"
+        );
+        // ChatGPT's headless sign-in prints its code too.
+        let issuer = Router::new().route(
+            "/api/accounts/deviceauth/usercode",
+            post(|| async {
+                Json(serde_json::json!({"device_auth_id":"dev-1","user_code":"ABCD\u{1b}]0;x\u{7}","interval":"1"}))
+            }),
+        );
+        let issuer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer_address = issuer_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(issuer_listener, issuer).await.unwrap() });
+        let chatgpt = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            issuer: format!("http://{issuer_address}"),
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_device_login()
+        .await
+        .err()
+        .expect("the sign-in stops")
+        .to_string();
+        assert_eq!(
+            chatgpt,
+            "OpenAI sign-in failed: the sign-in server sent a code with control characters"
         );
         for (path, said) in [
             (
