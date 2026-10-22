@@ -44,6 +44,29 @@ one. A side chat always asks with the chat's own provider, model and agent.
 
 The CLI equivalent is `haarness btw <session-id> <question>`.
 
+## TUI
+
+`/btw <question>` opens the side chat and asks there; a bare `/btw` opens it,
+or brings the thread back. The side chat takes the whole terminal, like
+Review: the thread on top, in the transcript's own style (the question as a
+prompt block, the answer as a reply that streams as it is written), and a box
+of its own for the next question at the bottom.
+
+| Key | What it does |
+| --- | --- |
+| `enter` | Ask; `shift+enter` (or `alt+enter`, `ctrl+j`) adds a line |
+| `esc` | Back to the chat. An answer still being written keeps going, and `/btw` brings the thread back |
+| `ctrl+c` | Clear the box; with nothing to clear, stop the answer being written; then back to the chat |
+| `/clear` or `/new` (typed in the box) | Start a new thread |
+| `/copy` (typed in the box) | Copy the last answer |
+| `pgup` / `pgdn`, mouse wheel | Scroll the thread |
+
+Each chat has one side chat for as long as the TUI runs; leaving it keeps the
+thread and what you typed. Asking while an answer is still being written is
+refused with a notice, and a `/btw <question>` from the chat meanwhile leaves
+the question in the box. Against a server without `btw.stream.v1` the answer
+arrives in one piece.
+
 ## Isolation
 
 Tool schemas provide context only. Every attempted tool call is refused locally;
