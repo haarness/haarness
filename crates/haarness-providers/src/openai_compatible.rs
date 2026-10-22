@@ -82,7 +82,37 @@ pub struct CompatibleModelDefaults {
     pub max_output_tokens: Option<u64>,
 }
 
+/// The assistant-message fields a server streams its reasoning in, and takes
+/// it back in: `reasoning_content` (DeepSeek, llama.cpp, SGLang) or
+/// `reasoning` (vLLM, Ollama, LM Studio).
+const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
+
+/// Whether an assistant message's reasoning goes back to the server with it,
+/// so a model keeps its reasoning between tool calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReasoningReplay {
+    /// DeepSeek, Moonshot and Z.ai want `reasoning_content` on every
+    /// assistant message, empty when there was none.
+    Required,
+    /// A server the user set up gets back the reasoning it sent, in the field
+    /// it sent it in.
+    Observed,
+    /// A built-in service or a managed gateway: nothing is sent back that
+    /// its API does not document.
+    Never,
+}
+
 impl OpenAiCompatibleProvider {
+    fn reasoning_replay(&self) -> ReasoningReplay {
+        if matches!(self.id.as_str(), "deepseek" | "moonshotai" | "zai") {
+            ReasoningReplay::Required
+        } else if crate::compatible_preset(&self.id).is_none() && !self.server_output_limit {
+            ReasoningReplay::Observed
+        } else {
+            ReasoningReplay::Never
+        }
+    }
+
     #[must_use]
     pub fn new(instance: CompatibleInstance) -> Self {
         let model_defaults = instance.model_defaults;
@@ -1140,10 +1170,12 @@ fn push_tool_call_message(messages: &mut Vec<Value>, message: Value) {
                 }
             }
         }
-        if let Some(incoming) = message["reasoning_content"].as_str() {
-            let existing = previous["reasoning_content"].as_str().unwrap_or_default();
-            if existing != incoming {
-                previous["reasoning_content"] = json!(format!("{existing}{incoming}"));
+        for field in REASONING_FIELDS {
+            if let Some(incoming) = message[field].as_str() {
+                let existing = previous[field].as_str().unwrap_or_default();
+                if existing != incoming {
+                    previous[field] = json!(format!("{existing}{incoming}"));
+                }
             }
         }
     } else {
@@ -1232,8 +1264,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             )));
         }
         let model = request.model;
-        let replay_reasoning_content =
-            matches!(self.id.as_str(), "deepseek" | "moonshotai" | "zai");
+        let replay = self.reasoning_replay();
         let mut messages = vec![json!({"role":"system","content":request.system})];
         let mut tool_media = Vec::new();
         for message in request.messages {
@@ -1243,7 +1274,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             match message {
                 ProviderMessage::Text { role, content } => {
                     let mut message = json!({"role":role,"content":content});
-                    if replay_reasoning_content && role == "assistant" {
+                    if replay == ReasoningReplay::Required && role == "assistant" {
                         message["reasoning_content"] = json!("");
                     }
                     messages.push(message);
@@ -1275,12 +1306,31 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         // replayed byte-for-byte and in their original order.
                         message["reasoning_details"] = Value::Array(details.clone());
                     }
-                    if replay_reasoning_content {
-                        message["reasoning_content"] = json!(
-                            provider_metadata["reasoning_content"]
-                                .as_str()
-                                .unwrap_or_default()
-                        );
+                    // The reasoning goes back in the field the server sent
+                    // it in, so a model keeps its train of thought between
+                    // tool calls.
+                    match replay {
+                        ReasoningReplay::Required => {
+                            message["reasoning_content"] = json!(
+                                provider_metadata["reasoning_content"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                            );
+                            if let Some(reasoning) = provider_metadata["reasoning"].as_str() {
+                                message["reasoning"] = json!(reasoning);
+                            }
+                        }
+                        ReasoningReplay::Observed => {
+                            for field in REASONING_FIELDS {
+                                if let Some(reasoning) = provider_metadata[field]
+                                    .as_str()
+                                    .filter(|reasoning| !reasoning.is_empty())
+                                {
+                                    message[field] = json!(reasoning);
+                                }
+                            }
+                        }
+                        ReasoningReplay::Never => {}
                     }
                     if self.id == "mistral"
                         && let Some(content) = provider_metadata.get("mistral_content")
@@ -1412,6 +1462,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let mut usage: Option<(u64, u64, u64, u64)> = None;
             let mut reasoning_details: Vec<Value> = Vec::new();
             let mut reasoning_content = String::new();
+            // The field the server streamed its reasoning in, first seen.
+            let mut reasoning_field: Option<&'static str> = None;
             let mut mistral_content: Vec<Value> = Vec::new();
             // The last detail whose text reached the transcript, so a new
             // block can be separated from the one before it.
@@ -1467,12 +1519,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         }
                     }
                 }
-                let direct_reasoning = delta
-                    .get("reasoning_content")
-                    .and_then(Value::as_str)
-                    .or_else(|| delta.get("reasoning").and_then(Value::as_str))
-                    .filter(|reasoning| !reasoning.is_empty());
-                if let Some(reasoning) = direct_reasoning {
+                let direct_reasoning = REASONING_FIELDS.into_iter().find_map(|field| {
+                    delta
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .filter(|reasoning| !reasoning.is_empty())
+                        .map(|reasoning| (field, reasoning))
+                });
+                if let Some((field, reasoning)) = direct_reasoning {
+                    reasoning_field.get_or_insert(field);
                     reasoning_content.push_str(reasoning);
                     yield ProviderEvent::ReasoningDelta(reasoning.into());
                 }
@@ -1521,7 +1576,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
             let mut provider_metadata = json!({});
             if !reasoning_details.is_empty() { provider_metadata["reasoning_details"] = json!(reasoning_details); }
-            if replay_reasoning_content { provider_metadata["reasoning_content"] = json!(reasoning_content); }
+            match replay {
+                ReasoningReplay::Required => provider_metadata[reasoning_field.unwrap_or("reasoning_content")] = json!(reasoning_content),
+                // Structured details, when the server sends them, are what it
+                // takes back; the plain text would only repeat them.
+                ReasoningReplay::Observed => if let Some(field) = reasoning_field.filter(|_| reasoning_details.is_empty() && !reasoning_content.is_empty()) {
+                    provider_metadata[field] = json!(reasoning_content);
+                },
+                ReasoningReplay::Never => {}
+            }
             if !mistral_content.is_empty() { provider_metadata["mistral_content"] = json!(mistral_content); }
             if provider_metadata.as_object().is_some_and(|metadata| metadata.is_empty()) { provider_metadata = Value::Null; }
             // Report usage before the tool calls, whose arguments may not parse.
@@ -3024,6 +3087,144 @@ mod tests {
         assert_eq!(assistant["reasoning_details"], details);
         assert_eq!(assistant["tool_calls"][0]["id"], "previous-call");
         assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read");
+    }
+
+    /// A server that streams its reasoning in `field`, then calls `read`.
+    async fn reasoning_in_field(
+        State((state, field)): State<(FixtureState, &'static str)>,
+        Json(request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        state.0.lock().push(request);
+        let stream = [
+            json!({"choices":[{"delta":{field: "Look at "}}]}),
+            json!({"choices":[{"delta":{field: "the file first."}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]
+        .iter()
+        .map(|chunk| format!("data: {chunk}\n\n"))
+        .collect();
+        ([(CONTENT_TYPE, "text/event-stream")], stream)
+    }
+
+    /// Runs one round against a server streaming reasoning in `field` as
+    /// provider `id`, then sends that call back as history. Returns the
+    /// call's metadata and the assistant message of the second request.
+    async fn reasoning_round_trip(id: &str, field: &'static str) -> (Value, Value) {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(reasoning_in_field))
+            .with_state((state.clone(), field));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: id.into(),
+            name: "Reasoning fixture".into(),
+            base_url: format!("http://{address}"),
+            api_key: Some("fixture".into()),
+            models: vec!["thinker".into()],
+            discover_models: false,
+            server_output_limit: false,
+            model_defaults: CompatibleModelDefaults {
+                reasoning: Some(true),
+                ..CompatibleModelDefaults::default()
+            },
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        });
+        let request = |messages: Vec<ProviderMessage>| ProviderRequest {
+            model: "thinker".into(),
+            system: "sys".into(),
+            messages,
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let mut stream = provider
+            .stream(
+                request(vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "Read a.txt".into(),
+                }]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut metadata = Value::Null;
+        while let Some(event) = stream.next().await {
+            if let ProviderEvent::ToolCall {
+                provider_metadata, ..
+            } = event.unwrap()
+            {
+                metadata = provider_metadata;
+            }
+        }
+        let mut stream = provider
+            .stream(
+                request(vec![
+                    ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "Read a.txt".into(),
+                    },
+                    ProviderMessage::ToolCall {
+                        call_id: "call_a".into(),
+                        name: "read".into(),
+                        arguments: json!({"path": "a.txt"}),
+                        provider_metadata: metadata.clone(),
+                    },
+                    ProviderMessage::ToolResult {
+                        call_id: "call_a".into(),
+                        name: "read".into(),
+                        output: "contents".into(),
+                        is_error: false,
+                        attachments: Vec::new(),
+                    },
+                ]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let assistant = state.0.lock()[1]["messages"][2].clone();
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_a");
+        (metadata, assistant)
+    }
+
+    #[tokio::test]
+    async fn a_custom_server_gets_its_reasoning_back_in_the_field_it_used() {
+        // vLLM and Ollama stream and take `reasoning`.
+        let (metadata, assistant) = reasoning_round_trip("vllm-local", "reasoning").await;
+        assert_eq!(metadata, json!({"reasoning": "Look at the file first."}));
+        assert_eq!(assistant["reasoning"], "Look at the file first.");
+        assert!(assistant.get("reasoning_content").is_none(), "{assistant}");
+        // llama.cpp and SGLang use `reasoning_content`.
+        let (metadata, assistant) = reasoning_round_trip("llama-local", "reasoning_content").await;
+        assert_eq!(
+            metadata,
+            json!({"reasoning_content": "Look at the file first."})
+        );
+        assert_eq!(assistant["reasoning_content"], "Look at the file first.");
+        assert!(assistant.get("reasoning").is_none(), "{assistant}");
+    }
+
+    #[tokio::test]
+    async fn built_in_services_keep_their_documented_reasoning_fields() {
+        // A built-in service gets back nothing its API does not document.
+        let (metadata, assistant) = reasoning_round_trip("groq", "reasoning").await;
+        assert_eq!(metadata, Value::Null);
+        assert!(assistant.get("reasoning").is_none(), "{assistant}");
+        assert!(assistant.get("reasoning_content").is_none(), "{assistant}");
+        // DeepSeek still gets `reasoning_content` on every assistant message.
+        let (metadata, assistant) = reasoning_round_trip("deepseek", "reasoning_content").await;
+        assert_eq!(
+            metadata,
+            json!({"reasoning_content": "Look at the file first."})
+        );
+        assert_eq!(assistant["reasoning_content"], "Look at the file first.");
     }
 
     #[tokio::test]

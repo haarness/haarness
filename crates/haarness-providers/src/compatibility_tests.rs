@@ -456,6 +456,14 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
                     "enabled"
                 }
             );
+        } else if id == "custom" {
+            // A server of the user's own gets its reasoning back in the
+            // field it streamed it in; it is no DeepSeek, so no `thinking`.
+            assert!(body.get("thinking").is_none());
+            assert_eq!(
+                body["messages"][2]["reasoning_content"],
+                "Read the fixture."
+            );
         } else {
             assert!(body.get("thinking").is_none());
             assert!(body["messages"][2].get("reasoning_content").is_none());
