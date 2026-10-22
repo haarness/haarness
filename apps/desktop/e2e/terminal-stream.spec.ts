@@ -427,7 +427,7 @@ test("after the server is replaced, the terminal it no longer has gives way to o
       "local:" + workspace,
     );
     expect(handed).toMatchObject({ id: shell.id });
-    expect(handed.created).toBeFalsy();
+    expect(handed.created).toBe(false);
   }
   // Only the new terminal is listed, and it is the one shown and connected.
   for (const window of [page, second]) {

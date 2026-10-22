@@ -47,8 +47,10 @@ pub struct PtyInfo {
     pub rows: u16,
     /// True only in the answer to the create that started this terminal, so
     /// a client can tell a shell it started (whose output is all new to it)
-    /// from one an `ifNone` create handed back. Left out everywhere else.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// from one an `ifNone` create handed back. Always sent, so a client can
+    /// tell `false` from a server too old to say (whose create always starts
+    /// one).
+    #[serde(default)]
     pub created: bool,
 }
 
@@ -125,4 +127,31 @@ pub struct PtyCursor {
     /// when there are none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_terminal_always_says_whether_its_create_started_it() {
+        let info = PtyInfo {
+            id: PtyId::new(),
+            title: "zsh".into(),
+            command: "zsh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+            created: false,
+        };
+        let sent = serde_json::to_value(&info).unwrap();
+        assert_eq!(sent["created"], false);
+        // An older server says nothing; it reads as false here.
+        let mut older = sent;
+        older.as_object_mut().unwrap().remove("created");
+        assert!(!serde_json::from_value::<PtyInfo>(older).unwrap().created);
+    }
 }
