@@ -272,6 +272,17 @@ Pitfalls: Chrome disables a `--load-extension` extension that reloads itself (`D
 
 ## Release and Chrome Web Store publishing
 
+Every release also publishes Haarness for Chrome on its own, as product `chrome-extension` (one build for every
+platform, `os` and `arch` `any`): `scripts/release.py collect-extension` packages the unpacked folder as
+`haarness-chrome-<version>.zip` and signs the same zip into `haarness-chrome-<version>.crx` (CRX3, RSA SHA-256) with the
+private key below, refusing a folder of another version, a manifest `key` that is not the signing key's, or source
+files; `scripts/test-release-extension.py` covers it. The website's download page offers the zip with the
+`haarness browser setup` steps, and the release service's
+`/api/v1/releases/<channel>/chrome-extension/updates.xml` names the channel's CRX and its Chrome version, so an
+organization can install the extension with Chrome's `ExtensionInstallForcelist` policy
+(`accdjhmcgljbadpeanajllmcembhkomn;<that URL>`) without Developer mode. Either way, the native host still needs
+`haarness browser setup` (or Desktop) on each computer.
+
 There is no Web Store listing yet: `CHROME_WEB_STORE_URL` is `None`, `webStoreUrl` is `null`, and every client shows the Load unpacked steps. When a listing exists, set the constant; Desktop's setup dialog then shows a Web Store button instead of the steps, and the CLI and TUI print the URL.
 
 **The key.** The manifest `key` is the extension's public key, committed as one line of base64 so the unpacked ID is always `accdjhmcgljbadpeanajllmcembhkomn`. The private key never enters a repository. The release owner keeps it in a `.chrome-extension-key/` folder beside the checkouts: `key.pem` (the private key, mode 0600), `pub.der` and `pub.b64` (the public key; `pub.b64` is the manifest `key`) and `id.txt` (the ID derived from it). To derive the ID from the public key:
