@@ -14,29 +14,13 @@ import { Icon } from "./icons";
 import { Button } from "./ui";
 import { pasteLabel } from "./PromptContext";
 import { commandPrompt, countLines, sentParts } from "./prompt-context";
+import { isOpen, setOpen } from "./disclosure";
 import "./user-message.css";
 
 /** A prompt taller than this many lines folds to its first eight
  * (`user-message.css`), as the TUI folds one (`view/transcript.rs`), so a
  * fold always hides enough to be worth a click. */
 const FOLD_LINES = 12;
-
-/**
- * What a reader opened in a message: its fold, a paste, a command's prompt.
- * Kept by message for the session, so a row the transcript unmounts while
- * scrolling comes back as it was left.
- */
-const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
-const isOpen = (key: string) => opened().has(key);
-function setOpen(key: string, open: boolean) {
-  if (isOpen(key) === open) return;
-  setOpened((keys) => {
-    const next = new Set(keys);
-    if (open) next.add(key);
-    else next.delete(key);
-    return next;
-  });
-}
 
 /**
  * The words of the user's bubble. A slash command reads as the line typed,

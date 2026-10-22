@@ -2368,6 +2368,15 @@
           },
           {
             "properties": {
+              "duration_ms": {
+                "description": "How long the model thought before this text was complete: from\nthe request (or the text or tool call before it) to the end of the\nreasoning, read off a monotonic clock. Absent in records made\nbefore it was measured.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "text": {
                 "type": "string"
               },

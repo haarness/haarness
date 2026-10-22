@@ -446,6 +446,51 @@ async fn a_finished_request_records_its_first_token_time_and_streaming_span() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A thought records how long the model took over it, from the request (or
+/// the text before it) to the end of its reasoning, so a client can say
+/// "Thought for 3s".
+#[tokio::test]
+async fn reasoning_records_how_long_the_model_thought() {
+    let (server, provider, root) = server("thought").await;
+    let thread = server.thread().await;
+    provider.push_paced(vec![
+        (
+            300,
+            ProviderEvent::ReasoningDelta("Reading the request.".into()),
+        ),
+        (400, ProviderEvent::ReasoningDelta(" Deciding.".into())),
+        (300, ProviderEvent::TextDelta("First answer.".into())),
+        (600, ProviderEvent::ReasoningDelta("Second thought.".into())),
+        (200, ProviderEvent::TextDelta(" Second answer.".into())),
+        (0, finished()),
+    ]);
+    let id = server.start(&thread, "think").await;
+    server.wait(&thread, &id).await;
+    let items: Value = server
+        .client
+        .get(format!("{}/v1/threads/{}/items", server.base, thread.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let thoughts = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["data"]["type"] == "reasoning")
+        .map(|item| item["data"]["duration_ms"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(thoughts.len(), 2, "{items:?}");
+    // From the request to the end of the first reasoning, then from the
+    // first text to the end of the second.
+    assert!((700..10_000).contains(&thoughts[0]), "{thoughts:?}");
+    assert!((600..10_000).contains(&thoughts[1]), "{thoughts:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[tokio::test]
 async fn a_tool_call_is_timed_from_when_it_started_not_when_its_arguments_were_whole() {
     let (server, provider, root) = server("tool-timed").await;

@@ -342,6 +342,12 @@ command expands to once it runs (`item.updated`), which is what the model
 receives. Clients show `command_line` when it is present; messages saved
 before it was kept, and ordinary messages, have none.
 
+A `reasoning` item carries `duration_ms`, how long the model thought before
+that text was complete: from the request, or from the text or tool call
+before it in the same response, to the end of the reasoning, on a monotonic
+clock. Clients read it as "Thought for 12s"; records made before it was
+measured have none.
+
 MCP configuration accepts stdio, Streamable HTTP, and legacy SSE transports.
 Remote entries may set `oauth`, `oauthClientId`, and `oauthScopes`; bearer and
 refresh credentials never appear in the v1 wire configuration. A protected

@@ -3303,13 +3303,7 @@ impl App {
                 }
             }
             OptionsKind::ReasoningEffort => match value {
-                "display" => {
-                    self.reasoning = !self.reasoning;
-                    self.notice = format!(
-                        "Reasoning display {}",
-                        if self.reasoning { "enabled" } else { "hidden" }
-                    );
-                }
+                "display" => self.cycle_thinking(),
                 "off" => {
                     self.thread.ultracode = false;
                     self.reasoning_effort = None;
@@ -5038,13 +5032,12 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
         value: "ultracode".into(),
     });
     entries.push(OptionEntry {
-        label: if app.reasoning {
-            language.text("hide reasoning text").into()
-        } else {
-            language.text("show reasoning text").into()
-        },
+        label: language.format(
+            "Thinking display: {mode}",
+            &[("mode", app.thinking.label(language))],
+        ),
         description: language
-            .text("Toggle the thinking display in the transcript")
+            .text("Compact, Show or Hide · Enter or Ctrl+T switches")
             .into(),
         value: "display".into(),
     });
