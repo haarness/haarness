@@ -34,6 +34,8 @@ import { registerCyclePanel } from "./tab-cycle";
 
 // A quick hide/reopen can remount the panel before shell creation returns.
 // Share startup by connection so that gesture still opens exactly one shell.
+// Other windows on the project ask too (all at once after the server was
+// replaced): `ifNone` lets the server hand them all the same new shell.
 const openings = new Map<string, Promise<void>>();
 async function ensureTerminal(connection: string) {
   let pending = openings.get(connection);
@@ -45,8 +47,10 @@ async function ensureTerminal(connection: string) {
         [],
       );
       if (!tabs.length) {
+        // Whichever window started it, the shell is newer than the empty
+        // list, so all of its output is new here.
         const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
-          { cols: 100, rows: 20 },
+          { cols: 100, rows: 20, ifNone: true },
         ]);
         shownOutput.started(connection + ":" + item.id);
       }

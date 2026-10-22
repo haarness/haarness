@@ -3897,6 +3897,10 @@
               "null"
             ]
           },
+          "ifNone": {
+            "description": "Start a terminal only when the project has none running; otherwise\nreturn its oldest running one. Several windows opening \"a terminal\" at\nonce (after the server was replaced, say) then share one shell instead\nof starting one each.",
+            "type": "boolean"
+          },
           "rows": {
             "format": "int32",
             "minimum": 0,

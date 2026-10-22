@@ -90,6 +90,17 @@ impl PtyManager {
 
     pub fn create(&self, request: PtyCreateRequest) -> CoreResult<PtyInfo> {
         let mut sessions = self.inner.sessions.lock();
+        // Checked under the same lock a create holds, so concurrent requests
+        // for "a terminal" start one.
+        if request.if_none
+            && let Some(oldest) = sessions
+                .values()
+                .map(|session| session.info.lock().clone())
+                .filter(|info| info.status == PtyStatus::Running)
+                .min_by_key(|info| info.id.0)
+        {
+            return Ok(oldest);
+        }
         if request.cols == 0 || request.rows == 0 {
             return Err(CoreError::Invalid("PTY dimensions must be positive".into()));
         }
@@ -699,6 +710,57 @@ mod tests {
         }
         assert!(output.contains("chars=2 "), "{output:?}");
         assert!(output.contains("UTF-8"), "{output:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_opening_a_terminal_at_once_share_one_shell() {
+        let manager = PtyManager::new(std::env::current_dir().unwrap(), EventBus::new(64));
+        // A shell that already exited is no terminal to share.
+        let ended = manager
+            .create(PtyCreateRequest {
+                command: Some("/bin/sh".into()),
+                args: vec!["-c".into(), "true".into()],
+                ..PtyCreateRequest::default()
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.get(ended.id).unwrap().status != PtyStatus::Exited {
+            assert!(std::time::Instant::now() < deadline, "the shell exits");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let request = PtyCreateRequest {
+            command: Some("/bin/sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            if_none: true,
+            ..PtyCreateRequest::default()
+        };
+        let opened = std::thread::scope(|scope| {
+            let windows: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| manager.create(request.clone()).unwrap().id))
+                .collect();
+            windows
+                .into_iter()
+                .map(|window| window.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(manager.list().len(), 2, "one shell for every window");
+        assert!(opened.iter().all(|id| *id == opened[0]));
+        assert_ne!(opened[0], ended.id);
+        // An explicit New terminal still opens another; "a terminal" then
+        // keeps returning the oldest.
+        let second = manager
+            .create(PtyCreateRequest {
+                if_none: false,
+                ..request.clone()
+            })
+            .unwrap();
+        assert_ne!(second.id, opened[0]);
+        assert_eq!(manager.create(request).unwrap().id, opened[0]);
+        assert_eq!(manager.list().len(), 3);
+        for info in manager.list() {
+            manager.delete(info.id).unwrap();
+        }
     }
 
     #[cfg(unix)]

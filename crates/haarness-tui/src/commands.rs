@@ -2590,7 +2590,14 @@ impl App {
                     let _ = client.delete_pty(info.id).await;
                 }
                 let created = if create || terminals.is_empty() {
-                    let info = client.create_pty(&PtyCreateRequest::default()).await?;
+                    // `/terminal new` always opens one; a first terminal is
+                    // shared with a window that opens one at the same time.
+                    let info = client
+                        .create_pty(&PtyCreateRequest {
+                            if_none: !create,
+                            ..PtyCreateRequest::default()
+                        })
+                        .await?;
                     terminals.push(info.clone());
                     Some(info.id)
                 } else {
