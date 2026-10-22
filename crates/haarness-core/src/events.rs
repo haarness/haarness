@@ -156,8 +156,12 @@ pub fn join_delta(run: &mut EventEnvelope, next: &EventEnvelope) -> bool {
     if text.len() + more.len() > JOINED_DELTA_LIMIT {
         return false;
     }
-    let joined = format!("{text}{more}");
-    run.payload = serde_json::json!({ "delta": joined });
+    // Appended where the run's text already is: joining a long run costs the
+    // new text, not a copy of all of it.
+    let Some(Value::String(text)) = run.payload.get_mut("delta") else {
+        return false;
+    };
+    text.push_str(more);
     run.event_id = next.event_id;
     run.created_at = next.created_at;
     true
@@ -172,22 +176,55 @@ fn delta_text(payload: &Value) -> Option<&str> {
     fields.get("delta")?.as_str()
 }
 
-/// How much one connection's queue may hold, counted as text: a client
-/// stalled for minutes behind a fast stream fits, one that stopped reading
-/// does not hold more.
+/// How much memory one connection's queue may hold: a client stalled for
+/// minutes behind a fast stream fits, one that stopped reading does not hold
+/// more.
 pub const PENDING_EVENTS_LIMIT: usize = 16 * 1024 * 1024;
+
+/// What a queued entry costs beyond its text: the envelope's ids and names, a
+/// delta's parsed payload, the queue's own bookkeeping.
+const ENTRY_OVERHEAD: usize = 512;
+
+/// One event as a connection sends it: its id (none for `resync_required`),
+/// its name and its JSON text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedEvent {
+    pub id: Option<u64>,
+    pub name: String,
+    pub data: String,
+}
+
+impl EncodedEvent {
+    fn of(event: &EventEnvelope) -> Self {
+        Self {
+            id: Some(event.event_id),
+            name: event.event_type.clone(),
+            data: serde_json::to_string(event).expect("event serializes"),
+        }
+    }
+}
+
+enum Entry {
+    /// A delta, kept whole while later ones may still join it.
+    Delta(EventEnvelope),
+    /// Any other event, kept as the text it goes out as.
+    Encoded(EncodedEvent),
+}
 
 /// The events waiting for one connection, oldest first. The connection takes
 /// every event as it is published and keeps it here until its client reads
 /// it, so a client slower than the model never falls out of the bus's bounded
 /// queue; while deltas wait, each one continuing the run of the one before it
 /// joins it (see [`join_delta`]), so the client reads fewer, longer ones and
-/// catches up. Past its limit the queue gives up what it holds and the
-/// client must reload what it shows.
+/// catches up. Other events wait as the text they go out as, written once.
+/// Past its limit, or after the bus dropped events for it, the queue lets go
+/// of everything and holds only `resync_required`: the connection then ends,
+/// and its client reconnects from its cursor.
 pub struct PendingEvents {
-    entries: VecDeque<(EventEnvelope, usize)>,
+    entries: VecDeque<(Entry, usize)>,
     size: usize,
     limit: usize,
+    given_up: bool,
 }
 
 impl PendingEvents {
@@ -197,13 +234,18 @@ impl PendingEvents {
             entries: VecDeque::new(),
             size: 0,
             limit,
+            given_up: false,
         }
     }
 
-    /// Queue `event`, or join it onto the last one waiting. Past the limit
-    /// the queue empties and says how many events it let go.
+    /// Queue `event`, or join it onto the delta waiting last. Past the limit
+    /// the queue gives up (see [`Self::give_up`]) and says how many events it
+    /// let go. Once given up it takes nothing more.
     pub fn push(&mut self, event: EventEnvelope) -> Result<(), usize> {
-        if let Some((last, size)) = self.entries.back_mut() {
+        if self.given_up {
+            return Err(0);
+        }
+        if let Some((Entry::Delta(last), size)) = self.entries.back_mut() {
             let added = delta_text(&event.payload).map_or(0, str::len);
             if join_delta(last, &event) {
                 *size += added;
@@ -211,9 +253,20 @@ impl PendingEvents {
                 return self.within_limit();
             }
         }
-        let size = event_size(&event);
+        let delta = is_delta(&event)
+            .then(|| delta_text(&event.payload).map(str::len))
+            .flatten();
+        let (entry, size) = match delta {
+            Some(text) => (Entry::Delta(event), text),
+            None => {
+                let encoded = EncodedEvent::of(&event);
+                let size = encoded.data.len() + encoded.name.len();
+                (Entry::Encoded(encoded), size)
+            }
+        };
+        let size = size + ENTRY_OVERHEAD;
         self.size += size;
-        self.entries.push_back((event, size));
+        self.entries.push_back((entry, size));
         self.within_limit()
     }
 
@@ -221,17 +274,41 @@ impl PendingEvents {
         if self.size <= self.limit {
             return Ok(());
         }
-        let dropped = self.entries.len();
-        self.entries.clear();
-        self.size = 0;
-        Err(dropped)
+        Err(self.give_up())
     }
 
-    /// The oldest waiting event.
-    pub fn pop(&mut self) -> Option<EventEnvelope> {
-        let (event, size) = self.entries.pop_front()?;
+    /// Let go of every waiting event, and the memory they took, keeping only
+    /// `resync_required`; returns how many events went.
+    pub fn give_up(&mut self) -> usize {
+        let dropped = self.entries.len();
+        self.entries = VecDeque::from([(
+            Entry::Encoded(EncodedEvent {
+                id: None,
+                name: "resync_required".into(),
+                data: serde_json::json!({"type": "resync_required"}).to_string(),
+            }),
+            0,
+        )]);
+        self.size = 0;
+        self.given_up = true;
+        dropped
+    }
+
+    /// Whether the queue gave up: once what it holds is sent, the connection
+    /// ends.
+    #[must_use]
+    pub fn given_up(&self) -> bool {
+        self.given_up
+    }
+
+    /// The oldest waiting event, as it goes out.
+    pub fn pop(&mut self) -> Option<EncodedEvent> {
+        let (entry, size) = self.entries.pop_front()?;
         self.size -= size;
-        Some(event)
+        Some(match entry {
+            Entry::Delta(event) => EncodedEvent::of(&event),
+            Entry::Encoded(encoded) => encoded,
+        })
     }
 
     #[must_use]
@@ -243,17 +320,19 @@ impl PendingEvents {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// How much memory the waiting events take, as the limit counts it.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.size
+    }
 }
 
-/// About how much text `event` takes on the wire: its payload, plus the
-/// envelope's ids and names.
-fn event_size(event: &EventEnvelope) -> usize {
-    const ENVELOPE: usize = 320;
-    ENVELOPE
-        + delta_text(&event.payload).map_or_else(
-            || serde_json::to_vec(&event.payload).map_or(0, |text| text.len()),
-            str::len,
-        )
+fn is_delta(event: &EventEnvelope) -> bool {
+    matches!(
+        event.event_type.as_str(),
+        "turn.text_delta" | "turn.reasoning_delta"
+    )
 }
 
 #[cfg(test)]
@@ -357,7 +436,7 @@ mod tests {
         for event in events {
             pending.push(event).unwrap();
         }
-        let joined: Vec<_> = std::iter::from_fn(|| pending.pop()).collect();
+        let joined = drained(&mut pending);
         let shown: Vec<_> = joined
             .iter()
             .map(|event| {
@@ -422,6 +501,13 @@ mod tests {
         assert!(!join_delta(&mut extra, &small));
     }
 
+    /// What `pending` sends, read back as the events they were.
+    fn drained(pending: &mut PendingEvents) -> Vec<EventEnvelope> {
+        std::iter::from_fn(|| pending.pop())
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect()
+    }
+
     #[test]
     fn a_connection_that_reads_slowly_keeps_every_word_in_few_events() {
         let bus = EventBus::new(16);
@@ -454,27 +540,33 @@ mod tests {
                 json!({"delta": "after"}),
             ))
             .unwrap();
-        let mut text = String::new();
-        let mut kinds = Vec::new();
-        while let Some(event) = pending.pop() {
-            if event.event_type == "turn.text_delta" && kinds.last() != Some(&"item.created") {
-                text.push_str(event.payload["delta"].as_str().unwrap());
-            }
-            kinds.push(if event.event_type == "item.created" {
-                "item.created"
-            } else {
-                "delta"
-            });
-        }
+        // Counted as memory: the text, and a little per waiting event.
+        assert!(
+            pending.size() < written.len() + 8 * ENTRY_OVERHEAD,
+            "{}",
+            pending.size()
+        );
+        let events = drained(&mut pending);
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        let text: String = events[..events.len() - 2]
+            .iter()
+            .map(|event| event.payload["delta"].as_str().unwrap())
+            .collect();
         assert_eq!(text, written);
         // Joined at 64 KiB, the run takes a few events; another kind ends it.
         assert!(kinds.len() < 10, "{}", kinds.len());
-        assert_eq!(&kinds[kinds.len() - 2..], ["item.created", "delta"]);
-        assert!(pending.is_empty());
+        assert_eq!(
+            &kinds[kinds.len() - 2..],
+            ["item.created", "turn.text_delta"]
+        );
+        assert_eq!(pending.size(), 0);
     }
 
     #[test]
-    fn a_connection_that_stops_reading_gives_up_past_its_limit() {
+    fn a_connection_that_stops_reading_gives_up_past_its_limit_and_takes_nothing_more() {
         let bus = EventBus::new(16);
         let thread = ThreadId::new();
         let mut pending = PendingEvents::new(64 * 1024);
@@ -495,11 +587,60 @@ mod tests {
         }
         let (index, dropped) = overflowed.expect("the queue gives up");
         assert!(index < 10 && dropped == index + 1, "{index} {dropped}");
-        assert!(pending.is_empty());
-        // It takes events again afterwards.
+        assert!(pending.given_up());
+        // It holds only resync_required now, and takes nothing more: the
+        // connection ends once that is sent.
+        assert!(
+            pending
+                .push(bus.publish("item.created", Some(thread), None, None, json!({})))
+                .is_err()
+        );
+        let marker = pending.pop().unwrap();
+        assert_eq!((marker.id, marker.name.as_str()), (None, "resync_required"));
+        assert!(pending.pop().is_none());
+    }
+
+    #[test]
+    fn a_gap_in_what_the_bus_kept_leaves_only_resync_required() {
+        let bus = EventBus::new(16);
+        let thread = ThreadId::new();
+        let mut pending = PendingEvents::new(PENDING_EVENTS_LIMIT);
         pending
             .push(bus.publish("item.created", Some(thread), None, None, json!({})))
             .unwrap();
-        assert_eq!(pending.len(), 1);
+        // The bus dropped events for this connection: nothing older than the
+        // gap goes out after the marker, and nothing at all after it.
+        assert_eq!(pending.give_up(), 1);
+        let sent: Vec<_> = std::iter::from_fn(|| pending.pop())
+            .map(|event| event.name)
+            .collect();
+        assert_eq!(sent, ["resync_required"]);
+    }
+
+    #[test]
+    fn a_run_grows_where_its_text_is_instead_of_being_copied_for_each_delta() {
+        let bus = EventBus::new(16);
+        let (thread, turn) = (ThreadId::new(), TurnId::new());
+        let mut run = bus.publish("turn.text_delta", Some(thread), Some(turn), None, json!({}));
+        let mut text = String::with_capacity(JOINED_DELTA_LIMIT);
+        text.push('a');
+        // Built by hand: `json!` would copy the text and its spare room away.
+        let mut payload = serde_json::Map::new();
+        payload.insert("delta".into(), Value::String(text));
+        run.payload = Value::Object(payload);
+        let start = run.payload["delta"].as_str().unwrap().as_ptr();
+        for _ in 0..1000 {
+            let next = bus.publish(
+                "turn.text_delta",
+                Some(thread),
+                Some(turn),
+                None,
+                json!({"delta": "b"}),
+            );
+            assert!(join_delta(&mut run, &next));
+        }
+        let joined = run.payload["delta"].as_str().unwrap();
+        assert_eq!(joined.len(), 1001);
+        assert_eq!(joined.as_ptr(), start, "the run's text was copied");
     }
 }
