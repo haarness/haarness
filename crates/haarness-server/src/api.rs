@@ -1738,6 +1738,7 @@ async fn vcs_diff(
         query.context.unwrap_or(i32::MAX as u32),
         query.summary,
         query.path.as_deref(),
+        state.project_trusted,
     )
     .await
     .map_err(|error| CoreError::Tool(format!("Git diff failed: {error}")))?;

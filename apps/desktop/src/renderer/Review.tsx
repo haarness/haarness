@@ -753,7 +753,7 @@ export function Review(props: { compact?: boolean } = {}) {
                       }
                       detail={
                         known() === "download"
-                          ? t("Run git backfill in this folder to download them, then check again.")
+                          ? t("Project configuration isn’t trusted, so Review doesn’t download them. Run git backfill (Git 2.49 or later), then check again.")
                           : t("Review compares your working tree against version control. Initialise a repository to see changes here.")
                       }
                     >

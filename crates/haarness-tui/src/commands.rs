@@ -119,7 +119,7 @@ pub(crate) fn diff_error(error: &anyhow::Error) -> String {
             .into();
     }
     if text.contains("has not downloaded the files the review needs") {
-        return "Review needs files this clone hasn’t downloaded yet · run git backfill, then /diff again".into();
+        return "Review needs files this clone hasn’t downloaded yet · project configuration isn’t trusted; run git backfill (Git 2.49+), then /diff again".into();
     }
     format!("Diff failed: {text}")
 }
