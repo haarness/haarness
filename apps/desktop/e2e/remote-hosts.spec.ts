@@ -549,12 +549,13 @@ test("the switcher holds a row while it reads your computers, and one the accoun
     let page: Page;
     ({ app, page } = await launch(env, folders.local));
     // Signed in, the first read takes a moment: one quiet row holds the place.
-    cloud.state.listDelay = 1500;
+    cloud.state.listDelay = shots ? 4000 : 1500;
     await expect.poll(() => page.locator(".sidebar").textContent()).toContain("Remote hosts test");
     await page.getByRole("button", { name: "Switch server", exact: true }).click();
     const menu = page.getByRole("menu", { name: "Switch server" });
     const holder = menu.getByRole("menuitem", { name: "Looking for your computers…" });
     await expect(holder).toBeDisabled();
+    await shoot(page, "switcher-loading");
     await expect(menu.getByRole("menuitem", { name: "Studio", exact: true })).toBeVisible();
     await expect(holder).toHaveCount(0);
     cloud.state.listDelay = 0;
