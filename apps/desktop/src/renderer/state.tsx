@@ -48,7 +48,13 @@ import {
   type DesktopEvent,
   type NotificationTarget,
 } from "../shared";
-import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
+import {
+  cloudServers,
+  localServer,
+  serverAfterRemoval,
+  serverKey,
+  serverProjects,
+} from "../servers";
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
 import {
   archivedByReader,
@@ -707,6 +713,20 @@ function createApp() {
       renewing = false;
     }
   }
+  /** Leaves an open project that was removed from the sidebar (in another
+   * window, or with its server) while it reconnected: the project home of its
+   * server, or of this computer when the server is gone too. Unsaved file
+   * edits are asked about once; kept, they stay on screen with the project,
+   * which no longer reconnects, and the next project chosen leaves it. */
+  async function leaveRemovedProject() {
+    recovering = false;
+    clearTimeout(reconnectTimer);
+    retryPending = false;
+    const generationNow = generation;
+    if (!(await leaveSettings()) || !(await leaveWorkspace())) return;
+    if (generationNow !== generation) return;
+    await clearWorkspace(serverAfterRemoval(servers(), state.activeServer));
+  }
   async function hydrate(knownInfo?: T.ServerInfo) {
     const current = generation,
       operation = ++hydration;
@@ -726,10 +746,7 @@ function createApp() {
       if (!state.connection) throw error;
       // Removed from the sidebar meanwhile (here or in another window), the
       // project is left as a removal leaves it, not reconnected forever.
-      const gone = () => {
-        recovering = false;
-        void switchServer(state.activeServer);
-      };
+      const gone = () => void leaveRemovedProject();
       const id = state.connection.id;
       if (!state.recent.some((item) => item.id === id)) return gone();
       const view = await window.haarness.connect({ recent: id });
