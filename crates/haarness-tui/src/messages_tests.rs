@@ -42,6 +42,7 @@ fn messages_search_full_text_unicode_and_hide_internal_records() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     ));
     app.items.push(message_item(
@@ -52,6 +53,7 @@ fn messages_search_full_text_unicode_and_hide_internal_records() {
             attachments: vec![],
             queued: false,
             synthetic: true,
+            command_line: None,
         },
     ));
     app.items.push(message_item(

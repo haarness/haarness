@@ -13883,6 +13883,7 @@ request_timeout = 0
                         text: "new objective".into(),
                         attachments: Vec::new(),
                         synthetic: false,
+                        command_line: None,
                         queued: false,
                     },
                 ),

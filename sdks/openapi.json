@@ -2636,6 +2636,13 @@
                 },
                 "type": "array"
               },
+              "command_line": {
+                "description": "The line typed to run a slash command (`/review src/foo.rs`).\n`text` becomes the prompt the command expands to, which is what\nthe model receives; clients show this line instead. Absent for\nordinary messages and for messages saved before it was kept.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "queued": {
                 "description": "True when the message arrived while a turn was already running and\nwas queued for steering into that turn's next provider round.",
                 "type": "boolean"

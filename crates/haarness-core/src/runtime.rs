@@ -2156,6 +2156,7 @@ impl AgentRuntime {
                     attachments: request.attachments.clone(),
                     queued: true,
                     synthetic: request.synthetic,
+                    command_line: None,
                 },
             )
             .await?;
@@ -2838,6 +2839,7 @@ impl AgentRuntime {
                                 attachments: Vec::new(),
                                 queued: false,
                                 synthetic: true,
+                                command_line: None,
                             },
                             ItemData::Error {
                                 message: notice,
@@ -4900,6 +4902,9 @@ impl AgentRuntime {
         // command template cannot activate Ultracode accidentally.
         let keyword_ultracode = !request.synthetic && detects_ultracode_keyword(&request.text);
         let mut prepared_command = None;
+        // The store keeps the line a command was typed as; the runner
+        // expands the command itself, so it no longer travels on `request`.
+        let typed_command = request.command.clone();
         if let Some(name) = request.command.take() {
             let command = self
                 .live_commands
@@ -5014,14 +5019,16 @@ impl AgentRuntime {
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
+        let stored = StartTurnRequest {
+            command: typed_command,
+            ..request.clone()
+        };
         let (turn, user_item, created) = if let Some(revision) = queue_revision {
             self.repository
-                .start_queued_turn(thread_id, request.clone(), revision)
+                .start_queued_turn(thread_id, stored, revision)
                 .await?
         } else {
-            self.repository
-                .start_turn(thread_id, request.clone())
-                .await?
+            self.repository.start_turn(thread_id, stored).await?
         };
         if !created {
             return Ok(turn);
@@ -6900,6 +6907,7 @@ impl RunnerTask {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: true,
+                    command_line: None,
                 })
                 .await?;
             }
@@ -7648,6 +7656,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             queued: false,
                             synthetic: true,
+                            command_line: None,
                         })
                         .await?;
                         continue 'provider_round;
@@ -10230,6 +10239,7 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             attachments: Vec::new(),
             queued: false,
             synthetic: true,
+            command_line: None,
         },
         ItemData::Error {
             message: notice,
@@ -10786,6 +10796,7 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                 attachments,
                 queued,
                 synthetic,
+                ..
             } => {
                 // A user-authored message queued while the turn was already
                 // running is live steering input. Synthetic runtime delivery
@@ -13479,6 +13490,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13501,6 +13513,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13526,6 +13539,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13549,6 +13563,7 @@ mod tests {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         };
         let messages = provider_messages(vec![
             item(1, user("read the file")),
@@ -13619,6 +13634,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13634,6 +13650,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13665,6 +13682,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13696,6 +13714,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13715,6 +13734,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13826,6 +13846,7 @@ mod tests {
                 ],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -13850,6 +13871,7 @@ mod tests {
                     attachments: vec![source.clone()],
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13985,6 +14007,7 @@ mod tests {
                 attachments: vec![shot.into(), screen.into()],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )];
         items.extend(tool_round("call-image", shot).into_iter().map(|mut item| {
@@ -14112,6 +14135,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: true,
+                    command_line: None,
                 },
             ),
             item(
@@ -14121,6 +14145,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -14148,6 +14173,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let messages = provider_messages(vec![
@@ -14191,6 +14217,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let text_queued_id = text_queued.id;
@@ -14202,6 +14229,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             text_queued,
@@ -14247,6 +14275,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let tool_queued_id = tool_queued.id;
@@ -14311,6 +14340,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14335,6 +14365,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ];
@@ -14355,6 +14386,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14378,6 +14410,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ];
