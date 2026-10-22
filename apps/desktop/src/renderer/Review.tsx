@@ -20,6 +20,7 @@ import { Button, Icon, Empty } from "./ui";
 import { ReviewRows } from "./ReviewRows";
 import { InlineComment } from "./InlineComment";
 import { ReviewCache } from "./review-cache";
+import { reviewProblem } from "./review-problem";
 import { sessionKey } from "../projects";
 import { lines, split, patchText, type DiffLine } from "./diff";
 export function Review(props: { compact?: boolean } = {}) {
@@ -116,10 +117,7 @@ export function Review(props: { compact?: boolean } = {}) {
       if (id === generation) setLoading(false);
     }
   }
-  const noRepository = () =>
-    /not (?:inside a git worktree|a git repository)|workspace is not a directory/i.test(
-      problem(),
-    );
+  const known = () => reviewProblem(problem());
   app.registerSearch("review", () => [
     {
       key: "review-refresh",
@@ -589,7 +587,7 @@ export function Review(props: { compact?: boolean } = {}) {
   return (
     <section ref={root} class="review">
       {/* Keep refresh/source controls available after a transient read failure. */}
-      <Show when={!noRepository()}>
+      <Show when={known() !== "repository"}>
         <div class="panel-toolbar">
           <Button
             icon="filter"
@@ -739,7 +737,7 @@ export function Review(props: { compact?: boolean } = {}) {
                   }
                 >
                   <Show
-                    when={noRepository()}
+                    when={known()}
                     fallback={
                       <Empty
                         title={t("Changes are unavailable.")}
@@ -748,8 +746,16 @@ export function Review(props: { compact?: boolean } = {}) {
                     }
                   >
                     <Empty
-                      title={t("This folder isn’t a Git repository.")}
-                      detail={t("Review compares your working tree against version control. Initialise a repository to see changes here.")}
+                      title={
+                        known() === "download"
+                          ? t("Review needs files this clone hasn’t downloaded yet.")
+                          : t("This folder isn’t a Git repository.")
+                      }
+                      detail={
+                        known() === "download"
+                          ? t("Run git backfill in this folder to download them, then check again.")
+                          : t("Review compares your working tree against version control. Initialise a repository to see changes here.")
+                      }
                     >
                       <button onClick={() => void refresh()}>
                         {t("Check again")}

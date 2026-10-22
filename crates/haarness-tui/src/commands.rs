@@ -109,12 +109,17 @@ pub(crate) async fn run_diff_load(
 }
 
 /// A failed review in words that say what to do. A folder that is not a Git
-/// repository has no working-tree review, but its last turn still has one.
+/// repository has no working-tree review, but its last turn still has one. A
+/// partial clone missing files the review needs gets them with
+/// `git backfill`: the review never downloads them itself.
 pub(crate) fn diff_error(error: &anyhow::Error) -> String {
     let text = format!("{error:#}");
     if text.contains("not inside a Git worktree") {
         return "This folder isn’t a Git repository · /diff last shows the last turn’s changes"
             .into();
+    }
+    if text.contains("has not downloaded the files the review needs") {
+        return "Review needs files this clone hasn’t downloaded yet · run git backfill, then /diff again".into();
     }
     format!("Diff failed: {text}")
 }

@@ -815,8 +815,17 @@ fn require_metadata(output: &GitOutput, operation: &str) -> Result<()> {
     Err(git_error(operation, output))
 }
 
+/// What a review says when a partial clone lacks objects it needs: a review
+/// does not fetch them (`GIT_NO_LAZY_FETCH`), and `git backfill` does. The
+/// clients recognise this text and show it in their own words.
+pub const MISSING_OBJECTS: &str =
+    "this clone has not downloaded the files the review needs; run git backfill, then try again";
+
 fn git_error(operation: &str, output: &GitOutput) -> anyhow::Error {
     let detail = output.stderr_text();
+    if detail.contains("lazy fetching disabled") || detail.contains("from promisor remote") {
+        return anyhow!("{MISSING_OBJECTS}");
+    }
     if detail.is_empty() {
         anyhow!("{operation}: Git exited with status {}", output.status)
     } else {
@@ -1770,10 +1779,11 @@ mod tests {
         );
 
         // The base's copy of the file was never downloaded, and the review
-        // does not fetch it.
+        // does not fetch it; it says what to do instead of quoting Git.
         let review = branch_diff(&clone).await;
         let _ = fs::remove_dir_all(&clone);
         assert!(marks.left().is_empty(), "{:?} {review:?}", marks.left());
+        assert_eq!(review.unwrap_err().to_string(), MISSING_OBJECTS);
     }
 
     fn added_lines(patch: &str) -> usize {
