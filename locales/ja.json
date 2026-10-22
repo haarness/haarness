@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "チャットでこのサーバーのページをツールの下に表示します。オフにするとツールはテキストで表示されます。",
   "{name} app options": "{name} アプリのオプション",
   "Turn off interactive apps for {server}": "{server} のインタラクティブアプリをオフにする",
-  "Interactive apps are off for {server}. Its tools show as text.": "{server} のインタラクティブアプリはオフです。ツールはテキストで表示されます。"
+  "Interactive apps are off for {server}. Its tools show as text.": "{server} のインタラクティブアプリはオフです。ツールはテキストで表示されます。",
+  "Store in Keychain": "キーチェーンに保存",
+  "Store in Credential Manager": "資格情報マネージャーに保存",
+  "Store in keyring": "キーリングに保存",
+  "Saved there when you add the server; the settings keep only a reference.": "サーバーを追加すると保存され、設定には参照だけが残ります。"
 }

@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "채팅에서 이 서버의 페이지를 도구 아래에 표시합니다. 끄면 도구가 텍스트로 표시됩니다.",
   "{name} app options": "{name} 앱 옵션",
   "Turn off interactive apps for {server}": "{server}의 인터랙티브 앱 끄기",
-  "Interactive apps are off for {server}. Its tools show as text.": "{server}의 인터랙티브 앱이 꺼져 있습니다. 도구가 텍스트로 표시됩니다."
+  "Interactive apps are off for {server}. Its tools show as text.": "{server}의 인터랙티브 앱이 꺼져 있습니다. 도구가 텍스트로 표시됩니다.",
+  "Store in Keychain": "키체인에 저장",
+  "Store in Credential Manager": "자격 증명 관리자에 저장",
+  "Store in keyring": "키링에 저장",
+  "Saved there when you add the server; the settings keep only a reference.": "서버를 추가할 때 그곳에 저장되며, 설정에는 참조만 남습니다."
 }

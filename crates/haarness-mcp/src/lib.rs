@@ -2,6 +2,7 @@
 
 mod credentials;
 mod executable;
+pub mod keychain;
 mod process;
 #[cfg(all(test, unix))]
 mod process_tests;
@@ -531,10 +532,7 @@ impl NativeMcpRegistry {
                                 command.env_remove(name);
                             }
                             command.envs(
-                                config
-                                    .env
-                                    .iter()
-                                    .map(|(key, value)| (key, expand_env_reference(value))),
+                                resolve_references(&config.env, lookup_limit(&config)).await?,
                             );
                             if let Some((_, path)) = resolved {
                                 command.env("PATH", path);
@@ -1958,31 +1956,25 @@ fn mcp_headers(values: &BTreeMap<String, String>) -> CoreResult<HashMap<HeaderNa
 const HEADERS_HELPER_OUTPUT_LIMIT: usize = 64 * 1024;
 
 /// The headers a connection sends: the configured ones with their `${VAR}`
-/// references resolved, once, then whatever the headers helper printed, as
-/// printed.
+/// and `${keychain:NAME}` references resolved, once, then whatever the
+/// headers helper printed, as printed.
 async fn resolve_headers(
     name: &str,
     config: &McpConfigureRequest,
 ) -> CoreResult<BTreeMap<String, String>> {
-    let mut headers: BTreeMap<String, String> = config
-        .headers
-        .iter()
-        .map(|(name, value)| (name.clone(), expand_env_reference(value)))
-        .collect();
+    let limit = lookup_limit(config);
+    let mut headers = resolve_references(&config.headers, limit).await?;
     let Some(helper) = &config.headers_helper else {
         return Ok(headers);
     };
+    let env = resolve_references(&config.env, limit).await?;
     let url = config.url.as_deref().unwrap_or_default();
     // cmd.exe reads its own command line and expands `%NAME%`, not
     // `${NAME}`: hand it the helper with its references filled in.
     #[cfg(windows)]
     let mut command = {
         let helper = expand_env_reference_with(helper, &|name| {
-            config
-                .env
-                .get(name)
-                .map(|value| expand_env_reference(value))
-                .or_else(|| std::env::var(name).ok())
+            env.get(name).cloned().or_else(|| std::env::var(name).ok())
         });
         let mut command = tokio::process::Command::new("cmd.exe");
         command.raw_arg(format!("/d /s /c \"{helper}\""));
@@ -1997,10 +1989,8 @@ async fn resolve_headers(
         // A quoted here-document expands nothing: its references get the
         // values the shell would read.
         let helper = place_placeholders(ShellKind::Posix, helper, &variable_at, &|name| {
-            config
-                .env
-                .get(name)
-                .map(|value| expand_env_reference(value))
+            env.get(name)
+                .cloned()
                 .or_else(|| std::env::var(name).ok())
                 .unwrap_or_default()
         });
@@ -2015,12 +2005,7 @@ async fn resolve_headers(
         command.env_remove(name);
     }
     command
-        .envs(
-            config
-                .env
-                .iter()
-                .map(|(key, value)| (key, expand_env_reference(value))),
-        )
+        .envs(&env)
         .env("CLAUDE_CODE_MCP_SERVER_NAME", name)
         .env("CLAUDE_CODE_MCP_SERVER_URL", url)
         .stdin(std::process::Stdio::null())
@@ -2089,12 +2074,116 @@ fn refreshable_helper_error(error: &CoreError) -> bool {
 }
 
 /// Resolve the `${VAR}` and `${VAR:-fallback}` forms used by Claude Code and
-/// Haarness MCP configuration at connection time. Keeping the reference in
-/// the config avoids copying bearer tokens into generated config files. One
-/// pass: a variable's value is spliced in and never read again, so a value
-/// that holds `${OTHER}` reaches the server as that text.
+/// Haarness MCP configuration. Keeping the reference in the config avoids
+/// copying bearer tokens into generated config files. One pass: a variable's
+/// value is spliced in and never read again, so a value that holds
+/// `${OTHER}` reaches the server as that text. A `${keychain:NAME}`
+/// reference stays as written: only [`resolve_references`] reads the
+/// system's store, when a server starts, so comparing configurations never
+/// does.
 fn expand_env_reference(value: &str) -> String {
-    expand_env_reference_with(value, &|name| std::env::var(name).ok())
+    expand_env_reference_with(value, &|name| {
+        if name.starts_with("keychain:") {
+            Some(format!("${{{name}}}"))
+        } else {
+            std::env::var(name).ok()
+        }
+    })
+}
+
+/// How long one secret lookup may take: the server's connection timeout when
+/// that is shorter than [`keychain::LOOKUP_LIMIT`].
+fn lookup_limit(config: &McpConfigureRequest) -> Duration {
+    connection_timeout(config).min(keychain::LOOKUP_LIMIT)
+}
+
+/// A secret lookup: the entry named, or why there is none.
+type SecretLookup =
+    dyn Fn(String) -> futures::future::BoxFuture<'static, Result<String, keychain::Error>> + Sync;
+
+/// `values` as a server that is starting gets them: each `${VAR}` and
+/// `${VAR:-fallback}` read from the environment and each
+/// `${keychain:NAME}` from the system's store, once each, in one pass (see
+/// [`expand_env_reference`]). A missing entry without a fallback stops the
+/// server with an error that names the reference, never a value.
+async fn resolve_references(
+    values: &BTreeMap<String, String>,
+    limit: Duration,
+) -> CoreResult<BTreeMap<String, String>> {
+    resolve_references_with(values, &move |entry| {
+        Box::pin(async move { keychain::get(&entry, limit).await })
+    })
+    .await
+}
+
+async fn resolve_references_with(
+    values: &BTreeMap<String, String>,
+    lookup: &SecretLookup,
+) -> CoreResult<BTreeMap<String, String>> {
+    // Each entry once, needed unless every reference to it has a fallback.
+    let mut wanted = BTreeMap::<String, bool>::new();
+    for value in values.values() {
+        for (entry, fallback) in keychain_references(value) {
+            *wanted.entry(entry).or_default() |= !fallback;
+        }
+    }
+    let store = keychain::store_name();
+    let mut secrets = HashMap::new();
+    for (entry, required) in wanted {
+        if !keychain::valid_name(&entry) {
+            return Err(CoreError::Tool(format!(
+                "${{keychain:{entry}}} does not name a {store} entry: use letters, digits, '.', '_' and '-'"
+            )));
+        }
+        match lookup(entry.clone()).await {
+            Ok(secret) => {
+                secrets.insert(entry, secret);
+            }
+            Err(keychain::Error::Missing) if !required => {}
+            Err(keychain::Error::Missing) => {
+                return Err(CoreError::Tool(format!(
+                    "${{keychain:{entry}}} is not in the {store}; store it with `haarness mcp secret set {entry}`"
+                )));
+            }
+            Err(keychain::Error::Unavailable(reason)) => {
+                return Err(CoreError::Tool(format!(
+                    "cannot read ${{keychain:{entry}}}: {reason}"
+                )));
+            }
+        }
+    }
+    Ok(values
+        .iter()
+        .map(|(key, value)| {
+            let resolved =
+                expand_env_reference_with(value, &|name| match name.strip_prefix("keychain:") {
+                    Some(entry) => secrets.get(entry).cloned(),
+                    None => std::env::var(name).ok(),
+                });
+            (key.clone(), resolved)
+        })
+        .collect())
+}
+
+/// The keychain entries `value` names, each with whether it has a fallback.
+fn keychain_references(value: &str) -> Vec<(String, bool)> {
+    let mut found = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let token = &after[..end];
+        let (name, fallback) = token
+            .split_once(":-")
+            .map_or((token, false), |(name, _)| (name, true));
+        if let Some(entry) = name.strip_prefix("keychain:") {
+            found.push((entry.to_owned(), fallback));
+        }
+        rest = &after[end + 1..];
+    }
+    found
 }
 
 /// `value` with each `${NAME}` or `${NAME:-fallback}` read from `lookup`.
@@ -2917,6 +3006,105 @@ mod tests {
             expand_env_reference("${HAARNESS_MCP_MISSING:-fallback}"),
             "fallback"
         );
+    }
+
+    /// A store holding `github-token` (whose value looks like a reference)
+    /// and `team.key`, that counts its lookups, and that cannot be reached
+    /// for `locked`.
+    fn fake_store(
+        lookups: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl Fn(String) -> futures::future::BoxFuture<'static, Result<String, keychain::Error>> + Sync
+    {
+        move |entry: String| {
+            lookups.lock().unwrap().push(entry.clone());
+            Box::pin(async move {
+                match entry.as_str() {
+                    "github-token" => Ok("ghp_${HOME}".into()),
+                    "team.key" => Ok("k-123".into()),
+                    "locked" => Err(keychain::Error::Unavailable(
+                        "the Keychain refused to read the entry".into(),
+                    )),
+                    _ => Err(keychain::Error::Missing),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn keychain_references_resolve_once_when_a_server_starts_and_name_what_is_missing() {
+        let lookups = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = fake_store(lookups.clone());
+        let values: BTreeMap<String, String> = [
+            ("Authorization", "Bearer ${keychain:github-token}"),
+            ("X-Team", "${keychain:team.key}/${keychain:github-token}"),
+            ("X-Home", "${HOME}"),
+            ("X-Optional", "${keychain:absent:-none}"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        let resolved = resolve_references_with(&values, &store).await.unwrap();
+        // One pass: a secret that holds `${HOME}` reaches the server as that text.
+        assert_eq!(resolved["Authorization"], "Bearer ghp_${HOME}");
+        assert_eq!(resolved["X-Team"], "k-123/ghp_${HOME}");
+        assert_eq!(
+            resolved["X-Home"],
+            std::env::var("HOME").unwrap_or_default()
+        );
+        assert_eq!(resolved["X-Optional"], "none");
+        // Each entry is looked up once, however often it is named.
+        let mut asked = lookups.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(asked, ["absent", "github-token", "team.key"]);
+        let missing = |value: &str| {
+            let values = BTreeMap::from([("TOKEN".to_owned(), value.to_owned())]);
+            let store = fake_store(Arc::default());
+            async move {
+                resolve_references_with(&values, &store)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+        let error = missing("${keychain:gone}").await;
+        assert!(
+            error.contains("${keychain:gone} is not in the")
+                && error.contains("store it with `haarness mcp secret set gone`"),
+            "{error}"
+        );
+        let error = missing("${keychain:locked}").await;
+        assert!(
+            error
+                .contains("cannot read ${keychain:locked}: the Keychain refused to read the entry"),
+            "{error}"
+        );
+        let error = missing("${keychain:a b}").await;
+        assert!(error.contains("${keychain:a b} does not name a"), "{error}");
+        // No value ever appears in an error.
+        assert!(!error.contains("ghp_") && !error.contains("k-123"));
+    }
+
+    #[test]
+    fn keychain_references_stay_as_written_wherever_settings_are_compared() {
+        assert_eq!(
+            expand_env_reference("Bearer ${keychain:github-token}"),
+            "Bearer ${keychain:github-token}"
+        );
+        let config = |token: &str| -> McpConfigureRequest {
+            serde_json::from_value(serde_json::json!({
+                "transport": "stdio", "command": "server", "env": {"TOKEN": token}
+            }))
+            .unwrap()
+        };
+        // Another entry is another configuration, and comparing reads no store.
+        assert!(!same_effective_config(
+            &config("${keychain:one}"),
+            &config("${keychain:two}")
+        ));
+        assert!(same_effective_config(
+            &config("${keychain:one}"),
+            &config("${keychain:one}")
+        ));
     }
 
     #[tokio::test]

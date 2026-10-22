@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Pokazuj strony tego serwera pod jego narzędziami w czatach. Po wyłączeniu narzędzia są pokazywane jako tekst.",
   "{name} app options": "Opcje aplikacji {name}",
   "Turn off interactive apps for {server}": "Wyłącz aplikacje interaktywne serwera {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "Aplikacje interaktywne serwera {server} są wyłączone. Jego narzędzia są pokazywane jako tekst."
+  "Interactive apps are off for {server}. Its tools show as text.": "Aplikacje interaktywne serwera {server} są wyłączone. Jego narzędzia są pokazywane jako tekst.",
+  "Store in Keychain": "Zapisz w pęku kluczy",
+  "Store in Credential Manager": "Zapisz w Menedżerze poświadczeń",
+  "Store in keyring": "Zapisz w pęku kluczy",
+  "Saved there when you add the server; the settings keep only a reference.": "Zapisywane tam po dodaniu serwera; ustawienia zachowują tylko odwołanie."
 }

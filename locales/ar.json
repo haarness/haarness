@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "اعرض صفحات هذا الخادم تحت أدواته في المحادثات. عند الإيقاف تظهر أدواته نصًا.",
   "{name} app options": "خيارات تطبيق {name}",
   "Turn off interactive apps for {server}": "إيقاف التطبيقات التفاعلية لـ {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "التطبيقات التفاعلية متوقفة لـ {server}. تظهر أدواته نصًا."
+  "Interactive apps are off for {server}. Its tools show as text.": "التطبيقات التفاعلية متوقفة لـ {server}. تظهر أدواته نصًا.",
+  "Store in Keychain": "التخزين في سلسلة المفاتيح",
+  "Store in Credential Manager": "التخزين في مدير بيانات الاعتماد",
+  "Store in keyring": "التخزين في حلقة المفاتيح",
+  "Saved there when you add the server; the settings keep only a reference.": "يُحفظ هناك عند إضافة الخادم؛ ولا تحتفظ الإعدادات إلا بمرجع إليه."
 }

@@ -751,6 +751,29 @@ enum McpCommand {
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
+    /// Keep a secret in the system's keychain (macOS Keychain, Windows
+    /// Credential Manager, Linux Secret Service) for MCP settings to name as
+    /// `${keychain:NAME}` in an `env` or `headers` value.
+    Secret {
+        #[command(subcommand)]
+        command: McpSecretCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpSecretCommand {
+    /// Store a secret, replacing one of that name. It is read from a hidden
+    /// prompt, or from standard input when that is piped, and never shown.
+    Set {
+        /// Entry name: letters, digits, '.', '_' and '-'.
+        name: String,
+    },
+    /// Remove a stored secret.
+    #[command(alias = "rm")]
+    Remove {
+        /// Entry name.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -7560,6 +7583,10 @@ async fn mcp_command(
     trust: bool,
     command: McpCommand,
 ) -> Result<()> {
+    // Secrets live in the system's store, not with any server.
+    if let McpCommand::Secret { command } = command {
+        return mcp_secret_command(command).await;
+    }
     let discovery = ensure_workspace_server(paths, workspace, trust).await?;
     let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
     match command {
@@ -7835,6 +7862,7 @@ async fn mcp_command(
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
+        McpCommand::Secret { .. } => unreachable!("handled before the server starts"),
         McpCommand::Remove { name, project } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
             let mut entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
@@ -7845,6 +7873,58 @@ async fn mcp_command(
         }
     }
     Ok(())
+}
+
+async fn mcp_secret_command(command: McpSecretCommand) -> Result<()> {
+    use haarness_mcp::keychain;
+    let store = keychain::store_name();
+    let fail = |error: keychain::Error| match error {
+        keychain::Error::Missing => anyhow::anyhow!("There is no such entry in the {store}."),
+        keychain::Error::Unavailable(reason) => anyhow::anyhow!("{reason}"),
+    };
+    match command {
+        McpSecretCommand::Set { name } => {
+            if !keychain::valid_name(&name) {
+                anyhow::bail!(
+                    "\"{name}\" is not a usable name: use letters, digits, '.', '_' and '-'"
+                );
+            }
+            let secret = read_mcp_secret(&name)?;
+            keychain::set(&name, &secret).await.map_err(fail)?;
+            println!(
+                "Stored {name} in the {store}. Name it as ${{keychain:{name}}} in an MCP server's env or headers."
+            );
+        }
+        McpSecretCommand::Remove { name } => {
+            if keychain::delete(&name).await.map_err(fail)? {
+                println!("Removed {name} from the {store}.");
+            } else {
+                println!("There was no {name} in the {store}.");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A secret typed at a hidden prompt, or piped on standard input (one line;
+/// the line break that ends it is not part of it). An empty one is refused.
+fn read_mcp_secret(name: &str) -> Result<String> {
+    let secret = if io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("Secret for {name}: "))
+            .context("Cannot ask for the secret without a terminal; pipe it on standard input")?
+    } else {
+        let mut secret = String::new();
+        io::stdin().read_to_string(&mut secret)?;
+        secret
+            .strip_suffix('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .unwrap_or(&secret)
+            .to_owned()
+    };
+    if secret.is_empty() {
+        anyhow::bail!("No secret entered; nothing was stored.");
+    }
+    Ok(secret)
 }
 
 async fn oauth_registry(
