@@ -7684,6 +7684,113 @@ export default workflow({
 }
 
 #[tokio::test]
+async fn a_refused_background_result_goes_into_a_turn_that_started_meanwhile() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let thread = echo_thread(&runtime).await;
+    // A person's turn is in the middle of a tool call when the result,
+    // refused a moment ago, is kept.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request("!tool bash {\"command\":\"sleep 1\"}"),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::ToolCall { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn calls its tool");
+    runtime
+        .keep_refused_background_result(
+            thread.id,
+            "<task id=\"x\" state=\"completed\">late result</task>".into(),
+            "The result could not start a turn in this chat (busy).".into(),
+            &haarness_core::CoreError::Invalid("busy".into()),
+        )
+        .await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let call = items
+        .iter()
+        .position(|item| matches!(item.data, haarness_protocol::ItemData::ToolCall { .. }))
+        .unwrap();
+    let result = items
+        .iter()
+        .position(|item| matches!(item.data, haarness_protocol::ItemData::ToolResult { .. }))
+        .unwrap();
+    // Only steering the turn defers past the tool result may sit there; a
+    // plain message would split the call from its result for every request.
+    assert!(
+        items[call + 1..result].iter().all(|item| !matches!(
+            item.data,
+            haarness_protocol::ItemData::UserMessage { queued: false, .. }
+                | haarness_protocol::ItemData::Error { .. }
+        )),
+        "{items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::AssistantMessage { text, .. } if text.contains("late result"))),
+        "the turn read the result: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| item.turn_id == Some(turn.id)
+            && matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, queued: true, synthetic: true, .. }
+                if text.contains("late result"))),
+        "the running turn takes it as steering: {items:#?}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::Error { .. })),
+        "{items:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_background_result_is_not_kept_in_an_archived_chat() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let thread = echo_thread(&runtime).await;
+    runtime
+        .update_thread(
+            thread.id,
+            haarness_protocol::UpdateThreadRequest {
+                title: None,
+                archived: Some(true),
+                agent: None,
+                provider: None,
+                model: None,
+                ultracode: None,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .keep_refused_background_result(
+            thread.id,
+            "late result".into(),
+            "notice".into(),
+            &haarness_core::CoreError::Invalid("gone".into()),
+        )
+        .await;
+    assert!(runtime.items(thread.id, None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_workflow_result_its_chat_cannot_take_is_kept_for_the_next_message() {
     let workspace = std::env::temp_dir().join(format!(
         "haarness-workflow-refused-{}",
