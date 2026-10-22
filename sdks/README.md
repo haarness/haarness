@@ -234,8 +234,10 @@ with LocalServer.start("/path/to/project", executable="/path/to/haarness") as se
 
 These helpers spawn a foreground child on an OS-assigned loopback port with a
 fresh random bearer token. They verify the server identity/schema, retain
-ownership, and stop only that child. They fail if a workspace server already
-owns the lease; they never replace it. `dataDir`/`data_dir` selects an isolated
+ownership, and stop only that child. In a folder whose server already runs (the
+TUI's, Desktop's or another helper's), the child is a front for that server: the
+same chats at its own address, and closing it stops only the front; the folder's
+server is never replaced. `dataDir`/`data_dir` selects an isolated
 installation. Project configuration loads by default. Set `disableProjectConfig: true`
 (TypeScript) or `disable_project_config=True` (Python) to load only global
 configuration. The environment opt-out `HAARNESS_DISABLE_PROJECT_CONFIG=1`

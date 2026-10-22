@@ -81,6 +81,7 @@ try:
         assert screen.count("todo-alpha-proof") == 1, screen
         assert screen.count("todo-beta-proof") == 1, screen
         assert "Updating todos" not in screen, screen
+        assert "ctrl+b shows the plan" not in screen, screen
         evidence.append(screen)
 
     attach()
@@ -96,7 +97,14 @@ try:
     assert_sidebar()
     run("tmux", "send-keys", "-t", session, "C-b")
     until(lambda: "▾ todo" not in pane(), "sidebar did not hide")
-    assert "todo-alpha-proof" not in pane(), pane()
+    # Hidden, the plan folds to one transcript row: the step in hand, the
+    # progress and the key that shows the rest, never the whole list.
+    def plan_row():
+        screen = pane()
+        return screen if "ctrl+b shows the plan" in screen else None
+    screen = until(plan_row, "hidden plan left no row in the transcript")
+    assert "[•] todo-alpha-proof  ·  0/2 done  ·  ctrl+b shows the plan" in screen, screen
+    assert screen.count("todo-alpha-proof") == 1 and "todo-beta-proof" not in screen, screen
     run("tmux", "send-keys", "-t", session, "C-b")
     assert_sidebar()
     # Complete through the current tool alias and verify the historical update

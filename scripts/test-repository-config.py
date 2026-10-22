@@ -34,7 +34,7 @@ holder = None if keep else tempfile.TemporaryDirectory(prefix='haarness-reposito
 root = Path(keep or holder.name).resolve()
 if keep and root.exists():
     shutil.rmtree(root)
-root.mkdir(parents=True)
+root.mkdir(parents=True, exist_ok=True)
 home, data, marks = root / 'home', root / 'data', root / 'marks'
 for folder in (home, data, marks):
     folder.mkdir()
