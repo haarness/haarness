@@ -9,6 +9,13 @@ import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-fold
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
+import {
+  eventIdleMs,
+  onlineAgain,
+  retryWaits,
+  TERMINAL_PING_EVERY_MS,
+  terminalPingTimeoutMs,
+} from "./connection-health";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { shortcutLabel } from "../renderer/search";
@@ -29,6 +36,7 @@ import {
   nativeTheme,
   nativeImage,
   globalShortcut,
+  net,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -134,6 +142,19 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
+/** Connections waiting to try again; a wake ends their wait. */
+const retries = retryWaits();
+/** A terminal socket that no longer reaches its server closes, and its view
+ * connects again from its cursor; a healthy one answers and is left alone. */
+function checkTerminals() {
+  for (const socket of terminals.all()) void socket.ping(terminalPingTimeoutMs());
+}
+/** The machine woke or its network came back: what waits to reconnect tries
+ * now, and terminals say whether they still reach their server. */
+function wakeConnections() {
+  retries.wake();
+  checkTerminals();
+}
 // End-to-end tests end terminal sockets as a server or network outage does,
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
@@ -229,7 +250,7 @@ function watchNotifications(id: string, owner: number) {
   previous?.stop();
   const client = new Haarness({ baseUrl: item.url, auth: item.auth });
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let waiting: (() => void) | undefined;
   const watch = {
     client,
     endpoint: item.url,
@@ -237,7 +258,7 @@ function watchNotifications(id: string, owner: number) {
     owner,
     stop() {
       stopped = true;
-      clearTimeout(timer);
+      waiting?.();
       client.close();
     },
   };
@@ -255,6 +276,7 @@ function watchNotifications(id: string, owner: number) {
       for await (const event of client.events({
         after: cursor,
         reconnect: true,
+        idleTimeoutMs: eventIdleMs(),
       })) {
         if (stopped) return;
         if (!("eventId" in event)) {
@@ -278,8 +300,9 @@ function watchNotifications(id: string, owner: number) {
     } catch {
       /* Retry without disturbing the user's foreground connection. */
     }
+    // A wake ends this wait (see wakeConnections).
     if (!stopped)
-      timer = setTimeout(
+      waiting = retries.wait(
         () => void listen(),
         Math.min(30000, 1000 * 2 ** Math.min(retry++, 5)),
       );
@@ -992,6 +1015,7 @@ function installHandlers() {
         for await (const event of client.events({
           after: cursor,
           reconnect: false,
+          idleTimeoutMs: eventIdleMs(),
         })) {
           send(win, { kind: "server", connection: id, id: key, data: event });
         }
@@ -1711,9 +1735,12 @@ else {
       void refreshProjects().catch(() => {});
       setupChromeOnLaunch();
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
-      powerMonitor.on("resume", () =>
-        broadcast({ kind: "connection", data: "resume" }),
-      );
+      powerMonitor.on("resume", () => {
+        broadcast({ kind: "connection", data: "resume" });
+        wakeConnections();
+      });
+      onlineAgain(() => net.isOnline(), wakeConnections);
+      setInterval(checkTerminals, TERMINAL_PING_EVERY_MS).unref();
       nativeTheme.on("updated", () =>
         broadcast({ kind: "menu", data: "theme" }),
       );
