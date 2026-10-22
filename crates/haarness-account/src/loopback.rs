@@ -105,26 +105,65 @@ impl Loopback {
     }
 
     async fn accept_loop(self, expected_state: &str) -> Result<CallbackParams> {
-        // Each connection is read in a task of its own while the listener keeps accepting, so idle
-        // ones (a browser's spare socket, a page's preconnect) never hold up the real return.
-        let mut connections = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                accepted = self.listener.accept() => {
-                    let (mut stream, peer) = accepted?;
-                    if !peer.ip().is_loopback() {
-                        let _ = stream.shutdown().await;
-                        continue;
-                    }
-                    connections.spawn(answer(stream, expected_state.to_owned()));
+        let listener = &self.listener;
+        answer_until_callback(move || listener.accept(), expected_state).await
+    }
+}
+
+/// The next connection `accept` hands over. A failed accept belongs to one connection, not to the
+/// listener: a client that reset before it was accepted (`ECONNABORTED`), or a moment with no file
+/// descriptor left (`EMFILE`), is skipped and the wait goes on, so it cannot end a sign-in the
+/// browser has yet to return to. Other failures than a connection's own are retried after a short
+/// pause, within the caller's overall timeout.
+pub async fn next_connection<F, A, S>(mut accept: F) -> S
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<S>>,
+{
+    loop {
+        match accept().await {
+            Ok(accepted) => return accepted,
+            Err(error) => {
+                tracing::debug!(%error, "a sign-in callback connection failed before it was read");
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionRefused
+                ) {
+                    tokio::time::sleep(ACCEPT_RETRY).await;
                 }
-                // Every finished connection is taken, so one that ended the sign-in is never left
-                // behind one that did not (a pattern that fails disables its branch for the rest
-                // of the `select!`).
-                Some(joined) = connections.join_next(), if !connections.is_empty() => {
-                    if let Ok(Some(outcome)) = joined {
-                        return outcome;
-                    }
+            }
+        }
+    }
+}
+
+/// How long a failed accept that is not one connection's own waits before the next one.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+async fn answer_until_callback<F, A>(mut accept: F, expected_state: &str) -> Result<CallbackParams>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>>,
+{
+    // Each connection is read in a task of its own while the listener keeps accepting, so idle
+    // ones (a browser's spare socket, a page's preconnect) never hold up the real return.
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            (mut stream, peer) = next_connection(&mut accept) => {
+                if !peer.ip().is_loopback() {
+                    let _ = stream.shutdown().await;
+                    continue;
+                }
+                connections.spawn(answer(stream, expected_state.to_owned()));
+            }
+            // Every finished connection is taken, so one that ended the sign-in is never left
+            // behind one that did not (a pattern that fails disables its branch for the rest
+            // of the `select!`).
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                if let Ok(Some(outcome)) = joined {
+                    return outcome;
                 }
             }
         }
@@ -449,6 +488,46 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(params.code, "hcc_abc");
+    }
+
+    /// A connection that failed before it was accepted (reset by its client, or no file descriptor
+    /// left for it) does not end the sign-in: the browser's return is still taken.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_sign_in() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let loopback = Loopback::bind().await.unwrap();
+        let port = loopback.port;
+        let listener = &loopback.listener;
+        let mut failures = vec![
+            std::io::Error::other("Too many open files"),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ];
+        let accept = move || {
+            let failure = failures.pop();
+            async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => listener.accept().await,
+                }
+            }
+        };
+        let browser = async {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            stream
+                .write_all(b"GET /callback?code=hcc_abc&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let (params, response) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(answer_until_callback(accept, "st-1"), browser)
+        })
+        .await
+        .expect("the browser's return is taken after the failed accepts");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(params.unwrap().code, "hcc_abc");
     }
 
     #[test]
