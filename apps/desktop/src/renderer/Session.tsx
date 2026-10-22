@@ -1298,7 +1298,8 @@ export function Session() {
       draftTimer = setTimeout(persistDraft, 500);
     }
   }
-  let waitingForModels = false;
+  /** The chats whose Enter waits for the model choices. */
+  const waitingForModels = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
       await queue.save({ text: draft(), attachments: attachments() });
@@ -1376,14 +1377,19 @@ export function Session() {
     // A chat started while the model choices load would take a model chosen
     // from an incomplete (or the last project's) catalog: send once they are
     // in, checking again then, and only once however often Enter is pressed.
+    // Another chat or project shown meanwhile gives it up: its draft is not
+    // what Enter was pressed on, and this one stays unsent where it was.
     if (state.catalogLoading) {
-      if (waitingForModels) return;
-      waitingForModels = true;
+      const pressed = owner();
+      const connection = state.connection?.id;
+      if (waitingForModels.has(pressed)) return;
+      waitingForModels.add(pressed);
       try {
         await app.catalogsSettled();
       } finally {
-        waitingForModels = false;
+        waitingForModels.delete(pressed);
       }
+      if (owner() !== pressed || state.connection?.id !== connection) return;
       return send(delivery);
     }
     if (!selectedModel()) {

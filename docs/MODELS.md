@@ -18,8 +18,9 @@ when asked, so `haarness run` and a new chat never choose a model without it. Wh
 lists are all in and the catalog changed, `assets.updated` (`resource: "provider"`)
 tells clients to read it again, so an open model picker fills in by itself. A
 configuration reload keeps each provider defined as before (the same configuration
-section and stored credentials), its loaded list with it, and loads the others' lists the
-same way, after it is applied.
+section and stored API keys, and still signed in or still not, by OAuth included), its
+loaded list with it, and loads the others' lists the same way, after it is applied: xAI
+signed in by OAuth after the start is built again, so it lists its models.
 The TUI's first frame waits a second at most for the catalog; until it comes the
 status line says **Loading models…**, and a new chat the TUI opened meanwhile on a
 model it chose takes the model it would have chosen once the catalog is in. `POST /v1/providers/refresh` (a picker opening, a key just saved)

@@ -6370,7 +6370,8 @@ impl HotReloadController {
             persisted_rules,
             true,
         )?;
-        let credentials = resolved_credentials(&read_auth(&self.paths)?);
+        let auth = read_auth(&self.paths)?;
+        let credentials = resolved_credentials(&auth);
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
             provider_instances(&sources.file_config, &credentials);
@@ -6385,8 +6386,7 @@ impl HotReloadController {
         )
         .await
         .with_stream_limits(&stream_limits(&sources.file_config));
-        let provider_definitions =
-            provider_fingerprints(&sources.file_config, &credentials, &registry);
+        let provider_definitions = provider_fingerprints(&sources.file_config, &auth, &registry);
         let live = self.runtime.providers();
         {
             let known = self.provider_definitions.lock();
@@ -7102,7 +7102,8 @@ async fn application_at(
     for notice in config_specs::startup_notices(paths, workspace, trust) {
         tracing::warn!("config: {notice}");
     }
-    let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
+    let auth = read_auth(paths).unwrap_or_default();
+    let credentials = resolved_credentials(&auth);
     let (instances, disabled_providers) = provider_instances(&file_config, &credentials);
     // Their live model lists load below, once the runtime can announce them.
     let providers = Arc::new(
@@ -7114,8 +7115,7 @@ async fn application_at(
         .await
         .with_stream_limits(&stream_limits(&file_config)),
     );
-    let provider_definitions =
-        provider_fingerprints(&file_config, &credentials, providers.as_ref());
+    let provider_definitions = provider_fingerprints(&file_config, &auth, providers.as_ref());
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
@@ -9078,17 +9078,30 @@ fn provider_instances(
 /// The configured stream limits by provider id (`stream_idle_timeout`,
 /// `request_timeout`); providers without either keep the defaults.
 /// What makes each of `registry`'s providers the one it is: its section of
-/// the configuration (its definition, or the tuning of a built-in one) and
-/// the stored credentials, as a digest. A reload keeps a provider whose
-/// digest is the same, and its loaded model list with it.
+/// the configuration (its definition, or the tuning of a built-in one), the
+/// stored API keys, and whether it is signed in by any credential (OAuth
+/// included), as a digest. A reload keeps a provider whose digest is the
+/// same, and its loaded model list with it.
 fn provider_fingerprints(
     config: &FileConfig,
-    credentials: &HashMap<String, String>,
+    auth: &BTreeMap<String, serde_json::Value>,
     registry: &NativeProviderRegistry,
 ) -> HashMap<String, String> {
+    let credentials = resolved_credentials(auth);
     let mut stored: Vec<_> = credentials.iter().collect();
     stored.sort();
     let stored = serde_json::to_vec(&stored).unwrap_or_default();
+    // Signed in with a credential of any kind, OAuth included, under its id
+    // or a preset alias: xAI decides when it is built whether to list its
+    // models. Whether, not which: a refreshed token changes nothing.
+    let signed_in: std::collections::HashSet<&str> = auth
+        .iter()
+        .filter(|(_, raw)| serde_json::from_value::<Credential>((*raw).clone()).is_ok())
+        .flat_map(|(id, _)| {
+            std::iter::once(id.as_str())
+                .chain(haarness_providers::compatible_preset(id).map(|preset| preset.id))
+        })
+        .collect();
     haarness_core::ProviderRegistry::list(registry)
         .into_iter()
         .map(|info| {
@@ -9101,6 +9114,7 @@ fn provider_fingerprints(
             digest.update(&section);
             digest.update([0]);
             digest.update(&stored);
+            digest.update([u8::from(signed_in.contains(info.id.as_str()))]);
             (info.id, format!("{:x}", digest.finalize()))
         })
         .collect()
@@ -12773,6 +12787,35 @@ mod tests {
         write_provider_entry(&path, "company-gateway", None).unwrap();
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.providers.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_by_oauth_changes_that_providers_definition_and_a_refreshed_token_does_not() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-fingerprints-{}", uuid::Uuid::now_v7()));
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            Vec::new(),
+            &std::collections::HashSet::new(),
+            std::sync::Arc::new(super::CredentialStore::new(root.join("auth.json"))),
+        )
+        .await;
+        let config = FileConfig::default();
+        let oauth = |access: &str| {
+            BTreeMap::from([(
+                "xai".to_owned(),
+                serde_json::to_value(Credential::oauth(access.into(), "refresh".into(), 1, None))
+                    .unwrap(),
+            )])
+        };
+        let before = super::provider_fingerprints(&config, &BTreeMap::new(), &registry);
+        let signed_in = super::provider_fingerprints(&config, &oauth("first"), &registry);
+        let refreshed = super::provider_fingerprints(&config, &oauth("second"), &registry);
+        // xAI decides when it is built whether to list its models: a reload
+        // after a sign-in by OAuth builds it again.
+        assert_ne!(before["xai"], signed_in["xai"]);
+        assert_eq!(signed_in["xai"], refreshed["xai"]);
+        assert_eq!(before["groq"], signed_in["groq"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
