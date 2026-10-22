@@ -836,16 +836,18 @@ impl NativeMcpRegistry {
         command: impl FnOnce(oneshot::Sender<CoreResult<T>>) -> WorkerCommand,
     ) -> CoreResult<T> {
         self.revoke_stale();
+        // The read guard ends with this statement: `stopped` reads the lock
+        // again, and a second read while a writer waits would never return.
         let worker = self
             .servers
             .read()
             .get(name)
-            .and_then(|entry| entry.worker.clone())
-            .ok_or_else(|| {
-                self.stopped(name).unwrap_or_else(|| {
-                    CoreError::Conflict(format!("MCP server {name} is not connected"))
-                })
-            })?;
+            .and_then(|entry| entry.worker.clone());
+        let Some(worker) = worker else {
+            return Err(self.stopped(name).unwrap_or_else(|| {
+                CoreError::Conflict(format!("MCP server {name} is not connected"))
+            }));
+        };
         let disconnected = || {
             self.stopped(name)
                 .unwrap_or_else(|| CoreError::Conflict(format!("MCP server {name} disconnected")))
@@ -3082,6 +3084,61 @@ mod tests {
         assert!(error.contains("${keychain:a b} does not name a"), "{error}");
         // No value ever appears in an error.
         assert!(!error.contains("ghp_") && !error.contains("k-123"));
+    }
+
+    /// A request to a server without a connection must not take the
+    /// registry's lock a second time while it still holds it: a writer that
+    /// queues in between (the reconnect watcher, `revoke_stale` on every tool
+    /// list) would wait for the first read and the second read for the
+    /// writer, for ever.
+    #[test]
+    fn a_request_to_a_server_without_a_connection_never_reads_the_registry_twice() {
+        let registry = NativeMcpRegistry::default();
+        let local = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let mut config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
+            "transport": "stdio", "command": "server", "enabled": false
+        }))
+        .unwrap();
+        config.enabled = false;
+        local()
+            .block_on(registry.configure("idle", config))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        std::thread::spawn({
+            let (registry, stop) = (registry.clone(), stop.clone());
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    drop(registry.servers.write());
+                }
+            }
+        });
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let registry = registry.clone();
+            move || {
+                let runtime = local();
+                for _ in 0..200_000 {
+                    let error = runtime
+                        .block_on(registry.read_resource("idle", "docs://x"))
+                        .unwrap_err();
+                    assert!(error.to_string().contains("is not connected"), "{error}");
+                }
+                let _ = done.send(());
+            }
+        });
+        // On a deadlock both threads stay blocked; the test fails instead of
+        // waiting for them.
+        let result = finished.recv_timeout(Duration::from_secs(30));
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            result.is_ok(),
+            "a request deadlocked on the registry's lock"
+        );
     }
 
     #[test]
