@@ -7114,7 +7114,8 @@ async fn application_at(
         .await
         .with_stream_limits(&stream_limits(&file_config)),
     );
-    let provider_definitions = provider_fingerprints(&file_config, &credentials, providers.as_ref());
+    let provider_definitions =
+        provider_fingerprints(&file_config, &credentials, providers.as_ref());
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
