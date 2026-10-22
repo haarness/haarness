@@ -55,9 +55,16 @@ export function isElementContext(item: Record<string, unknown>) {
 export const elementKey = (item: ElementContext) =>
   JSON.stringify([item.kind, item.url, item.selector || item.html]);
 
-/** `button#save “Save changes”`: what the chip and the sent message call it. */
-export const elementLabel = (item: ElementContext) =>
-  item.name ? `${item.tag} “${cut(item.name, 60)}”` : item.tag;
+const squash = (text: string) => text.replace(/\s+/g, " ").trim();
+/**
+ * `button#save “Save changes”`: what the chip and the sent message call it,
+ * on one line whatever the page put in its id or name.
+ */
+export function elementLabel(item: ElementContext) {
+  const tag = cut(squash(item.tag), 80);
+  const name = squash(item.name ?? "");
+  return name ? `${tag} “${cut(name, 60)}”` : tag;
+}
 
 /** `example.com/settings`: the page without its scheme, for a short line. */
 export function shortPage(url: string) {

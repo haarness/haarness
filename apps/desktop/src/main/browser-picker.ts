@@ -77,9 +77,13 @@ export const pickerScript = String.raw`globalThis.__haarnessPicker ??= (() => {
   tag.append(what, size);
   root.append(box, tag, hint);
   // While picking, frames give their input to this document, so a frame can be
-  // outlined and picked as a whole, and the pointer says what a click does.
-  const page = new CSSStyleSheet();
-  page.replaceSync("iframe, frame, embed, object { pointer-events: none !important; } html, html * { cursor: crosshair !important; }");
+  // outlined and picked as a whole (and a press over one is refused like any
+  // other); the pointer says what a click does. An agent's click into a frame
+  // lifts the first sheet for as long as it is dispatched.
+  const frames = new CSSStyleSheet();
+  frames.replaceSync("iframe, frame, embed, object { pointer-events: none !important; }");
+  const pointer = new CSSStyleSheet();
+  pointer.replaceSync("html, html * { cursor: crosshair !important; }");
   let on = false, current = null, frame = 0, x = -1, y = -1, exact = false, more = false, leave = 0;
 
   const squash = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
@@ -101,17 +105,28 @@ export const pickerScript = String.raw`globalThis.__haarnessPicker ??= (() => {
     }
     return node;
   };
+  /** A frame under the point that nothing but its own ancestors covers: frames ignore the pointer while picking. */
+  const framed = (px, py, hit) => {
+    for (const item of doc.querySelectorAll("iframe, frame, embed, object")) {
+      const rect = item.getBoundingClientRect();
+      if (px < rect.left || px >= rect.right || py < rect.top || py >= rect.bottom) continue;
+      if (!hit || hit === item || hit.contains(item)) return item;
+    }
+    return null;
+  };
   const target = (px, py, alt) => {
-    let node = top(px, py);
+    const hit = top(px, py);
+    let node = framed(px, py, hit) ?? hit;
     if (!node || node === host || node === doc.documentElement || node === doc.body) return null;
-    if (alt) return node;
+    if (alt || node.matches("iframe, frame, embed, object")) return node;
     if (node instanceof SVGElement && node.ownerSVGElement) node = node.ownerSVGElement;
     return node.closest(CONTROL) ?? node;
   };
-  /** "button#save.primary": the tag, its id and first two classes. */
+  /** "button#save.primary": the tag, its id (escaped as CSS writes it) and first two classes. */
   const badge = (node) => {
     const classes = [...node.classList].filter((item) => /^[\w-]+$/.test(item)).slice(0, 2);
-    return cut(node.localName + (node.id ? "#" + node.id : "") + classes.map((item) => "." + item).join(""), 80);
+    const id = squash(node.id) ? "#" + CSS.escape(squash(node.id)) : "";
+    return cut(squash(node.localName + id + classes.map((item) => "." + item).join("")), 80);
   };
   const named = (node) => {
     const label = squash(node.getAttribute("aria-label"));
@@ -216,10 +231,9 @@ export const pickerScript = String.raw`globalThis.__haarnessPicker ??= (() => {
     schedule();
   };
   const out = (event) => { if (!event.relatedTarget) { x = -1; clear(); } };
-  const alt = (event) => {
-    more = event.shiftKey;
-    if (event.key === "Alt") { exact = event.type === "keydown"; schedule(); }
-  };
+  // Shift comes from the pointer's last move: the agent's keys reach the
+  // page too, and say nothing of what the person holds.
+  const alt = (event) => { if (event.key === "Alt") { exact = event.type === "keydown"; schedule(); } };
   const listen = (add) => {
     const method = add ? addEventListener : removeEventListener;
     method("mousemove", move, { capture: true, passive: true });
@@ -229,12 +243,27 @@ export const pickerScript = String.raw`globalThis.__haarnessPicker ??= (() => {
     method("scroll", schedule, { capture: true, passive: true });
     method("resize", schedule);
   };
-  const adopt = (add) => {
+  const adopt = (sheet, add) => {
     try {
-      const others = doc.adoptedStyleSheets.filter((item) => item !== page);
-      doc.adoptedStyleSheets = add ? [...others, page] : others;
+      const others = doc.adoptedStyleSheets.filter((item) => item !== sheet);
+      doc.adoptedStyleSheets = add ? [...others, sheet] : others;
     } catch {}
   };
+  const quit = (picked) => {
+    if (!on) return;
+    on = false;
+    listen(false);
+    adopt(frames, false);
+    adopt(pointer, false);
+    cancelAnimationFrame(frame);
+    frame = 0;
+    hint.classList.add("off");
+    tag.classList.remove("on");
+    leave = setTimeout(() => { clear(); host.remove(); }, picked ? 450 : 0);
+  };
+  // Back and Forward may keep this document to show it again: it comes back
+  // as the page left it, with no picking and no outline.
+  addEventListener("pagehide", () => { quit(false); clearTimeout(leave); clear(); host.remove(); }, true);
   return {
     start(input) {
       clearTimeout(leave);
@@ -244,9 +273,22 @@ export const pickerScript = String.raw`globalThis.__haarnessPicker ??= (() => {
       box.classList.remove("taken");
       clear();
       raise();
-      if (!on) { on = true; listen(true); adopt(true); }
+      if (!on) { on = true; listen(true); adopt(frames, true); adopt(pointer, true); }
       schedule();
       return true;
+    },
+    /**
+     * Frames take the pointer again (false) while an agent clicks into one,
+     * then give it back. Hit testing follows the style a frame later, so this
+     * resolves once the page has drawn twice (or 100 ms have passed).
+     */
+    frames(take) {
+      if (!on) return true;
+      adopt(frames, take);
+      return new Promise((done) => {
+        setTimeout(done, 100);
+        requestAnimationFrame(() => requestAnimationFrame(done));
+      });
     },
     /**
      * The element a press at the point picks, outlined as taken, and whether
@@ -263,17 +305,7 @@ export const pickerScript = String.raw`globalThis.__haarnessPicker ??= (() => {
       return { element: details(node), more };
     },
     /** A pick stays outlined a moment, so it reads as taken. */
-    stop(picked) {
-      if (!on) return;
-      on = false;
-      listen(false);
-      adopt(false);
-      cancelAnimationFrame(frame);
-      frame = 0;
-      hint.classList.add("off");
-      tag.classList.remove("on");
-      leave = setTimeout(() => { clear(); host.remove(); }, picked ? 450 : 0);
-    },
+    stop: quit,
     /** Screenshots hide it, so the agent never sees it. */
     hide(value) {
       host.style.setProperty("visibility", value ? "hidden" : "visible", "important");
@@ -286,13 +318,89 @@ type Callbacks = {
   ended: (reason: PickEnd) => void;
 };
 
+/**
+ * An input event an agent's DevTools command makes the page receive, as
+ * Electron reports it: a press at view pixels (`x`, `y`) and at screen
+ * pixels (`screenX`, `screenY`), since a press that lands in a frame of
+ * another process reports the frame's own coordinates but the same screen
+ * point; or a key.
+ */
+export type AgentEvent =
+  | { kind: "mouse"; type: string; x: number; y: number; screenX: number; screenY: number; button?: string }
+  | { kind: "key"; type: "keyDown" | "keyUp"; key?: string; code?: string };
+
+const MOUSE: Record<string, string> = {
+  mousePressed: "mouseDown",
+  mouseReleased: "mouseUp",
+  mouseMoved: "mouseMove",
+  mouseWheel: "mouseWheel",
+};
+/**
+ * What an `Input.*` command will dispatch to the page: its presses (at view
+ * pixels: CSS pixels times `zoom`; and on screen, from the view's `origin`
+ * there) and keys. Text inserted with `Input.insertText` makes no key events,
+ * and drags are not presses.
+ */
+export function agentEvents(
+  method: string,
+  params: Record<string, unknown>,
+  zoom: number,
+  origin = { x: 0, y: 0 },
+): AgentEvent[] {
+  if (method === "Input.dispatchMouseEvent") {
+    const type = MOUSE[String(params.type)];
+    if (!type) return [];
+    const x = Number(params.x) * zoom, y = Number(params.y) * zoom;
+    const at = { x, y, screenX: origin.x + x, screenY: origin.y + y };
+    const button = typeof params.button === "string" ? params.button : undefined;
+    const events: AgentEvent[] = [{ kind: "mouse", type, ...at, button }];
+    // A right press opens the page's context menu as well.
+    if (type === "mouseDown" && button === "right") events.push({ kind: "mouse", type: "contextMenu", ...at });
+    return events;
+  }
+  if (method === "Input.dispatchKeyEvent") {
+    const type = params.type === "keyUp" ? "keyUp" : params.type === "keyDown" || params.type === "rawKeyDown" ? "keyDown" : undefined;
+    if (!type) return [];
+    return [{
+      kind: "key",
+      type,
+      key: typeof params.key === "string" ? params.key : undefined,
+      code: typeof params.code === "string" ? params.code : undefined,
+    }];
+  }
+  return [];
+}
+const pressedKey = (type: string) => type === "keyDown" || type === "rawKeyDown";
+/** Whether `input` is one of the events an agent command now in flight dispatches. */
+function expected(flight: Iterable<AgentEvent[]>, input: Electron.MouseInputEvent | Electron.Input) {
+  for (const events of flight)
+    for (const event of events) {
+      if (event.kind === "mouse") {
+        if (!("x" in input) || input.type !== event.type) continue;
+        if (event.button && input.button && event.button !== input.button) continue;
+        const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+        if (near(input.x, event.x) && near(input.y, event.y)) return true;
+        if (input.globalX !== undefined && input.globalY !== undefined && near(input.globalX, event.screenX) && near(input.globalY, event.screenY))
+          return true;
+      } else if ("key" in input && (pressedKey(input.type) ? "keyDown" : input.type) === event.type) {
+        if ((event.key !== undefined && event.key === input.key) || (!!event.code && event.code === input.code))
+          return true;
+      }
+    }
+  return false;
+}
+
 /** Which modifier keys are down, as the last key event that reached a view said. */
 export function createModifiers() {
   let held = { shift: false, alt: false };
   return {
     input(input: Pick<Electron.Input, "type" | "shift" | "alt">) {
-      if (input.type === "keyDown" || input.type === "rawKeyDown" || input.type === "keyUp")
+      if (pressedKey(input.type) || input.type === "keyUp")
         held = { shift: input.shift, alt: input.alt };
+    },
+    /** The window went to the background: a key released there never reports. */
+    reset() {
+      held = { shift: false, alt: false };
     },
     get: () => held,
   };
@@ -300,17 +408,21 @@ export function createModifiers() {
 
 /**
  * Picking in one tab's page. `zoom` is the page's zoom factor (presses come in
- * view pixels, the page measures in CSS pixels); `agent` says an agent's own
- * input is being dispatched to the page right now, which passes untouched.
- * Presses do not say which modifiers are down, so Shift and Option come from
- * the keys the page and its window (`window`) last heard, and from the
- * pointer's last move.
+ * view pixels, the page measures in CSS pixels). Presses do not say which
+ * modifiers are down, so Shift and Option come from the keys the page and its
+ * window (`window`) last heard, and from the pointer's last move.
+ *
+ * The agent's own input reaches the page through DevTools commands, which
+ * `dispatch` sends: each registers the presses and keys it will make, and only
+ * events matching one of those pass while the person picks; any other press
+ * or key in the meantime is the person's, and is kept from the page.
  */
 export function createPicker(
   contents: Pick<WebContents, "executeJavaScriptInIsolatedWorld" | "isDestroyed">,
   options: {
     zoom: () => number;
-    agent: () => boolean;
+    /** Where the page's view starts on the screen. */
+    origin?: () => { x: number; y: number };
     window?: () => { shift: boolean; alt: boolean };
   },
 ) {
@@ -322,9 +434,15 @@ export function createPicker(
   let session: Callbacks | undefined;
   // A press whose release the page must not see either.
   let pressed = false;
-  let swallow = { until: 0, up: false };
+  let swallow = { until: 0, up: false, escape: false };
   // Until when the outline may still be on screen, for screenshots.
   let lingers = 0;
+  /** The events each agent command now being dispatched makes. */
+  const flight = new Set<AgentEvent[]>();
+  // Frames have the pointer back for the agent's clicking (a lift in
+  // progress or done), until a moment after its last press.
+  let lifting: Promise<unknown> | undefined;
+  let restore: ReturnType<typeof setTimeout> | undefined;
   const run = <T>(code: string) =>
     contents.isDestroyed()
       ? Promise.reject(new Error("Browser tab was closed"))
@@ -335,12 +453,15 @@ export function createPicker(
     run(
       `globalThis.__haarnessPicker.${method}(${args.map((value) => JSON.stringify(value ?? null)).join(",")})`,
     );
+  const agent = (input: Electron.MouseInputEvent | Electron.Input) => expected(flight, input);
   function end(reason: PickEnd) {
     const current = session;
     if (!current) return;
     session = undefined;
+    clearTimeout(restore);
+    lifting = undefined;
     if (reason === "picked")
-      swallow = { until: Date.now() + SWALLOW_MS, up: pressed };
+      swallow = { ...swallow, until: Date.now() + SWALLOW_MS, up: pressed };
     lingers = Date.now() + 1_000;
     void call("stop", reason === "picked").catch(() => {});
     current.ended(reason);
@@ -361,6 +482,7 @@ export function createPicker(
     get active() {
       return !!session;
     },
+    /** Starts picking; false when it ended (or another began) before the page was ready. */
     async start(request: PickRequest, callbacks: Callbacks) {
       end("stopped");
       const current = (session = callbacks);
@@ -373,13 +495,41 @@ export function createPicker(
           cause: error,
         });
       }
+      return session === current;
     },
     end,
+    /**
+     * Sends one of the agent's DevTools commands. While the person picks, its
+     * presses and keys are let through, and frames take the pointer back for
+     * a press, so the agent's click lands inside a frame as it aimed.
+     */
+    async dispatch<T>(method: string, params: Record<string, unknown>, send: () => Promise<T>): Promise<T> {
+      const events = agentEvents(method, params, options.zoom() || 1, options.origin?.());
+      if (!events.length) return send();
+      flight.add(events);
+      const press = !!session && method === "Input.dispatchMouseEvent";
+      try {
+        if (press) {
+          // One lift serves the moves, press and release of a click.
+          clearTimeout(restore);
+          lifting ??= call("frames", false).catch(() => {});
+          await lifting;
+        }
+        return await send();
+      } finally {
+        flight.delete(events);
+        if (press)
+          restore = setTimeout(() => {
+            lifting = undefined;
+            if (session) void call("frames", true).catch(() => {});
+          }, 250);
+      }
+    },
     /** A press in the page: true when the picker kept it from the page. */
     mouse(event: Electron.Event, input: Electron.MouseInputEvent) {
       const press =
         input.type === "mouseDown" || input.type === "mouseUp" || input.type === "contextMenu";
-      if (!press || options.agent()) return false;
+      if (!press || agent(input)) return false;
       if (!session) {
         // The release of the press that picked, and the rest of a double click.
         const swallowed =
@@ -394,14 +544,31 @@ export function createPicker(
       if (input.type === "mouseDown" && input.button === "left") void take(input);
       return true;
     },
-    /** A key in the page: Escape stops picking. */
+    /**
+     * A key in the page. While the person picks, the page hears none of their
+     * keys (Space, Enter and letters would press what it focused); Escape
+     * stops, and its release is kept too. Command and Control chords pass, so
+     * the app's own shortcuts still work.
+     */
     key(event: Electron.Event, input: Electron.Input) {
-      if (options.agent()) return false;
+      if (agent(input)) return false;
       keys.input(input);
-      if (!session || input.type !== "keyDown" || input.key !== "Escape") return false;
+      if (swallow.escape && input.type === "keyUp" && input.key === "Escape") {
+        swallow.escape = false;
+        event.preventDefault();
+        return true;
+      }
+      if (!session || input.meta || input.control) return false;
       event.preventDefault();
-      end("cancelled");
+      if (pressedKey(input.type) && input.key === "Escape") {
+        swallow.escape = true;
+        end("cancelled");
+      }
       return true;
+    },
+    /** The page lost the keyboard: modifiers it saw held may have been released elsewhere. */
+    blur() {
+      keys.reset();
     },
     /** Runs `capture` with the outline hidden while it may be on screen. */
     async hidden<T>(capture: () => Promise<T>): Promise<T> {

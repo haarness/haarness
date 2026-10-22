@@ -21,18 +21,27 @@ const errors: string[] = [];
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 const shots = process.env.HAARNESS_PICK_SCREENSHOTS;
 
-const fixture = `<!doctype html><html lang="en"><head><title>Pick fixture</title>
-<style>body{font:16px system-ui;margin:0;padding:32px;background:#f5f2ec;color:#1d1b19}button{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #b9b2a6;background:#fff}.card{margin-top:24px;padding:20px;border-radius:12px;background:#fff;max-width:520px}</style></head><body>
+/** The page: `frame` is the cross-site address of the embedded form, so it runs in a process of its own. */
+const fixture = (frame: string) => `<!doctype html><html lang="en"><head><title>Pick fixture</title>
+<style>body{font:16px system-ui;margin:0;padding:32px;background:#f5f2ec;color:#1d1b19}button{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #b9b2a6;background:#fff}.card{margin-top:24px;padding:20px;border-radius:12px;background:#fff;max-width:520px}#grid{display:grid;grid-template-columns:repeat(8,46px);gap:6px;padding:0;margin:16px 0;list-style:none}#grid li{height:26px;background:#fff;border-radius:4px;text-align:center;font-size:12px;line-height:26px}iframe{width:320px;height:90px;border:1px solid #b9b2a6;background:#fff}</style></head><body>
 <h1 id="title">Pick fixture</h1>
 <button id="save" class="primary wide" onclick="saved++"><span>Save</span> changes</button>
 <button id="count" onclick="counted++;this.textContent='Counted '+counted">Count</button>
+<button id="delete" onclick="deleted++">Delete</button>
+<input id="field" aria-label="Agent field">
 <div class="card"><p>Shipping is free on orders over $50.</p></div>
+<ul id="grid">${Array.from({ length: 24 }, (_, index) => `<li>${index + 1}</li>`).join("")}</ul>
+<iframe id="embedded" title="Embedded form" src="${frame}"></iframe>
 <a href="/other">Other page</a>
 <script>
-window.saved = 0; window.counted = 0; window.heard = [];
+window.saved = 0; window.counted = 0; window.deleted = 0; window.heard = []; window.keys = [];
 for (const type of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "focusin"])
-  addEventListener(type, (event) => { if (event.target.id !== "count") heard.push(type); }, true);
+  addEventListener(type, (event) => { if (!["count", "field"].includes(event.target.id)) heard.push(type); }, true);
+for (const type of ["keydown", "keyup"]) addEventListener(type, (event) => keys.push(type + ":" + event.key), true);
 </script></body></html>`;
+const framePage = `<!doctype html><html lang="en"><head><title>Embedded form</title></head><body style="margin:8px;font:14px system-ui">
+<button id="framed" onclick="framed++;this.textContent='Framed '+framed">Frame button</button>
+<script>window.framed = 0;</script></body></html>`;
 
 async function tool(name: string, args: object = {}) {
   const sdk = new Haarness({ baseUrl: endpoint.url, token: endpoint.token });
@@ -75,6 +84,47 @@ const shift = (type: "keyDown" | "keyUp") =>
 const pickButton = () => page.getByRole("button", { name: "Pick an element", exact: true });
 const messageBox = () => page.getByRole("textbox", { name: "Message" });
 const chips = () => page.locator(".prompt-context-item");
+/**
+ * Pixels at CSS points of the page as the person sees it now (`"page"`) or
+ * of a screenshot file, scaled to the page's CSS width.
+ */
+const sample = (source: string, points: { x: number; y: number }[], width: number) =>
+  app.evaluate(
+    async ({ nativeImage, webContents }, { source, points, width, url }) => {
+      const image =
+        source === "page"
+          ? await webContents.getAllWebContents().find((item) => item.getURL().startsWith(url))!.capturePage()
+          : nativeImage.createFromPath(source);
+      const scaled = image.resize({ width, quality: "best" });
+      const bitmap = scaled.toBitmap();
+      const row = scaled.getSize().width;
+      return points.map(({ x, y }) => Array.from(bitmap.subarray((y * row + x) * 4, (y * row + x) * 4 + 3)));
+    },
+    { source, points, width, url: siteURL },
+  );
+const distance = (a: number[], b: number[]) => Math.max(...a.map((value, index) => Math.abs(value - b[index])));
+/** The person's keys reach the page, which has the keyboard, one at a time. */
+const typePerson = (names: string[]) =>
+  app.evaluate(async ({ webContents }, { url, names }) => {
+    const contents = webContents.getAllWebContents().find((item) => item.getURL().startsWith(url))!;
+    contents.focus();
+    for (const keyCode of names) {
+      contents.sendInputEvent({ type: "keyDown", keyCode });
+      if (keyCode.length === 1 || keyCode === "Space") contents.sendInputEvent({ type: "char", keyCode: keyCode === "Space" ? " " : keyCode });
+      contents.sendInputEvent({ type: "keyUp", keyCode });
+      await new Promise((done) => setTimeout(done, 30));
+    }
+  }, { url: siteURL, names });
+/**
+ * What a field holds after the agent fills it with `texts` in turn: each fill
+ * selects all, presses Backspace and types the text. Where the synthetic
+ * select-all does not select (macOS, an unfocused window), Backspace takes
+ * one character instead; either way each key and text landed exactly once.
+ */
+const filled = (start: string, texts: string[]) => [
+  texts.at(-1)!,
+  texts.reduce((value, text) => value.slice(0, -1) + text, start),
+];
 /** Whether the picker's outline is in the page now. */
 const outlined = () => evaluate("!!document.querySelector('haarness-element-picker')");
 /** The window as the person sees it: the app with the browser's page drawn in place. */
@@ -143,7 +193,14 @@ test.beforeAll(async () => {
   delete env.ELECTRON_RENDERER_URL;
   site = createServer((request, response) => {
     response.setHeader("Content-Type", "text/html");
-    response.end(request.url === "/other" ? "<!doctype html><title>Other</title><h1>Other page</h1>" : fixture);
+    const port = (site.address() as { port: number }).port;
+    response.end(
+      request.url === "/other"
+        ? "<!doctype html><title>Other</title><h1>Other page</h1>"
+        : request.url === "/frame"
+          ? framePage
+          : fixture(`http://localhost:${port}/frame`),
+    );
   });
   await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
   siteURL = "http://127.0.0.1:" + (site.address() as any).port;
@@ -301,16 +358,147 @@ test("the agent's own clicks still reach the page while the person picks", async
   await tool("click", { tabID, ref });
   expect(await evaluate("counted")).toBe(1);
   await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
-  // The agent's screenshot never shows the person's outline.
+  // The agent's screenshot never shows the person's outline, which the
+  // person sees around the button at that moment.
+  const box = JSON.parse(
+    await evaluate("(() => { const r = save.getBoundingClientRect(); return JSON.stringify({ left: r.left, y: r.top + r.height / 2, width: innerWidth }); })()"),
+  ) as { left: number; y: number; width: number };
   await mouse(await center("#save"));
+  await page.waitForTimeout(300);
+  const ring = { x: Math.round(box.left - 1), y: Math.round(box.y) };
+  const background = { x: Math.round(box.left - 20), y: Math.round(box.y) };
+  const seen = await sample("page", [ring, background], box.width);
   const shot = await tool("screenshot", { tabID });
-  expect(shot.files?.length ?? 1).toBeGreaterThan(0);
+  const taken = await sample(shot.files[0].path, [ring, background], box.width);
+  expect(distance(seen[0], seen[1])).toBeGreaterThan(40);
+  expect(distance(taken[0], taken[1])).toBeLessThan(16);
   await expect.poll(outlined).toBe(true);
   // A page that goes away ends picking.
   await tool("navigate", { tabID, url: siteURL + "/other" });
   await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
   await tool("navigate", { tabID, url: siteURL + "/" });
   await expect(pickButton()).toBeEnabled();
+});
+
+test("while picking the page hears none of the person's keys, and Escape's release stays with the picker", async () => {
+  await evaluate("keys.length = 0");
+  await pickButton().click();
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
+  // Space, Enter and letters would press what the page focused.
+  await typePerson(["Space", "Enter", "d"]);
+  expect(await evaluate("JSON.stringify(keys)")).toBe("[]");
+  await typePerson(["Escape"]);
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(outlined).toBe(false);
+  expect(await evaluate("JSON.stringify(keys)")).toBe("[]");
+  // Not picking, the page has its keys again.
+  await typePerson(["d"]);
+  await expect.poll(() => evaluate("keys.join(' ')")).toContain("keydown:d");
+  expect(JSON.parse(await evaluate("JSON.stringify({ saved, deleted })"))).toEqual({ saved: 0, deleted: 0 });
+});
+
+test("a frame is picked as a whole, and the agent's click inside one lands while the person picks", async () => {
+  const frame = (await tool("frames", { tabID })).frames.find((item: { url: string }) => item.url.endsWith("/frame"));
+  expect(frame).toBeTruthy();
+  await pickButton().click();
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
+  // The person's press over the frame picks the frame, and the button inside it does not run.
+  await mouse(await center("#embedded"), { press: true, modifiers: ["shift"] });
+  await expect(chips()).toHaveCount(1);
+  await expect(chips().first()).toContainText("iframe#embedded");
+  expect((await tool("evaluate", { tabID, frameID: frame.id, script: "framed" })).value).toBe(0);
+  // The agent clicks the button inside the frame, and it runs.
+  const snapshot = (await tool("snapshot", { tabID, frameID: frame.id })).content as string;
+  const ref = snapshot.split("\n").find((line) => line.includes('"Frame button"'))?.match(/@e\d+/)?.[0];
+  expect(ref).toBeTruthy();
+  await tool("click", { tabID, ref });
+  expect((await tool("evaluate", { tabID, frameID: frame.id, script: "framed" })).value).toBe(1);
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
+  // The frame ignores the pointer again: the next press over it picks it again.
+  await mouse(await center("#embedded"), { press: true });
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
+  expect((await tool("evaluate", { tabID, frameID: frame.id, script: "framed" })).value).toBe(1);
+  await chips().first().getByRole("button", { name: /^Remove context/ }).click();
+  await expect(chips()).toHaveCount(0);
+});
+
+test("the person's clicks while the agent types pick instead of pressing, and Escape still stops", async () => {
+  const snapshot = (await tool("snapshot", { tabID })).content as string;
+  const field = snapshot.split("\n").find((line) => line.includes('"Agent field"'))?.match(/@e\d+/)?.[0];
+  expect(field).toBeTruthy();
+  await pickButton().click();
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
+  const target = await center("#delete");
+  // The agent types again and again; meanwhile the person presses Delete as
+  // fast as the system lets them, with Shift, so they keep picking.
+  let typing = true;
+  const agent = (async () => {
+    try {
+      for (let round = 0; round < 12; round++) await tool("fill", { tabID, ref: field, text: "agent text " + round });
+    } finally {
+      typing = false;
+    }
+  })();
+  await app.evaluate(async ({ webContents }, { url, target }) => {
+    const contents = webContents.getAllWebContents().find((item) => item.getURL().startsWith(url))!;
+    contents.sendInputEvent({ type: "mouseMove", x: target.x, y: target.y, modifiers: ["shift"] });
+    await new Promise((done) => setTimeout(done, 100));
+  }, { url: siteURL, target });
+  while (typing)
+    await app.evaluate(async ({ webContents }, { url, target }) => {
+      const contents = webContents.getAllWebContents().find((item) => item.getURL().startsWith(url))!;
+      for (let press = 0; press < 25; press++) {
+        contents.sendInputEvent({ type: "mouseDown", x: target.x, y: target.y, button: "left", clickCount: 1 });
+        contents.sendInputEvent({ type: "mouseUp", x: target.x, y: target.y, button: "left", clickCount: 1 });
+        await new Promise((done) => setTimeout(done, 2));
+      }
+    }, { url: siteURL, target });
+  await agent;
+  expect(await evaluate("deleted")).toBe(0);
+  // Every key and every text the agent sent landed once.
+  expect(filled("", Array.from({ length: 12 }, (_, round) => "agent text " + round))).toContain(
+    await evaluate("document.querySelector('#field').value"),
+  );
+  await expect(chips()).toHaveCount(1);
+  await expect(chips().first()).toContainText("button#delete “Delete”");
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
+  // The person's Escape stops picking in the middle of the agent's typing,
+  // and the agent's typing goes on to the end.
+  await evaluate("keys.length = 0");
+  const start = await evaluate("document.querySelector('#field').value");
+  const more = (async () => {
+    for (let round = 0; round < 6; round++) await tool("fill", { tabID, ref: field, text: "more text " + round });
+  })();
+  await page.waitForTimeout(150);
+  await typePerson(["Escape"]);
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
+  await more;
+  expect(filled(start, Array.from({ length: 6 }, (_, round) => "more text " + round))).toContain(
+    await evaluate("document.querySelector('#field').value"),
+  );
+  expect(await evaluate("keys.filter((key) => key.endsWith(':Escape')).length")).toBe(0);
+  await chips().first().getByRole("button", { name: /^Remove context/ }).click();
+  await expect(chips()).toHaveCount(0);
+});
+
+test("a page's worth of elements can be picked into one message", async () => {
+  await pickButton().click();
+  for (let cell = 1; cell <= 21; cell++)
+    await mouse(await center(`#grid li:nth-of-type(${cell})`), { press: true, modifiers: ["shift"] });
+  await expect(chips()).toHaveCount(21);
+  await expect(page.locator(".notice-inline, [role=alert]").filter({ hasText: /context/i })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
+  await messageBox().fill("Tidy these");
+  await messageBox().press("Enter");
+  await expect(chips()).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const items = await client.listItems(thread.id);
+      const sent = (items as any[]).map((item) => item.data).filter((data) => data.type === "user_message").at(-1)?.text ?? "";
+      return sent.split("<summary>Page element: li").length - 1;
+    })
+    .toBe(21);
 });
 
 test("the shortcut's menu item and the command palette start picking, and stop it when asked again", async () => {

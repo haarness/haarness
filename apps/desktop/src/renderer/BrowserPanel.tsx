@@ -76,6 +76,9 @@ export function BrowserPanel(props: {
   // The person is picking an element in the shown page; `picks` counts what
   // this round of picking added to the draft `pickDraft` names.
   const [picking, setPicking] = createSignal(false);
+  // Asked to pick, waiting for the page; `pickRound` tells a late answer apart.
+  const [starting, setStarting] = createSignal(false);
+  let pickRound = 0;
   let picks = 0;
   let pickDraft = "";
   let addressField!: HTMLInputElement;
@@ -119,6 +122,8 @@ export function BrowserPanel(props: {
   createEffect(() => {
     const { connection, thread } = owner();
     const version = ++epoch;
+    pickRound++;
+    setStarting(false);
     setPicking(false);
     lastLayout = "";
     held = false;
@@ -267,21 +272,34 @@ export function BrowserPanel(props: {
   /** Picks elements of the shown page into the message as chips. */
   async function startPicking() {
     const { connection, thread } = owner();
+    const round = ++pickRound;
     picks = 0;
     pickDraft = app.draftKey();
     setError("");
+    setStarting(true);
     try {
-      await window.haarness.browserPick(connection, thread, {
+      const started = await window.haarness.browserPick(connection, thread, {
         hint: t("Click an element to add it · Shift-click for more · Esc to cancel"),
         accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
       });
-      if (belongs(connection, thread)) setPicking(true);
+      if (round !== pickRound) {
+        // Stopped while the page got ready: what began meanwhile stops too.
+        if (started && belongs(connection, thread))
+          void window.haarness.browserPick(connection, thread, null).catch(() => {});
+        return;
+      }
+      // The button lights only when the page is really picking.
+      setPicking(!!started && belongs(connection, thread));
     } catch (reason) {
-      if (belongs(connection, thread)) setError(String(reason));
+      if (round === pickRound && belongs(connection, thread)) setError(String(reason));
+    } finally {
+      if (round === pickRound) setStarting(false);
     }
   }
   function stopPicking() {
-    if (!picking()) return;
+    if (!picking() && !starting()) return;
+    pickRound++;
+    setStarting(false);
     setPicking(false);
     const { connection, thread } = owner();
     void window.haarness.browserPick(connection, thread, null).catch(() => {});
@@ -305,10 +323,11 @@ export function BrowserPanel(props: {
   createEffect(
     on([() => props.visible, focusedTab], () => stopPicking(), { defer: true }),
   );
-  // Escape stops picking, and only that: the composer's Escape would stop a
-  // running turn. A dialog over the window keeps its own Escape.
+  // Escape stops picking (or picking about to start), and only that: the
+  // composer's Escape would stop a running turn. A dialog over the window
+  // keeps its own Escape.
   createEffect(() => {
-    if (!picking()) return;
+    if (!picking() && !starting()) return;
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing) return;
       if (event.target instanceof Element && event.target.closest("dialog, [role='dialog'], [role='alertdialog']")) return;
@@ -328,7 +347,7 @@ export function BrowserPanel(props: {
     const request = props.pickRequest ?? 0;
     if (!request || request === taken || !props.visible) return;
     if (Date.now() - request > 5_000) return;
-    if (untrack(picking)) {
+    if (untrack(picking) || untrack(starting)) {
       taken = request;
       stopPicking();
     } else if (pickable()) {
@@ -532,8 +551,9 @@ export function BrowserPanel(props: {
           aria-label={t("Pick an element")}
           title={[t("Pick an element"), state.preferences.shortcuts.pick && shortcutText(state.preferences.shortcuts.pick, state.platform)].filter(Boolean).join(" — ")}
           aria-pressed={picking()}
-          disabled={!picking() && !pickable()}
-          onClick={() => (picking() ? stopPicking() : void startPicking())}
+          aria-busy={starting()}
+          disabled={!picking() && !starting() && !pickable()}
+          onClick={() => (picking() || starting() ? stopPicking() : void startPicking())}
         >
           <Icon name="pick" size="sm" />
         </button>

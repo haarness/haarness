@@ -202,6 +202,8 @@ export function createBrowserHost(
       const created = (held = createModifiers());
       modifiers.set(win, created);
       win.webContents.on("before-input-event", (_event, input) => created.input(input));
+      // A key released while another app has the keyboard never reports here.
+      win.on("blur", () => created.reset());
     }
     return held.get;
   }
@@ -770,7 +772,7 @@ export function createBrowserHost(
       const send = (pick: PickEvent) =>
         emit(e.win, { kind: "browser", connection: e.connection, id: e.thread, data: { pick } });
       let picks = 0;
-      await page.pick(request, {
+      const started = await page.pick(request, {
         picked: (element, more) => {
           picks++;
           send({ type: "picked", tab, element, more });
@@ -781,7 +783,8 @@ export function createBrowserHost(
           send({ type: "ended", reason });
         },
       });
-      return { tab };
+      // The page went (or another pick began) while picking started.
+      return started ? { tab } : null;
     },
     /** The focused page as drawn now, so the window can hold a still copy
         while a menu or dialog has to paint where the native view sits. */
