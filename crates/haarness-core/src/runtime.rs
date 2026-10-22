@@ -9552,6 +9552,7 @@ impl RunnerTask {
         call_id: &str,
         mut arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
+        use std::fmt::Write as _;
         let mut answers = None;
         let mut hook_context = None;
         if let Some(hooks) = &self.hooks {
@@ -9609,7 +9610,6 @@ impl RunnerTask {
             }
             plain_tool_output(self.ask_question(&arguments).await?)
         };
-        use std::fmt::Write as _;
         if let Some(context) = hook_context {
             let _ = write!(
                 output.text,
