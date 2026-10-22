@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Günlükler {path} konumuna kaydedildi · yol kopyalandı",
   "{count} older files left out past 200 MB": "200 MB sınırını aşan {count} eski dosya dışarıda bırakıldı",
   "Could not export logs: {error}": "Günlükler dışa aktarılamadı: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} bir günlük zip dosyası değil; başka bir ad seçin",
   "Could not change detailed logging: {error}": "Ayrıntılı günlük değiştirilemedi: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Ayrıntılı günlük kapalı · /logs detail on · /logs export [yol]",
   "Detailed logging on until {time} · /logs detail off stops it": "Ayrıntılı günlük {time} saatine kadar açık · /logs detail off durdurur",

@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Dzienniki zapisano w {path} · ścieżka skopiowana",
   "{count} older files left out past 200 MB": "Pominięto {count} starszych plików powyżej 200 MB",
   "Could not export logs: {error}": "Nie udało się wyeksportować dzienników: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} nie jest plikiem zip z dziennikami; wybierz inną nazwę",
   "Could not change detailed logging: {error}": "Nie udało się zmienić szczegółowych dzienników: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Szczegółowe dzienniki wyłączone · /logs detail on · /logs export [ścieżka]",
   "Detailed logging on until {time} · /logs detail off stops it": "Szczegółowe dzienniki włączone do {time} · /logs detail off je zatrzymuje",

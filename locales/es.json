@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Registros guardados en {path} · ruta copiada",
   "{count} older files left out past 200 MB": "{count} archivos antiguos omitidos por superar 200 MB",
   "Could not export logs: {error}": "No se pudieron exportar los registros: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} no es un zip de registros; elige otro nombre",
   "Could not change detailed logging: {error}": "No se pudo cambiar el registro detallado: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Registro detallado desactivado · /logs detail on · /logs export [ruta]",
   "Detailed logging on until {time} · /logs detail off stops it": "Registro detallado activado hasta las {time} · /logs detail off lo detiene",

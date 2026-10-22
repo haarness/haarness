@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "日志已保存到 {path} · 已复制路径",
   "{count} older files left out past 200 MB": "超过 200 MB，已略过 {count} 个较旧的文件",
   "Could not export logs: {error}": "无法导出日志：{error}",
+  "{path} is not a zip of logs; choose another name": "{path} 不是日志 zip 文件，请换一个名称",
   "Could not change detailed logging: {error}": "无法更改详细日志：{error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "详细日志已关闭 · /logs detail on · /logs export [路径]",
   "Detailed logging on until {time} · /logs detail off stops it": "详细日志已开启，直到 {time} · /logs detail off 可停止",

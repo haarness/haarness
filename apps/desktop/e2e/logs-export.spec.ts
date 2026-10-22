@@ -131,6 +131,10 @@ test("Detailed logging turns on for 30 minutes, says how long it has left, and t
   await expect(settings().getByRole("switch", { name: "Detailed logging" })).not.toBeChecked();
   await expect(stat(join(data(), "log-level.json"))).rejects.toThrow();
   await shoot("diagnostics-off", settings().locator('[data-setting="Diagnostics"]').locator(".."));
+  // Reading the level runs `haarness logs` from the home folder, which must
+  // not become a project.
+  const registry = await readFile(join(data(), "workspaces.json"), "utf8").catch(() => "");
+  expect(registry).not.toContain(JSON.stringify(await app.evaluate(({ app }) => app.getPath("home"))));
 });
 
 test("Export logs… saves a scrubbed zip named for today and shows it in the file manager", async () => {

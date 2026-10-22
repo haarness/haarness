@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Logfiler gemt i {path} · sti kopieret",
   "{count} older files left out past 200 MB": "{count} ældre filer udeladt over 200 MB",
   "Could not export logs: {error}": "Kunne ikke eksportere logfiler: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} er ikke en zip med logfiler; vælg et andet navn",
   "Could not change detailed logging: {error}": "Kunne ikke ændre detaljeret logning: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Detaljeret logning fra · /logs detail on · /logs export [sti]",
   "Detailed logging on until {time} · /logs detail off stops it": "Detaljeret logning til indtil {time} · /logs detail off stopper den",
