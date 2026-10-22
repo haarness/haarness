@@ -2,8 +2,8 @@
 """Real TUI in tmux, echo provider: folder names stay plain text in shell commands.
 
 A project whose folder name holds a space and `$(…)` runs a slash command whose !`…` snippet names
-the folder bare, in double quotes and in single quotes: the reply shows the name three times as
-written and nothing runs. `/editor` with a temporary folder named the same way hands `$EDITOR` the
+the folder in double quotes, in single quotes and inside a nested `$(basename "…")`: the reply shows
+the name as written each time and nothing runs. `/editor` with a temporary folder named the same way hands `$EDITOR` the
 composer file as one word.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-shell-text-tmux.py
@@ -21,7 +21,7 @@ for folder in (project/'.haarness/commands', temporary, state, home):
     folder.mkdir(parents=True, exist_ok=True)
 (project/'.haarness/commands/where.md').write_text(
     "---\ndescription: Name the project folder\n---\n"
-    "WHERE !`printf '[%s]' ${CLAUDE_PROJECT_DIR} \"${CLAUDE_PROJECT_DIR}\" '${CLAUDE_PROJECT_DIR}'`\n")
+    "WHERE !`printf '[%s]' \"${CLAUDE_PROJECT_DIR}\" '${CLAUDE_PROJECT_DIR}' \"$(basename \"${CLAUDE_PROJECT_DIR}\")\"`\n")
 session = 'haarness-shell-text-' + uuid.uuid4().hex[:8]
 checks = []
 
@@ -57,10 +57,10 @@ try:
     until(lambda: 'echo' in capture().lower(), 'TUI did not open')
     type_text('/where'); keys('Enter')
     until(lambda: 'Echo: WHERE' in capture(), 'the command reply did not show')
-    expected = f'Echo: WHERE [{project}][{project}][{project}]'
+    expected = f'Echo: WHERE [{project}][{project}][{project.name}]'
     until(lambda: any(reply.strip() == expected for reply in replies()), f'the snippet did not name the folder as written: {replies()}')
     assert not (root/'project-ran').exists() and not (project/'project-ran').exists(), 'the folder name ran as a command'
-    check('a slash command snippet names a folder holding a space and $(…) as written, bare, quoted and in single quotes')
+    check('a slash command snippet names a folder holding a space and $(…) as written, quoted, in single quotes and in a nested $(…)')
     type_text('/editor'); keys('Enter')
     until(lambda: 'from the editor' in capture(), 'the editor text did not reach the composer')
     assert not (root/'editor-ran').exists(), 'the temporary folder name ran as a command'

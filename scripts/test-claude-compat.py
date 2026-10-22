@@ -46,7 +46,7 @@ write(plugins/'a/commands/failed-context.md','---\ndescription: Failed context\n
 write(workspace/'.haarness/skills/standalone/SKILL.md','---\nname: standalone\ndescription: Local skill\n---\nSTANDALONE_BODY $ARGUMENTS\n')
 # Projects whose folder names hold shell syntax and a snippet: the names must stay plain text.
 odd=root/'odd $(printf INJECTED) folder';odd_snippet=root/'w !`printf SNIPPET`'
-write(odd/'.haarness/commands/where.md','---\ndescription: Folder in a snippet\n---\nWHERE !`printf \'[%s]\' ${CLAUDE_PROJECT_DIR} "${CLAUDE_PROJECT_DIR}" \'${CLAUDE_PROJECT_DIR}\'`\n')
+write(odd/'.haarness/commands/where.md','---\ndescription: Folder in a snippet\n---\nWHERE !`printf \'[%s]\' "${CLAUDE_PROJECT_DIR}" \'${CLAUDE_PROJECT_DIR}\' "$(dirname "${CLAUDE_PROJECT_DIR}")"`\n')
 write(odd_snippet/'.haarness/commands/where.md','---\ndescription: Folder in the text\n---\nPROJECT ${CLAUDE_PROJECT_DIR}\n')
 def run_in(folder,command):
  p=subprocess.run([binary,'--workspace',str(folder),'--trust-project','run','','--command',command,'--provider','echo','--model','echo-1'],env=env,text=True,capture_output=True,timeout=60)
@@ -92,7 +92,7 @@ try:
  result=run('"two words" last','--command','a:named')
  check('named missing and project substitutions','NAMED two words to last () MISSING $5' in result['out'] and str(workspace) in result['out'],result)
  result=run_in(odd,'where')
- check('a folder name is plain text in a command snippet',f'WHERE [{odd}][{odd}][{odd}]' in result['out'],result)
+ check('a folder name is plain text in a command snippet',f'WHERE [{odd}][{odd}][{odd.parent}]' in result['out'],result)
  result=run_in(odd_snippet,'where')
  check('a folder name in the text never starts a snippet',f'PROJECT {odd_snippet}' in result['out'],result)
  result=run('','--command','a:failed-context')
