@@ -14,7 +14,8 @@ into the project. The script proves that:
 4. changing one of its items saves the person's own version: `haarness mcp disable` copies the
    server's entry into the global file and removing that copy brings the base one back, Desktop's
    customize copies an agent, `haarness mcp remove` of the base server refuses and says why;
-5. the TUI's /mcp, /hooks, /skills and theme picker show the base items;
+5. the TUI's /mcp, /hooks, /skills and theme picker show the base items, and hot reload follows
+   edits of the base folder;
 6. a terminal started with the variable that reuses a server without it says so in the log;
 7. the base folder is byte for byte as it was after all of this, and a missing folder is reported.
 
@@ -276,6 +277,15 @@ try:
     (evidence / "mismatch-notice.txt").write_text(line + "\n")
     check("A client with the variable that reuses a server without it says so, with how to apply it",
           "reads no base folder" in line and "haarness serve --stop" in line)
+
+    # Hot reload watches the base folder as it does the global one.
+    write(team / "agents/late-arrival.md", "---\ndescription: Added while running\n---\nLate.")
+    until(lambda: any(agent["id"] == "late-arrival" for agent in api("/agents")),
+          "an agent added to the base folder did not reach the running server", 30)
+    (team / "agents/late-arrival.md").unlink()
+    until(lambda: all(agent["id"] != "late-arrival" for agent in api("/agents")),
+          "an agent removed from the base folder stayed on the running server", 30)
+    check("Hot reload picks up an agent added to and removed from the base folder")
 
     # 7. Never written; a missing folder is reported.
     check("The base folder is byte for byte as it was", snapshot(team) == before)
