@@ -5553,6 +5553,14 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
+/// A definition's `!` snippet on its way to the shell tool: the text its
+/// permissions are judged on, the text that runs, and that text's values.
+pub(crate) struct DefinitionShell<'a> {
+    shown: &'a str,
+    run: &'a str,
+    env: &'a std::collections::BTreeMap<String, String>,
+}
+
 #[async_trait::async_trait]
 impl crate::ToolInvoker for TurnToolInvoker {
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
@@ -5562,43 +5570,8 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .is_some_and(|tool| tool.parallel_safe(arguments))
     }
     fn activate_skill_permissions(&self, execution: &haarness_protocol::DefinitionExecution) {
-        let expand = |s: &String| {
-            let mut value = s.replace(
-                "${CLAUDE_PROJECT_DIR}",
-                &self.runner.workspace.to_string_lossy(),
-            );
-            if let Some(dir) = &execution.directory {
-                value = value.replace("${CLAUDE_SKILL_DIR}", dir);
-            }
-            if let Some(dir) = &execution.plugin_root {
-                value = value.replace("${CLAUDE_PLUGIN_ROOT}", dir);
-            }
-            value
-        };
-        // A `!` snippet keeps its placeholders as written (its shell reads
-        // them), while the model writes the real paths: each pattern counts in
-        // both spellings.
-        let both = |entries: &[String]| {
-            entries
-                .iter()
-                .flat_map(|entry| {
-                    let expanded = expand(entry);
-                    (expanded != *entry)
-                        .then(|| entry.clone())
-                        .into_iter()
-                        .chain([expanded])
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut rules = crate::definitions::approval_rules(&both(&execution.allowed_tools));
-        rules.extend(
-            crate::definitions::approval_rules(&both(&execution.disallowed_tools))
-                .into_iter()
-                .map(|mut rule| {
-                    rule.decision = PermissionDecision::Deny;
-                    rule
-                }),
-        );
+        let rules =
+            crate::definitions::skill_rules(execution, &self.runner.workspace.to_string_lossy());
         self.runner.skill_rules.lock().extend(rules);
     }
     fn workspace(&self) -> Option<String> {
@@ -5620,7 +5593,8 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     async fn definition_shell(
         &self,
-        command: String,
+        shown: String,
+        run: String,
         env: std::collections::BTreeMap<String, String>,
     ) -> CoreResult<ToolOutput> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
@@ -5629,9 +5603,13 @@ impl crate::ToolInvoker for TurnToolInvoker {
                 &self.agent,
                 &format!("{}:{sequence}", self.parent_call_id),
                 "bash",
-                json!({"command":command}),
+                json!({"command":shown}),
                 false,
-                Some(&env),
+                Some(&DefinitionShell {
+                    shown: &shown,
+                    run: &run,
+                    env: &env,
+                }),
             )
             .await
     }
@@ -8559,9 +8537,9 @@ impl RunnerTask {
         name: &str,
         mut arguments: serde_json::Value,
         require_advertised: bool,
-        // A definition's `!` snippet: what its shell reads its placeholders
-        // from.
-        definition_env: Option<&std::collections::BTreeMap<String, String>>,
+        // A definition's `!` snippet: what runs in place of the text that
+        // was judged, and what its shell reads the placeholders from.
+        definition_shell: Option<&DefinitionShell<'_>>,
     ) -> CoreResult<ToolOutput> {
         let resolved = self.resolve_tool_name(name);
         let name = resolved.as_str();
@@ -8821,13 +8799,22 @@ impl RunnerTask {
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
         }
+        // A snippet was judged with its folders filled in; unless a hook
+        // rewrote it, the shell runs it with its references, reading the
+        // values from its environment, so a folder name is never shell text.
+        let mut executed = arguments.clone();
         if name == "bash"
-            && let Some(env) = definition_env
+            && let Some(snippet) = definition_shell
         {
             execution.shell_env.extend(
-                env.iter()
+                snippet
+                    .env
+                    .iter()
                     .map(|(name, value)| (name.clone(), value.clone())),
             );
+            if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
+                executed["command"] = json!(snippet.run);
+            }
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
@@ -8841,7 +8828,7 @@ impl RunnerTask {
         } else {
             tool.expect("non-internal tool resolved above")
                 .execute(
-                    arguments.clone(),
+                    executed,
                     ToolContext {
                         execution,
                         thread_id: self.thread.id,

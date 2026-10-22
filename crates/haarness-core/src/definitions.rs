@@ -561,9 +561,13 @@ pub async fn prepare(
             &workspace,
             false,
             false,
+            false,
         ));
         prepared.push_str(whole.as_str().split_once("!`").unwrap().0);
-        let command = substitutions(
+        // Permissions judge the snippet with its folders filled in (what
+        // the person reads on the card and what rules name); it runs with
+        // its references kept for the shell to read from its environment.
+        let shown = substitutions(
             &capture[1],
             input,
             execution,
@@ -571,9 +575,24 @@ pub async fn prepare(
             &workspace,
             true,
             false,
+            false,
+        );
+        let run = substitutions(
+            &capture[1],
+            input,
+            execution,
+            session,
+            &workspace,
+            true,
+            cfg!(not(windows)),
+            false,
         );
         let result = invoker
-            .definition_shell(command, snippet_environment(execution, session, &workspace))
+            .definition_shell(
+                shown,
+                run,
+                snippet_environment(execution, session, &workspace),
+            )
             .await?;
         if result
             .metadata
@@ -602,6 +621,7 @@ pub async fn prepare(
         execution,
         session,
         &workspace,
+        false,
         false,
         false,
     ));
@@ -798,6 +818,7 @@ fn substitutions(
     session: &str,
     workspace: &str,
     shell: bool,
+    keep_references: bool,
     _append: bool,
 ) -> String {
     // Do not let supplied arguments be reinterpreted as template substitutions.
@@ -814,12 +835,12 @@ fn substitutions(
             .find(|(candidate, _)| *candidate == name)
             .map_or_else(String::new, |(_, value)| (*value).to_owned())
     };
-    // A snippet runs in the agent's shell (`sh` here, `cmd` on Windows, which
-    // gets the values as they are). Its placeholders stay as written and the
-    // shell reads them from the snippet's environment, so a folder named
-    // `a b` or `p$(touch x)` is a value, never shell text; inside single
-    // quotes a reference is opened for the shell.
-    let template = if shell && cfg!(not(windows)) {
+    // The text a snippet runs (`sh` here; `cmd` on Windows gets the values
+    // filled in) keeps its placeholders as written, and the shell reads them
+    // from the snippet's environment, so a folder named `a b` or
+    // `p$(touch x)` is a value, never shell text; inside single quotes a
+    // reference is opened for the shell. Every other text gets the values.
+    let template = if keep_references {
         crate::shell_text::place_placeholders(
             crate::shell_text::ShellKind::Posix,
             template,
@@ -866,6 +887,49 @@ fn substitutions(
         template
     }
 }
+/// The rules a skill's or command's `allowed-tools` and `disallowed-tools`
+/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}` and
+/// `${CLAUDE_PLUGIN_ROOT}` filled in. Snippets are judged with their folders
+/// filled in, as the model writes them, so an allowance names the real paths
+/// only: one that kept the `${CLAUDE_PLUGIN_ROOT}` spelling would cover a
+/// command that sets that variable itself. A deny counts in both spellings.
+#[must_use]
+pub fn skill_rules(execution: &DefinitionExecution, workspace: &str) -> Vec<crate::PermissionRule> {
+    let expand = |entry: &String| {
+        let mut value = entry.replace("${CLAUDE_PROJECT_DIR}", workspace);
+        if let Some(directory) = &execution.directory {
+            value = value.replace("${CLAUDE_SKILL_DIR}", directory);
+        }
+        if let Some(root) = &execution.plugin_root {
+            value = value.replace("${CLAUDE_PLUGIN_ROOT}", root);
+        }
+        value
+    };
+    let mut rules = approval_rules(
+        &execution
+            .allowed_tools
+            .iter()
+            .map(expand)
+            .collect::<Vec<_>>(),
+    );
+    let denied: Vec<String> = execution
+        .disallowed_tools
+        .iter()
+        .flat_map(|entry| {
+            let expanded = expand(entry);
+            (expanded != *entry)
+                .then(|| entry.clone())
+                .into_iter()
+                .chain([expanded])
+        })
+        .collect();
+    rules.extend(approval_rules(&denied).into_iter().map(|mut rule| {
+        rule.decision = crate::PermissionDecision::Deny;
+        rule
+    }));
+    rules
+}
+
 pub fn approval_rules(tools: &[String]) -> Vec<crate::PermissionRule> {
     tools
         .iter()
@@ -1103,6 +1167,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_skill_allowance_names_real_paths_and_a_deny_both_spellings() {
+        let execution = DefinitionExecution {
+            plugin_root: Some("/plugins/kit".into()),
+            directory: Some("/skills/tool".into()),
+            allowed_tools: vec![
+                "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/run.sh:*)".into(),
+                "Bash(${CLAUDE_SKILL_DIR}/check.sh)".into(),
+            ],
+            disallowed_tools: vec!["Bash(rm ${CLAUDE_PROJECT_DIR}/:*)".into()],
+            ..DefinitionExecution::default()
+        };
+        let rules = skill_rules(&execution, "/work/project");
+        let allowed: Vec<&str> = rules
+            .iter()
+            .filter(|rule| rule.decision == crate::PermissionDecision::Allow)
+            .map(|rule| rule.pattern.as_str())
+            .collect();
+        assert_eq!(
+            allowed,
+            [
+                "bash:/plugins/kit/scripts/run.sh *",
+                "bash:/skills/tool/check.sh"
+            ]
+        );
+        let denied: Vec<&str> = rules
+            .iter()
+            .filter(|rule| rule.decision == crate::PermissionDecision::Deny)
+            .map(|rule| rule.pattern.as_str())
+            .collect();
+        assert!(denied.contains(&"bash:rm /work/project/ *"), "{denied:?}");
+        assert!(
+            denied.contains(&"bash:rm ${CLAUDE_PROJECT_DIR}/ *"),
+            "{denied:?}"
+        );
+    }
+
     /// Runs each `!` snippet in `sh`, as the agent's shell tool does.
     struct ShellInvoker {
         workspace: String,
@@ -1114,11 +1215,12 @@ mod tests {
         }
         async fn definition_shell(
             &self,
-            command: String,
+            _shown: String,
+            run: String,
             env: std::collections::BTreeMap<String, String>,
         ) -> CoreResult<crate::ToolOutput> {
             let output = tokio::process::Command::new("sh")
-                .args(["-c", &command])
+                .args(["-c", &run])
                 .envs(env)
                 .output()
                 .await
@@ -1191,6 +1293,18 @@ mod tests {
             text,
             format!("Up: [/skills/José skills] Here: [{workspace}]")
         );
+
+        // A quoted here-document prints the folder, as it reads nothing.
+        let text = prepare(
+            "Doc: !`cat <<'EOF'\n[${CLAUDE_PROJECT_DIR}]\nEOF`",
+            "",
+            &DefinitionExecution::default(),
+            "session",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, format!("Doc: [{workspace}]"));
 
         let invoker = ShellInvoker {
             workspace: "/work/w !`printf SNIPPET`".into(),

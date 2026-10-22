@@ -1779,7 +1779,16 @@ async fn resolve_headers(
     #[cfg(not(windows))]
     let mut command = {
         use haarness_core::shell_text::{ShellKind, place_placeholders, variable_at};
-        let helper = place_placeholders(ShellKind::Posix, helper, &variable_at, &|_| String::new());
+        // A quoted here-document expands nothing: its references get the
+        // values the shell would read.
+        let helper = place_placeholders(ShellKind::Posix, helper, &variable_at, &|name| {
+            config
+                .env
+                .get(name)
+                .map(|value| expand_env_reference(value))
+                .or_else(|| std::env::var(name).ok())
+                .unwrap_or_default()
+        });
         let mut command = tokio::process::Command::new("sh");
         command.args(["-lc", &helper]);
         command
