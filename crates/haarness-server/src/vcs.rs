@@ -1761,10 +1761,11 @@ mod tests {
         repo.commit_all("baseline");
         let config = repo.path.join(".git/config");
         let mut text = fs::read_to_string(&config).unwrap();
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "[filter \"\"]\n\tclean = \"{}\"\n",
             marks.command("empty", "cat")
-        ));
+        );
         fs::write(&config, text).unwrap();
         run(
             &repo.path,
