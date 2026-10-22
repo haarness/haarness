@@ -46,7 +46,7 @@ import {
 import { z } from "zod";
 import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
 import { serverKey } from "../servers";
-import { mergeProjectCatalog, projectKey } from "../projects";
+import { mergeProjectCatalog, projectKey, saveConnected } from "../projects";
 import {
   connectLocal,
   establish,
@@ -690,8 +690,10 @@ function installHandlers() {
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
     if (cloudSession || cloudWorkspace) {
       const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
-      const index = data().recent.findIndex(item => item.id === view.id);
-      if (index >= 0) data().recent[index] = view; else data().recent.push(view);
+      // Removed from the sidebar while it connected: it stays removed.
+      const next = saveConnected(data().recent, view, input.recent);
+      if (!next) return null;
+      data().recent = next;
       await persist(); watchNotifications(view.id, win.id); return view;
     }
 
@@ -823,6 +825,11 @@ function installHandlers() {
         checkout: view.checkout ?? current?.checkout,
         ...(url ? { url } : {}),
       };
+      // A saved project removed from the sidebar while it connected (a row
+      // retrying in the background, a notification opening its chat) stays
+      // removed, with nothing of it saved again.
+      const next = saveConnected(data().recent, saved, input.recent);
+      if (!next) return null;
       if (url) {
         saveServerAuth(serverId, auth);
         const savedServer = {
@@ -836,9 +843,7 @@ function installHandlers() {
         if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
         else data().servers.push(savedServer);
       }
-      const index = data().recent.findIndex((item) => item.id === view.id);
-      if (index >= 0) data().recent[index] = saved;
-      else data().recent.push(saved);
+      data().recent = next;
       await persist();
       if (!view.remote) {
         await refreshProjects();

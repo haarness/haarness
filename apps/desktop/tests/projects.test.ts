@@ -11,6 +11,7 @@ import {
   primaryLocation,
   projectSections,
   readProjectMeta,
+  saveConnected,
   sessionKey,
   sidebarGroups,
 } from "../src/projects";
@@ -54,6 +55,19 @@ const recent = (path: string): Recent => ({
   workspace: path,
   remote: false,
   trust: true,
+});
+
+test("a connected project replaces its saved entry or joins the list, but one removed while it connected stays removed", () => {
+  const one = { id: "local:/one", label: "one" };
+  const two = { id: "remote:https://host", label: "two" };
+  assert.deepEqual(saveConnected([one], { ...one, label: "renamed" }), [
+    { ...one, label: "renamed" },
+  ]);
+  assert.deepEqual(saveConnected([one], two), [one, two]);
+  // Asked for by its saved ID, and still saved.
+  assert.deepEqual(saveConnected([one, two], two, two.id), [one, two]);
+  // Asked for by its saved ID, and removed from the sidebar meanwhile.
+  assert.equal(saveConnected([one], two, two.id), undefined);
 });
 
 test("registered identity groups a worktree outside the project and discovers the primary folder without conflating remote hosts", () => {
