@@ -647,6 +647,11 @@ fn rule_names(rule: &PermissionRule, operation: &str, spellings: &[(String, bool
     if wildcard_match(&rule.pattern, operation) {
         return true;
     }
+    if operation.starts_with(EXTERNAL_DIRECTORY)
+        && real_folder_rule(&rule.pattern).is_some_and(|real| wildcard_match(&real, operation))
+    {
+        return true;
+    }
     if spellings.is_empty() {
         return false;
     }
@@ -660,6 +665,24 @@ fn rule_names(rule: &PermissionRule, operation: &str, spellings: &[(String, bool
     spellings.iter().any(|(spelled, spelled_absolute)| {
         *spelled_absolute == absolute && wildcard_match(&rule.pattern, spelled)
     })
+}
+
+const EXTERNAL_DIRECTORY: &str = "external_directory:";
+
+/// An `external_directory` rule written through a folder link, such as
+/// macOS's `/tmp` (really `/private/tmp`) or a linked home folder, in the
+/// form the asks use: they name the folder a path really reaches. `None`
+/// when the rule's folder is not absolute, does not exist or is no link.
+fn real_folder_rule(pattern: &str) -> Option<String> {
+    let target = pattern.strip_prefix(EXTERNAL_DIRECTORY)?;
+    let literal = &target[..target.find(['*', '?']).unwrap_or(target.len())];
+    let (folder, rest) = target.split_at(literal.rfind(['/', '\\'])?);
+    if folder.is_empty() || !Path::new(folder).is_absolute() {
+        return None;
+    }
+    let real = Path::new(folder).canonicalize().ok()?;
+    let real = real.to_string_lossy();
+    (real != folder).then(|| format!("{EXTERNAL_DIRECTORY}{real}{rest}"))
 }
 
 fn ruleset_disables_browser<'a>(
@@ -1424,6 +1447,53 @@ mod tests {
         );
         assert!(engine.disables_tool("write"));
         assert!(engine.disables_tool("apply_patch"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_outside_folder_rule_written_through_a_link_meets_the_ask_for_where_it_leads() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-linked-rules-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let link = root.join("link").to_string_lossy().into_owned();
+        let real = root.join("real").canonicalize().unwrap();
+        let real = real.to_string_lossy();
+        let engine = PermissionEngine::new(vec![
+            rule(
+                &format!("external_directory:{link}/*"),
+                PermissionDecision::Allow,
+            ),
+            rule(
+                &format!("external_directory:{link}/sub/*"),
+                PermissionDecision::Deny,
+            ),
+        ]);
+        assert_eq!(
+            engine.evaluate(&format!("external_directory:{real}/*")),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            engine.evaluate(&format!("external_directory:{real}/sub/*")),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            engine.evaluate(&format!("external_directory:{real}-other/*")),
+            PermissionDecision::Ask
+        );
+        // macOS's /tmp is /private/tmp, the folder an ask names.
+        let tmp = Path::new("/tmp").canonicalize().unwrap();
+        if tmp != Path::new("/tmp") {
+            let engine = PermissionEngine::new(vec![rule(
+                "external_directory:/tmp/*",
+                PermissionDecision::Allow,
+            )]);
+            assert_eq!(
+                engine.evaluate(&format!("external_directory:{}/build/*", tmp.display())),
+                PermissionDecision::Allow
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
