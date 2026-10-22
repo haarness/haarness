@@ -476,6 +476,73 @@ test("a project waiting to reconnect connects within 2 s of a wake or the networ
   }
 });
 
+test("a project removed from the sidebar while it reconnects stays removed after relaunch", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("removed-while-connecting");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Removal server", proxy.url, remote.token);
+    const id = "remote:" + new URL(proxy.url).origin;
+    // The open project's next read of its server fails, so it connects again
+    // from the start, and that connection waits until released.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    let infos = 0;
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/info") return false;
+      if (++infos === 1) {
+        req.resume();
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Server is busy" } }));
+        return true;
+      }
+      holding();
+      return gate;
+    });
+    proxy.cut();
+    await held;
+    const name = "removed-while-connecting";
+    const heading = () =>
+      page.locator(".sidebar .project-heading").filter({ hasText: name });
+    await page
+      .getByRole("button", { name: `Project options for ${name}`, exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Remove project", exact: true }).click();
+    await page
+      .getByRole("dialog", { name: `Remove ${name} from the sidebar?`, exact: true })
+      .getByRole("button", { name: "Remove project", exact: true })
+      .click();
+    await expect(heading()).toHaveCount(0);
+    const answered = proxy.answered("GET /v1/info");
+    proxy.intercept(undefined);
+    release();
+    await expect
+      .poll(() => proxy.answered("GET /v1/info"))
+      .toBeGreaterThan(answered);
+    await page.waitForTimeout(1000);
+    const saved = () =>
+      page.evaluate(
+        async (id) =>
+          (await window.haarness.boot()).recent.some((item) => item.id === id),
+        id,
+      );
+    expect(await saved()).toBe(false);
+    await app.close();
+    await launch();
+    await expect(page.locator(".server-switcher-button")).toHaveText(
+      "Removal server",
+    );
+    await expect(heading()).toHaveCount(0);
+    expect(await saved()).toBe(false);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
 test.beforeEach(async () => {
   temporary = await realpath(
     await mkdtemp(join(tmpdir(), "haarness-servers-")),
