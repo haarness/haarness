@@ -1778,14 +1778,8 @@ async fn resolve_headers(
     // quotes, where `sh` expands nothing, a reference is opened for it.
     #[cfg(not(windows))]
     let mut command = {
-        use haarness_core::shell_text::{Placeholders, ShellKind, place_placeholders, variable_at};
-        let helper = place_placeholders(
-            ShellKind::Posix,
-            helper,
-            &variable_at,
-            Placeholders::Expand,
-            &|_| String::new(),
-        );
+        use haarness_core::shell_text::{ShellKind, place_placeholders, variable_at};
+        let helper = place_placeholders(ShellKind::Posix, helper, &variable_at, &|_| String::new());
         let mut command = tokio::process::Command::new("sh");
         command.args(["-lc", &helper]);
         command

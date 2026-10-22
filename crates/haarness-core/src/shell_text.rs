@@ -1,11 +1,12 @@
 //! Values that go into the text a shell parses: a hook's command, an MCP
 //! server's `headersHelper`, a command's or skill's `` !`…` `` snippet. A
 //! value pasted into that text as it is becomes shell syntax: a folder named
-//! `p$(touch x)` runs `touch`, and one holding a space splits a word. The
-//! scanner here reads the text as the shell reads its quotes and puts each
-//! placeholder where it stands either for the shell to expand from the
-//! environment ([`Placeholders::Expand`]) or as its value quoted for that
-//! spot ([`Placeholders::Fill`]).
+//! `p$(touch x)` runs `touch`, and one holding a space splits a word. So the
+//! value goes in the command's environment and the text keeps its
+//! `${NAME}` reference for the shell to expand. The scanner here reads the
+//! text as the shell reads its quotes, to open a reference written inside
+//! single quotes (where a shell expands nothing) and, for PowerShell, to
+//! write references the way it reads them.
 
 use std::fmt::Write as _;
 
@@ -17,16 +18,6 @@ use std::fmt::Write as _;
 pub enum ShellKind {
     Posix,
     PowerShell,
-}
-
-/// What becomes of a placeholder.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Placeholders {
-    /// Left for the shell to expand from the environment the command gets.
-    Expand,
-    /// Replaced by its value, quoted for where it stands (POSIX shells; a
-    /// command without that environment, such as the agent's shell tool).
-    Fill,
 }
 
 /// `${NAME}` or `${NAME:-fallback}`, for any variable name, at the start of
@@ -54,20 +45,6 @@ fn placeholder_name(placeholder: &str) -> &str {
     token.split_once(":-").map_or(token, |(name, _)| name)
 }
 
-/// `value` as one word a POSIX shell reads back as it is: bare when it holds
-/// only characters no shell reads specially, else single-quoted.
-#[must_use]
-pub fn posix_word(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:@%+,".contains(&byte))
-    {
-        return value.to_owned();
-    }
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
 /// Whether a value can be written inside PowerShell single quotes as it is:
 /// only characters no PowerShell reads specially there.
 fn powershell_plain(value: &str) -> bool {
@@ -78,45 +55,50 @@ fn powershell_plain(value: &str) -> bool {
 }
 
 /// `command` with each placeholder `find` reports (its length at the start
-/// of the text) placed as the scanner reads the shell's quotes.
-///
-/// [`Placeholders::Expand`], from the environment:
+/// of the text) left for the shell to expand from the environment the
+/// command gets, as the scanner reads the shell's quotes:
 /// - outside single quotes a POSIX shell's `${NAME}` stays and PowerShell's
 ///   becomes `${env:NAME}`;
 /// - inside single quotes, where nothing expands, POSIX gets `'"${NAME}"'`
-///   (close, expand in double quotes, reopen), which stays safe even where
-///   the scanner misjudges the quotes (a comment, a here-document, `$'…'`);
-///   PowerShell gets the value itself only when it is made of plain
-///   characters, every single-quote character (ASCII and U+2018–U+201B)
-///   doubled, and `${env:NAME}` otherwise, which is then read literally:
-///   wrong, but never run.
-/// - In PowerShell each statement that starts with a placeholder (at the
-///   start, after `;`, `|`, `&&`, `||` or a line break) is a path to run, so
-///   that word is quoted and called with `&`.
-///
-/// [`Placeholders::Fill`], POSIX: outside quotes the value as one quoted
-/// word, inside double quotes with `\`, `"`, `$` and `` ` `` escaped, inside
-/// single quotes with each `'` closed, escaped and reopened.
+///   (close, expand in double quotes, reopen); where the scanner misjudges
+///   the quotes the value is still never part of the text, only placed
+///   wrong. A POSIX command's `#` comments, `$'…'` strings and the quotes of
+///   each `$(…)` and `` `…` `` are read as the shell reads them;
+/// - PowerShell gets the value itself inside single quotes only when it is
+///   made of plain characters, every single-quote character (ASCII and
+///   U+2018–U+201B) doubled, and `${env:NAME}` otherwise, which is then read
+///   literally: wrong, but never run. Each statement that starts with a
+///   placeholder (at the start, after `;`, `|`, `&&`, `||` or a line break)
+///   is a path to run, so that word is quoted and called with `&`.
 pub fn place_placeholders(
     kind: ShellKind,
     command: &str,
     find: &dyn Fn(&str) -> Option<usize>,
-    mode: Placeholders,
     value: &dyn Fn(&str) -> String,
 ) -> String {
-    #[derive(PartialEq)]
+    #[derive(Clone, Copy, PartialEq)]
     enum Quote {
         None,
         Single,
         Double,
     }
-    let escape = if kind == ShellKind::Posix { '\\' } else { '`' };
+    /// A command substitution the scanner is inside: the quote it opened
+    /// in, how deep its own parentheses go, and whether it is a backtick one.
+    struct Frame {
+        outer: Quote,
+        depth: usize,
+        backtick: bool,
+    }
+    let posix = kind == ShellKind::Posix;
+    let escape = if posix { '\\' } else { '`' };
     let single = |character: char| {
         character == '\''
             || (kind == ShellKind::PowerShell && ('\u{2018}'..='\u{201b}').contains(&character))
     };
     let mut out = String::with_capacity(command.len());
     let mut quote = Quote::None;
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut previous: Option<char> = None;
     let mut statement_start = true;
     // After PowerShell's own `&` or `.` the word is already called.
     let mut called = false;
@@ -125,8 +107,8 @@ pub fn place_placeholders(
         if let Some(length) = find(rest) {
             let placeholder = &rest[..length];
             let name = placeholder_name(placeholder);
-            match (&quote, kind, mode) {
-                (Quote::None, ShellKind::PowerShell, _) if statement_start => {
+            match (quote, kind) {
+                (Quote::None, ShellKind::PowerShell) if statement_start => {
                     // A path to run: quote the whole word and call it. The
                     // word ends at a space or a statement or block end that
                     // is not part of a placeholder.
@@ -158,26 +140,13 @@ pub fn place_placeholders(
                     rest = &rest[end..];
                     statement_start = false;
                     called = false;
+                    previous = Some('"');
                     continue;
                 }
-                (Quote::Single, ShellKind::Posix, Placeholders::Expand) => {
+                (Quote::Single, ShellKind::Posix) => {
                     let _ = write!(out, "'\"{placeholder}\"'");
                 }
-                (Quote::Single, ShellKind::Posix, Placeholders::Fill) => {
-                    out.push_str(&value(name).replace('\'', r"'\''"));
-                }
-                (Quote::Double, ShellKind::Posix, Placeholders::Fill) => {
-                    for character in value(name).chars() {
-                        if matches!(character, '\\' | '"' | '$' | '`') {
-                            out.push('\\');
-                        }
-                        out.push(character);
-                    }
-                }
-                (Quote::None, ShellKind::Posix, Placeholders::Fill) => {
-                    out.push_str(&posix_word(&value(name)));
-                }
-                (Quote::Single, ShellKind::PowerShell, _) => {
+                (Quote::Single, ShellKind::PowerShell) => {
                     let text = value(name);
                     if powershell_plain(&text) {
                         for character in text.chars() {
@@ -190,24 +159,97 @@ pub fn place_placeholders(
                         let _ = write!(out, "${{env:{name}}}");
                     }
                 }
-                (_, ShellKind::Posix, Placeholders::Expand) => out.push_str(placeholder),
-                (_, ShellKind::PowerShell, _) => {
+                (_, ShellKind::Posix) => out.push_str(placeholder),
+                (_, ShellKind::PowerShell) => {
                     let _ = write!(out, "${{env:{name}}}");
                 }
             }
             rest = &rest[length..];
             statement_start = false;
+            previous = Some('}');
             continue;
+        }
+        if posix && quote == Quote::None {
+            // A comment runs to the end of its line; its quotes are text.
+            let word_start = previous.is_none_or(|before| {
+                before.is_whitespace() || matches!(before, ';' | '&' | '|' | '(' | ')')
+            });
+            if character == '#' && word_start {
+                let end = rest.find('\n').unwrap_or(rest.len());
+                out.push_str(&rest[..end]);
+                rest = &rest[end..];
+                previous = Some('#');
+                continue;
+            }
+            // `$'…'` closes only at an unescaped quote and expands nothing.
+            if rest.starts_with("$'") {
+                let mut end = 2;
+                let bytes = rest.as_bytes();
+                while end < bytes.len() && bytes[end] != b'\'' {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                let end = (end + 1).min(rest.len());
+                out.push_str(&rest[..end]);
+                rest = &rest[end..];
+                previous = Some('\'');
+                continue;
+            }
+        }
+        if posix && quote != Quote::Single {
+            // A command substitution starts its own quoting.
+            let backtick_closes = character == '`'
+                && quote == Quote::None
+                && frames.last().is_some_and(|frame| frame.backtick);
+            if rest.starts_with("$(") || (character == '`' && !backtick_closes) {
+                let length = if character == '`' { 1 } else { 2 };
+                frames.push(Frame {
+                    outer: quote,
+                    depth: 0,
+                    backtick: character == '`',
+                });
+                quote = Quote::None;
+                out.push_str(&rest[..length]);
+                rest = &rest[length..];
+                previous = Some('(');
+                continue;
+            }
+            if quote == Quote::None
+                && let Some(frame) = frames.last_mut()
+            {
+                let closes = if frame.backtick {
+                    backtick_closes
+                } else if character == '(' {
+                    frame.depth += 1;
+                    false
+                } else if character == ')' {
+                    if frame.depth == 0 {
+                        true
+                    } else {
+                        frame.depth -= 1;
+                        false
+                    }
+                } else {
+                    false
+                };
+                if closes {
+                    quote = frames.pop().map_or(Quote::None, |frame| frame.outer);
+                    out.push(character);
+                    rest = &rest[character.len_utf8()..];
+                    previous = Some(character);
+                    continue;
+                }
+            }
         }
         if quote == Quote::None && (rest.starts_with("&&") || rest.starts_with("||")) {
             out.push_str(&rest[..2]);
             rest = &rest[2..];
             statement_start = true;
             called = false;
+            previous = Some('&');
             continue;
         }
         let mut length = character.len_utf8();
-        match (&quote, character) {
+        match (quote, character) {
             (Quote::None, _) if single(character) => quote = Quote::Single,
             (Quote::Single, _) if single(character) => quote = Quote::None,
             (Quote::Double, '"') => quote = Quote::None,
@@ -236,6 +278,7 @@ pub fn place_placeholders(
             called = false;
         }
         out.push_str(&rest[..length]);
+        previous = rest[..length].chars().last();
         rest = &rest[length..];
     }
     out
@@ -244,6 +287,12 @@ pub fn place_placeholders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expanded(command: &str) -> String {
+        place_placeholders(ShellKind::Posix, command, &variable_at, &|_| {
+            unreachable!("the shell reads the value")
+        })
+    }
 
     #[test]
     fn any_variable_reference_is_found_with_its_fallback() {
@@ -262,59 +311,33 @@ mod tests {
     }
 
     #[test]
-    fn a_filled_value_is_plain_text_wherever_it_stands() {
-        let value = |_: &str| "/p q/it's $(touch x) \"`a`\" \\".to_owned();
-        let shown = |command: &str| {
-            place_placeholders(
-                ShellKind::Posix,
-                command,
-                &variable_at,
-                Placeholders::Fill,
-                &value,
-            )
-        };
-        assert_eq!(
-            shown("cat ${DIR}/x"),
-            r#"cat '/p q/it'\''s $(touch x) "`a`" \'/x"#
-        );
-        assert_eq!(
-            shown(r#"cat "${DIR}/x""#),
-            r#"cat "/p q/it's \$(touch x) \"\`a\`\" \\/x""#
-        );
-        assert_eq!(
-            shown("cat '${DIR}/x'"),
-            r#"cat '/p q/it'\''s $(touch x) "`a`" \/x'"#
-        );
-        assert_eq!(
-            place_placeholders(
-                ShellKind::Posix,
-                "cat ${DIR}/x",
-                &variable_at,
-                Placeholders::Fill,
-                &|_| "/plain/path".to_owned(),
+    fn a_reference_stays_for_the_shell_and_opens_single_quotes() {
+        for (command, shown) in [
+            (
+                "get-token --scope ${SCOPE} \"${A:-x}\"",
+                "get-token --scope ${SCOPE} \"${A:-x}\"",
             ),
-            "cat /plain/path/x"
-        );
-    }
-
-    #[test]
-    fn an_expanded_reference_stays_for_the_shell_and_opens_single_quotes() {
-        let shown = |command: &str| {
-            place_placeholders(
-                ShellKind::Posix,
-                command,
-                &variable_at,
-                Placeholders::Expand,
-                &|_| unreachable!("the shell reads the value"),
-            )
-        };
-        assert_eq!(
-            shown("get-token --scope ${SCOPE} \"${A:-x}\""),
-            "get-token --scope ${SCOPE} \"${A:-x}\""
-        );
-        assert_eq!(
-            shown(r#"printf '{"X":"${TOKEN:-none}"}'"#),
-            r#"printf '{"X":"'"${TOKEN:-none}"'"}'"#
-        );
+            (
+                r#"printf '{"X":"${TOKEN:-none}"}'"#,
+                r#"printf '{"X":"'"${TOKEN:-none}"'"}'"#,
+            ),
+            // The quotes of a command substitution are its own.
+            (r#"cd "$(dirname "${DIR}")""#, r#"cd "$(dirname "${DIR}")""#),
+            (
+                r#"echo "$(printf '%s' '${DIR}')""#,
+                r#"echo "$(printf '%s' ''"${DIR}"'')""#,
+            ),
+            ("echo `printf '${DIR}'`", "echo `printf ''\"${DIR}\"''`"),
+            // An apostrophe in a comment opens no quote.
+            (
+                "true # it's here\nprintf %s ${DIR}",
+                "true # it's here\nprintf %s ${DIR}",
+            ),
+            // `$'…'` ends at its own unescaped quote.
+            ("printf $'it\\'s' ${DIR}", "printf $'it\\'s' ${DIR}"),
+            ("echo ${#DIR} ${DIR}", "echo ${#DIR} ${DIR}"),
+        ] {
+            assert_eq!(expanded(command), shown, "{command}");
+        }
     }
 }

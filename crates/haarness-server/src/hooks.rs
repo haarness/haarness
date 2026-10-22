@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use haarness_core::shell_text::{Placeholders, ShellKind, place_placeholders};
+use haarness_core::shell_text::{ShellKind, place_placeholders};
 use haarness_core::{HookDecision, HookPort, PermissionDecision};
 use haarness_protocol::ThreadId;
 use serde_json::{Value, json};
@@ -506,7 +506,7 @@ fn placeholder_at(rest: &str) -> Option<usize> {
 /// `command` with each placeholder left for the shell to expand from the
 /// environment the hook gets (see [`place_placeholders`]).
 fn quoted_placeholders(kind: ShellKind, command: &str, value: &dyn Fn(&str) -> String) -> String {
-    place_placeholders(kind, command, &placeholder_at, Placeholders::Expand, value)
+    place_placeholders(kind, command, &placeholder_at, value)
 }
 
 /// What `${name}` stands for in a hook of `entry` run for `workspace`.
