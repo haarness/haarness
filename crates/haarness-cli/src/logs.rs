@@ -855,6 +855,7 @@ mod tests {
             data.join("logs/haarness.log.2026-10-18"),
             "INFO request failed Authorization: Bearer sk-live-1234567890abcdef\n\
              WARN mcp: cannot reach https://mcp.example.com/sse?X-Amz-Signature=QUERYSECRET42 (refused)\n\
+             DEBUG discovery url: Url { scheme: \"https\", cannot_be_a_base: false, username: \"DEBUGUSER\", password: Some(\"DEBUGPASS\"), host: Some(Domain(\"mcp.example.com\")), port: None, path: \"/\", query: None, fragment: None }\n\
              ERROR key read failed: \"-----BEGIN RSA PRIVATE KEY-----\\nMIIEINLINEKEY\\n-----END RSA PRIVATE KEY-----\" rest\n\
              DEBUG loaded -----BEGIN PRIVATE KEY-----\n\
              MIIBLOCKLINEONE\n\
@@ -886,6 +887,8 @@ mod tests {
             "MIIBLOCKLINETWO",
             "lQPGBPGPLINE",
             "MHcCUTOFFLINE",
+            "DEBUGUSER",
+            "DEBUGPASS",
         ] {
             assert!(!log.contains(secret), "{secret} in {log}");
         }

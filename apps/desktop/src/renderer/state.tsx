@@ -173,7 +173,8 @@ interface State extends Live {
   drafts: Record<string, string>;
   catalogVersion: number;
 }
-function createApp() {
+/** `saved` is the settings index.tsx read before the first render. */
+function createApp(saved?: Preferences) {
   const [state, set] = createStore<State>({
     modelRecents: [],
     approvalModes: {},
@@ -189,7 +190,9 @@ function createApp() {
     servers: [],
     activeServer: "local",
     remoteProjectRequest: null,
-    preferences: { ...defaults },
+    // The window opens in its saved theme, palette, text size and language,
+    // never the defaults first.
+    preferences: { ...defaults, ...saved },
     version: "",
     platform: "",
     selected: "",
@@ -2210,8 +2213,8 @@ function createApp() {
 }
 type AppContext = ReturnType<typeof createApp>;
 const Context = createContext<AppContext>();
-export const AppProvider = (props: ParentProps) => (
-  <Context.Provider value={createApp()}>{props.children}</Context.Provider>
+export const AppProvider = (props: ParentProps<{ preferences?: Preferences }>) => (
+  <Context.Provider value={createApp(props.preferences)}>{props.children}</Context.Provider>
 );
 export function useApp() {
   return useContext(Context)!;

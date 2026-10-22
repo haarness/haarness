@@ -711,12 +711,14 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
         // Taken before the coordinator forgets the run, so the launching
         // thread is owed this result without a gap until its input admits it.
         let handoff = runtime.background_handoff(launch_thread_id);
+        let name = run.workflow_name;
         // A launcher wait can be aborted by the same turn that is currently
         // executing this tool. Deliver out of band so that turn can unwind;
         // queue_input asks us to retry during the narrow stopping window, then
         // starts a clean follow-up turn once the interrupted turn is gone.
         tokio::spawn(async move {
             let deadline = Instant::now() + Duration::from_secs(5);
+            let mut storage_attempts = 0_u32;
             loop {
                 match runtime
                     .queue_background_result(launch_thread_id, text.clone(), &handoff)
@@ -726,12 +728,21 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
                     Err(CoreError::Conflict(_)) if Instant::now() < deadline => {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                    // A busy database clears; the handoff's request id makes
+                    // a retry of an admission that did land a no-op. Three
+                    // tries, as for a subagent's result.
+                    Err(CoreError::Storage(_)) if storage_attempts < 3 => {
+                        storage_attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(250) * storage_attempts).await;
+                    }
                     Err(error) => {
-                        tracing::warn!(
-                            thread = %launch_thread_id,
-                            %error,
-                            "failed to inject workflow terminal result"
+                        let reason = haarness_core::refusal_reason(&error);
+                        let notice = format!(
+                            "The result of the workflow \u{201c}{name}\u{201d} could not start a turn in this chat ({reason}); your next message passes it to the agent."
                         );
+                        runtime
+                            .keep_refused_background_result(launch_thread_id, text, notice, &error)
+                            .await;
                         return;
                     }
                 }

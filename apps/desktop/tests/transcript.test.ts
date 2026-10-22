@@ -485,3 +485,89 @@ test("tool verbs are whole catalog keys, with their own keys where a word alread
   // An unknown tool is named by itself.
   assert.equal(toolVerb("my_mcp_tool"), "my_mcp_tool");
 });
+
+// Every tool Haarness defines itself, as the server names them.
+const haarnessTools = [
+  "websearch", "web_search", "execute", "lsp", "preview", "image_generate", "video_generate", "get_goal",
+  "update_goal", "propose_goal_criteria", "load_tool", "schedule", "workflow", "marketplace_manage",
+  "capability_manage", "skill_manage", "plugin_manage", "mcp_manage", "agent_manage", "command_manage",
+  "cloud_agent_manage", "cloud_agent_session", "cloud_chat", "cloud_schedule", "memory_list", "memory_search",
+  "memory_read", "memory_save", "memory_delete", "task_abort", "agent_switch", "session_manage",
+  "session_rename", "session_message", "session_wait", "StructuredOutput",
+];
+
+test("each of Haarness's own tools reads as what it does, never as its id or another family's verb", () => {
+  for (const name of haarnessTools) {
+    const shape = describeTool(name, {});
+    for (const form of [shape.verb, shape.doing, shape.attempt]) {
+      assert.notEqual(form, name, name);
+      assert.ok(toolVerbKeys.includes(form), `${name}: ${form}`);
+    }
+    // The activity line says it alone, without a target.
+    assert.equal(toolActivity(name), shape.doing, name);
+  }
+  // Managing agent profiles is not a delegation, nor managing slash commands a shell command.
+  assert.deepEqual(describeTool("agent_manage", { action: "create", name: "reviewer", prompt: "Review it" }), {
+    icon: "agents",
+    verb: "Managed agents",
+    doing: "Managing agents",
+    attempt: "Tried to manage agents",
+    target: "reviewer",
+  });
+  assert.equal(describeTool("command_manage", { action: "remove", name: "ship" }).verb, "Managed commands");
+  // A row names what was acted on in a reader's words: never the action's
+  // English word, and never an id, whatever argument carries it.
+  assert.equal(describeTool("mcp_manage", { action: "add", name: "github", url: "https://x.test" }).target, "github");
+  assert.equal(describeTool("schedule", { action: "list" }).target, "");
+  const uuid = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+  assert.equal(describeTool("workflow", { action: "status", runID: uuid }).target, "");
+  assert.equal(describeTool("cloud_chat", { action: "rename", sessionId: uuid, chatId: uuid, title: "Release" }).target, "Release");
+  assert.equal(describeTool("task_abort", { task_id: uuid }).target, "");
+  assert.equal(describeTool("session_wait", { id: uuid }).target, "");
+  assert.equal(describeTool("session_message", { id: uuid, message: "Ship it" }).target, "");
+  assert.equal(describeTool("session_rename", { id: uuid, title: "Release" }).target, "Release");
+  assert.equal(describeTool("memory_read", { id: "01HZX3K9Q7W2V5N8R4T6Y1M3PB" }).target, "");
+  assert.equal(describeTool("agent_switch", { agent: "reviewer" }).target, "reviewer");
+  assert.equal(describeTool("load_tool", { queries: ["mcp__github__*", "browser"] }).target, "mcp__github__*, browser");
+  assert.equal(describeTool("websearch", { query: "solid 2" }).target, "solid 2");
+  assert.equal(describeTool("lsp", { operation: "hover", filePath: "src/a.ts", line: 3 }).target, "src/a.ts");
+  assert.equal(describeTool("session_rename", { title: "Release" }).verb, "Renamed a chat");
+  // A tool of someone else's is still named, or guessed from its name.
+  assert.equal(describeTool("acme_zap", {}).verb, "acme_zap");
+  assert.equal(describeTool("github_search_code", {}).verb, "Searched");
+});
+
+test("the activity line says what a running tool of Haarness's own is doing", () => {
+  assert.equal(toolActivity("todowrite"), "Updating the plan");
+  assert.equal(toolActivity("todoread"), "Checking the plan");
+  assert.equal(toolActivity("websearch"), "Searching the web");
+  assert.equal(toolActivity("memory_read"), "Reading a memory");
+  assert.equal(toolActivity("skill"), "Using a skill");
+  assert.equal(toolActivity("question"), "Asking a question");
+  assert.equal(toolActivity("functions.agent_manage"), "Managing agents");
+  // The families keep their own phrases, and anything else is named.
+  assert.equal(toolActivity("bash"), "Running a command");
+  assert.equal(toolActivity("read"), "Reading files");
+  assert.equal(toolActivity("webfetch"), "Reading a web page");
+  assert.equal(toolActivity("acme_zap"), "Using acme_zap");
+  // A batch of them is not guessed into a family either.
+  const steps = batchSteps({ tool_calls: [{ tool: "agent_manage", parameters: {} }, { tool: "command_manage", parameters: {} }] });
+  assert.equal(batchLabel(steps), "Used tools");
+  assert.equal(toolActivity("batch agent_manage,command_manage"), "Using tools");
+});
+
+test("the new tool wording is in every language, Arabic included", () => {
+  const global = globalThis as { document?: unknown };
+  const saved = global.document;
+  global.document = { documentElement: {} };
+  try {
+    applyLanguage("ar");
+    assert.equal(toolVerb(describeTool("agent_manage", {}).verb), "أدار الوكلاء");
+    assert.equal(toolActivity("websearch"), "جارٍ البحث في الويب");
+    applyLanguage("de");
+    assert.equal(toolActivity("memory_save"), "Speichert eine Erinnerung");
+  } finally {
+    applyLanguage("en");
+    global.document = saved;
+  }
+});

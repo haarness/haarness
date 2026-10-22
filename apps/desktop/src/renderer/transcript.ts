@@ -72,7 +72,72 @@ const namedTools: Record<string, { icon: IconName } & Verbs> = {
   todowrite: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "Tried to update the plan") },
   todoread: { icon: "todo", ...verbs("Checked the plan", "Checking the plan", "Tried to check the plan") },
   batch: { icon: "layers", ...verbs("Ran a batch", "Running a batch", "Tried to run a batch") },
+  // The rest of Haarness's own tools. Their names would otherwise be shown
+  // as they are (`mcp_manage`) or read as the wrong family (`agent_manage`
+  // as a delegation, `command_manage` as a shell command).
+  websearch: { icon: "web", ...verbs("Searched the web", "Searching the web", "Tried to search the web") },
+  web_search: { icon: "web", ...verbs("Searched the web", "Searching the web", "Tried to search the web") },
+  execute: { icon: "code", ...verbs("Ran a script", "Running a script", "Tried to run a script") },
+  lsp: { icon: "code", ...verbs("Looked up code", "Looking up code", "Tried to look up code") },
+  preview: { icon: "eye", ...verbs("Showed a preview", "Showing a preview", "Tried to show a preview") },
+  image_generate: { icon: "image", ...verbs("Generated an image", "Generating an image", "Tried to generate an image") },
+  video_generate: { icon: "image", ...verbs("Generated a video", "Generating a video", "Tried to generate a video") },
+  get_goal: { icon: "todo", ...verbs("Checked the goal", "Checking the goal", "Tried to check the goal") },
+  update_goal: { icon: "todo", ...verbs("Updated the goal", "Updating the goal", "Tried to update the goal") },
+  propose_goal_criteria: { icon: "todo", ...verbs("Proposed goal criteria", "Proposing goal criteria", "Tried to propose goal criteria") },
+  load_tool: { icon: "tools", ...verbs("Loaded tools", "Loading tools", "Tried to load tools") },
+  schedule: { icon: "clock", ...verbs("Managed schedules", "Managing schedules", "Tried to manage schedules") },
+  workflow: { icon: "layers", ...verbs("Managed workflows", "Managing workflows", "Tried to manage workflows") },
+  marketplace_manage: { icon: "plugin", ...verbs("Used the marketplace", "Using the marketplace", "Tried to use the marketplace") },
+  capability_manage: { icon: "plugin", ...verbs("Managed capabilities", "Managing capabilities", "Tried to manage capabilities") },
+  skill_manage: { icon: "book", ...verbs("Managed skills", "Managing skills", "Tried to manage skills") },
+  plugin_manage: { icon: "plugin", ...verbs("Managed plugins", "Managing plugins", "Tried to manage plugins") },
+  mcp_manage: { icon: "server", ...verbs("Managed MCP servers", "Managing MCP servers", "Tried to manage MCP servers") },
+  agent_manage: { icon: "agents", ...verbs("Managed agents", "Managing agents", "Tried to manage agents") },
+  command_manage: { icon: "compose", ...verbs("Managed commands", "Managing commands", "Tried to manage commands") },
+  cloud_agent_manage: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
+  cloud_agent_session: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
+  cloud_chat: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
+  cloud_schedule: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
+  memory_list: { icon: "book", ...verbs("Looked through memories", "Looking through memories", "Tried to look through memories") },
+  memory_search: { icon: "book", ...verbs("Looked through memories", "Looking through memories", "Tried to look through memories") },
+  memory_read: { icon: "book", ...verbs("Read a memory", "Reading a memory", "Tried to read a memory") },
+  memory_save: { icon: "book", ...verbs("Saved a memory", "Saving a memory", "Tried to save a memory") },
+  memory_delete: { icon: "trash", ...verbs("Deleted a memory", "Deleting a memory", "Tried to delete a memory") },
+  task_abort: { icon: "stop", ...verbs("Stopped a task", "Stopping a task", "Tried to stop a task") },
+  agent_switch: { icon: "agents", ...verbs("Switched agents", "Switching agents", "Tried to switch agents") },
+  session_manage: { icon: "chat", ...verbs("Managed chats", "Managing chats", "Tried to manage chats") },
+  session_rename: { icon: "chat", ...verbs("Renamed a chat", "Renaming a chat", "Tried to rename a chat") },
+  session_message: { icon: "chat", ...verbs("Wrote to a chat", "Writing to a chat", "Tried to write to a chat") },
+  session_wait: { icon: "chat", ...verbs("Waited for a chat", "Waiting for a chat", "Tried to wait for a chat") },
+  structuredoutput: { icon: "check", ...verbs("Returned a result", "Returning a result", "Tried to return a result") },
 };
+/** The tools the family guesses below were written for, whose running
+    phrase needs no target ("Running a command", "Reading files"). Every
+    other named tool's own "doing" form says it all ("Searching the web"). */
+const familyTools = new Set([
+  "bash", "read", "write", "edit", "multiedit", "apply_patch", "list", "glob", "grep", "webfetch", "task", "batch",
+]);
+/** Values a row never shows: ids that mean nothing to a reader (a UUID, a
+    ULID, a long run of hex), whatever argument carries them. */
+const opaqueId = (value: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ||
+  /^[0-9A-HJKMNP-TV-Z]{26}$/.test(value) ||
+  /^[0-9a-f]{16,}$/i.test(value);
+/** The arguments a row of Haarness's other tools may name, in the order a
+    reader recognises them: what it is called before where it is. Its
+    `action` (`add`, `rename`) is left out: the verb already says what was
+    done, and an English word in another language's row would only jar. */
+const humanFields = ["title", "name", "label", "agent", "query", "path", "filePath", "file_path", "url", "prompt", "description"];
+function humanTarget(record: Record<string, unknown> | undefined) {
+  for (const key of humanFields) {
+    const value = record?.[key];
+    if (typeof value !== "string") continue;
+    const text = value.replace(/\s+/g, " ").trim();
+    if (text && !opaqueId(text)) return text;
+  }
+  return "";
+}
 const toolKind = (name: string) =>
   /bash|shell|exec|command/.test(name)
     ? "run"
@@ -125,6 +190,10 @@ export function describeTool(name: string, args: unknown): ToolShape {
           targetList(files),
       };
   }
+  if (name === "load_tool" && Array.isArray(record?.queries))
+    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string")) };
+  if (known && !familyTools.has(name) && !["execute", "skill", "question", "todo", "todowrite", "todoread"].includes(name))
+    return { ...known, target: humanTarget(record) };
   if (known) return { ...known, target: toolTarget(args) };
   const kind = toolKind(name);
   // An unrecognised tool is named rather than described; guessing a verb for
@@ -415,18 +484,26 @@ const toolDoing = {
   web: "Reading a web page",
   agent: "Working with an agent",
 } as const;
+/** Named tools whose "doing" form needs its target ("Using", "Asking"), as the activity line words them alone. */
+const ownActivity: Record<string, string> = {
+  skill: "Using a skill",
+  question: "Asking a question",
+};
 /** The activity keys reached through the tables above, for the catalog guard. */
 export const activityKeys = [
   ...new Set([
     ...Object.values(batchDone),
     ...Object.values(batchDoing),
     ...Object.values(toolDoing),
+    ...Object.values(ownActivity),
   ]),
 ];
 const batchGroup = (tool: string) => {
   const name = toolName(tool);
   if (name === "list") return "list";
   if (["todo", "todowrite", "todoread"].includes(name)) return "plan";
+  // A tool of Haarness's own outside the families is not guessed into one.
+  if (namedTools[name] && !familyTools.has(name)) return "other";
   return toolKind(name);
 };
 export function batchLabel(steps: BatchStep[]) {
@@ -732,6 +809,9 @@ export function toolActivity(name: string, args?: unknown): string {
     return phraseList(phrases.map((phrase) => t(phrase)));
   }
   if (toolName(name) === "batch") return t("Working through several steps");
+  const known = namedTools[toolName(name)];
+  if (Object.hasOwn(ownActivity, toolName(name))) return t(ownActivity[toolName(name)]);
+  if (known && !familyTools.has(toolName(name))) return t(known.doing);
   const kind = toolKind(name);
   return kind === "other"
     ? t("Using {tool}", { tool: name })

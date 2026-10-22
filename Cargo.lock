@@ -1795,6 +1795,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
+ "socket2",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.30.0",

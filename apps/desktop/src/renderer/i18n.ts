@@ -9,6 +9,10 @@ export function applyLanguage(value: unknown) {
   document.documentElement.lang = code;
   document.documentElement.dir = code === "ar" ? "rtl" : "ltr";
 }
+/** A number as the interface language writes it ("1,234", "1.234", "1 234"). */
+export const formatNumber = (value: number) => new Intl.NumberFormat(language()).format(value);
+/** A date and time as the interface language writes them. */
+export const formatDateTime = (value: number | string | Date) => new Date(value).toLocaleString(language());
 export function t(key: string, values: Record<string, string | number> = {}): string {
   return translate(language(), key).replace(/\{(\w+)\}/g, (match, name) =>
     Object.hasOwn(values, name) ? String(values[name]) : match);

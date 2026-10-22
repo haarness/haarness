@@ -17596,6 +17596,7 @@ async fn ctrl_five_detaches_the_terminal_view() {
             pid: None,
             cols: 80,
             rows: 24,
+            created: false,
         },
     ]));
     crate::input::handle_key(
@@ -17621,6 +17622,7 @@ fn a_new_terminal_tab_can_take_focus() {
         pid: None,
         cols: 20,
         rows: 4,
+        created: false,
     };
     let (first, second, third) = (info("first"), info("second"), info("third"));
     let mut terminal =
@@ -18331,4 +18333,25 @@ fn the_event_task_is_started_again_three_times_a_minute_at_most() {
             .collect::<Vec<_>>(),
         [true, true, true, false]
     );
+}
+
+/// The composer's temporary file reaches `$EDITOR` as one word, however its
+/// folder is named.
+#[cfg(unix)]
+#[test]
+fn the_external_editor_gets_its_file_as_one_word() {
+    let root = std::env::temp_dir().join(format!(
+        "haarness-editor-{} a b $(touch marker) it's",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("compose.md");
+    let status = crate::editor_command("printf '%s' edited >", &file)
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited");
+    assert!(!root.join("marker").exists());
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { formatDateTime, formatNumber, t } from "./i18n";
 import {
   For,
   Show,
@@ -494,7 +494,7 @@ export function BrowserSettings() {
                   <div>
                     <strong>{entry.title || entry.url}</strong>
                     <p title={entry.url}>{entry.url}</p>
-                    <small>{new Date(entry.time).toLocaleString()}</small>
+                    <small>{formatDateTime(entry.time)}</small>
                   </div>
                   <button
                     disabled={!app.state.connection || dataBusy()}
@@ -558,9 +558,9 @@ export function BrowserSettings() {
                     <p title={entry.url}>{entry.url}</p>
                     <small>
                       {t("{size} bytes", {
-                        size: entry.bytes.toLocaleString(),
+                        size: formatNumber(entry.bytes),
                       })}{" "}
-                      · {entry.state} · {new Date(entry.time).toLocaleString()}
+                      · {entry.state} · {formatDateTime(entry.time)}
                     </small>
                   </div>
                   <button

@@ -101,6 +101,36 @@ test("renderer text set imperatively goes through t()", async () => {
   assert.deepEqual(found, []);
 });
 
+// A number or date formatted without a locale is written the system's way
+// (or American English), whatever the interface language: 1,234 in German.
+test("renderer numbers and dates are written in the interface language", async () => {
+  const directory = new URL("../src/renderer/", import.meta.url);
+  const names = (await readdir(directory)).filter((name) => /\.tsx?$/.test(name));
+  const unlocalized = /\.toLocale(?:Date|Time)?String\(\s*(?:\)|\[\]|"en-US")|Intl\.(?:NumberFormat|DateTimeFormat)\(\s*(?:\)|undefined|\[\])/g;
+  const found: string[] = [];
+  for (const name of names) {
+    const source = await readFile(new URL(name, directory), "utf8");
+    for (const [match] of source.matchAll(unlocalized)) {
+      // The time zone is the system's, not a language's.
+      if (match.startsWith("Intl.DateTimeFormat()") && /Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/.test(source)) continue;
+      found.push(`${name}: ${match}`);
+    }
+  }
+  assert.deepEqual(found, []);
+  const global = globalThis as { document?: unknown };
+  const saved = global.document;
+  global.document = { documentElement: {} };
+  try {
+    const { applyLanguage, formatNumber } = await import("../src/renderer/i18n");
+    applyLanguage("de");
+    assert.equal(formatNumber(1234567), "1.234.567");
+    applyLanguage("en");
+    assert.equal(formatNumber(1234567), "1,234,567");
+  } finally {
+    global.document = saved;
+  }
+});
+
 // `t(key).replace("{name}", value)` reads `$&`, `$'` and `$$` in the value as
 // replacement patterns, so a provider named "A $& B" would show the key's
 // text; `t(key, { name })` inserts values as they are.
