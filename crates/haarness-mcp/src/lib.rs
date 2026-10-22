@@ -659,6 +659,20 @@ impl NativeMcpRegistry {
             .await
             .map_err(mcp_error)?;
         let authorization_url = state.get_authorization_url().await.map_err(mcp_error)?;
+        // The server picks this address and every client opens it in a
+        // browser: a `file:` or custom-scheme link would open a local file or
+        // start an app instead, so it stops here, before any client sees it.
+        let authorization_url = haarness_core::links::http_url(&authorization_url)
+            .ok_or_else(|| {
+                CoreError::Invalid(match haarness_core::links::scheme(&authorization_url) {
+                    Some(scheme) => format!(
+                        "MCP server \"{name}\" sent a {scheme} sign-in link; only http and https links open"
+                    ),
+                    None => format!(
+                        "MCP server \"{name}\" sent a sign-in link that is not a web address"
+                    ),
+                })
+            })?;
         Ok(McpOAuthSession {
             state,
             authorization_url,
@@ -1924,6 +1938,12 @@ mod tests {
     }
 
     async fn run_oauth_fixture(listener: TcpListener) {
+        run_oauth_fixture_with(listener, None).await;
+    }
+
+    /// The OAuth fixture, advertising `authorize` as its authorization
+    /// endpoint when given.
+    async fn run_oauth_fixture_with(listener: TcpListener, authorize: Option<&'static str>) {
         let address = listener.local_addr().unwrap();
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1953,7 +1973,8 @@ mod tests {
                     "200 OK",
                     &json!({
                         "issuer": format!("http://{address}"),
-                        "authorization_endpoint": format!("http://{address}/authorize"),
+                        "authorization_endpoint": authorize
+                            .map_or_else(|| format!("http://{address}/authorize"), str::to_owned),
                         "token_endpoint": format!("http://{address}/token"),
                         "code_challenge_methods_supported": ["S256"],
                         "scopes_supported": ["mcp"]
@@ -2179,6 +2200,56 @@ mod tests {
                 .clear()
                 .await
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_link_that_is_not_http_or_https_never_reaches_a_client() {
+        for (authorize, said) in [
+            (
+                "file:///Applications/Calculator.app",
+                "sent a file: sign-in link",
+            ),
+            (
+                "x-fixture-app://open?x=1",
+                "sent a x-fixture-app: sign-in link",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(run_oauth_fixture_with(listener, Some(authorize)));
+            let auth_dir = std::env::temp_dir()
+                .join(format!("haarness-mcp-oauth-link-{}", uuid::Uuid::now_v7()));
+            let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
+            let config = McpConfigureRequest {
+                transport: "streamable_http".into(),
+                command: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+                url: Some(format!("http://{address}/mcp")),
+                headers: BTreeMap::new(),
+                headers_helper: None,
+                timeout_ms: Some(2_000),
+                oauth: Some(true),
+                oauth_client_id: Some("fixture-client".into()),
+                oauth_scopes: vec!["mcp".into()],
+                enabled: true,
+            };
+            registry.configure("secure", config).await.unwrap();
+            let error = registry
+                .begin_oauth("secure", "http://127.0.0.1:19876/mcp/oauth/callback")
+                .await
+                .err()
+                .expect("the link is refused");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid request: MCP server \"secure\" {said}; only http and https links open"
+                )
+            );
+            server.abort();
+            let _ = std::fs::remove_dir_all(auth_dir);
         }
     }
 

@@ -7429,7 +7429,14 @@ fn read_api_key(provider: &str, key: Option<String>) -> Result<String> {
     Ok(key.to_owned())
 }
 
+/// Opens a link in the browser, but only an http or https one: a sign-in
+/// link comes from a server, and any other scheme would make the system open
+/// a local file or start an app. The parsed address is what opens.
 fn open_browser(url: &str) -> Result<()> {
+    let Some(url) = haarness_core::links::http_url(url) else {
+        anyhow::bail!("only http and https links open in the browser");
+    };
+    let url = url.as_str();
     #[cfg(target_os = "macos")]
     let status = ProcessCommand::new("open").arg(url).status()?;
     #[cfg(target_os = "linux")]
@@ -10958,6 +10965,22 @@ mod tests {
             "{written}"
         );
         assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
+    #[test]
+    fn only_a_web_link_reaches_the_system_opener() {
+        // Should the check ever go, none of these opens anything here.
+        for refused in [
+            "file:///nonexistent/haarness-fixture.app",
+            "x-haarness-unregistered-fixture://open",
+            "not a link",
+        ] {
+            assert_eq!(
+                super::open_browser(refused).unwrap_err().to_string(),
+                "only http and https links open in the browser",
+                "{refused}"
+            );
+        }
     }
 
     #[test]
