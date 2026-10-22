@@ -212,6 +212,30 @@ pub fn project_directories(workspace: &Path) -> Vec<PathBuf> {
     vec![workspace.to_path_buf()]
 }
 
+/// The real roots of `workspace`'s project, where a cloned repository puts
+/// what it likes: its worktree root and the workspace itself.
+pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = [
+        project_directories(workspace).first().cloned(),
+        Some(workspace.to_path_buf()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| path.canonicalize().ok())
+    .collect();
+    roots.dedup();
+    roots
+}
+
+/// Whether `path`, where links really lead it, is inside one of `roots` (real
+/// paths). A path that does not exist is inside none.
+pub fn real_path_within(path: &Path, roots: &[PathBuf]) -> bool {
+    !roots.is_empty()
+        && path
+            .canonicalize()
+            .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
+}
+
 /// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) as one
 /// workspace reads it: the lowest configuration layer, below the global
 /// folder, which a team or device management ships. Haarness only reads it,
@@ -233,19 +257,8 @@ impl BaseFolder {
     }
 
     pub fn at(root: PathBuf, workspace: &Path) -> Self {
-        let mut project: Vec<PathBuf> = [
-            project_directories(workspace).first().cloned(),
-            Some(workspace.to_path_buf()),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|path| path.canonicalize().ok())
-        .collect();
-        project.dedup();
-        if root
-            .canonicalize()
-            .is_ok_and(|real| project.iter().any(|dir| real.starts_with(dir)))
-        {
+        let mut project = project_roots(workspace);
+        if real_path_within(&root, &project) {
             project.clear();
         }
         Self { root, project }
@@ -257,10 +270,7 @@ impl BaseFolder {
 
     /// Whether `path` really is inside the project, through a link.
     pub fn leads_into_project(&self, path: &Path) -> bool {
-        !self.project.is_empty()
-            && path
-                .canonicalize()
-                .is_ok_and(|real| self.project.iter().any(|dir| real.starts_with(dir)))
+        real_path_within(path, &self.project)
     }
 
     /// `name` in the folder, unless a link leads it into the project (which is

@@ -112,6 +112,9 @@ haarness agents
 haarness agent create reviewer --description 'Review changes' --model anthropic/claude-sonnet-5-5 --tool bash=false --permission 'edit:*=deny' --prompt 'Review for correctness.' --project
 haarness command create audit --description 'Audit a subsystem' --template 'Audit $ARGUMENTS' --agent reviewer --project
 haarness skill create release-check --description 'Check release readiness' --instructions 'Verify build, tests, and artifacts.' --project
+haarness prompt list                   # built-in prompts and the prompt files that change them
+haarness prompt eject system           # ~/.config/haarness/prompts/system.md to edit; see docs/PROMPT-FILES.md
+haarness prompt diff system
 haarness sessions list
 haarness sessions export SESSION_ID --output session.json
 haarness sessions export SESSION_ID --sanitize --output shareable-session.json

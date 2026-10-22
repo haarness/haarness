@@ -90,7 +90,12 @@ impl ModelProvider for EchoProvider {
 
         // Auxiliary naming uses the same provider without executing its
         // scripted tools or waiting for a scripted main-response stream.
-        if request.system == haarness_core::system_prompt_for("title") {
+        // A title prompt file changes the system prompt; the request still
+        // quotes the message the same way.
+        if request.system == haarness_core::system_prompt_for("title")
+            || (request.tools.is_empty()
+                && prompt.starts_with("Write a title for a conversation that begins with"))
+        {
             // Titles quote the first message; echo the message itself.
             let message = prompt
                 .split_once("<message>\n")

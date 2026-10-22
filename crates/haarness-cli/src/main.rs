@@ -18,6 +18,7 @@ mod memory_settings;
 mod otel;
 mod plugins;
 mod profile;
+mod prompt_files;
 mod reconnect;
 mod remote;
 mod remote_attention;
@@ -244,6 +245,13 @@ enum Command {
     Prompt {
         #[command(subcommand)]
         command: CommandManageCommand,
+    },
+    /// List, show, eject and compare the built-in prompts that prompt files
+    /// change.
+    #[command(name = "prompt", visible_alias = "prompts")]
+    PromptFiles {
+        #[command(subcommand)]
+        command: prompt_files::PromptCommand,
     },
     /// Create, inspect, and remove local Agent Skills.
     #[command(name = "skill", visible_alias = "skills")]
@@ -1620,6 +1628,9 @@ async fn cli_main() -> Result<()> {
         Some(Command::Prompt { command }) => {
             command_manage_command(&paths, &workspace, project_config, command)
         }
+        Some(Command::PromptFiles { command }) => {
+            prompt_files::run(paths.config_dir(), &workspace, command)
+        }
         Some(Command::SkillManage { command }) => {
             skill_manage_command(&paths, &workspace, project_config, command).await
         }
@@ -1738,6 +1749,7 @@ impl Command {
             Self::Agents { .. } => "agents",
             Self::AgentManage { .. } => "agent",
             Self::Prompt { .. } => "command",
+            Self::PromptFiles { .. } => "prompt",
             Self::SkillManage { .. } => "skill",
             Self::Marketplace(..) => "marketplace",
             Self::Capability { .. } => "capability",
@@ -6177,6 +6189,7 @@ fn compose_runtime_sources(
     runtime_config
         .disabled_agents
         .extend(json_layers.disabled_agents.clone());
+    runtime_config.prompts = prompt_files::load(&config_dir, workspace);
     runtime_config.output_style = load_output_style(
         &config_dir,
         workspace,
@@ -9735,6 +9748,7 @@ fn runtime_config(
         default_reasoning_effort: defaults.reasoning_effort,
         default_ultracode: defaults.ultracode.unwrap_or(false),
         output_style: None,
+        prompts: haarness_core::Prompts::default(),
         max_rounds: config.tools.clone().unwrap_or_default().max_rounds,
         tool_availability: config
             .tool_availability
