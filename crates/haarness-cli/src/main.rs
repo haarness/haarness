@@ -8202,6 +8202,45 @@ fn mcp_changes(
     if before.headers != after.headers {
         fields.push(("headers".into(), Some(json!(after.headers))));
     }
+    let opencode = matches!(
+        raw.get("type").and_then(Value::as_str),
+        Some("local" | "remote")
+    );
+    if opencode {
+        // opencode takes `oauth` as `false` or an object holding `clientId`
+        // and a space-separated `scope`, never `true` or the other keys.
+        if before.oauth != after.oauth
+            || before.oauth_client_id != after.oauth_client_id
+            || before.oauth_scopes != after.oauth_scopes
+        {
+            let value = if after.oauth == Some(false) {
+                Some(Value::Bool(false))
+            } else {
+                let had_object = raw.get("oauth").is_some_and(Value::is_object);
+                let mut object = raw
+                    .get("oauth")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                match &after.oauth_client_id {
+                    Some(client) => object.insert("clientId".into(), json!(client)),
+                    None => object.remove("clientId"),
+                };
+                if after.oauth_scopes.is_empty() {
+                    object.remove("scope");
+                } else {
+                    object.insert("scope".into(), json!(after.oauth_scopes.join(" ")));
+                }
+                (after.oauth == Some(true) || had_object || !object.is_empty())
+                    .then_some(Value::Object(object))
+            };
+            fields.push(("oauth".into(), value));
+        }
+        if before.enabled != after.enabled {
+            fields.push(("enabled".into(), Some(Value::Bool(after.enabled))));
+        }
+        return fields;
+    }
     if before.oauth != after.oauth {
         fields.push(("oauth".into(), after.oauth.map(Value::Bool)));
     }
