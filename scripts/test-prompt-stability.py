@@ -13,7 +13,9 @@ daemon in a private data folder shows that:
    the messages, not the system prompt;
 3. a chat that began days ago (its `created_at` edited in the store) is told today's date
    once, and the next turn replays that reminder instead of adding another;
-4. a `general` subagent started from a plan chat and one started from a build chat send a
+4. a compaction summary request carries no `cache_control` (nothing reads its prefix back, so
+   it must not pay a cache write), while the chat's own requests keep their breakpoints;
+5. a `general` subagent started from a plan chat and one started from a build chat send a
    byte-identical tool list and system prompt, so the second reads the cached prefix the first
    wrote: the plan chat's browser and write ceiling refuses those tools when called, it does not
    take them out of the list.
@@ -259,7 +261,22 @@ try:
                                      'hook stamp after its prompt', 'reminders hidden from the API transcript and the TUI']})
     print('PASS stable system prompt with per-turn hook context', flush=True)
 
-    # 3. A chat begun days ago is told today's date once.
+    # 3. A compaction summary writes no cache entry.
+    offset = len(REQUESTS)
+    api(f'/threads/{stable}/compact', {})
+    summaries = REQUESTS[offset:]
+    assert len(summaries) == 1, f'{len(summaries)} compaction requests'
+    assert 'Summarize this conversation for continuation' in json.dumps(summaries[0]['messages'][-1]), summaries[0]['messages'][-1]
+    assert 'cache_control' not in json.dumps(summaries[0]), 'the compaction summary marked cache breakpoints'
+    assert 'cache_control' in json.dumps(first['system']) and 'cache_control' in json.dumps(second['messages']), 'a turn lost its breakpoints'
+    offset = len(REQUESTS)
+    assert turn(stable, 'THIRD stable turn')['status'] == 'completed'
+    assert 'cache_control' in json.dumps(REQUESTS[offset]), 'the turn after a compaction lost its breakpoints'
+    (EVIDENCE / 'compaction-request.json').write_text(json.dumps(summaries[0], indent=2))
+    checks.append({'compaction': ['summary request has no cache_control', 'turns before and after keep theirs']})
+    print('PASS compaction summary writes no cache entry', flush=True)
+
+    # 4. A chat begun days ago is told today's date once.
     old = chat('Old chat fixture')
     began = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=5)).replace(microsecond=0)
     database = next(path for path in data.rglob('haarness.db')
@@ -283,7 +300,7 @@ try:
     checks.append({'date reminder': [f'system says {began_local}', f'told {today} once', 'replayed unchanged']})
     print('PASS date reminder for an old chat', flush=True)
 
-    # 4. Subagents of a plan chat and of a build chat share one cached prefix. This workspace
+    # 5. Subagents of a plan chat and of a build chat share one cached prefix. This workspace
     # denies every tool, so it runs in a second one with the default rules.
     agents_workspace = root / 'agents-workspace'
     (agents_workspace / '.haarness').mkdir(parents=True, exist_ok=True)
