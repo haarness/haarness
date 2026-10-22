@@ -58,6 +58,7 @@ import {
   on,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
@@ -67,6 +68,7 @@ import { attachable, attachmentName, relabelAttachments, type Attachment } from 
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
+import { createReplySelection } from "./reply-selection";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
 import {
@@ -1138,10 +1140,18 @@ export function Session() {
       revealTarget = undefined;
     });
   }
+  // Text the person selected in a streaming reply stays selected when the
+  // saved reply takes its place (see reply-selection.ts).
+  const replySelection = createReplySelection();
+  onCleanup(() => replySelection.dispose());
+  const replyDrawn = (event: Event) =>
+    replySelection.drawn(event.target as Element);
   onMount(() => {
     scrolling.addEventListener("markdown-ready", settleReveal);
+    scrolling.addEventListener("markdown-ready", replyDrawn);
     onCleanup(() => {
       scrolling.removeEventListener("markdown-ready", settleReveal);
+      scrolling.removeEventListener("markdown-ready", replyDrawn);
       cancelAnimationFrame(revealFrame);
     });
   });
@@ -1828,9 +1838,35 @@ export function Session() {
             </div>
           </Show>
           <Show when={stream()?.text}>
-            <div class="message assistant" data-testid="streaming-reply">
-              <Markdown text={stream()!.text} live />
-            </div>
+            {(() => {
+              let reply!: HTMLDivElement;
+              // Read untracked: Show draws this once per live reply.
+              const turn = untrack(() => active()?.id);
+              const saved = () =>
+                state.items.filter(
+                  (item) =>
+                    item.turnId === turn &&
+                    item.data.type === "assistant_message",
+                );
+              const earlier = new Set(untrack(saved).map((item) => item.id));
+              // The live reply goes when its text is saved as a message of
+              // the turn: that message keeps what the person selected.
+              onCleanup(() =>
+                replySelection.keep(
+                  reply,
+                  saved().findLast((item) => !earlier.has(item.id))?.id,
+                ),
+              );
+              return (
+                <div
+                  ref={reply}
+                  class="message assistant"
+                  data-testid="streaming-reply"
+                >
+                  <Markdown text={stream()!.text} live />
+                </div>
+              );
+            })()}
           </Show>
           <Show when={active() && !pending()}>
             <div class="assistant-activity" role="status" aria-live="polite">

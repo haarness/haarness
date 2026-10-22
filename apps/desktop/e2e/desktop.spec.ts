@@ -12381,7 +12381,8 @@ test("incremental Markdown retains live selection and completed blocks", async (
       observer.observe(reply, { subtree: true, childList: true, characterData: true });
     });
   });
-  await expect(live.locator("li")).toHaveText("streams while working");
+  // The list lives in the live reply for half a second at most: wait for the
+  // page's own reading of it rather than for a poll to catch it there.
   const evidence = await page.evaluate(() => (window as any).__markdownEvidence);
   await test.info().attach("live-selection", { body: JSON.stringify(evidence), contentType: "application/json" });
   expect(evidence.landedAfterSelection).toBe(true);
@@ -12391,6 +12392,42 @@ test("incremental Markdown retains live selection and completed blocks", async (
   }
   await expect(live).toHaveCount(0);
   await expect(page.locator(".transcript article.assistant").last().locator("strong")).toHaveText("Live markdown");
+  expect(errors).toEqual([]);
+});
+
+test("text selected in a streaming reply stays selected, backward as made, when the saved reply takes its place, and copies", async () => {
+  await newSession();
+  await send("::mdslow");
+  const live = page.getByTestId("streaming-reply");
+  await expect(live.locator("strong")).toHaveText("Live markdown");
+  // "markdown", dragged from its end back to its start.
+  const before = await live.locator("strong").evaluate((element) => {
+    const text = element.firstChild as Text;
+    window.getSelection()!.setBaseAndExtent(text, 13, text, 5);
+    return document.activeElement?.outerHTML.slice(0, 80);
+  });
+  await app.evaluate(({ clipboard }) => clipboard.writeText("clipboard before copy"));
+  await expect(live).toHaveCount(0);
+  const saved = page.locator(".transcript article.assistant").last();
+  await expect(saved.locator("li")).toHaveText("streams while working");
+  await expect
+    .poll(() =>
+      saved.evaluate((element) => {
+        const selection = window.getSelection()!;
+        return {
+          text: selection.toString(),
+          inSaved: element.contains(selection.anchorNode) && element.contains(selection.focusNode),
+          anchor: selection.anchorOffset,
+          focus: selection.focusOffset,
+          active: document.activeElement?.outerHTML.slice(0, 80),
+        };
+      }),
+    )
+    .toEqual({ text: "markdown", inSaved: true, anchor: 13, focus: 5, active: before });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+C" : "Control+C");
+  await expect
+    .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe("markdown");
   expect(errors).toEqual([]);
 });
 
