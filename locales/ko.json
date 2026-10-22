@@ -2649,5 +2649,6 @@
   "Store in Keychain": "키체인에 저장",
   "Store in Credential Manager": "자격 증명 관리자에 저장",
   "Store in keyring": "키링에 저장",
-  "Saved there when you add the server; the settings keep only a reference.": "서버를 추가할 때 그곳에 저장되며, 설정에는 참조만 남습니다."
+  "Saved there when you add the server; the settings keep only a reference.": "서버를 추가할 때 그곳에 저장되며, 설정에는 참조만 남습니다.",
+  "Set outside your settings": "내 설정 밖에서 설정됨"
 }

@@ -2649,5 +2649,6 @@
   "Store in Keychain": "キーチェーンに保存",
   "Store in Credential Manager": "資格情報マネージャーに保存",
   "Store in keyring": "キーリングに保存",
-  "Saved there when you add the server; the settings keep only a reference.": "サーバーを追加すると保存され、設定には参照だけが残ります。"
+  "Saved there when you add the server; the settings keep only a reference.": "サーバーを追加すると保存され、設定には参照だけが残ります。",
+  "Set outside your settings": "あなたの設定の外で設定されています"
 }

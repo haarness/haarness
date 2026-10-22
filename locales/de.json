@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Im Schlüsselbund speichern",
   "Store in Credential Manager": "In der Anmeldeinformationsverwaltung speichern",
   "Store in keyring": "Im Schlüsselring speichern",
-  "Saved there when you add the server; the settings keep only a reference.": "Wird dort gespeichert, wenn Sie den Server hinzufügen; die Einstellungen behalten nur einen Verweis."
+  "Saved there when you add the server; the settings keep only a reference.": "Wird dort gespeichert, wenn Sie den Server hinzufügen; die Einstellungen behalten nur einen Verweis.",
+  "Set outside your settings": "Außerhalb Ihrer Einstellungen festgelegt"
 }

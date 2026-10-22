@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Сохранить в связке ключей",
   "Store in Credential Manager": "Сохранить в диспетчере учетных данных",
   "Store in keyring": "Сохранить в связке ключей",
-  "Saved there when you add the server; the settings keep only a reference.": "Сохраняется там при добавлении сервера; в настройках остается только ссылка."
+  "Saved there when you add the server; the settings keep only a reference.": "Сохраняется там при добавлении сервера; в настройках остается только ссылка.",
+  "Set outside your settings": "Задано вне ваших настроек"
 }

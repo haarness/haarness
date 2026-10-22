@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Gem i nøgleringen",
   "Store in Credential Manager": "Gem i Legitimationsstyring",
   "Store in keyring": "Gem i nøgleringen",
-  "Saved there when you add the server; the settings keep only a reference.": "Gemmes der, når du tilføjer serveren; indstillingerne gemmer kun en henvisning."
+  "Saved there when you add the server; the settings keep only a reference.": "Gemmes der, når du tilføjer serveren; indstillingerne gemmer kun en henvisning.",
+  "Set outside your settings": "Angivet uden for dine indstillinger"
 }

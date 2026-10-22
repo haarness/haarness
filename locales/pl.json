@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Zapisz w pęku kluczy",
   "Store in Credential Manager": "Zapisz w Menedżerze poświadczeń",
   "Store in keyring": "Zapisz w pęku kluczy",
-  "Saved there when you add the server; the settings keep only a reference.": "Zapisywane tam po dodaniu serwera; ustawienia zachowują tylko odwołanie."
+  "Saved there when you add the server; the settings keep only a reference.": "Zapisywane tam po dodaniu serwera; ustawienia zachowują tylko odwołanie.",
+  "Set outside your settings": "Ustawione poza Twoimi ustawieniami"
 }

@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Salvar nas Chaves",
   "Store in Credential Manager": "Salvar no Gerenciador de Credenciais",
   "Store in keyring": "Salvar no chaveiro",
-  "Saved there when you add the server; the settings keep only a reference.": "Salvo lá quando você adiciona o servidor; as configurações guardam só uma referência."
+  "Saved there when you add the server; the settings keep only a reference.": "Salvo lá quando você adiciona o servidor; as configurações guardam só uma referência.",
+  "Set outside your settings": "Definido fora das suas configurações"
 }

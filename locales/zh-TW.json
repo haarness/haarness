@@ -2649,5 +2649,6 @@
   "Store in Keychain": "儲存到鑰匙圈",
   "Store in Credential Manager": "儲存到認證管理員",
   "Store in keyring": "儲存到金鑰圈",
-  "Saved there when you add the server; the settings keep only a reference.": "新增伺服器時儲存在那裡；設定中只保留參照。"
+  "Saved there when you add the server; the settings keep only a reference.": "新增伺服器時儲存在那裡；設定中只保留參照。",
+  "Set outside your settings": "在你的設定之外設定"
 }

@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Lagre i nøkkelringen",
   "Store in Credential Manager": "Lagre i Legitimasjonsbehandling",
   "Store in keyring": "Lagre i nøkkelringen",
-  "Saved there when you add the server; the settings keep only a reference.": "Lagres der når du legger til serveren; innstillingene beholder bare en referanse."
+  "Saved there when you add the server; the settings keep only a reference.": "Lagres der når du legger til serveren; innstillingene beholder bare en referanse.",
+  "Set outside your settings": "Angitt utenfor innstillingene dine"
 }

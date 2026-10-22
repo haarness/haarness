@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Anahtar Zinciri'ne kaydet",
   "Store in Credential Manager": "Kimlik Bilgisi Yöneticisi'ne kaydet",
   "Store in keyring": "Anahtarlığa kaydet",
-  "Saved there when you add the server; the settings keep only a reference.": "Sunucuyu eklediğinizde oraya kaydedilir; ayarlarda yalnızca bir başvuru kalır."
+  "Saved there when you add the server; the settings keep only a reference.": "Sunucuyu eklediğinizde oraya kaydedilir; ayarlarda yalnızca bir başvuru kalır.",
+  "Set outside your settings": "Ayarlarınızın dışında belirlendi"
 }

@@ -827,13 +827,36 @@ impl ManagementService {
                     }
                 }
                 if requested.is_none() {
+                    // Desktop names the servers its own connection runs (this
+                    // process has no live registry of its own).
+                    let mut extra: BTreeSet<String> = input
+                        .get("names")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|name| !live.contains_key(*name))
+                        .map(str::to_owned)
+                        .collect();
+                    // A server from a file of either scope other than the one listed
+                    // above is edited where it is; one from a plugin (or anything else
+                    // outside the person's settings) is read-only here.
+                    let editable = |name: &str| self.resolve_mcp(name, None).is_ok();
                     for (name, status) in live {
+                        extra.remove(&name);
                         if !configured.contains(&name) {
+                            let editable = editable(&name);
                             values.push(json!({
                                 "name":name,"runtimeStatus":status.status,"runtimeDetail":status.detail,
-                                "managed":false,"pluginManaged":true,"readOnly":true
+                                "managed":editable,"pluginManaged":!editable,"readOnly":!editable
                             }));
                         }
+                    }
+                    for name in extra.into_iter().filter(|name| !configured.contains(name)) {
+                        let editable = editable(&name);
+                        values.push(json!({
+                            "name":name,"managed":editable,"pluginManaged":!editable,"readOnly":!editable
+                        }));
                     }
                 }
                 Ok(json!(values))
@@ -3794,6 +3817,44 @@ mod tests {
             error.contains("\"mcp.twice.enabled\" is written more than once"),
             "{error}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Desktop names the servers its connection runs; those Haarness cannot
+    /// edit (a plugin's, or set outside the person's files) are read-only,
+    /// while one in another file of the same scope is edited where it is.
+    #[tokio::test]
+    async fn the_list_says_which_named_servers_are_read_only() {
+        let (root, workspace, _, service) = isolated_service("mcp-read-only");
+        fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        fs::write(
+            workspace.join(".haarness/haarness.json"),
+            r#"{"mcp": {"own": {"command": "own-mcp"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("opencode.json"),
+            r#"{"mcp": {"shared": {"type": "local", "command": ["shared-mcp"]}}}"#,
+        )
+        .unwrap();
+        let listed = service
+            .mcp(&json!({"action": "list", "names": ["own", "shared", "from-plugin"]}))
+            .await
+            .unwrap();
+        let entry = |name: &str| {
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} is not listed: {listed}"))
+        };
+        assert_eq!(entry("own")["managed"], true);
+        assert_ne!(entry("own")["readOnly"], true);
+        assert_eq!(entry("shared")["readOnly"], false);
+        assert_eq!(entry("from-plugin")["readOnly"], true);
+        assert_eq!(entry("from-plugin")["pluginManaged"], true);
         fs::remove_dir_all(root).unwrap();
     }
 

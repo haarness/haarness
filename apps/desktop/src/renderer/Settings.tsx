@@ -14,7 +14,7 @@ import { modelName } from "../model-names";
 import { Schedules } from "./Schedules";
 import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
-import { appsOff, noteMcpServers, offersApps, setApps } from "./mcp-servers";
+import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
@@ -1366,6 +1366,11 @@ function Mcp(props: { cli: Cli }) {
     const servers = await app.api<T.McpServerInfo[]>("mcpServers");
     setRows(servers);
     noteMcpServers(connection(), servers);
+    if (!app.state.connection?.remote)
+      await loadReadOnlyServers(
+        connection(),
+        servers.map((server) => server.name),
+      ).catch(() => undefined);
   }
   createEffect(() => {
     app.state.catalogVersion;
@@ -1477,12 +1482,18 @@ function Mcp(props: { cli: Cli }) {
                   {/* Pages this server shows under its tools; off, it is a plain MCP server. */}
                   <label
                     class="mcp-apps-switch"
-                    title={t("Show this server's pages under its tools in chats. Off, its tools show as text.")}
+                    classList={{ locked: readOnlyServer(connection(), server.name) }}
+                    title={
+                      readOnlyServer(connection(), server.name)
+                        ? t("Set outside your settings")
+                        : t("Show this server's pages under its tools in chats. Off, its tools show as text.")
+                    }
                   >
                     <input
                       type="checkbox"
                       role="switch"
                       aria-label={t("Interactive apps for {name}", { name: server.name })}
+                      disabled={readOnlyServer(connection(), server.name)}
                       checked={!appsOff(connection(), server.name)}
                       onChange={(event) => {
                         const on = event.currentTarget.checked;

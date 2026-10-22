@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Enregistrer dans le trousseau",
   "Store in Credential Manager": "Enregistrer dans le Gestionnaire d’identification",
   "Store in keyring": "Enregistrer dans le trousseau de clés",
-  "Saved there when you add the server; the settings keep only a reference.": "Enregistré là lorsque vous ajoutez le serveur ; les réglages ne gardent qu’une référence."
+  "Saved there when you add the server; the settings keep only a reference.": "Enregistré là lorsque vous ajoutez le serveur ; les réglages ne gardent qu’une référence.",
+  "Set outside your settings": "Défini en dehors de vos réglages"
 }

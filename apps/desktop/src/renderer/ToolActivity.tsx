@@ -14,7 +14,7 @@ import {
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
-import { appsOff, loadMcpServers, mcpServersKnown, setApps } from "./mcp-servers";
+import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
 import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
 import {
   batchLabel,
@@ -125,7 +125,7 @@ export function ToolActivity(props: {
   const off = () => {
     const value = payload();
     if (!value) return false;
-    loadMcpServers(connection(), store.state.catalogVersion);
+    loadMcpServers(connection(), store.state.catalogVersion, !store.state.connection?.remote);
     return !mcpServersKnown(connection()) || appsOff(connection(), value.server);
   };
   const app = createMemo(() => (off() ? undefined : payload()));
@@ -291,7 +291,13 @@ export function ToolActivity(props: {
           payload={value}
           arguments={props.args}
           callKey={props.id ?? value.uri}
-          turnOff={store.state.connection?.remote ? undefined : () => apps(false)}
+          turnOff={
+            // A remote host's servers are changed on that host, and a
+            // plugin's in the plugin.
+            store.state.connection?.remote || readOnlyServer(connection(), value.server)
+              ? undefined
+              : () => apps(false)
+          }
         />
       )}
     </Show>
