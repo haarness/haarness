@@ -552,13 +552,16 @@ fn authority_end(bytes: &[u8], from: usize, stops: &[u8]) -> usize {
 
 /// Whether what follows the last `:` of a host part is something other than
 /// a port number (`user:pa` of `user:pa?ss@host`); an IPv6 address's own
-/// colons do not count.
+/// colons do not count, and neither does a variable standing for the port
+/// (`localhost:${PORT}`, `localhost:$PORT`).
 fn port_is_not_a_number(authority: &str) -> bool {
     let host_port = authority
         .rsplit_once(']')
         .map_or(authority, |(_, after)| after);
     host_port.rsplit_once(':').is_some_and(|(_, port)| {
-        !port.is_empty() && !port.bytes().all(|byte| byte.is_ascii_digit())
+        !port.is_empty()
+            && !port.starts_with('$')
+            && !port.bytes().all(|byte| byte.is_ascii_digit())
     })
 }
 
@@ -891,6 +894,9 @@ mod tests {
             r#"{\"url\":\"http://localhost:3000\",\"email\":\"me@example.com\"}"#,
             "https://h.fixture.test:8080/x?email=a@b",
             "http://[::1]/x?a@b",
+            // A variable standing for the port.
+            "http://localhost:${PORT}/api/@scope/pkg",
+            "http://localhost:$PORT/api/@scope/pkg",
             "['https://h.fixture.test','me@x.fixture.test']",
         ] {
             assert_eq!(text(kept), kept);
