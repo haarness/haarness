@@ -28,6 +28,7 @@ import {
 import { Button, Icon, Forms, type IconName } from "./ui";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
+import { computers, lastSeen, loadComputers, platformName } from "./computers";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
 import { toastAnchor } from "./toast-anchors";
@@ -35,7 +36,7 @@ import { ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
 import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
 import { createOrdering, createOrderDropTarget } from "./Sortable";
-import { MenuButton } from "./MenuButton";
+import { MenuButton, type MenuAction } from "./MenuButton";
 import { UniversalSearch } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
@@ -105,12 +106,38 @@ const MemoryDialog = lazy(() => import("./MemoryDialog").then((module) => ({defa
 const Settings = lazy(() =>
   import("./Settings").then((module) => ({ default: module.Settings })),
 );
-/** This computer, a remote host, or Haarness Cloud, each with its own picture. */
-const serverIcon = (server: { url?: string; cloud?: boolean }): IconName =>
-  server.cloud ? "cloud" : server.url ? "server" : "computer";
+/** This computer, a remote server, Haarness Cloud or another of your
+ * computers, each with its own picture. */
+const serverIcon = (server: { url?: string; cloud?: boolean; host?: string }): IconName =>
+  server.cloud ? "cloud" : server.url ? "server" : server.host ? "host" : "computer";
 export function App() {
   const app = useApp();
   const { state, set } = app;
+  /** Your other computers in the server switcher, once the account has
+   * listed them; the one open now stays listed while it is read again. */
+  const computerItems = (): MenuAction[] => {
+    const active = app.currentServer().host;
+    const listed = computers.items.some((item) => item.id === active)
+      ? computers.items
+      : [
+          ...(active && computers.status !== "ready"
+            ? [{ id: active, name: app.currentServer().label, connected: true }]
+            : []),
+          ...computers.items,
+        ];
+    return listed.map((computer, index) => ({
+      label: computer.name,
+      detail: computer.connected
+        ? platformName("platform" in computer ? computer.platform : null) || t("Connected")
+        : lastSeen(computer),
+      icon: computer.id === active ? "check" : "host",
+      // An away computer cannot be opened until it is back.
+      disabled: !computer.connected && computer.id !== active,
+      divider: index === 0,
+      heading: index === 0 ? t("Your computers") : undefined,
+      run: () => void app.run(() => app.openComputer(computer)),
+    }));
+  };
   onMount(() => {
     const pointer = () => document.documentElement.setAttribute("data-pointer-focus", "");
     const keyboard = (event: KeyboardEvent) => {
@@ -904,7 +931,18 @@ export function App() {
               </span>
             </Show>
             <Show when={state.connection!.remote}>
-              <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
+              <Show
+                when={state.connection!.remoteHost}
+                fallback={
+                  <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
+                }
+              >
+                {/* Where prompts, tools and terminals run, on every screen. */}
+                <span class="badge host-badge" title={app.currentServer().label}>
+                  <Icon name="host" size="xs" />
+                  <span>{t("on {computer}", { computer: app.currentServer().label })}</span>
+                </span>
+              </Show>
             </Show>
           </Show>
         </div>
@@ -951,6 +989,7 @@ export function App() {
               label={t("Switch server")}
               class="server-switcher-button"
               matchWidth
+              onOpen={() => void loadComputers()}
               content={
                 <>
                   <Icon name={serverIcon(app.currentServer())} size="md" />
@@ -959,19 +998,24 @@ export function App() {
                 </>
               }
               items={[
-                ...app.servers().map((server) => ({
-                  label: t(server.label),
-                  detail:
-                    server.url ??
-                    t(server.cloud ? "Cloud sessions" : "Local projects"),
-                  icon: (server.id === state.activeServer
-                    ? "check"
-                    : serverIcon(server)) as IconName,
-                  run: () => void app.run(() => app.switchServer(server.id)),
-                })),
+                ...app
+                  .servers()
+                  .filter((server) => !server.host)
+                  .map((server) => ({
+                    label: t(server.label),
+                    detail:
+                      server.url ??
+                      t(server.cloud ? "Cloud sessions" : "Local projects"),
+                    icon: (server.id === state.activeServer
+                      ? "check"
+                      : serverIcon(server)) as IconName,
+                    run: () => void app.run(() => app.switchServer(server.id)),
+                  })),
+                ...computerItems(),
                 {
                   label: t("Manage servers"),
                   icon: "settings",
+                  divider: computerItems().length > 0,
                   run: () => {
                     void app.openSettings("servers");
                   },

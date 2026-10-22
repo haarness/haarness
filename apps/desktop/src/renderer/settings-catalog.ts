@@ -75,6 +75,7 @@ export const settingsControls = [
   ["general", "Question notifications", "input answer needed alerts notify"],
   ["profiles", "Restore configuration", "restore import archive preview rollback"],
   ["servers", "Add remote server", "connect URL authentication password token host"],
+  ["servers", "Your computers", "other computers remote hosts machines mac pc laptop cloud relay remote enable"],
   ["hooks", "Create hook", "add event command matcher timeout shell async"],
   ["schedules", "Create schedule", "new automation cron interval prompt model timezone"],
   ["extensions", "Extension scope", "global project local"],

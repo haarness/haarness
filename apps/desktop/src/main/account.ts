@@ -207,9 +207,11 @@ export async function connectCloud(
   return view;
 }
 
+/** After a sign-out or an account switch: Cloud sessions and your other
+ * computers were reached with the account that just changed. */
 export function closeCloudConnections() {
   for (const [id, value] of connections)
-    if (value.view.cloudWorkspace) {
+    if (value.view.cloudWorkspace || value.view.remoteHost) {
       value.client.close();
       connections.delete(id);
     }
