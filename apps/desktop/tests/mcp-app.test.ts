@@ -22,6 +22,7 @@ import {
   sources,
   variables,
   webLink,
+  HOVER,
   type Host,
 } from "../src/renderer/mcp-app";
 
@@ -176,6 +177,9 @@ test("the page document starts with its policy and the host script, after its do
   // The person's presses are reported with the token: trusted events only, and the script leaves the page first.
   assert.ok(html.includes(INPUT) && html.includes("e.isTrusted&&!e.repeat"));
   assert.ok(html.includes('addEventListener("pointerdown",press,true);addEventListener("keydown",press,true)'));
+  // The pointer coming into the page and leaving it is reported once each way, with the token, for the page's options.
+  assert.ok(html.includes(HOVER) && html.includes("if(!e.relatedTarget)hover(0)"));
+  assert.ok(html.includes(`p.postMessage({${HOVER}:[v,s]},"*")`));
   assert.ok(html.includes("document.currentScript.remove()"));
   // Neither a declared domain nor the token can end the tags they are written into.
   assert.ok(!html.includes('"><script>alert(1)'));

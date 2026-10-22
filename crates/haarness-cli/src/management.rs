@@ -873,13 +873,36 @@ impl ManagementService {
                             .iter()
                             .filter_map(|row| row["name"].as_str().map(str::to_owned)),
                     );
+                    // Desktop names the servers its own connection runs (this
+                    // process has no live registry of its own).
+                    let mut extra: BTreeSet<String> = input
+                        .get("names")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|name| !live.contains_key(*name))
+                        .map(str::to_owned)
+                        .collect();
+                    // A server from a file of either scope other than the one listed
+                    // above is edited where it is; one from a plugin (or anything else
+                    // outside the person's settings) is read-only here.
+                    let editable = |name: &str| self.resolve_mcp(name, None).is_ok();
                     for (name, status) in live {
+                        extra.remove(&name);
                         if !configured.contains(&name) {
+                            let editable = editable(&name);
                             values.push(json!({
                                 "name":name,"runtimeStatus":status.status,"runtimeDetail":status.detail,
-                                "managed":false,"pluginManaged":true,"readOnly":true
+                                "managed":editable,"pluginManaged":!editable,"readOnly":!editable
                             }));
                         }
+                    }
+                    for name in extra.into_iter().filter(|name| !configured.contains(name)) {
+                        let editable = editable(&name);
+                        values.push(json!({
+                            "name":name,"managed":editable,"pluginManaged":!editable,"readOnly":!editable
+                        }));
                     }
                 }
                 Ok(json!(values))
@@ -2602,6 +2625,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled,
+            apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
         },
         "remote" => McpConfigureRequest {
             transport: "streamable_http".into(),
@@ -2617,6 +2641,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_client_id: optional_string(input, "oauthClientId").map(ToOwned::to_owned),
             oauth_scopes: string_array(input, "oauthScopes")?,
             enabled,
+            apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
         },
         _ => bail!("MCP type must be local or remote"),
     };
@@ -2664,6 +2689,14 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
     }
     if input.get("oauthScopes").is_some() {
         entry.oauth_scopes = string_array(input, "oauthScopes")?;
+    }
+    if let Some(apps) = input.get("apps") {
+        // On is the default and is saved as no setting at all.
+        entry.apps = match apps {
+            Value::Bool(false) => Some(false),
+            Value::Bool(true) | Value::Null => None,
+            _ => bail!("apps must be true or false"),
+        };
     }
     Ok(())
 }
@@ -3943,6 +3976,98 @@ mod tests {
             error.contains("\"mcp.twice.enabled\" is written more than once"),
             "{error}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Desktop names the servers its connection runs; those Haarness cannot
+    /// edit (a plugin's, or set outside the person's files) are read-only,
+    /// while one in another file of the same scope is edited where it is.
+    #[tokio::test]
+    async fn the_list_says_which_named_servers_are_read_only() {
+        let (root, workspace, _, service) = isolated_service("mcp-read-only");
+        fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        fs::write(
+            workspace.join(".haarness/haarness.json"),
+            r#"{"mcp": {"own": {"command": "own-mcp"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("opencode.json"),
+            r#"{"mcp": {"shared": {"type": "local", "command": ["shared-mcp"]}}}"#,
+        )
+        .unwrap();
+        let listed = service
+            .mcp(&json!({"action": "list", "names": ["own", "shared", "from-plugin"]}))
+            .await
+            .unwrap();
+        let entry = |name: &str| {
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} is not listed: {listed}"))
+        };
+        assert_eq!(entry("own")["managed"], true);
+        assert_ne!(entry("own")["readOnly"], true);
+        assert_eq!(entry("shared")["readOnly"], false);
+        assert_eq!(entry("from-plugin")["readOnly"], true);
+        assert_eq!(entry("from-plugin")["pluginManaged"], true);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interactive_apps_turn_off_as_a_setting_and_back_on_as_none() {
+        let (root, workspace, _, service) = isolated_service("mcp-apps-switch");
+        let file = workspace.join("haarness.json");
+        fs::write(
+            &file,
+            r#"{
+  // Servers for this project.
+  "mcp": {
+    "weather": {"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}}
+  }
+}
+"#,
+        )
+        .unwrap();
+        let read = || -> Value {
+            jsonc_parser::parse_to_serde_value(
+                &fs::read_to_string(&file).unwrap(),
+                &jsonc_parser::ParseOptions::default(),
+            )
+            .unwrap()
+        };
+        service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": false}))
+            .await
+            .unwrap();
+        // Only the switch is written; the references stay as written.
+        assert_eq!(
+            read()["mcp"]["weather"],
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}, "apps": false})
+        );
+        assert_eq!(read_mcp_entry(&file, "weather").unwrap().apps, Some(false));
+        service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            read()["mcp"]["weather"],
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}})
+        );
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains("// Servers for this project.")
+        );
+        let error = service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": "no"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("apps must be true or false"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 

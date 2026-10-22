@@ -935,6 +935,33 @@ html[dir="rtl"] .tool-target {
   padding-block: var(--s1) var(--s2);
   padding-inline-start: var(--s4);
 }
+/* The page's options: over its top corner, shown while the page is pointed
+   at or the button has the keyboard, so the page itself stays uncovered. */
+.mcp-app {
+  position: relative;
+}
+.mcp-app-menu {
+  position: absolute;
+  top: calc(var(--s1) + var(--s1));
+  inset-inline-end: var(--s1);
+  z-index: 1;
+  border-radius: var(--r-sm);
+  background: var(--page);
+  box-shadow: 0 0 0 1px var(--line);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.mcp-app:hover > .mcp-app-menu,
+.mcp-app.pointed > .mcp-app-menu,
+.mcp-app-menu:focus-within,
+.mcp-app-menu:has([aria-expanded="true"]) {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mcp-app-menu {
+    transition: none;
+  }
+}
 .mcp-app-frame {
   position: relative;
   overflow: hidden;

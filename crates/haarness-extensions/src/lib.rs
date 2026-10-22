@@ -589,6 +589,9 @@ impl ToolRegistry for CombinedTools {
             None => tool,
         })
     }
+    fn resource_servers(&self) -> Vec<String> {
+        self.inner.resource_servers()
+    }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut tools = self.inner.list();
         tools.extend(self.extensions.tools.values().map(|tool| tool.definition()));

@@ -57,6 +57,13 @@ fn primary_argument(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
     };
+    // A resource row names the resource it read, or the server it listed.
+    if same_tool(name, "mcp_resource_read") {
+        return text("uri").map(str::to_owned);
+    }
+    if same_tool(name, "mcp_resource_list") {
+        return text("server").map(str::to_owned);
+    }
     if (same_tool(name, "grep") || same_tool(name, "glob"))
         && let Some(pattern) = text("pattern")
     {
@@ -516,18 +523,26 @@ fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Valu
 
 /// A successful result that carries an MCP App page (`metadata.mcp_app`, a
 /// `ui://` page on the tool's server), which only Desktop renders.
-fn has_mcp_app(result: &ItemData) -> bool {
+/// Whether a result comes with a page Desktop shows: not one of a server
+/// whose interactive apps are off since, which Desktop shows as text too.
+fn has_mcp_app(result: &ItemData, servers: &[haarness_protocol::McpServerInfo]) -> bool {
     let ItemData::ToolResult {
         is_error, metadata, ..
     } = result
     else {
         return false;
     };
+    let server = metadata
+        .pointer("/mcp_app/server")
+        .and_then(serde_json::Value::as_str);
     !is_error
         && metadata
             .pointer("/mcp_app/uri")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|uri| uri.starts_with("ui://"))
+        && !servers
+            .iter()
+            .any(|info| Some(info.name.as_str()) == server && info.apps == Some(false))
 }
 
 /// Every successful paired tool result is a compact activity row by default,
@@ -1609,7 +1624,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 }
                 // An MCP tool whose server pairs it with a page: the page
                 // renders in Desktop, so the row says where to find it.
-                if result.is_some_and(|item| has_mcp_app(&item.data)) {
+                if result.is_some_and(|item| has_mcp_app(&item.data, &app.mcp_status)) {
                     let notice = app.language.text(
                         "This tool comes with an app; open the chat in Haarness Desktop to use it.",
                     );
