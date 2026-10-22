@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import type { Item, ItemData, Thread } from "@haarness/sdk";
 import {
   contextUsage,
+  costNumber,
   paceSeconds,
   paceSpeed,
+  percentNumber,
   requestPace,
+  tokenNumber,
 } from "../src/renderer/context-usage";
+import { applyLanguage } from "../src/renderer/i18n";
 const thread = { id: "one" } as Thread;
 const item = (sequence: number, data: ItemData): Item => ({
   id: String(sequence),
@@ -117,4 +121,26 @@ test("a timed request reports its first-token time, and its speed only over half
   assert.match(paceSeconds(1240, "de"), /^1,2\s?\S/);
   assert.equal(paceSpeed(85.4, "en"), "85");
   assert.equal(paceSpeed(9.94, "en"), "9.9");
+});
+
+test("context counts, shares and costs are written in the reader's language", () => {
+  assert.equal(tokenNumber(1234567, "en"), "1,234,567");
+  assert.equal(tokenNumber(1234567, "de"), "1.234.567");
+  assert.equal(tokenNumber(1234567, "fr"), "1\u202f234\u202f567");
+  assert.equal(percentNumber(12.345, "en"), "12.3");
+  assert.equal(percentNumber(12.345, "de"), "12,3");
+  assert.equal(costNumber(0.025, "en"), "$0.0250");
+  assert.equal(costNumber(0.025, "de"), "0,0250\u00a0$");
+  // An unknown count says so in the interface language too.
+  const global = globalThis as { document?: unknown };
+  const saved = global.document;
+  global.document = { documentElement: {} };
+  try {
+    assert.equal(tokenNumber(undefined, "en"), "Not available");
+    applyLanguage("de");
+    assert.equal(tokenNumber(null, "de"), "Nicht verfügbar");
+  } finally {
+    applyLanguage("en");
+    global.document = saved;
+  }
 });
