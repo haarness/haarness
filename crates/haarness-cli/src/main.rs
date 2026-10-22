@@ -10942,8 +10942,9 @@ mod tests {
             super::quiet_closed_stdout();
             // Fills the pipe nobody reads, as a queue's thread does.
             std::thread::spawn(|| {
+                let filler = vec![b'x'; 64 * 1024];
                 loop {
-                    let _ = std::io::stderr().write_all(&[b'x'; 64 * 1024]);
+                    let _ = std::io::stderr().write_all(&filler);
                 }
             });
             std::thread::sleep(std::time::Duration::from_millis(300));
