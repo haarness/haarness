@@ -116,6 +116,28 @@ fn scoped_roundtrip_preserves_assets_and_excludes_runtime_credentials_and_unrela
 }
 
 #[test]
+fn a_keychain_reference_travels_as_written_and_never_its_secret() {
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    let settings = r#"{"mcp": {"github": {"type": "remote", "url": "https://mcp.example.test",
+        "headers": {"Authorization": "Bearer ${keychain:github-token}"}}}}"#;
+    put(&source.config, "haarness.json", settings);
+    let bytes = Archive::capture(&source, "keychain", Scope::Global).unwrap();
+    let archive = Archive::decode(&bytes).unwrap();
+    assert_eq!(
+        archive.files["global/config/haarness.json"],
+        settings.as_bytes(),
+        "the reference is kept as written"
+    );
+    let target = fixture.roots("target");
+    archive.restore(&target, false, false).unwrap();
+    assert_eq!(
+        fs::read_to_string(target.config.join("haarness.json")).unwrap(),
+        settings
+    );
+}
+
+#[test]
 fn export_leaves_out_what_finder_and_macos_write_beside_configuration() {
     let fixture = Fixture::new();
     let roots = fixture.roots("source");

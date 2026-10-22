@@ -1075,13 +1075,14 @@ impl Tool for ManagementTool {
                     "type": {"type":"string","enum":["local","remote"],"description":"Server type for add; local requires command and remote requires url."},
                     "command": {"type":"string","description":"Executable for a local MCP server."},
                     "args": {"type":"array","items":{"type":"string"},"description":"Arguments for a local MCP server."},
-                    "environment": {"type":"object","additionalProperties":{"type":"string"},"description":"Environment for a local MCP server."},
+                    "environment": {"type":"object","additionalProperties":{"type":"string"},"description":"Environment for a local MCP server. A value may name an environment variable as ${NAME} or a stored secret as ${keychain:NAME}; never write a secret itself."},
                     "url": {"type":"string","description":"Streamable HTTP URL for a remote MCP server."},
-                    "headers": {"type":"object","additionalProperties":{"type":"string"},"description":"Headers for a remote MCP server."},
+                    "headers": {"type":"object","additionalProperties":{"type":"string"},"description":"Headers for a remote MCP server. A value may name an environment variable as ${NAME} or a stored secret as ${keychain:NAME}, e.g. Bearer ${keychain:github-token}."},
                     "oauth": {"type":"boolean","description":"Enable or disable generic OAuth discovery for a remote server."},
                     "oauthClientId": {"type":"string","description":"Optional public OAuth client id."},
                     "oauthScopes": {"type":"array","items":{"type":"string"},"description":"OAuth scopes."},
                     "enabled": {"type":"boolean","description":"Initial enabled state for add. Defaults to true."},
+                    "apps": {"type":"boolean","description":"Interactive apps (MCP App pages) from this server, for add or edit. Defaults to true. false makes it a plain MCP server: it is not told pages render, its results carry no page and its pages are not served."},
                     "callbackPort": {"type":"integer","minimum":0,"maximum":65535,"description":"Loopback OAuth callback port for auth; 0 selects an ephemeral port."}
                 }),
                 vec![
@@ -1772,6 +1773,18 @@ impl ToolRegistry for NativeToolRegistry {
         if let Some(tool) = self.tools.get(name) {
             return Some(tool.clone());
         }
+        if let Some(mcp) = self
+            .mcp
+            .as_ref()
+            .filter(|mcp| !mcp.resource_servers().is_empty())
+        {
+            let [list, read] = crate::mcp_resources::tools(mcp);
+            match name {
+                crate::mcp_resources::LIST => return Some(list),
+                crate::mcp_resources::READ => return Some(read),
+                _ => {}
+            }
+        }
         let definition = self
             .mcp
             .as_ref()?
@@ -1785,10 +1798,22 @@ impl ToolRegistry for NativeToolRegistry {
             registry: self.mcp.as_ref()?.clone(),
         }))
     }
+    fn resource_servers(&self) -> Vec<String> {
+        self.mcp
+            .as_ref()
+            .map(|mcp| mcp.resource_servers())
+            .unwrap_or_default()
+    }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         if let Some(mcp) = &self.mcp {
             values.extend(mcp.tool_snapshot());
+            // Only while a connected server declares resources: most expose
+            // tools only, and the two tools would cost every request for
+            // nothing.
+            if !mcp.resource_servers().is_empty() {
+                values.extend(crate::mcp_resources::definitions());
+            }
         }
         values.sort_by(|a, b| a.name.cmp(&b.name));
         values
@@ -4300,11 +4325,11 @@ fn output_with_diffs(text: String, diffs: Vec<FileDiff>, diffs_truncated: bool) 
 const TOOL_OUTPUT_MAX_LINES: usize = 2_000;
 const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1_024;
 
-async fn truncate_output(text: String) -> CoreResult<ToolOutput> {
+pub(crate) async fn truncate_output(text: String) -> CoreResult<ToolOutput> {
     truncate_output_at(text, &tool_output_dir()).await
 }
 
-async fn truncate_output_at(text: String, directory: &Path) -> CoreResult<ToolOutput> {
+pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreResult<ToolOutput> {
     let total_lines = text.lines().count();
     if total_lines <= TOOL_OUTPUT_MAX_LINES && text.len() <= TOOL_OUTPUT_MAX_BYTES {
         return Ok(output(text));
@@ -4342,7 +4367,7 @@ fn output_preview(text: &str) -> String {
     preview.join("\n")
 }
 
-fn tool_output_dir() -> PathBuf {
+pub(crate) fn tool_output_dir() -> PathBuf {
     if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
         return PathBuf::from(root).join("data/tool-output");
     }

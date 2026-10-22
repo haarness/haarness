@@ -52,8 +52,12 @@ by other applications is not captured.
 **Configuration and scripts can contain inline secrets.** Archives retain
 their contents, including literal environment/header values, and are neither
 encrypted nor automatically sanitized. Inspect included files before sharing.
-Environment references are preserved without expansion. Reconnect provider
-accounts and MCP OAuth after restore. Embedded absolute paths may need editing
+Environment and keychain references (`${VAR}`, `${keychain:NAME}`) are
+preserved without expansion, and keychain entries themselves are never
+exported: a profile whose MCP settings name `${keychain:github-token}` carries
+no secret, so store it again on the new machine with
+`haarness mcp secret set github-token`. Reconnect provider accounts and MCP
+OAuth after restore. Embedded absolute paths may need editing
 on another machine; plugin-relative placeholders resolve at the restored root.
 
 Restore validates the entire archive and all targets before changing files,

@@ -1156,6 +1156,7 @@ fn mcp_config(server: McpServer, cwd: &Path) -> AcpResult<(String, McpConfigureR
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled: true,
+            apps: None,
         },
     ))
 }

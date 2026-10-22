@@ -724,3 +724,234 @@ async fn denied_loader_restores_only_allowed_tools_and_completes_the_turn() {
         assert!(runtime.items(thread.id, None).await.unwrap().iter().any(|item| matches!(&item.data, haarness_protocol::ItemData::ToolResult { name, is_error: false, .. } if name == "session_manage")));
     }
 }
+
+/// The two resource tools as the server registers them, answering with the
+/// servers the runtime scoped each call to.
+struct ResourceFixtures {
+    tools: HashMap<String, Arc<dyn Tool>>,
+}
+
+struct ScopedResourceTool(&'static str);
+
+#[async_trait]
+impl Tool for ScopedResourceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.0.into(),
+            description: "MCP resources".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"server": {"type": "string"}, "uri": {"type": "string"}},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, arguments: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        Ok(ToolOutput {
+            text: arguments["__servers"].to_string(),
+            metadata: Value::Null,
+        })
+    }
+}
+
+impl ResourceFixtures {
+    fn new() -> Self {
+        let mut tools = FixtureRegistry::new().tools;
+        for name in ["mcp_resource_list", "mcp_resource_read"] {
+            tools.insert(
+                name.into(),
+                Arc::new(ScopedResourceTool(name)) as Arc<dyn Tool>,
+            );
+        }
+        Self { tools }
+    }
+}
+
+impl ToolRegistry for ResourceFixtures {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
+    fn list(&self) -> Vec<ToolDefinition> {
+        self.tools.values().map(|tool| tool.definition()).collect()
+    }
+
+    fn resource_servers(&self) -> Vec<String> {
+        vec!["docs".into(), "hidden".into()]
+    }
+}
+
+#[derive(Clone, Default)]
+struct SchemaRecorder {
+    schemas: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl ModelProvider for SchemaRecorder {
+    fn id(&self) -> &str {
+        "schemas"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "schemas".into(),
+            name: "Schema recorder".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "schemas-1".into(),
+                display_name: "Schema recorder".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: Some(128_000),
+                max_output_tokens: Some(2_000),
+                pricing: None,
+            }],
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        self.schemas
+            .lock()
+            .unwrap()
+            .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta("done".into())),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+fn deny(pattern: &str) -> PermissionRule {
+    PermissionRule {
+        pattern: pattern.into(),
+        decision: PermissionDecision::Deny,
+    }
+}
+
+/// A rule that takes every tool of a server away keeps its resources from
+/// the model too: a read naming it is refused, a listing leaves it out, and
+/// with no resource server left the resource tools are not offered.
+#[tokio::test]
+async fn a_server_whose_tools_are_all_denied_keeps_its_resources_from_the_model() {
+    let runtime = |rules: Vec<PermissionRule>, provider: SchemaRecorder| {
+        AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(ResourceFixtures::new()),
+            EventBus::new(64),
+            PathBuf::from("."),
+            String::new(),
+            RuntimeConfig {
+                base_rules: rules,
+                ..RuntimeConfig::default()
+            },
+        )
+    };
+    let provider = SchemaRecorder::default();
+    let partly = runtime(vec![deny("mcp__hidden__*:*")], provider.clone());
+    let thread = partly
+        .create_thread(CreateThreadRequest {
+            title: Some("Resources".into()),
+            provider: Some("schemas".into()),
+            model: Some("schemas-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let Err(refused) = partly
+        .run_direct_tool(
+            thread.id,
+            "mcp_resource_read",
+            json!({"server": "hidden", "uri": "hidden://notes"}),
+            CancellationToken::new(),
+        )
+        .await
+    else {
+        panic!("a read of the denied server ran");
+    };
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("MCP server \"hidden\" is turned off for this chat"),
+        "{refused}"
+    );
+    let listed = partly
+        .run_direct_tool(
+            thread.id,
+            "mcp_resource_list",
+            json!({}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.output.text, r#"["docs"]"#);
+    // A rule about one tool of the server leaves its resources alone.
+    let one_tool = runtime(
+        vec![deny("mcp__hidden__search:*")],
+        SchemaRecorder::default(),
+    );
+    let thread_two = one_tool
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .unwrap();
+    let listed = one_tool
+        .run_direct_tool(
+            thread_two.id,
+            "mcp_resource_list",
+            json!({}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.output.text, r#"["docs","hidden"]"#);
+    // The tools are offered while one resource server is open, and not after.
+    let turn = partly
+        .start_turn(thread.id, turn_request("hello"))
+        .await
+        .unwrap();
+    wait_done(&partly, turn.id).await;
+    let closed_provider = SchemaRecorder::default();
+    let closed = runtime(
+        vec![deny("mcp__hidden__*:*"), deny("mcp__docs__*:*")],
+        closed_provider.clone(),
+    );
+    let thread_three = closed
+        .create_thread(CreateThreadRequest {
+            provider: Some("schemas".into()),
+            model: Some("schemas-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let turn = closed
+        .start_turn(thread_three.id, turn_request("hello"))
+        .await
+        .unwrap();
+    wait_done(&closed, turn.id).await;
+    let offered = provider.schemas.lock().unwrap()[0].clone();
+    assert!(
+        offered.contains(&"mcp_resource_read".to_owned()),
+        "{offered:?}"
+    );
+    let offered = closed_provider.schemas.lock().unwrap()[0].clone();
+    assert!(
+        !offered.iter().any(|name| name.starts_with("mcp_resource_")),
+        "{offered:?}"
+    );
+    assert!(offered.contains(&"read".to_owned()), "{offered:?}");
+}

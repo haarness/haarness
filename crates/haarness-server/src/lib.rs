@@ -10,6 +10,7 @@ mod command;
 pub mod files;
 pub mod front;
 pub mod hooks;
+mod mcp_resources;
 pub mod models;
 pub mod plugins;
 pub mod preview;

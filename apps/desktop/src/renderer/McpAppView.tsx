@@ -1,6 +1,7 @@
 import { t, language } from "./i18n";
 import { useApp } from "./state";
 import { Icon } from "./ui";
+import { MenuButton } from "./MenuButton";
 import {
   Show,
   createEffect,
@@ -11,6 +12,7 @@ import {
 } from "solid-js";
 import {
   DEFAULT_HEIGHT,
+  HOVER,
   INPUT,
   LEFT,
   MAX_HEIGHT,
@@ -69,6 +71,8 @@ export function McpAppView(props: {
   arguments: unknown;
   /** Identifies the call, for the page's remembered height. */
   callKey: string;
+  /** Turns this server's interactive apps off; absent where that cannot be changed (a remote host). */
+  turnOff?: () => void;
 }) {
   const app = useApp();
   const connection = app.state.connection?.id ?? "";
@@ -86,6 +90,8 @@ export function McpAppView(props: {
   /** The scheme of the last link Haarness refused after a press in the page ("" when it has none). */
   const [refused, setRefused] = createSignal<string>();
   const [render, setRender] = createSignal(0);
+  /** The pointer is over the page, which the window cannot tell past the frame. */
+  const [pointed, setPointed] = createSignal(false);
   let root!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
   let probe!: HTMLSpanElement;
@@ -281,6 +287,11 @@ export function McpAppView(props: {
       if (data.type !== "receive") return;
       const message = data.message as Record<string, unknown> | undefined;
       if (message && Array.isArray(message[WHEEL])) return wheel(message[WHEEL] as number[]);
+      if (message && HOVER in message) {
+        const [value, from] = Array.isArray(message[HOVER]) ? (message[HOVER] as unknown[]) : [];
+        if (from === token) setPointed(value === 1);
+        return;
+      }
       if (message && INPUT in message) {
         if (message[INPUT] === token) pressed = true;
         return;
@@ -356,9 +367,25 @@ export function McpAppView(props: {
       ref={root}
       data-mcp-app={props.payload.uri}
       data-state={failure() ? "failed" : left() ? "left" : loaded() ? "ready" : "loading"}
-      classList={{ bordered: page()?.meta.prefersBorder !== false }}
+      classList={{ bordered: page()?.meta.prefersBorder !== false, pointed: pointed() }}
     >
       <span ref={probe} class="mcp-app-probe" aria-hidden="true" />
+      <Show when={props.turnOff}>
+        {(turnOff) => (
+          <div class="mcp-app-menu">
+            <MenuButton
+              icon="more"
+              label={t("{name} app options", { name: label() })}
+              items={[
+                {
+                  label: t("Turn off interactive apps for {server}", { server: props.payload.server }),
+                  run: turnOff(),
+                },
+              ]}
+            />
+          </div>
+        )}
+      </Show>
       <Show when={!failure() && !left()}>
         <div class="mcp-app-frame" style={{ height: `${height() || DEFAULT_HEIGHT}px` }}>
           <iframe

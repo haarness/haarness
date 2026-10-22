@@ -324,7 +324,14 @@
   margin-bottom: var(--s2);
 }
 .mcp-pair-row {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) var(--icon-button);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) calc(
+      var(--icon-button) * 2 + var(--s1)
+    );
+}
+/* The place of a row's keep-in-keychain toggle while it is not offered. */
+.mcp-row-actions > .icon-button-space {
+  flex: none;
+  width: var(--icon-button);
 }
 .mcp-argument-row {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) calc(
@@ -997,6 +1004,27 @@ dialog .notifications {
 .setting-block p {
   font-size: var(--ui);
   color: var(--muted);
+}
+/* A server's Interactive apps switch ends its row of actions, quietly. */
+.setting-block .mcp-apps-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-inline-start: auto;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+/* A plugin's server (or one set elsewhere) shows its state, not a control. */
+.setting-block .mcp-apps-switch.locked {
+  cursor: default;
+  opacity: 0.6;
+}
+/* Why an MCP server failed, under its name: a sentence, never a log dump. */
+.setting-block > .mcp-server-detail {
+  margin: 0;
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
 }
 .setting-block pre {
   font-size: var(--ui-sm);

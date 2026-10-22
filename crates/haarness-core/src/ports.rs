@@ -699,6 +699,11 @@ pub trait Tool: Send + Sync {
 pub trait ToolRegistry: Send + Sync {
     fn get(&self, name: &str) -> Option<Arc<dyn Tool>>;
     fn list(&self) -> Vec<ToolDefinition>;
+    /// The connected MCP servers that declare resources, for the resource
+    /// tools' reach (see [`McpRegistry::resource_servers`]).
+    fn resource_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Exact registrations win. Repair only unambiguous capitalization or the
     /// known function namespace; never guess spellings or choose by permission.
@@ -886,6 +891,11 @@ pub trait McpRegistry: Send + Sync {
     async fn disconnect(&self, name: &str) -> CoreResult<McpServerInfo>;
     async fn tools(&self, name: &str) -> CoreResult<Vec<ToolDefinition>>;
     async fn call(&self, name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput>;
+    /// Connected servers that declare the resources capability, by name.
+    /// The model's resource tools are offered only while there is one.
+    fn resource_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
     async fn resources(&self, name: &str) -> CoreResult<Vec<Value>>;
     async fn resource_templates(&self, name: &str) -> CoreResult<Vec<Value>>;
     async fn read_resource(&self, name: &str, uri: &str) -> CoreResult<Value>;
