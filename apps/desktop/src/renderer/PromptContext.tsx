@@ -3,9 +3,11 @@ import {
   createEffect,
   createSignal,
   For,
+  Match,
   onCleanup,
   onMount,
   Show,
+  Switch,
 } from "solid-js";
 import { useApp } from "./state";
 import { Icon } from "./icons";
@@ -15,10 +17,50 @@ import {
   contextLabel,
   fileContext,
   mentionAgents,
+  type PromptContext,
 } from "./prompt-context";
+import { shortPage, type ElementContext } from "./element-context";
 import "./prompt-context.css";
 
 type Option = { kind: "file" | "agent"; name: string; description?: string };
+/** Hovering a picked element's chip says what and where it is. */
+function chipTitle(item: PromptContext) {
+  if (item.kind !== "element") return contextLabel(item);
+  return [
+    `${item.tag} · ${item.width}×${item.height}`,
+    shortPage(item.url),
+    item.selector ?? "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+/** A picked element as it was captured: where, what it said, its HTML. */
+function ElementPreview(props: { item: ElementContext }) {
+  return (
+    <>
+      <small>
+        {t("Picked page element · {size}", {
+          size: `${props.item.width}×${props.item.height}`,
+        })}
+      </small>
+      <dl class="prompt-context-element">
+        <dt>{t("Page")}</dt>
+        <dd dir="ltr">{props.item.url}</dd>
+        <Show when={props.item.selector}>
+          <dt>{t("Selector")}</dt>
+          <dd dir="ltr">
+            <code>{props.item.selector}</code>
+          </dd>
+        </Show>
+        <Show when={props.item.text}>
+          <dt>{t("Text")}</dt>
+          <dd dir="auto">{props.item.text}</dd>
+        </Show>
+      </dl>
+      <pre dir="ltr">{props.item.html}</pre>
+    </>
+  );
+}
 export function PromptContextControls(props: {
   text: string;
   textarea: () => HTMLTextAreaElement;
@@ -195,26 +237,34 @@ export function PromptContextControls(props: {
             {(item) => (
               <div class="prompt-context-item">
                 <Icon
-                  name={item.kind === "file" ? "file" : "agents"}
+                  name={item.kind === "file" ? "file" : item.kind === "element" ? "pick" : "agents"}
                   size="sm"
                 />
                 <details>
-                  <summary title={contextLabel(item)}>
+                  <summary title={chipTitle(item)}>
                     {contextLabel(item)}
                     {item.kind === "file" && item.unsaved ? ` · ${t("unsaved")}` : ""}
                   </summary>
                   <div class="prompt-context-preview">
-                    <Show
-                      when={item.kind === "file"}
+                    <Switch
                       fallback={
                         <p>
                           {t("Requests delegation to this agent, using the task tool and normal permissions.")}
                         </p>
                       }
                     >
-                      <small>{t("Captured file context")}</small>
-                      <pre>{item.kind === "file" ? item.content : ""}</pre>
-                    </Show>
+                      <Match when={item.kind === "file" && item}>
+                        {(file) => (
+                          <>
+                            <small>{t("Captured file context")}</small>
+                            <pre>{file().content}</pre>
+                          </>
+                        )}
+                      </Match>
+                      <Match when={item.kind === "element" && item}>
+                        {(element) => <ElementPreview item={element()} />}
+                      </Match>
+                    </Switch>
                   </div>
                 </details>
                 <button

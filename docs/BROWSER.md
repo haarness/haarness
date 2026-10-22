@@ -12,6 +12,16 @@ Ask Haarness to open a site, fill a form, inspect a failure, or take a screensho
 
 While the agent loads, clicks, types or takes a screenshot, your keyboard stays where it was, such as in the message box: a page that focuses one of its fields or calls `window.focus()` does not take it. A page you load yourself (an address you type, **Back**, **Forward** or **Reload**, a link you open from a chat or from browsing history) takes the keyboard once it is shown, as in a browser, so its own field gets what you type next; only while Haarness is the app you are using, and a new tab with no address leaves the keyboard in the address bar. It leaves the keyboard where you are if the page takes more than three seconds to show (it may wait behind the agent's work), if you type or click in the window meanwhile, or if the message box or another field of the window has the keyboard by then. A page that has your keyboard and is put away (the agent shows another tab or closes it) gives it back to the message box, if the message box had it before and Haarness is the app you are using; it never brings Haarness in front of another app. A file chooser a page opens during the agent's action, or in the five seconds after it (a widget may wait for a request first), does not appear: the page sees it cancelled, and the agent is told to use `browser_files_upload`, with that action's result or, for a later chooser, its next one. Pressing a key or clicking in the page ends that hold at once, so to type in the page or choose a file yourself, click the page.
 
+## Pick an element
+
+Show the agent exactly which part of a page you mean. Click the crosshair beside the address bar, press **⌘⇧C** (Ctrl+Shift+C elsewhere, the Chromium DevTools key; change or unset it in **Settings → Keyboard shortcuts**), or choose **Pick an element in the browser** in the command palette or **View → Pick an element**. A closed Browser opens for it, and the same key or button stops picking.
+
+While picking, the element under the pointer is outlined with a small label, its tag and size (`button#save.primary 120×32`); the button is outlined rather than the label inside it, and holding **Option** (Alt) outlines exactly what is under the pointer. A hint at the top of the page (the bottom when the pointer is near the top) says what to do. A click picks the outlined element: it becomes a chip in the message box and the keyboard moves there, with its caret where it was, so you can type your note at once. **Shift**-click picks several, and **Esc** stops. Picking ends when the page navigates, another tab or chat is shown, or the Browser is hidden.
+
+Picking never reaches the page: Desktop refuses each press before Chromium hands it to the page (`before-mouse-event`), so no page listener hears a mousedown, focus or click, and its links and buttons do not run; only the pointer's movement reaches it, as hover does. The outline is drawn like the agent's cursor, in an isolated world in a closed shadow root that is inert and hidden from assistive technology, so the agent's snapshots never list it and its screenshots hide it. The agent's own clicks and keys still reach the page while you pick.
+
+The chip names the element (`button#save.primary “Save changes”`); hovering it shows its tag, size, page and selector, opening it shows what was captured, and × removes it. Picking the same element again adds nothing. The chip is a snapshot taken when you picked it: the page address, a CSS selector from the nearest unique id (`>>>` steps into a shadow root; none when it would pass 300 characters), its accessible name and visible text (up to 300 characters), its size, and its outer HTML in one line, with long attribute values cut, up to 2 KB. It is saved with the draft like other context, and the message sends it as a folded `Page element:` block naming the browser tab, with the page's strings quoted and the HTML fenced so the model reads them as page data. The TUI shows a sent element as an `@` chip, as it shows file context. No screenshot of the element is sent; the agent can take one with `browser_screenshot`.
+
 Each conversation has a separate tab inventory and Chromium storage partition. Switching conversations never changes an agent command's target. Tab URLs return after restarting Desktop; cookies and site storage belong to the connected browser host and reset when it reconnects or Desktop restarts. The Haarness browser never uses the user's Chrome profile.
 
 A TUI attached to the **same conversation and server** can use its Desktop browser too. Keep Desktop running; screenshots also require its window and target tab to be visible. Without Desktop, TUI, CLI and SDK conversations on this computer can browse in the user's Chrome once Haarness for Chrome is set up (`/chrome` in the TUI, Settings → Browser → Chrome in Desktop, or `haarness browser setup`).
@@ -155,6 +165,8 @@ npm --prefix packages/browser-driver run contract:check   # fail if the catalog 
 npm --prefix packages/browser-driver test
 npm --prefix apps/desktop run typecheck
 npm --prefix apps/desktop run test:e2e -- browser.spec.ts
+npm --prefix apps/desktop run test:e2e -- browser-pick.spec.ts   # picking an element
+python3 scripts/test-picked-element-tmux.py                       # its chip in an attached TUI
 ```
 
 The Electron suite uses disposable Git repositories and actual native Chromium views. Optional live verification uses a real model and an attached tmux TUI: `HAARNESS_BROWSER_LIVE=1`. Local test credentials stay in process memory. Set `HAARNESS_BROWSER_EVIDENCE` to retain test artifacts.
@@ -196,7 +208,7 @@ During an agent operation, browser requests to blocked sites are refused, WebSoc
 
 Policies are stored under `browser.policy` in the existing scoped `haarness.json`/`haarness.jsonc` configuration files. The authenticated `manageResource("browser-settings", …)` API supports `get`, `set`, and `reset`; mutations require the revision returned by `get`. Servers advertise `browser-settings.v1`.
 
-In the Haarness browser, logins remain temporary and isolated per conversation. Browser profiles/password import, autofill, camera/microphone controls, annotation workflows, WebMCP, and unrestricted CDP are not part of this release; a task that needs the user's own signed-in profile uses Chrome instead.
+In the Haarness browser, logins remain temporary and isolated per conversation. Browser profiles/password import, autofill, camera/microphone controls, annotation workflows beyond [picking an element](#pick-an-element), WebMCP, and unrestricted CDP are not part of this release; a task that needs the user's own signed-in profile uses Chrome instead.
 
 Settings → Browser also supports **Remember site approvals** and leading subdomain rules such as `https://*.example.com`. Remembering is off by default. See [browser approval behavior](PERMISSIONS-AND-EXECUTION.md#browser-approvals) for persistence scopes, origin matching and redirect boundaries.
 

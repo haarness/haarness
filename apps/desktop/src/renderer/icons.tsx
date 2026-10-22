@@ -32,6 +32,7 @@ import ChevronUp from "lucide-solid/icons/chevron-up";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import ChartColumn from "lucide-solid/icons/chart-column";
 import CreditCard from "lucide-solid/icons/credit-card";
+import Crosshair from "lucide-solid/icons/crosshair";
 import Laptop from "lucide-solid/icons/laptop";
 import LogOut from "lucide-solid/icons/log-out";
 import Play from "lucide-solid/icons/play";
@@ -171,6 +172,8 @@ const catalog = {
   cloud: Cloud,
   reasoning: Zap,
   web: Globe,
+  // Picking an element in the browser's page, and the chip it becomes.
+  pick: Crosshair,
   key: KeyRound,
   todo: ListTodo,
   "todo-open": CircleDashed,

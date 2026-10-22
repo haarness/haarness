@@ -158,6 +158,7 @@ test("keys translated through a variable are in the catalog", () => {
     // Keyboard shortcut names and notes, from `shortcutTitles` and
     // `shortcutDescriptions`.
     "Next agent", "Previous agent", "While the message box has focus",
+    "Pick an element", "Adds part of the browser's page to your message",
     "Browser", "Review", "Terminal", "Context",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",

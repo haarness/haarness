@@ -612,6 +612,9 @@ export function Session() {
     persistDraft();
   });
   const active = () => state.turns.find((t) => t.threadId === state.selected);
+  /** Page elements picked into this draft: the box then asks what to do with them. */
+  const pickedElements = () =>
+    app.promptContext().filter((item) => item.kind === "element").length;
   const queue = createInputQueue({
     owner,
     working: () => !!active(),
@@ -2063,11 +2066,15 @@ export function Session() {
                 placeholder={
                   !project()
                     ? t("Choose a project to start a chat")
-                    : active()
-                      ? t("Send a follow-up message…")
-                      : state.selected
-                        ? t("Reply, or @ to add files and agents")
-                        : t("Do anything, or @ to add files and agents")
+                    : pickedElements()
+                      ? pickedElements() > 1
+                        ? t("Ask about these elements…")
+                        : t("Ask about this element…")
+                      : active()
+                        ? t("Send a follow-up message…")
+                        : state.selected
+                          ? t("Reply, or @ to add files and agents")
+                          : t("Do anything, or @ to add files and agents")
                 }
                 value={draft()}
                 onInput={(event) => change(event.currentTarget.value)}

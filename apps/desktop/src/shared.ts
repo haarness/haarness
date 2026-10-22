@@ -94,6 +94,8 @@ export const defaults: Preferences = {
     diff: "Mod+Shift+D",
     terminal: "Mod+J",
     browser: "Mod+Shift+B",
+    // The Chromium DevTools key for inspecting an element.
+    pick: "Mod+Shift+C",
     // Composer keys, matched while the message box has focus rather than by
     // the native menu. The TUI switches agents with Tab, but here Tab has to
     // keep moving keyboard focus, so the defaults are chords.
@@ -166,6 +168,7 @@ export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
 /** Shortcuts that may be left unset: the ones added after people could
  * choose their own keys. */
 export const optionalShortcuts = new Set([
+  "pick",
   "tabNext",
   "tabPrev",
   "chatPrev",
@@ -281,6 +284,8 @@ export interface Bridge {
   browserLayout(connection:string,thread:string,layout:BrowserLayout):Promise<void>;
   /** A JPEG data URL of the focused page, or null when nothing is drawn. */
   browserSnapshot(connection:string,thread:string):Promise<string | null>;
+  /** Starts picking an element in the page the window shows for this chat, or stops (null). */
+  browserPick(connection: string, thread: string, request: import("./browser-pick").PickRequest | null): Promise<{ tab: string } | null>;
 
   notificationReady(): Promise<NotificationTarget | null>;
   notificationHandled(target: NotificationTarget): Promise<void>;

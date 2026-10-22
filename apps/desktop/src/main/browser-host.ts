@@ -12,6 +12,7 @@ import {
 } from "@haarness/browser-driver/rpc";
 import { createAgentActivity } from "./browser-activity";
 import { createBrowserPage, type BrowserPage } from "./browser-chromium";
+import { createModifiers } from "./browser-picker";
 import { createKeyboardHandoff } from "./browser-keyboard";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
@@ -20,6 +21,7 @@ import { connections } from "./runtime";
 import { data, persist } from "./store";
 import { translate } from "../localization";
 import type { DesktopEvent, BrowserLayout } from "../shared";
+import type { PickEvent, PickRequest } from "../browser-pick";
 
 type Entry = {
   key: string;
@@ -192,6 +194,17 @@ export function createBrowserHost(
   }
   /** Windows whose own key and pointer presses are watched for the browsers in them. */
   const watched = new WeakSet<BrowserWindow>();
+  /** The modifier keys each window's own page last heard: Shift-click keeps picking. */
+  const modifiers = new WeakMap<BrowserWindow, ReturnType<typeof createModifiers>>();
+  function windowModifiers(win: BrowserWindow) {
+    let held = modifiers.get(win);
+    if (!held) {
+      const created = (held = createModifiers());
+      modifiers.set(win, created);
+      win.webContents.on("before-input-event", (_event, input) => created.input(input));
+    }
+    return held.get;
+  }
   /** A press in the window's own page means the person has moved on from a load they asked for. */
   function watchInput(win: BrowserWindow) {
     if (watched.has(win)) return;
@@ -255,6 +268,7 @@ export function createBrowserHost(
       favicon: (urls) => void loadIcon(e, id, urls),
       agentCursor: () => data().preferences.browserAgentCursor !== false,
       translate: (key) => translate(data().preferences.language, key),
+      modifiers: windowModifiers(e.win),
       popup: (options) => {
         const popup = create(e, false, options);
         // A popup the page opens while an agent command runs in it, or just
@@ -723,6 +737,51 @@ export function createBrowserHost(
     },
     hide(win: BrowserWindow) {
       for (const e of entries.values()) if (e.win === win) layout(e, undefined);
+    },
+    /**
+     * Starts the person picking elements in the page the window shows for this
+     * chat (`request`), or stops it (null). Each pick and the end are sent to
+     * the window as `pick` browser events. A pick that ends picking gives the
+     * window its keyboard back, which the click in the page took, so the
+     * message box can take the person's note at once.
+     */
+    async pick(
+      win: BrowserWindow,
+      connection: string,
+      thread: string,
+      request: PickRequest | null,
+    ) {
+      for (const entry of entries.values())
+        if (entry.win === win)
+          for (const page of entry.pages.values()) page.stopPicking();
+      if (!request) return null;
+      const e = entries.get(key(connection, thread));
+      if (e?.win === win) {
+        await e.ready.catch(() => {});
+        // The page may still be on its way to the screen: the panel has just
+        // opened, or a menu over it has just closed.
+        for (let waited = 0; !e.shown && !e.disposed && waited < 3_000; waited += 50)
+          await new Promise((done) => setTimeout(done, 50));
+      }
+      const tab = e?.shown;
+      const page = tab ? e.pages.get(tab) : undefined;
+      if (!e || e.win !== win || e.disposed || !tab || !page)
+        throw new Error("Open a page in the browser to pick from it.");
+      const send = (pick: PickEvent) =>
+        emit(e.win, { kind: "browser", connection: e.connection, id: e.thread, data: { pick } });
+      let picks = 0;
+      await page.pick(request, {
+        picked: (element, more) => {
+          picks++;
+          send({ type: "picked", tab, element, more });
+        },
+        ended: (reason) => {
+          const done = reason === "picked" || (reason === "cancelled" && picks > 0);
+          if (done && !win.isDestroyed() && win.isFocused()) win.webContents.focus();
+          send({ type: "ended", reason });
+        },
+      });
+      return { tab };
     },
     /** The focused page as drawn now, so the window can hold a still copy
         while a menu or dialog has to paint where the native view sits. */
