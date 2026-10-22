@@ -7,6 +7,7 @@ import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrom
 import { exportLogs, logLevel } from "./logs";
 import { releaseNotesText } from "../release-notes";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
+import { createSideChatStorage } from "./side-chat-storage";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
@@ -23,7 +24,7 @@ import {
 import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
-import { shortcutLabel } from "../renderer/search";
+import { matchesShortcut, shortcutLabel } from "../renderer/search";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
 import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
@@ -158,6 +159,10 @@ const subscriptions = new Map<
 if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
+/** Side questions whose answers are still coming, by the id their window gave them. */
+const sideQuestions = new Map<string, { owner: number; abort: AbortController }>();
+/** Windows whose keyboard is in the side chat, where ⌘W closes its thread in front. */
+const sideChatKeyboard = new Set<number>();
 const terminals = terminalSockets<PtyConnection>();
 /** Connections waiting to try again; a wake ends their wait. */
 const retries = retryWaits();
@@ -740,7 +745,11 @@ function installHandlers() {
     registerShortcut();
   });
   const attachmentDraftStorage = createAttachmentDraftStorage(join(app.getPath("userData"), "attachment-drafts"));
+  const sideChatStorage = createSideChatStorage(join(app.getPath("userData"), "side-chats"));
   handle("attachmentDraft", (_, key: string, value: unknown) => attachmentDraftStorage(key, value));
+  handle("sideChats", (_, key: unknown, value: unknown) =>
+    value === undefined ? sideChatStorage.get(key) : sideChatStorage.set(key, value),
+  );
   const reviewStorage = createReviewStorage(data().values, persist);
   handle("review", async (_, input: ReviewRequest) => {
     bounded(input, 2 * 1024 * 1024);
@@ -1082,7 +1091,7 @@ function installHandlers() {
   handle("forget", async (_, id: string) => {
     for (const item of data().recent)
       if (item.id === id || projectKey(item) === id)
-        { forgetNotifications(item.id); browserHost.disconnect(item.id); }
+        { forgetNotifications(item.id); browserHost.disconnect(item.id); void sideChatStorage.drop(item.id + ":").catch(() => {}); }
     data().recent = data().recent.filter(
       (item) => item.id !== id && projectKey(item) !== id,
     );
@@ -1213,6 +1222,51 @@ function installHandlers() {
   handle("cancel", (win, id: string) => {
     const child = commands.get(id);
     if (child && commandOwners.get(id) === win.id) stopCommand(child);
+    const side = sideQuestions.get(id);
+    if (side?.owner === win.id) side.abort.abort();
+  });
+  handle("sideChatFocus", (win, focused: unknown) => {
+    if (focused === true) sideChatKeyboard.add(win.id);
+    else sideChatKeyboard.delete(win.id);
+  });
+  // A side question's answer arrives as "btw" events with the id the window
+  // chose, and the call answers with the last of them (done or error), so the
+  // window never depends on an event outrunning the reply. Cancelling that id
+  // ends the request, which stops the provider. A server from before streamed
+  // side questions answers in one piece.
+  handle("btw", async (win, id: string, thread: string, raw: unknown, stream: string) => {
+    z.string().uuid().parse(stream);
+    z.string().min(1).max(200).parse(thread);
+    const body = z
+      .object({
+        question: z.string().trim().min(1).max(200_000),
+        history: z
+          .array(z.object({ question: z.string().trim().min(1), answer: z.string().trim().min(1) }).strict())
+          .max(100)
+          .optional(),
+      })
+      .strict()
+      .parse(raw);
+    const item = connection(id);
+    if (sideQuestions.has(stream)) throw new Error("This side question is already being answered");
+    const abort = new AbortController();
+    sideQuestions.set(stream, { owner: win.id, abort });
+    try {
+      if (!item.view.info.capabilities.includes("btw.stream.v1")) {
+        const answer = await item.client.btw(thread, body, { signal: abort.signal, timeoutMs: 310_000 });
+        return { type: "done" as const, ...answer };
+      }
+      for await (const event of item.client.btwStream(thread, body, {
+        signal: abort.signal,
+        idleTimeoutMs: eventIdleMs(),
+      })) {
+        if (event.type === "done" || event.type === "error") return event;
+        send(win, { kind: "btw", id: stream, data: event });
+      }
+      return undefined;
+    } finally {
+      sideQuestions.delete(stream);
+    }
   });
   handle("subscribe", (win, id: string, cursor: number) => {
     if (!Number.isSafeInteger(cursor) || cursor < 0)
@@ -1822,9 +1876,41 @@ function createWindow() {
     data().values.window = { width, height };
     void persist();
   });
-  win.webContents.on("did-start-navigation", () => {
+  win.webContents.on("did-start-navigation", (event) => {
     browserHost.hide(win);
     resumeShortcut(win.id);
+    // A reloaded page has forgotten the answers it was waiting for; an
+    // iframe that navigates (a preview, an MCP app) has not.
+    if (!event.isMainFrame || event.isSameDocument) return;
+    sideChatKeyboard.delete(win.id);
+    for (const side of sideQuestions.values())
+      if (side.owner === win.id) side.abort.abort();
+  });
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const keys = {
+      key: input.key,
+      code: input.code,
+      metaKey: input.meta,
+      ctrlKey: input.control,
+      altKey: input.alt,
+      shiftKey: input.shift,
+    };
+    // The side chat's key reaches the window once: neither the page nor the
+    // menu hears it as well. (The menu still hears it while a page in the
+    // Browser has the keyboard, which this window's contents do not see.)
+    const side = data().preferences.shortcuts.sideChat;
+    if (side && matchesShortcut(keys, side, process.platform)) {
+      event.preventDefault();
+      send(win, { kind: "menu", data: "side-chat" });
+      return;
+    }
+    // ⌘W (Ctrl+W elsewhere) closes the side chat's thread in front while the
+    // keyboard is there, and the window everywhere else.
+    const mod = process.platform === "darwin" ? input.meta : input.control;
+    if (!sideChatKeyboard.has(win.id) || !mod || input.shift || input.alt || input.key.toLowerCase() !== "w") return;
+    event.preventDefault();
+    send(win, { kind: "menu", data: "side-chat-close" });
   });
   win.on("closed", () => {
     screenshotListings.forget(win.id);
@@ -1839,6 +1925,9 @@ function createWindow() {
         subscriptions.delete(id);
         item.client.close();
       }
+    for (const side of sideQuestions.values())
+      if (side.owner === win.id) side.abort.abort();
+    sideChatKeyboard.delete(win.id);
     terminals.close(win.id);
     answerers.forget(win.id);
     shownServers.delete(win.id);
@@ -1978,6 +2067,15 @@ function menu() {
               "CmdOrCtrl",
             ),
             click: (_item, win) => action("pick", win),
+          },
+          {
+            label: t("Side chat"),
+            accelerator: data().preferences.shortcuts.sideChat
+              ? data().preferences.shortcuts.sideChat.replace(/\bMod\b/g, "CmdOrCtrl")
+              : undefined,
+            // Heard here too while a page in the Browser has the keyboard;
+            // the window toggles once however many hear one press (App.tsx).
+            click: () => action("side-chat"),
           },
           { type: "separator" },
           { label: t("Actual size"), role: "resetZoom" },

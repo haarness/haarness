@@ -177,6 +177,7 @@ export async function preferences(input: Partial<Preferences>) {
         terminal: z.string(),
         browser: z.string(),
         pick: z.string(),
+        sideChat: z.string(),
         agentNext: z.string(),
         agentPrev: z.string(),
         tabNext: z.string(),

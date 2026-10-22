@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use haarness_protocol::tokens::{self, Tokenizer};
 use haarness_protocol::{
-    BackgroundTaskInfo, BtwRequest, BtwResponse, CompactRequest, CreateThreadRequest,
+    BackgroundTaskInfo, BtwEvent, BtwRequest, BtwResponse, CompactRequest, CreateThreadRequest,
     ForkThreadRequest, GoalActionRequest, GoalActionResponse, GoalCompletion, GoalLogicalTurnEvent,
     GoalLogicalTurnPhase, GoalState, GoalStatus, GoalUpdateRequest, GoalUpdatedEvent, GoalVerdict,
     Item, ItemData, ItemId, PendingPermissionInfo, PendingQuestionInfo, PermissionReply,
@@ -2463,9 +2463,57 @@ impl AgentRuntime {
     /// Schemas are context only: this path never invokes tools, hooks, or writes
     /// transcript/usage/turn records. Cold sessions use current stable context.
     pub async fn btw(&self, thread_id: ThreadId, request: BtwRequest) -> CoreResult<BtwResponse> {
+        self.btw_streaming(thread_id, request, CancellationToken::new(), |_| {})
+            .await
+    }
+
+    /// Whether a side question can be asked: the chat exists, the question is
+    /// not empty, and its side chat's earlier questions are whole. A streamed
+    /// question checks this before its response starts, so a bad request is
+    /// an HTTP error rather than an error event.
+    pub async fn check_btw(&self, thread_id: ThreadId, request: &BtwRequest) -> CoreResult<()> {
         if request.question.trim().is_empty() {
             return Err(CoreError::Invalid("btw question is required".into()));
         }
+        if request.history.len() > haarness_protocol::BTW_HISTORY_LIMIT {
+            return Err(CoreError::Invalid(format!(
+                "a side question carries at most {} earlier questions",
+                haarness_protocol::BTW_HISTORY_LIMIT
+            )));
+        }
+        if request
+            .history
+            .iter()
+            .any(|turn| turn.question.trim().is_empty() || turn.answer.trim().is_empty())
+        {
+            return Err(CoreError::Invalid(
+                "each earlier side question needs its question and answer".into(),
+            ));
+        }
+        let size: usize = request
+            .history
+            .iter()
+            .map(|turn| turn.question.len() + turn.answer.len())
+            .sum();
+        if size > haarness_protocol::BTW_HISTORY_BYTES {
+            return Err(CoreError::Invalid(
+                "this side chat's earlier questions and answers are larger than 1 MiB; start a new side chat".into(),
+            ));
+        }
+        self.repository.get_thread(thread_id).await.map(|_| ())
+    }
+
+    /// [`Self::btw`], telling `progress` the answer as it is written: `delta`
+    /// events that add up to it, and an empty `text` when an attempt after a
+    /// refused tool call starts it over. `cancel` ends the provider request.
+    pub async fn btw_streaming(
+        &self,
+        thread_id: ThreadId,
+        request: BtwRequest,
+        cancel: CancellationToken,
+        mut progress: impl FnMut(BtwEvent) + Send,
+    ) -> CoreResult<BtwResponse> {
+        self.check_btw(thread_id, &request).await?;
         let components = self.components();
         let thread = self.repository.get_thread(thread_id).await?;
         let mut items = self.repository.list_items(thread_id, None).await?;
@@ -2600,22 +2648,38 @@ impl AgentRuntime {
             )
         };
         provider.prepare_side_question(&mut prepared);
+        // The side chat goes after the chat's own history, oldest first, and
+        // only its first question carries the instructions: a follow-up sends
+        // the previous question's request plus its answer and the new
+        // question, so it reads back what the previous one wrote.
+        for (index, turn) in request.history.iter().enumerate() {
+            prepared.messages.push(ProviderMessage::Text {
+                role: "user".into(),
+                content: crate::side_question::prompt(&turn.question, index == 0),
+            });
+            prepared.messages.push(ProviderMessage::Text {
+                role: "assistant".into(),
+                content: turn.answer.trim().to_owned(),
+            });
+        }
         prepared.messages.push(ProviderMessage::Text {
             role: "user".into(),
-            content: format!(
-                "<btw-side-question>\n{}\n</btw-side-question>\n\nAnswer using the supplied conversation snapshot. This is an isolated read-only side question. Tool schemas describe the main task but every tool call here is refused. Do not invoke tools or continue the main task. Return only the concise answer.",
-                request.question.trim()
-            ),
+            content: crate::side_question::prompt(&request.question, request.history.is_empty()),
         });
         let mut input_tokens = 0_u64;
         let mut output_tokens = 0_u64;
         // Some models call a schema even after being told it is read-only.
         // Return local refusals and allow a bounded text-only recovery; never
         // resolve a live executor or persist these synthetic exchanges.
-        for _ in 0..3 {
-            let mut stream = provider
-                .stream(prepared.clone(), CancellationToken::new())
-                .await?;
+        for attempt in 0..3 {
+            let mut stream = provider.stream(prepared.clone(), cancel.clone()).await?;
+            // An attempt after refused tool calls answers from scratch, so
+            // whatever the previous one wrote before its calls is taken back.
+            if attempt > 0 {
+                progress(BtwEvent::Text {
+                    text: String::new(),
+                });
+            }
             let mut answer = String::new();
             let mut calls = Vec::new();
             let mut finished = false;
@@ -2623,9 +2687,19 @@ impl AgentRuntime {
             // every chunk, Anthropic at start and end): the last report is the
             // request's; only separate attempts add up.
             let mut attempt_usage = (0_u64, 0_u64);
-            while let Some(event) = stream.next().await {
+            loop {
+                let event = tokio::select! {
+                    () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                    event = stream.next() => event,
+                };
+                let Some(event) = event else { break };
                 match event? {
-                    ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
+                    ProviderEvent::TextDelta(delta) => {
+                        answer.push_str(&delta);
+                        if !delta.is_empty() {
+                            progress(BtwEvent::Delta { text: delta });
+                        }
+                    }
                     ProviderEvent::ReasoningDelta(_) | ProviderEvent::ContentStarted => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;

@@ -867,7 +867,8 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 /* -------------------------------------------------------------- side panel */
 .side-panel {
   /* Never take so much that the conversation drops far below its measure. */
-  width: clamp(360px, var(--dock-width), calc(100% - 480px));
+  /* The side chat's column, when it shows beside it, comes out of that room. */
+  width: clamp(360px, var(--dock-width), calc(100% - 480px - var(--side-chat-room, 0px)));
   min-width: 0;
   flex: none;
   flex-direction: column;
@@ -880,6 +881,11 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 }
 .dock-expanded .side-panel {
   width: 100%;
+}
+/* Expanded beside the side chat's column, it takes the rest of the row. */
+.workbench.side-column.dock-expanded .side-panel {
+  width: auto;
+  flex: 1;
 }
 /* Same height as the session bar beside it, so the two hairlines under the
    window's split line up. */

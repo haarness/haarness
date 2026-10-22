@@ -947,7 +947,7 @@ fn render_tool_result(
 
 /// Anchor the first line of an assistant reply with a small identity mark,
 /// so even one-word answers read as "haarness said this".
-fn mark_reply(lines: &mut [Line], theme: &Theme) {
+pub(crate) fn mark_reply(lines: &mut [Line], theme: &Theme) {
     // Keep the anchor on visible content even if another block renderer adds
     // a leading boundary row in the future.
     let Some(first) = lines.iter_mut().find(|line| !blank(line)) else {
@@ -970,7 +970,7 @@ fn mark_reply(lines: &mut [Line], theme: &Theme) {
 /// the snapshot or delegation they expand to is for the model. A paste
 /// Desktop folded reads as one `▸ Pasted text · N lines` row until the
 /// message is opened (`open`), then as the text pasted.
-fn user_block(
+pub(crate) fn user_block(
     text: &str,
     width: usize,
     theme: &Theme,

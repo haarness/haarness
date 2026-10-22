@@ -114,6 +114,8 @@ export const defaults: Preferences = {
     browser: "Mod+Shift+B",
     // The Chromium DevTools key for inspecting an element.
     pick: "Mod+Shift+C",
+    // ⌘J is the terminal; the side chat takes the key beside it.
+    sideChat: "Mod+Shift+J",
     // Composer keys, matched while the message box has focus rather than by
     // the native menu. The TUI switches agents with Tab, but here Tab has to
     // keep moving keyboard focus, so the defaults are chords.
@@ -187,6 +189,7 @@ export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
  * choose their own keys. */
 export const optionalShortcuts = new Set([
   "pick",
+  "sideChat",
   "tabNext",
   "tabPrev",
   "chatPrev",
@@ -306,7 +309,8 @@ export interface DesktopEvent {
     | "command"
     | "menu"
     | "update"
-    | "projects";
+    | "projects"
+    | "btw";
   connection?: string;
   id?: string;
   data: unknown;
@@ -420,6 +424,26 @@ export interface Bridge {
     id: string,
   ): Promise<{ output: string; value: unknown }>;
   cancel(id: string): Promise<void>;
+  /** Asks a side question of `thread`. Its answer arrives as `btw` events
+   * with `id` (`delta`, `text`), and the call answers with how it ended
+   * (`done` or `error`; nothing when the stream broke off); `cancel(id)`
+   * stops it. */
+  btw(
+    connection: string,
+    thread: string,
+    body: { question: string; history?: { question: string; answer: string }[] },
+    id: string,
+  ): Promise<
+    | { type: "done"; answer: string; inputTokens: number; outputTokens: number }
+    | { type: "error"; code: string; message: string; retryable: boolean }
+    | undefined
+  >;
+  /** The keyboard came into (or left) the side chat, where ⌘W closes the
+   * thread in front instead of the window. */
+  sideChatFocus(focused: boolean): Promise<void>;
+  /** A chat's stored side chats (`key` is its project and chat), or with
+   * `value` saves them; null forgets them. Kept in files of their own. */
+  sideChats(key: string, value?: unknown): Promise<unknown>;
   preferences(input: Partial<Preferences>): Promise<Preferences>;
   storage(key: string, value?: unknown): Promise<unknown>;
   review(input: import("./review-drafts").ReviewRequest): Promise<import("./review-drafts").ReviewResponse>;

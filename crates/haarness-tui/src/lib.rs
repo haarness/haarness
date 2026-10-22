@@ -22,6 +22,7 @@ mod prompt_context;
 mod pty_view;
 mod remote_control;
 mod servers;
+mod side_chat;
 mod state;
 mod statusline;
 mod terminal;
@@ -574,6 +575,9 @@ async fn run_with_client(
     // for a list), applied when they come.
     let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
     app.catalog_tx = Some(catalog_tx.clone());
+    // Side chat answers being written, applied as they arrive.
+    let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(side_tx.clone());
     if app.models_loading {
         let client = client.clone();
         tokio::spawn(async move {
@@ -613,6 +617,7 @@ async fn run_with_client(
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
                     catalog_rx = receiver;
                     app.catalog_tx = Some(sender);
+                    app.side.sender = Some(side_tx.clone());
                     force_redraw = true;
                 }
                 Err(error) => {
@@ -740,6 +745,10 @@ async fn run_with_client(
                                     app.notice = format!("Terminal paste failed: {error}");
                                 }
                             }
+                            continue;
+                        }
+                        if matches!(app.overlay, state::Overlay::SideChat) {
+                            app.paste_side_chat(&text);
                             continue;
                         }
                         if app.overlay.is_filterable() {
@@ -955,6 +964,7 @@ async fn run_with_client(
                     }
                 }
             },
+            Some(message) = side_rx.recv() => app.side_message(message),
             Some(listed) = catalog_rx.recv() => {
                 match listed {
                     Some(providers) => app.catalog_arrived(providers, &client).await,

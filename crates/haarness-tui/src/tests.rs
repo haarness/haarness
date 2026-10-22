@@ -290,22 +290,18 @@ fn selector_fixture() -> App {
     )
 }
 
-#[tokio::test]
-async fn btw_slash_command_executes_real_http_path_and_renders_result() {
+/// A server that answers each request it accepts with the next of
+/// `responses` (`None` holds the connection open after its head and first
+/// event, until the client goes away) and hands back what it was sent.
+async fn side_chat_server(
+    responses: Vec<Option<String>>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let thread = fixture_thread();
-    let btw_body = serde_json::json!({
-        "answer": "The worker verified the release.",
-        "inputTokens": 11,
-        "outputTokens": 6,
-    })
-    .to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for body in [btw_body] {
+        for response in responses {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
@@ -329,36 +325,261 @@ async fn btw_slash_command_executes_real_http_path_and_renders_result() {
                     break;
                 }
             }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
             requests.push(String::from_utf8(request).unwrap());
+            match response {
+                Some(body) => {
+                    let kind = if body.starts_with('{') {
+                        "application/json"
+                    } else {
+                        "text/event-stream"
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    // The events arrive in pieces, as they are written.
+                    for piece in body.as_bytes().chunks(7) {
+                        socket.write_all(piece).await.unwrap();
+                        socket.flush().await.unwrap();
+                    }
+                }
+                None => {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n: connected\n\ndata: {\"type\":\"delta\",\"text\":\"Half\"}\n\n")
+                        .await
+                        .unwrap();
+                    // Held until the client goes away.
+                    let _ = socket.read(&mut chunk).await;
+                }
+            }
         }
         requests
     });
+    (address, server)
+}
+
+fn side_frame(app: &App) -> String {
+    app.lines((100, 30))
+        .iter()
+        .map(|line| line_text(line) + "\n")
+        .collect()
+}
+
+fn side_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn side_server_info(capabilities: Vec<String>) -> haarness_protocol::ServerInfo {
+    haarness_protocol::ServerInfo {
+        name: "haarness".into(),
+        version: "0.1.0".into(),
+        schema_version: "1".into(),
+        server_instance_id: uuid::Uuid::now_v7(),
+        event_cursor: 0,
+        capabilities,
+        workspace: None,
+        git_branch: None,
+        default_provider: None,
+        default_model: None,
+        default_agent: None,
+        project_trusted: None,
+        pid: None,
+    }
+}
+
+fn side_events(events: &[serde_json::Value]) -> String {
+    let mut body = String::new();
+    for event in events {
+        body.push_str("data: ");
+        body.push_str(&event.to_string());
+        body.push_str("\n\n");
+    }
+    body
+}
+
+/// Applies answers being written until the shown side chat's last answer
+/// settles.
+async fn settle_side_chat(
+    app: &mut App,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::side_chat::Message>,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while app.side.shown().is_some_and(crate::side_chat::Thread::busy) {
+            let message = receiver.recv().await.unwrap();
+            app.side_message(message);
+        }
+    })
+    .await
+    .expect("the side answer did not settle");
+}
+
+fn side_request(raw: &str) -> haarness_protocol::BtwRequest {
+    serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+#[tokio::test]
+async fn btw_opens_a_side_chat_that_streams_answers_and_sends_follow_ups_with_their_thread() {
+    let thread = fixture_thread();
+    let first = side_events(&[
+        serde_json::json!({"type":"delta","text":"The worker "}),
+        serde_json::json!({"type":"delta","text":"verified the release."}),
+        serde_json::json!({"type":"done","answer":"The worker verified the release.","inputTokens":11,"outputTokens":6}),
+    ]);
+    let second = side_events(&[
+        serde_json::json!({"type":"delta","text":"Twice."}),
+        serde_json::json!({"type":"done","answer":"Twice.","inputTokens":12,"outputTokens":2}),
+    ]);
+    let (address, server) = side_chat_server(vec![Some(first), Some(second)]).await;
     let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(sender);
+    let before = app.items.len();
 
     app.execute_command("/btw what did the worker verify?", &client)
         .await
         .unwrap();
-    assert!(app.notice.contains("transcript unchanged"));
-    let crate::state::Overlay::Panel { title, lines } = &app.overlay else {
-        panic!("btw command did not render an isolated answer panel");
-    };
-    assert!(title.contains("isolated read-only"));
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0], "The worker verified the release.");
+    assert!(matches!(app.overlay, crate::state::Overlay::SideChat));
+    let frame = side_frame(&app);
+    assert!(frame.contains("/btw"), "{frame}");
+    assert!(frame.contains("what did the worker verify?"), "{frame}");
+    settle_side_chat(&mut app, &mut receiver).await;
+    let frame = side_frame(&app);
+    assert!(
+        frame.contains("The worker verified the release."),
+        "{frame}"
+    );
+    assert!(frame.contains("Ask a follow-up"), "{frame}");
+
+    // A follow-up typed in the side chat's own box carries the thread.
+    for character in "how often?".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    settle_side_chat(&mut app, &mut receiver).await;
+    let side = app.side.shown().unwrap();
+    assert_eq!(side.turns.len(), 2);
+    assert_eq!(side.turns[1].answer, "Twice.");
+    assert_eq!(app.items.len(), before, "the chat itself never changes");
 
     let requests = server.await.unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw ", thread.id)));
-    let request: haarness_protocol::BtwRequest =
-        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw/stream ", thread.id)));
+    let request = side_request(&requests[0]);
     assert_eq!(request.question, "what did the worker verify?");
+    assert!(request.history.is_empty());
+    let request = side_request(&requests[1]);
+    assert_eq!(request.question, "how often?");
+    assert_eq!(
+        request.history,
+        vec![haarness_protocol::BtwTurn {
+            question: "what did the worker verify?".into(),
+            answer: "The worker verified the release.".into(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn the_side_chat_keeps_its_thread_and_draft_and_ctrl_c_clears_then_stops() {
+    let thread = fixture_thread();
+    let (address, server) = side_chat_server(vec![None]).await;
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(sender);
+
+    // A bare /btw opens an empty side chat.
+    app.execute_command("/btw", &client).await.unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::SideChat));
+    assert!(app.side.shown().is_none());
+    assert!(side_frame(&app).contains("Ask a side question"));
+    for character in "take your time".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    app.side_message(message);
+    assert_eq!(app.side.shown().unwrap().turns[0].answer, "Half");
+
+    // Sending while it answers is refused, and the box keeps the text.
+    for character in "and?".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    assert_eq!(app.side.composer.text(), "and?");
+    assert!(app.notice.contains("Still answering"), "{}", app.notice);
+
+    // Esc goes back to the chat; the answer and the draft wait for /btw.
+    app.handle_side_key(side_key(KeyCode::Esc), &client);
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
+    assert!(app.side.busy(thread.id));
+    app.execute_command("/btw", &client).await.unwrap();
+    assert_eq!(app.side.composer.text(), "and?");
+    assert_eq!(app.side.shown().unwrap().turns.len(), 1);
+    // A /btw question from the chat meanwhile joins what the box holds.
+    app.handle_side_key(side_key(KeyCode::Esc), &client);
+    app.execute_command("/btw and also this", &client)
+        .await
+        .unwrap();
+    assert_eq!(app.side.composer.text(), "and?\nand also this");
+    app.side.composer.set_text("and?".into());
+
+    // Ctrl+C clears the box, then stops the answer, which ends the request.
+    app.side_interrupt();
+    assert!(app.side.composer.is_empty());
+    assert!(app.side.busy(thread.id));
+    app.side_interrupt();
+    assert!(!app.side.busy(thread.id));
+    assert_eq!(
+        app.side.shown().unwrap().turns[0].state,
+        crate::side_chat::TurnState::Stopped
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("stopping did not end the request")
+        .unwrap();
+    assert!(side_frame(&app).contains("Stopped"));
+
+    // /clear starts the side chat over.
+    for character in "/clear".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    assert!(app.side.shown().unwrap().turns.is_empty());
+    // A third Ctrl+C, with nothing to clear or stop, goes back to the chat.
+    app.side_interrupt();
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
+}
+
+#[tokio::test]
+async fn a_server_without_streamed_side_questions_answers_in_one_piece() {
+    let thread = fixture_thread();
+    let body = serde_json::json!({
+        "answer": "The worker verified the release.",
+        "inputTokens": 11,
+        "outputTokens": 6,
+    })
+    .to_string();
+    let (address, server) = side_chat_server(vec![Some(body)]).await;
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(sender);
+    app.server_info = Some(side_server_info(vec!["btw.v1".into()]));
+    app.execute_command("/btw what did the worker verify?", &client)
+        .await
+        .unwrap();
+    settle_side_chat(&mut app, &mut receiver).await;
+    assert_eq!(
+        app.side.shown().unwrap().turns[0].answer,
+        "The worker verified the release."
+    );
+    assert!(side_frame(&app).contains("This server answers each question on its own"));
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw ", thread.id)));
 }
 
 #[tokio::test]
