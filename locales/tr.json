@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Bu sunucunun sayfalarını sohbetlerde araçlarının altında göster. Kapalıyken araçları metin olarak görünür.",
   "{name} app options": "{name} uygulaması seçenekleri",
   "Turn off interactive apps for {server}": "{server} için etkileşimli uygulamaları kapat",
-  "Interactive apps are off for {server}. Its tools show as text.": "{server} için etkileşimli uygulamalar kapalı. Araçları metin olarak görünür."
+  "Interactive apps are off for {server}. Its tools show as text.": "{server} için etkileşimli uygulamalar kapalı. Araçları metin olarak görünür.",
+  "Store in Keychain": "Anahtar Zinciri'ne kaydet",
+  "Store in Credential Manager": "Kimlik Bilgisi Yöneticisi'ne kaydet",
+  "Store in keyring": "Anahtarlığa kaydet",
+  "Saved there when you add the server; the settings keep only a reference.": "Sunucuyu eklediğinizde oraya kaydedilir; ayarlarda yalnızca bir başvuru kalır."
 }

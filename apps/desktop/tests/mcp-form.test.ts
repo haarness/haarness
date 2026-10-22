@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mcpInput, newMcpDraft } from "../src/renderer/mcp-form";
+import { keychainEntry, keychainInput, mcpInput, newMcpDraft, secretLooking } from "../src/renderer/mcp-form";
 
 test("local MCP form preserves ordered argv and environment values without shell parsing", () => {
   const draft = newMcpDraft();
@@ -107,4 +107,41 @@ test("MCP validation rejects duplicate names, malformed targets and incomplete r
   );
   draft.headers = [{ key: "", value: "secret" }];
   assert.throws(() => mcpInput(draft), /Header 1 needs a name/);
+});
+
+test("a secret-looking value offers the keychain, and a kept one is written as a reference", () => {
+  const draft = newMcpDraft();
+  Object.assign(draft, { name: "git hub", type: "remote", url: "https://mcp.example.test/mcp" });
+  draft.headers = [
+    { key: "Authorization", value: "Bearer ghp_0123456789abcdefghij", vault: true },
+    { key: "X-Api-Key", value: "k-1", vault: true },
+    { key: "X-Trace", value: "on", vault: true },
+    { key: "X-Token", value: "${TEAM_TOKEN}", vault: true },
+    { key: "X-Plain-Token", value: "kept-as-written" },
+  ];
+  // Named like a credential, or a long run of letters and digits; never a reference or a blank.
+  assert.equal(secretLooking(draft.headers[0]), true);
+  assert.equal(secretLooking({ key: "NOTE", value: "a1b2c3d4e5f6g7h8i9j0k1l2m3" }), true);
+  assert.equal(secretLooking(draft.headers[2]), false);
+  assert.equal(secretLooking(draft.headers[3]), false);
+  assert.equal(secretLooking({ key: "API_KEY", value: "  " }), false);
+  const { input, secrets } = keychainInput(draft);
+  // The scheme stays written, so the file still says what the header is.
+  assert.deepEqual(input.headers, {
+    Authorization: "Bearer ${keychain:git-hub-Authorization}",
+    "X-Api-Key": "${keychain:git-hub-X-Api-Key}",
+    "X-Trace": "on",
+    "X-Token": "${TEAM_TOKEN}",
+    "X-Plain-Token": "kept-as-written",
+  });
+  assert.deepEqual(secrets, [
+    { name: "git-hub-Authorization", secret: "ghp_0123456789abcdefghij" },
+    { name: "git-hub-X-Api-Key", secret: "k-1" },
+  ]);
+  assert.equal(keychainEntry("a/b", "TOKEN"), "a-b-TOKEN");
+  // A local server keeps its environment the same way.
+  const local = newMcpDraft();
+  Object.assign(local, { name: "files", command: "server" });
+  local.environment = [{ key: "GITHUB_TOKEN", value: "ghp_x", vault: true }];
+  assert.deepEqual(keychainInput(local).input.environment, { GITHUB_TOKEN: "${keychain:files-GITHUB_TOKEN}" });
 });

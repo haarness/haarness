@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Vis serverens sider under dens værktøjer i chats. Når det er slået fra, vises værktøjerne som tekst.",
   "{name} app options": "Indstillinger for appen {name}",
   "Turn off interactive apps for {server}": "Slå interaktive apps fra for {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "Interaktive apps er slået fra for {server}. Dens værktøjer vises som tekst."
+  "Interactive apps are off for {server}. Its tools show as text.": "Interaktive apps er slået fra for {server}. Dens værktøjer vises som tekst.",
+  "Store in Keychain": "Gem i nøgleringen",
+  "Store in Credential Manager": "Gem i Legitimationsstyring",
+  "Store in keyring": "Gem i nøgleringen",
+  "Saved there when you add the server; the settings keep only a reference.": "Gemmes der, når du tilføjer serveren; indstillingerne gemmer kun en henvisning."
 }

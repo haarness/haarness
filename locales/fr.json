@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Affiche les pages de ce serveur sous ses outils dans les discussions. Désactivé, ses outils s’affichent en texte.",
   "{name} app options": "Options de l’app {name}",
   "Turn off interactive apps for {server}": "Désactiver les apps interactives de {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "Les apps interactives de {server} sont désactivées. Ses outils s’affichent en texte."
+  "Interactive apps are off for {server}. Its tools show as text.": "Les apps interactives de {server} sont désactivées. Ses outils s’affichent en texte.",
+  "Store in Keychain": "Enregistrer dans le trousseau",
+  "Store in Credential Manager": "Enregistrer dans le Gestionnaire d’identification",
+  "Store in keyring": "Enregistrer dans le trousseau de clés",
+  "Saved there when you add the server; the settings keep only a reference.": "Enregistré là lorsque vous ajoutez le serveur ; les réglages ne gardent qu’une référence."
 }

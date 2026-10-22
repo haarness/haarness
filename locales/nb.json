@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Vis serverens sider under verktøyene i chatter. Av: verktøyene vises som tekst.",
   "{name} app options": "Valg for appen {name}",
   "Turn off interactive apps for {server}": "Slå av interaktive apper for {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "Interaktive apper er slått av for {server}. Verktøyene vises som tekst."
+  "Interactive apps are off for {server}. Its tools show as text.": "Interaktive apper er slått av for {server}. Verktøyene vises som tekst.",
+  "Store in Keychain": "Lagre i nøkkelringen",
+  "Store in Credential Manager": "Lagre i Legitimasjonsbehandling",
+  "Store in keyring": "Lagre i nøkkelringen",
+  "Saved there when you add the server; the settings keep only a reference.": "Lagres der når du legger til serveren; innstillingene beholder bare en referanse."
 }

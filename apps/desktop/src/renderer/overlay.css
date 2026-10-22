@@ -324,7 +324,14 @@
   margin-bottom: var(--s2);
 }
 .mcp-pair-row {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) var(--icon-button);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) calc(
+      var(--icon-button) * 2 + var(--s1)
+    );
+}
+/* The place of a row's keep-in-keychain toggle while it is not offered. */
+.mcp-row-actions > .icon-button-space {
+  flex: none;
+  width: var(--icon-button);
 }
 .mcp-argument-row {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) calc(

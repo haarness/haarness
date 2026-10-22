@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "在聊天中将此服务器的页面显示在其工具下方。关闭后，其工具以文本显示。",
   "{name} app options": "{name} 应用选项",
   "Turn off interactive apps for {server}": "关闭 {server} 的交互式应用",
-  "Interactive apps are off for {server}. Its tools show as text.": "{server} 的交互式应用已关闭。其工具以文本显示。"
+  "Interactive apps are off for {server}. Its tools show as text.": "{server} 的交互式应用已关闭。其工具以文本显示。",
+  "Store in Keychain": "存储到钥匙串",
+  "Store in Credential Manager": "存储到凭据管理器",
+  "Store in keyring": "存储到密钥环",
+  "Saved there when you add the server; the settings keep only a reference.": "添加服务器时保存在那里；设置中只保留引用。"
 }

@@ -3806,7 +3806,7 @@ mod tests {
             r#"{
   // Servers for this project.
   "mcp": {
-    "weather": {"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}"}}
+    "weather": {"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}}
   }
 }
 "#,
@@ -3823,10 +3823,10 @@ mod tests {
             .mcp(&json!({"action": "edit", "name": "weather", "apps": false}))
             .await
             .unwrap();
-        // Only the switch is written; the reference stays as written.
+        // Only the switch is written; the references stay as written.
         assert_eq!(
             read()["mcp"]["weather"],
-            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}"}, "apps": false})
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}, "apps": false})
         );
         assert_eq!(read_mcp_entry(&file, "weather").unwrap().apps, Some(false));
         service
@@ -3835,7 +3835,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             read()["mcp"]["weather"],
-            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}"}})
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}})
         );
         assert!(
             fs::read_to_string(&file)

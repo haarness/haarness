@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Prikaži stranice ovog servera ispod njegovih alata u razgovorima. Kad je isključeno, alati se prikazuju kao tekst.",
   "{name} app options": "Opcije aplikacije {name}",
   "Turn off interactive apps for {server}": "Isključi interaktivne aplikacije za {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "Interaktivne aplikacije za {server} su isključene. Njegovi alati se prikazuju kao tekst."
+  "Interactive apps are off for {server}. Its tools show as text.": "Interaktivne aplikacije za {server} su isključene. Njegovi alati se prikazuju kao tekst.",
+  "Store in Keychain": "Spremi u Keychain",
+  "Store in Credential Manager": "Spremi u Credential Manager",
+  "Store in keyring": "Spremi u keyring",
+  "Saved there when you add the server; the settings keep only a reference.": "Sprema se tamo kada dodate server; postavke čuvaju samo referencu."
 }

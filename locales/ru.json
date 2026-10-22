@@ -2645,5 +2645,9 @@
   "Show this server's pages under its tools in chats. Off, its tools show as text.": "Показывать страницы этого сервера под его инструментами в чатах. Если выключено, инструменты показываются текстом.",
   "{name} app options": "Параметры приложения {name}",
   "Turn off interactive apps for {server}": "Выключить интерактивные приложения {server}",
-  "Interactive apps are off for {server}. Its tools show as text.": "Интерактивные приложения {server} выключены. Его инструменты показываются текстом."
+  "Interactive apps are off for {server}. Its tools show as text.": "Интерактивные приложения {server} выключены. Его инструменты показываются текстом.",
+  "Store in Keychain": "Сохранить в связке ключей",
+  "Store in Credential Manager": "Сохранить в диспетчере учетных данных",
+  "Store in keyring": "Сохранить в связке ключей",
+  "Saved there when you add the server; the settings keep only a reference.": "Сохраняется там при добавлении сервера; в настройках остается только ссылка."
 }

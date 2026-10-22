@@ -1382,6 +1382,10 @@ function Mcp(props: { cli: Cli }) {
       <Show when={adding()}>
         <McpForm
           close={() => setAdding(false)}
+          platform={app.state.platform}
+          storeSecret={(name, secret) =>
+            app.native({ action: "store_mcp_secret", name, secret })
+          }
           save={async (input) => {
             await app.native({ action: "asset", kind: "mcp", input });
             // Asset events refresh the live registry once the daemon has reloaded.
