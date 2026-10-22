@@ -30,8 +30,8 @@ struct Ledger {
     path: PathBuf,
     /// The recording server: its pid and start time.
     server: Option<(u32, String)>,
-    /// Group id to its leader's start time.
-    groups: Mutex<BTreeMap<i32, String>>,
+    /// Group id to its leader's start time, once read (see [`record_in`]).
+    groups: Mutex<BTreeMap<i32, Option<String>>>,
     /// Given up (see [`Recording`]): nothing more is written.
     released: AtomicBool,
 }
@@ -44,12 +44,17 @@ impl Ledger {
         Self {
             path,
             server: start_of(pid).map(|start| (pid, start)),
-            groups: Mutex::new(carried),
+            groups: Mutex::new(
+                carried
+                    .into_iter()
+                    .map(|(group, start)| (group, Some(start)))
+                    .collect(),
+            ),
             released: AtomicBool::new(false),
         }
     }
 
-    fn write(&self, groups: &BTreeMap<i32, String>) {
+    fn write(&self, groups: &BTreeMap<i32, Option<String>>) {
         use std::fmt::Write as _;
         if self.released.load(Ordering::Acquire) {
             return;
@@ -59,7 +64,9 @@ impl Ledger {
             let _ = writeln!(text, "server {pid} {start}");
         }
         for (group, start) in groups {
-            let _ = writeln!(text, "{group} {start}");
+            if let Some(start) = start {
+                let _ = writeln!(text, "{group} {start}");
+            }
         }
         let partial = self
             .path
@@ -67,12 +74,6 @@ impl Ledger {
         if std::fs::write(&partial, text).is_ok() {
             let _ = std::fs::rename(&partial, &self.path);
         }
-    }
-
-    fn add(&self, group: i32, start: String) {
-        let mut groups = self.groups.lock();
-        groups.insert(group, start);
-        self.write(&groups);
     }
 
     fn remove(&self, group: i32) {
@@ -113,7 +114,11 @@ pub fn take_over(path: PathBuf) -> (usize, Recording) {
     if !cfg!(unix) {
         return (0, Recording(false));
     }
-    let (stopped, carried) = sweep(&path, probe);
+    let (stopped, carried) = match sweep(&path, probe) {
+        Sweep::Done { stopped, carried } => (stopped, carried),
+        // Its record stays its own: this server records nothing over it.
+        Sweep::WriterRunning => return (0, Recording(false)),
+    };
     let installed = LEDGER.set(Arc::new(Ledger::new(path, carried))).is_ok();
     if let Some(ledger) = LEDGER.get().filter(|_| installed) {
         ledger.write(&ledger.groups.lock());
@@ -133,19 +138,43 @@ pub fn recorded(leader: Option<u32>) -> Recorded {
     record_in(ledger, pid)
 }
 
+/// The group is in the record at once; its leader's start time is read on a
+/// thread of its own (on macOS that is a `ps`, a few milliseconds), and the
+/// entry is written once it is known. A leader gone already, or one this
+/// system cannot date, is nothing to stop later and leaves the record again.
 fn record_in(ledger: &Arc<Ledger>, pid: u32) -> Recorded {
     let Ok(group) = i32::try_from(pid) else {
         return Recorded(None);
     };
-    // A leader gone already, or one this system cannot date, is nothing to
-    // stop later.
-    match probe(group) {
-        Probe::Running { group: led, start } if led == group => {
-            ledger.add(group, start);
-            Recorded(Some((ledger.clone(), group)))
-        }
-        _ => Recorded(None),
+    ledger.groups.lock().insert(group, None);
+    let reader = ledger.clone();
+    let dated = std::thread::Builder::new()
+        .name("haarness-process-start".into())
+        .spawn(move || {
+            let start = match probe(group) {
+                Probe::Running { group: led, start } if led == group => Some(start),
+                _ => None,
+            };
+            let mut groups = reader.groups.lock();
+            // Gone from the record meanwhile: the group ended already.
+            let Some(slot @ None) = groups.get_mut(&group) else {
+                return;
+            };
+            match start {
+                Some(start) => {
+                    *slot = Some(start);
+                    reader.write(&groups);
+                }
+                None => {
+                    groups.remove(&group);
+                }
+            }
+        });
+    if dated.is_err() {
+        ledger.groups.lock().remove(&group);
+        return Recorded(None);
     }
+    Recorded(Some((ledger.clone(), group)))
 }
 
 impl Drop for Recorded {
@@ -168,24 +197,54 @@ enum Probe {
     Unknown,
 }
 
-/// The record's groups to stop, and those left unchecked, carried into the
-/// next record. Nothing is lost when the check cannot be made: the record is
-/// removed only once every entry is settled.
-fn sweep(path: &Path, probe: impl Fn(i32) -> Probe) -> (usize, BTreeMap<i32, String>) {
+/// What a sweep found.
+#[derive(Debug, PartialEq, Eq)]
+enum Sweep {
+    /// The groups stopped, and those of a gone server left unchecked,
+    /// carried into the next record.
+    Done {
+        stopped: usize,
+        carried: BTreeMap<i32, String>,
+    },
+    /// The server that wrote the record still runs (its lock was bypassed,
+    /// or its folder's cache removed): its groups are its own.
+    WriterRunning,
+}
+
+/// Stops the record's groups a gone server left running. Nothing is lost
+/// when the check cannot be made: the record is removed only once every
+/// entry is settled. Groups of a writer that runs, or cannot be told to be
+/// gone, are never taken over: a later crash would then stop its commands.
+fn sweep(path: &Path, probe: impl Fn(i32) -> Probe) -> Sweep {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (0, BTreeMap::new());
+        return Sweep::Done {
+            stopped: 0,
+            carried: BTreeMap::new(),
+        };
     };
     let (server, groups) = parse_record(&text);
     if let Some((pid, start)) = server
         && let Ok(pid) = i32::try_from(pid)
     {
         match probe(pid) {
-            // The server that wrote it is still there (a folder lock that was
-            // removed): its groups are its own.
             Probe::Running { start: now, .. } if now == start => {
-                return (0, groups);
+                tracing::warn!(
+                    pid,
+                    "another Haarness server for this folder is still running; leaving its commands to it"
+                );
+                return Sweep::WriterRunning;
             }
-            Probe::Unknown => return (0, groups),
+            Probe::Unknown => {
+                tracing::warn!(
+                    pid,
+                    "could not tell whether the server that recorded these commands is gone; leaving them"
+                );
+                let _ = std::fs::remove_file(path);
+                return Sweep::Done {
+                    stopped: 0,
+                    carried: BTreeMap::new(),
+                };
+            }
             _ => {}
         }
     }
@@ -215,7 +274,10 @@ fn sweep(path: &Path, probe: impl Fn(i32) -> Probe) -> (usize, BTreeMap<i32, Str
             "could not tell whether commands an earlier server started still run; kept them on record"
         );
     }
-    (stopped, unchecked)
+    Sweep::Done {
+        stopped,
+        carried: unchecked,
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -395,17 +457,28 @@ mod tests {
         };
         assert_eq!(stoppable(&probe), [100]);
 
-        // The server that wrote it still runs (its lock was removed): its
-        // groups are left, and so is its record.
+        // The server that wrote it still runs (its lock was removed): none
+        // of its groups are taken over, and its record stays its own.
         let path = temporary_record(record);
         let alive = |pid: i32| match pid {
             9 => running(9, "server-start"),
             other => probe(other),
         };
-        let (stopped, kept) = sweep(&path, alive);
-        assert_eq!(stopped, 0);
-        assert_eq!(kept.len(), 4);
-        assert!(path.exists());
+        assert_eq!(sweep(&path, alive), Sweep::WriterRunning);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), record);
+        // Nor when it cannot be told whether that server is gone.
+        let unsure = |pid: i32| match pid {
+            9 => Probe::Unknown,
+            other => probe(other),
+        };
+        assert_eq!(
+            sweep(&path, unsure),
+            Sweep::Done {
+                stopped: 0,
+                carried: BTreeMap::new()
+            }
+        );
+        std::fs::write(&path, record).unwrap();
 
         // A check this system cannot make keeps the entry for the next
         // record instead of losing it.
@@ -416,16 +489,77 @@ mod tests {
                 Probe::Gone
             }
         };
-        let (stopped, kept) = sweep(&path, unknown);
-        assert_eq!(stopped, 0);
-        assert_eq!(kept.into_iter().collect::<Vec<_>>(), [(400, "d".into())]);
+        assert_eq!(
+            sweep(&path, unknown),
+            Sweep::Done {
+                stopped: 0,
+                carried: BTreeMap::from([(400, "d".into())])
+            }
+        );
         assert!(
             path.exists(),
             "the record stays until every entry is settled"
         );
-        let (stopped, kept) = sweep(&path, |_| Probe::Gone);
-        assert_eq!((stopped, kept.len()), (0, 0));
+        assert_eq!(
+            sweep(&path, |_| Probe::Gone),
+            Sweep::Done {
+                stopped: 0,
+                carried: BTreeMap::new()
+            }
+        );
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Waits for the record to name `pid` with its start time, read on a
+    /// thread of its own.
+    fn dated(path: &Path, pid: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line.starts_with(&format!("{pid} ")))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{pid} was never dated"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The start time is read off the caller's thread (on macOS a `ps`); a
+    /// group that ends before it is known never reaches the record.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_is_dated_off_the_callers_thread_and_one_that_ended_first_is_not_written() {
+        use std::os::unix::process::CommandExt as _;
+        let path = temporary_record("");
+        let ledger = Arc::new(Ledger::new(path.clone(), BTreeMap::new()));
+        let mut child = std::process::Command::new("sleep");
+        let mut child = child.arg("30").process_group(0).spawn().unwrap();
+        let recorded = record_in(&ledger, child.id());
+        // Recorded at once, written once dated.
+        assert!(ledger.groups.lock().contains_key(&(child.id() as i32)));
+        dated(&path, child.id());
+        drop(recorded);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(&format!("{} ", child.id()))
+        );
+        // Ended before its start time was read: never written.
+        let ended = record_in(&ledger, child.id());
+        drop(ended);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(&format!("{} ", child.id()))
+        );
+        assert!(ledger.groups.lock().is_empty());
+        child.kill().unwrap();
+        child.wait().unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -445,6 +579,7 @@ mod tests {
         // `other`'s pid for a program that started at another time.
         let ledger = Arc::new(Ledger::new(path.clone(), BTreeMap::new()));
         let _left = record_in(&ledger, left.id());
+        dated(&path, left.id());
         std::fs::write(
             &path,
             std::fs::read_to_string(&path).unwrap()
@@ -458,8 +593,13 @@ mod tests {
             "server 2147483646 ",
         );
         std::fs::write(&path, text).unwrap();
-        let (stopped, kept) = sweep(&path, probe);
-        assert_eq!((stopped, kept.len()), (1, 0));
+        assert_eq!(
+            sweep(&path, probe),
+            Sweep::Done {
+                stopped: 1,
+                carried: BTreeMap::new()
+            }
+        );
         assert!(left.wait().unwrap().code().is_none(), "killed by a signal");
         assert!(other.try_wait().unwrap().is_none(), "left alone");
         assert!(!path.exists(), "the record is used once");
@@ -469,14 +609,20 @@ mod tests {
         let mut exiting = spawn();
         let ledger = Arc::new(Ledger::new(path.clone(), BTreeMap::new()));
         let recorded = record_in(&ledger, exiting.id());
-        assert!(path.exists());
+        dated(&path, exiting.id());
         ledger.release();
         drop(recorded);
         assert!(
             !path.exists(),
             "nothing is written once the record is given up"
         );
-        assert_eq!(sweep(&path, probe).0, 0);
+        assert_eq!(
+            sweep(&path, probe),
+            Sweep::Done {
+                stopped: 0,
+                carried: BTreeMap::new()
+            }
+        );
         assert!(exiting.try_wait().unwrap().is_none());
         for mut child in [other, exiting] {
             child.kill().unwrap();

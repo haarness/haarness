@@ -556,6 +556,28 @@ struct QueueState {
 /// by a write that could wait for a reader that stopped.
 pub static STDERR_QUEUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The queue's state, for [`stderr_drained`].
+static QUEUE: std::sync::OnceLock<std::sync::Arc<QueueState>> = std::sync::OnceLock::new();
+
+/// Whether nothing waits in the stderr queue, waiting up to `within` for it
+/// to go out. A reader that is there reads it within that; one that stopped
+/// leaves it waiting.
+pub fn stderr_drained(within: Duration) -> bool {
+    let Some(state) = QUEUE.get() else {
+        return true;
+    };
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if state.queued.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Held for the life of the process: dropped, it gives what is still
 /// queued up to a second to go out.
 pub struct StderrQueueGuard(std::sync::Arc<QueueState>);
@@ -587,6 +609,7 @@ pub fn stderr_queue<W: std::io::Write + Send + 'static>(
         logs: logs.display().to_string(),
     });
     let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+    let _ = QUEUE.set(state.clone());
     let worker = state.clone();
     std::thread::Builder::new()
         .name("haarness-stderr-log".into())
