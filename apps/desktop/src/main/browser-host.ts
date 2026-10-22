@@ -12,6 +12,7 @@ import {
 } from "@haarness/browser-driver/rpc";
 import { createAgentActivity } from "./browser-activity";
 import { createBrowserPage, type BrowserPage } from "./browser-chromium";
+import { createKeyboardHandoff } from "./browser-keyboard";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
 import { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
@@ -44,6 +45,10 @@ type Entry = {
   ready: Promise<void>;
   disposed: boolean;
   layout?: BrowserLayout;
+  /** The tab whose page is drawn now. */
+  shown?: Browser.TabID;
+  /** A page the person just loaded, which takes the keyboard once it is shown. */
+  keyboard: ReturnType<typeof createKeyboardHandoff>;
   save?: ReturnType<typeof setTimeout>;
   abort: AbortController;
   access?: { policy: BrowserPolicy; approved: Set<string>; error?: string };
@@ -154,6 +159,7 @@ export function createBrowserHost(
       if (!value?.visible || id !== e.focusedTabID || e.disposed)
         page.setVisible(false);
     }
+    e.shown = undefined;
     if (!value?.visible || e.disposed || !e.focusedTabID) return;
     const b = value.bounds;
     const size = e.win.getContentSize();
@@ -177,6 +183,12 @@ export function createBrowserHost(
         : undefined);
     page?.layout(bounds, undefined, 0);
     page?.setVisible(true);
+    if (page) e.shown = e.focusedTabID;
+    offerKeyboard(e);
+  }
+  function offerKeyboard(e: Entry) {
+    const page = e.shown && !e.disposed ? e.pages.get(e.shown) : undefined;
+    e.keyboard.offer(e.shown, page?.contents);
   }
   function focus(e: Entry, id: Browser.TabID, agent = false) {
     e.focusedTabID = id;
@@ -455,6 +467,7 @@ export function createBrowserHost(
       requests: new Map(),
       requestTabs: new Map(),
       activity: createAgentActivity(),
+      keyboard: createKeyboardHandoff(win),
       queue: Promise.resolve(),
       ready,
       disposed: false,
@@ -666,9 +679,23 @@ export function createBrowserHost(
       }
       const result = e.queue
         .catch(() => {})
-        .then(() =>
-          execute(e, { action, files: [] }, new AbortController().signal),
-        );
+        .then(() => {
+          const run = execute(e, { action, files: [] }, new AbortController().signal);
+          // A page the person loads takes the keyboard, as in a browser; a
+          // new tab with no address leaves it in the address bar. A new
+          // tab is the one focused once its command has started.
+          const tab =
+            action.type === "navigate" || action.type === "back" || action.type === "forward" || action.type === "reload"
+              ? action.tabID
+              : action.type === "tabs.open" && action.url
+                ? e.focusedTabID
+                : undefined;
+          if (tab) {
+            e.keyboard.want(tab);
+            offerKeyboard(e);
+          }
+          return run;
+        });
       e.queue = result;
       return (await result).value;
     },
