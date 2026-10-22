@@ -459,6 +459,7 @@ impl HookPort for Rewrite {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
         HookDecision::default()
@@ -566,6 +567,7 @@ impl HookPort for ShellEnv {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
         HookDecision::default()
@@ -663,6 +665,7 @@ impl HookPort for RewritingAllow {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
         HookDecision {
@@ -773,6 +776,7 @@ impl HookPort for EchoingAllow {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         input: &Value,
     ) -> HookDecision {
         self.0.lock().unwrap().push(input.clone());
@@ -827,4 +831,416 @@ async fn a_permission_request_hook_handing_back_the_same_input_still_allows() {
         "{:?}",
         hook.0.lock().unwrap()
     );
+}
+
+/// A `PermissionRequest` hook that allows the first request it is asked
+/// about, answering Always when `always` is set, and denies every request
+/// after it. It records what Always each request offered it.
+struct FirstAllow {
+    always: bool,
+    offered: std::sync::Mutex<Vec<Option<Vec<String>>>>,
+}
+impl FirstAllow {
+    fn new(always: bool) -> Arc<Self> {
+        Arc::new(Self {
+            always,
+            offered: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+}
+#[async_trait]
+impl HookPort for FirstAllow {
+    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        always: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        let mut offered = self.offered.lock().unwrap();
+        offered.push(always.map(<[String]>::to_vec));
+        if offered.len() > 1 {
+            return HookDecision {
+                block: Some("asked again".into()),
+                permission: Some(PermissionDecision::Deny),
+                ..HookDecision::default()
+            };
+        }
+        HookDecision {
+            permission: Some(PermissionDecision::Allow),
+            always: self.always,
+            ..HookDecision::default()
+        }
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+/// Runs `echo one`, then `echo two` in a later round, under `bash:*` ask.
+async fn echo_twice(hook: Arc<FirstAllow>) -> (Fixture, Vec<haarness_protocol::Item>) {
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(PermissionRule {
+        pattern: "bash:*".into(),
+        decision: PermissionDecision::Ask,
+    });
+    let fixture = Fixture::with_hooks(config, Some(hook));
+    let items = fixture
+        .run(vec![
+            vec![call("one", "bash", json!({"command": "echo one"}))],
+            vec![call("two", "bash", json!({"command": "echo two"}))],
+        ])
+        .await;
+    (fixture, items)
+}
+
+fn tool_results(items: &[haarness_protocol::Item]) -> Vec<(String, bool)> {
+    items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::ToolResult {
+                output, is_error, ..
+            } => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_permission_request_hooks_always_lets_the_next_command_with_its_prefix_run() {
+    let hook = FirstAllow::new(true);
+    let (fixture, items) = echo_twice(hook.clone()).await;
+    let results = tool_results(&items);
+    assert_eq!(results.len(), 2, "{items:?}");
+    assert!(results.iter().all(|(_, error)| !error), "{results:?}");
+    // The hook was asked once, and was told what Always would remember.
+    let offered = hook.offered.lock().unwrap().clone();
+    assert_eq!(offered, vec![Some(vec!["echo *".to_owned()])]);
+    assert!(fixture.runtime.pending_permissions().is_empty());
+}
+
+#[tokio::test]
+async fn a_permission_request_hooks_allow_without_always_is_asked_again() {
+    let hook = FirstAllow::new(false);
+    let (_fixture, items) = echo_twice(hook.clone()).await;
+    let results = tool_results(&items);
+    assert_eq!(results.len(), 2, "{items:?}");
+    assert!(!results[0].1, "{results:?}");
+    assert!(
+        results[1].1 && results[1].0.contains("asked again"),
+        "{results:?}"
+    );
+    assert_eq!(hook.offered.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_permission_request_hook_cannot_answer_always_for_an_edit_of_haarness_config() {
+    let hook = FirstAllow::new(true);
+    let fixture = Fixture::with_hooks(RuntimeConfig::default(), Some(hook.clone()));
+    *fixture.provider.rounds.lock().unwrap() = vec![vec![call(
+        "config",
+        "write",
+        json!({"path": "haarness.json", "content": "{}"}),
+    )]]
+    .into();
+    let thread = fixture.thread().await;
+    fixture
+        .runtime
+        .start_turn(
+            thread,
+            StartTurnRequest {
+                request_id: RequestId::new(),
+                text: "Write the config".into(),
+                attachments: vec![],
+                synthetic: false,
+                auto_approve: false,
+                agent: None,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                tools: None,
+                command: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Only a person answers it: the hook's allow does not, and it was
+    // offered no Always.
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pending) = fixture.runtime.pending_permissions().pop() {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the prompt is asked");
+    assert_eq!(hook.offered.lock().unwrap().clone(), vec![None]);
+    fixture
+        .runtime
+        .reply_permission(
+            &pending.permission_id,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+    assert!(!fixture.root.join("haarness.json").exists());
+}
+
+/// A `PreToolUse` hook that answers every question with `answers`, copying
+/// the question's input as a real hook does.
+struct AnswersQuestions(Value);
+#[async_trait]
+impl HookPort for AnswersQuestions {
+    async fn pre_tool_use(&self, _: ThreadId, tool: &str, arguments: &Value) -> HookDecision {
+        if tool != "question" {
+            return HookDecision::default();
+        }
+        let mut updated = arguments.clone();
+        updated["answers"] = self.0.clone();
+        HookDecision {
+            updated_input: Some(updated),
+            context: Some("answered from the project's policy".into()),
+            ..HookDecision::default()
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        tool: &str,
+        _: &Value,
+        output: &str,
+        _: bool,
+    ) -> Option<String> {
+        // PostToolUse sees the answer, as it sees any tool's output.
+        (tool == "question").then(|| format!("after: {}", output.lines().next().unwrap_or("")))
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+fn question() -> ProviderEvent {
+    call(
+        "ask",
+        "question",
+        json!({"prompt": "Which test suite should I run?", "choices": ["Unit tests", "Full suite"]}),
+    )
+}
+
+#[tokio::test]
+async fn a_pre_tool_use_hook_answers_a_question_without_asking() {
+    let fixture = Fixture::with_hooks(
+        RuntimeConfig::default(),
+        Some(Arc::new(AnswersQuestions(json!([["Unit tests"]])))),
+    );
+    let items = fixture.run(vec![vec![question()]]).await;
+    let result = items
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::ToolResult {
+                name,
+                output,
+                is_error: false,
+                metadata,
+                ..
+            } if name == "question" => Some((output.clone(), metadata.clone())),
+            _ => None,
+        })
+        .expect("the question has a result");
+    assert!(result.0.starts_with("Unit tests"), "{}", result.0);
+    assert!(result.0.contains("answered from the project's policy"));
+    assert!(result.0.contains("after: Unit tests"), "{}", result.0);
+    assert_eq!(result.1, json!({"answeredBy": "hook"}));
+    // Nobody was asked: no question was recorded or left waiting.
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Question { .. })),
+        "{items:?}"
+    );
+    assert!(fixture.runtime.pending_questions().is_empty());
+}
+
+#[tokio::test]
+async fn answers_that_do_not_fit_leave_the_question_to_the_person() {
+    let fixture = Fixture::with_hooks(
+        RuntimeConfig::default(),
+        Some(Arc::new(AnswersQuestions(json!([
+            ["Unit tests"],
+            ["Full suite"]
+        ])))),
+    );
+    *fixture.provider.rounds.lock().unwrap() = vec![vec![question()]].into();
+    let thread = fixture.thread().await;
+    fixture
+        .runtime
+        .start_turn(
+            thread,
+            StartTurnRequest {
+                request_id: RequestId::new(),
+                text: "Ask which suite".into(),
+                attachments: vec![],
+                synthetic: false,
+                auto_approve: false,
+                agent: None,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                tools: None,
+                command: None,
+            },
+        )
+        .await
+        .unwrap();
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pending) = fixture.runtime.pending_questions().pop() {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the person is asked");
+    fixture
+        .runtime
+        .reply_question(
+            &pending.question_id,
+            haarness_protocol::QuestionReply {
+                answer: "Full suite".into(),
+            },
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+    let items = fixture.runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            ItemData::ToolResult { name, output, metadata, .. }
+                if name == "question" && output.starts_with("Full suite")
+                    && output.contains("after: Full suite") && metadata.is_null())),
+        "{items:?}"
+    );
+}
+
+/// A `PreToolUse` hook that stops every question, by a block or a deny.
+struct StopsQuestions {
+    deny: bool,
+}
+#[async_trait]
+impl HookPort for StopsQuestions {
+    async fn pre_tool_use(&self, _: ThreadId, tool: &str, _: &Value) -> HookDecision {
+        if tool != "question" {
+            return HookDecision::default();
+        }
+        if self.deny {
+            HookDecision {
+                permission: Some(PermissionDecision::Deny),
+                ..HookDecision::default()
+            }
+        } else {
+            HookDecision {
+                block: Some("questions are answered in the ticket".into()),
+                ..HookDecision::default()
+            }
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+#[tokio::test]
+async fn a_pre_tool_use_block_or_deny_stops_a_question() {
+    for (deny, reason) in [
+        (
+            false,
+            "blocked by a PreToolUse hook: questions are answered in the ticket",
+        ),
+        (true, "denied by a PreToolUse hook"),
+    ] {
+        let fixture = Fixture::with_hooks(
+            RuntimeConfig::default(),
+            Some(Arc::new(StopsQuestions { deny })),
+        );
+        let items = fixture.run(vec![vec![question()]]).await;
+        assert!(
+            items.iter().any(|item| matches!(&item.data,
+                ItemData::ToolResult { name, output, is_error: true, .. }
+                    if name == "question" && output.contains(reason))),
+            "{items:?}"
+        );
+        // Nobody was asked.
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::Question { .. })),
+            "{items:?}"
+        );
+        assert!(fixture.runtime.pending_questions().is_empty());
+    }
 }

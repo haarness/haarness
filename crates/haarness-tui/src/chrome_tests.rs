@@ -988,7 +988,7 @@ fn an_mcp_tool_with_an_app_says_its_app_opens_in_desktop() {
         call(5, "c3", "mcp__weather__broken"),
         result(6, "c3", "mcp__weather__broken", true, page),
     ];
-    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
     let frame = frame_text(&app, (120, 30));
     // The notice wraps to the transcript's width.
     let notice = "↳ This tool comes with an app; open the chat in Haarness Desktop";
@@ -999,6 +999,18 @@ fn an_mcp_tool_with_an_app_says_its_app_opens_in_desktop() {
         .position(|row| row.contains("mcp__weather__show_weather"))
         .unwrap();
     assert!(rows[show + 1].contains(notice), "{frame}");
+    // A server whose interactive apps were turned off since has no app to open.
+    app.mcp_status = vec![haarness_protocol::McpServerInfo {
+        name: "weather".into(),
+        transport: "stdio".into(),
+        status: "connected".into(),
+        detail: None,
+        scope: None,
+        apps: Some(false),
+        app_tools: None,
+    }];
+    let frame = frame_text(&app, (120, 30));
+    assert_eq!(frame.matches(notice).count(), 0, "{frame}");
 }
 
 /// A long address gives way to the Chrome tag on a narrow screen, however

@@ -511,6 +511,7 @@ async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCo
         models: Vec::new(),
         discover_models: true,
         server_output_limit: false,
+        replay_observed_reasoning: false,
         model_defaults: CompatibleModelDefaults::default(),
         assume_authenticated: false,
         headers: ProviderHeaders::default(),

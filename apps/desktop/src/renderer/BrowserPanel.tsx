@@ -2,9 +2,11 @@ import { t } from "./i18n";
 import { browserAddress } from "../browser-settings";
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
   Show,
+  on,
   onMount,
   onCleanup,
   untrack,
@@ -15,6 +17,9 @@ import type { BrowserState } from "../shared";
 import { setNativeArea } from "./native-area";
 import { registerCyclePanel } from "./tab-cycle";
 import { CHROME_CAPABILITY, chromeThreadTabs, type ChromeHosts } from "../chrome";
+import type { PickEvent } from "../browser-pick";
+import { elementContext } from "./element-context";
+import { shortcutText } from "./search";
 import "./browser.css";
 const empty = (): BrowserState => ({ tabs: [], focusedTabID: null });
 /** Everything that floats above the page: menus, pickers, popovers, dialogs, toasts. */
@@ -58,6 +63,8 @@ export function BrowserPanel(props: {
   onOpen: (agent: boolean) => void;
   /** The agent took the shown tab to another page. */
   onReveal: () => void;
+  /** When the person last asked to pick an element (⇧⌘C, the menu or the palette). */
+  pickRequest?: number;
 }) {
   const app = useApp();
   const { state } = app;
@@ -66,6 +73,15 @@ export function BrowserPanel(props: {
   const [address, setAddress] = createSignal("");
   const [error, setError] = createSignal("");
   const [connected, setConnected] = createSignal(false);
+  // The person is picking an element in the shown page; `picks` counts what
+  // this round of picking added to the draft `pickDraft` names.
+  const [picking, setPicking] = createSignal(false);
+  // Asked to pick, waiting for the page; `pickRound` tells a late answer apart.
+  const [starting, setStarting] = createSignal(false);
+  let pickRound = 0;
+  let picks = 0;
+  let pickDraft = "";
+  let addressField!: HTMLInputElement;
   // Tabs this chat holds in the user's Chrome, which this panel cannot show.
   const [chromeTabs, setChromeTabs] = createSignal(0);
   // The native page draws above the DOM, so a layer that must cover it gets
@@ -106,6 +122,9 @@ export function BrowserPanel(props: {
   createEffect(() => {
     const { connection, thread } = owner();
     const version = ++epoch;
+    pickRound++;
+    setStarting(false);
+    setPicking(false);
     lastLayout = "";
     held = false;
     freezing = 0;
@@ -246,6 +265,99 @@ export function BrowserPanel(props: {
       select: (tabID) => void command({ type: "tabs.focus", tabID }),
     }),
   );
+  const pickable = () => {
+    const url = tab()?.url ?? "";
+    return connected() && /^https?:/.test(url);
+  };
+  /** Picks elements of the shown page into the message as chips. */
+  async function startPicking() {
+    const { connection, thread } = owner();
+    const round = ++pickRound;
+    picks = 0;
+    pickDraft = app.draftKey();
+    setError("");
+    setStarting(true);
+    try {
+      const started = await window.haarness.browserPick(connection, thread, {
+        hint: t("Click an element to add it · Shift-click for more · Esc to cancel"),
+        accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+      });
+      if (round !== pickRound) {
+        // Stopped while the page got ready: what began meanwhile stops too.
+        if (started && belongs(connection, thread))
+          void window.haarness.browserPick(connection, thread, null).catch(() => {});
+        return;
+      }
+      // The button lights only when the page is really picking.
+      setPicking(!!started && belongs(connection, thread));
+    } catch (reason) {
+      if (round === pickRound && belongs(connection, thread)) setError(String(reason));
+    } finally {
+      if (round === pickRound) setStarting(false);
+    }
+  }
+  function stopPicking() {
+    if (!picking() && !starting()) return;
+    pickRound++;
+    setStarting(false);
+    setPicking(false);
+    const { connection, thread } = owner();
+    void window.haarness.browserPick(connection, thread, null).catch(() => {});
+  }
+  function picked(event: PickEvent) {
+    if (event.type === "picked") {
+      // A pick for a draft the window has left since is dropped.
+      if (app.draftKey() !== pickDraft) return;
+      picks++;
+      void app.run(() => app.addPromptContext(elementContext(event.element, event.tab), pickDraft));
+      return;
+    }
+    setPicking(false);
+    // The person picked what they meant: their note goes in the message box,
+    // where its caret was.
+    if (picks && ["picked", "cancelled", "stopped"].includes(event.reason))
+      document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+  }
+  // Picking belongs to the page on screen: another tab or a hidden panel ends it.
+  const focusedTab = createMemo(() => browser().focusedTabID);
+  createEffect(
+    on([() => props.visible, focusedTab], () => stopPicking(), { defer: true }),
+  );
+  // Escape stops picking (or picking about to start), and only that: the
+  // composer's Escape would stop a running turn. A dialog over the window
+  // keeps its own Escape.
+  createEffect(() => {
+    if (!picking() && !starting()) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      if (event.target instanceof Element && event.target.closest("dialog, [role='dialog'], [role='alertdialog']")) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      stopPicking();
+      if (picks) document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+    };
+    window.addEventListener("keydown", escape, true);
+    onCleanup(() => window.removeEventListener("keydown", escape, true));
+  });
+  // ⇧⌘C shows this panel and asks it to pick; asked again, it stops. A page
+  // still loading starts once it is there; with no page yet, the address
+  // field takes the keyboard instead.
+  let taken = 0;
+  createEffect(() => {
+    const request = props.pickRequest ?? 0;
+    if (!request || request === taken || !props.visible) return;
+    if (Date.now() - request > 5_000) return;
+    if (untrack(picking) || untrack(starting)) {
+      taken = request;
+      stopPicking();
+    } else if (pickable()) {
+      taken = request;
+      untrack(() => void startPicking());
+    } else if (connected() && !tab()?.loading && !/^https?:/.test(tab()?.url ?? "")) {
+      taken = request;
+      addressField?.focus();
+    }
+  });
   async function command(action: unknown) {
     const { connection, thread } = owner();
     try {
@@ -269,7 +381,9 @@ export function BrowserPanel(props: {
         reveal?: boolean;
         agent?: boolean;
         disconnected?: boolean;
+        pick?: PickEvent;
       };
+      if (data.pick) return picked(data.pick);
       if (data.state) setBrowser(data.state);
       if (data.error) setError(data.error);
       if (data.focus) props.onOpen(!!data.agent);
@@ -422,6 +536,7 @@ export function BrowserPanel(props: {
           <Icon name="refresh" size="sm" />
         </button>
         <input
+          ref={addressField}
           data-browser-address=""
           aria-label={t("Browser address")}
           placeholder={t("Enter a URL")}
@@ -430,6 +545,18 @@ export function BrowserPanel(props: {
           onBlur={() => setEditingAddress(false)}
           onInput={(event) => setAddress(event.currentTarget.value)}
         />
+        <button
+          type="button"
+          class="browser-pick"
+          aria-label={t("Pick an element")}
+          title={[t("Pick an element"), state.preferences.shortcuts.pick && shortcutText(state.preferences.shortcuts.pick, state.platform)].filter(Boolean).join(" — ")}
+          aria-pressed={picking()}
+          aria-busy={starting()}
+          disabled={!picking() && !starting() && !pickable()}
+          onClick={() => (picking() || starting() ? stopPicking() : void startPicking())}
+        >
+          <Icon name="pick" size="sm" />
+        </button>
         <button type="button" aria-label={t("Browser settings")} onClick={() => void app.openSettings("browser")}><Icon name="settings" size="sm" /></button>
         <button type="submit" disabled={!state.connection}>
           {t("Go")}

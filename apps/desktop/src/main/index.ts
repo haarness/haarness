@@ -4,13 +4,18 @@ import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
+import { exportLogs, logLevel } from "./logs";
+import { releaseNotesText } from "../release-notes";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
+import { createSideChatStorage } from "./side-chat-storage";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
 import {
   eventIdleMs,
+  RELAY_RESUME_FOR_MS,
+  relayResumeAfterMs,
   onlineAgain,
   retryWaits,
   TERMINAL_PING_EVERY_MS,
@@ -19,11 +24,12 @@ import {
 import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
-import { shortcutLabel } from "../renderer/search";
+import { matchesShortcut, shortcutLabel } from "../renderer/search";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
-import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
+import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { browseRemote, openRemote, remoteLocationId } from "./remote-projects";
+import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
 import {
   app,
@@ -38,6 +44,7 @@ import {
   nativeImage,
   globalShortcut,
   net,
+  type BaseWindow,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -65,6 +72,8 @@ import {
   connectLocal,
   establish,
   connection,
+  connectionAuth,
+  connectionClient,
   connections,
   invoke,
   command,
@@ -141,12 +150,19 @@ let renderer = resolve(here, "../renderer/index.html");
 let preload = resolve(here, "../preload/index.cjs");
 let uiSession: Awaited<ReturnType<typeof createUiSession>> | undefined;
 const windows = new Set<BrowserWindow>();
-const subscriptions = new Map<string, { owner: number; client: Haarness }>();
+const subscriptions = new Map<
+  string,
+  { owner: number; client: Haarness; connection: string }
+>();
 // Test runs never share usage statistics. Every server and CLI process
 // inherits this.
 if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
+/** Side questions whose answers are still coming, by the id their window gave them. */
+const sideQuestions = new Map<string, { owner: number; abort: AbortController }>();
+/** Windows whose keyboard is in the side chat, where ⌘W closes its thread in front. */
+const sideChatKeyboard = new Set<number>();
 const terminals = terminalSockets<PtyConnection>();
 /** Connections waiting to try again; a wake ends their wait. */
 const retries = retryWaits();
@@ -267,7 +283,7 @@ function watchNotifications(id: string, owner: number) {
     return;
   }
   previous?.stop();
-  const client = new Haarness({ baseUrl: item.url, auth: item.auth });
+  const client = connectionClient(item);
   let stopped = false;
   let waiting: (() => void) | undefined;
   // Each listen is an attempt of its own; a newer one ends the older.
@@ -333,8 +349,19 @@ function watchNotifications(id: string, owner: number) {
           )
           .catch(() => {});
       }
-    } catch {
-      /* Retry without disturbing the user's foreground connection. */
+    } catch (error) {
+      // Retry without disturbing the user's foreground connection; but
+      // another computer that refuses the account (signed out, no longer
+      // shared) is not asked again until it is opened again.
+      if (
+        item.view.remoteHost &&
+        error instanceof ApiError &&
+        [401, 403, 404].includes(error.status)
+      ) {
+        if (notificationWatches.get(id) === watch) notificationWatches.delete(id);
+        watch.stop();
+        return;
+      }
     }
     // The network coming back ends this wait, and a wake starts over (see
     // wakeConnections).
@@ -362,6 +389,53 @@ function forgetNotifications(id: string) {
   notificationWatches.get(id)?.stop();
   notificationWatches.delete(id);
   notifications.forget(id);
+}
+/** Ends the event streams windows hold for a connection that closed. */
+function closeSubscriptions(connection: string) {
+  for (const [key, item] of subscriptions)
+    if (item.connection === connection) {
+      subscriptions.delete(key);
+      item.client.close();
+    }
+}
+/** The server each window shows. Another computer is reached through Haarness
+ * Cloud only while a window shows it: its projects' notification watches stop
+ * when none does, and start again when one of its projects connects. */
+const shownServers = new Map<number, string>();
+function quietOtherComputers() {
+  const shown = new Set(shownServers.values());
+  for (const id of [...notificationWatches.keys()]) {
+    const view = connections.get(id)?.view;
+    if (view?.remoteHost && !shown.has(serverKey(view))) {
+      notificationWatches.get(id)?.stop();
+      notificationWatches.delete(id);
+    }
+  }
+}
+/** After a sign-out or an account switch: Cloud sessions and your other
+ * computers were reached with the account that changed. Returns the projects
+ * that closed. */
+function closeCloud() {
+  const closed = closeCloudConnections();
+  for (const id of closed) {
+    forgetNotifications(id);
+    closeSubscriptions(id);
+  }
+  return closed;
+}
+/** Your other computers are reached through Haarness Cloud with the
+ * account's sign-in, which only main holds. */
+const relay = createRelay((rejected) =>
+  accountRequest({ action: "remote-auth", ...(rejected ? { rejected } : {}) }),
+);
+/** Keeps another computer in the server list once it is opened, under the
+ * name the account gives it now. */
+function saveHostServer(host: string, label?: string) {
+  const id = hostServerId(host);
+  const saved = data().servers.find((item) => item.id === id);
+  if (saved) {
+    if (label) saved.label = label;
+  } else data().servers.push({ id, label: label || say("Remote"), host });
 }
 let projectCatalog: Promise<Recent[]> | undefined;
 async function refreshProjects(): Promise<Recent[]> {
@@ -441,6 +515,8 @@ function handle(
               : "";
         if (secret) message = message.replaceAll(secret, "[redacted]");
       }
+      for (const secret of relay.secrets())
+        message = message.replaceAll(secret, "[redacted]");
       return { ok: false, error: message.slice(0, 8000) };
     }
   });
@@ -573,6 +649,14 @@ function installHandlers() {
   handle("browserCommand", (win, connection:string, thread:string, action:unknown) => browserHost.command(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread), action));
   handle("browserLayout", (win, connection:string, thread:string, raw:unknown) => browserHost.layout(win, connection, thread, z.object({visible:z.boolean(),bounds:z.object({x:z.number().finite(),y:z.number().finite(),width:z.number().finite(),height:z.number().finite()})}).parse(raw)));
   handle("browserSnapshot", (win, connection:string, thread:string) => browserHost.snapshot(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread)));
+  handle("browserPick", (win, connection: string, thread: string, raw: unknown) =>
+    browserHost.pick(
+      win,
+      z.string().max(2048).parse(connection),
+      z.string().max(128).parse(thread),
+      z.object({ hint: z.string().max(400), accent: z.string().max(64) }).nullable().parse(raw),
+    ),
+  );
   handle("projects", () => refreshProjects());
   handle(
     "remoteProjects",
@@ -580,7 +664,7 @@ function installHandlers() {
       const id = z.string().parse(rawServer);
       const path = z.string().max(16384).optional().parse(rawPath);
       const server = data().servers.find((item) => item.id === id);
-      if (!server?.url) throw new Error("Saved remote server was not found");
+      if (!server?.url && !server?.host) throw new Error("Saved remote server was not found");
       const options = z
         .object({
           prefix: z.string().max(4096).optional(),
@@ -592,10 +676,18 @@ function installHandlers() {
         .optional()
         .parse(rawOptions);
       return {
-        listing: await browseRemote(server.url, serverAuth(id), path, options),
+        listing: server.host
+          ? await hostBrowse(relay, server.host, say, { ...options, ...(path ? { path } : {}) })
+          : await browseRemote(server.url!, serverAuth(id), path, options),
       };
     },
   );
+  handle("remoteCatalog", async (_, rawServer: unknown) => {
+    const id = z.string().max(200).parse(rawServer);
+    const host = data().servers.find((item) => item.id === id)?.host;
+    if (!host) throw new Error("Saved remote server was not found");
+    return hostCatalog(relay, host, say);
+  });
   handle("notificationHandled", (win, raw: unknown) => {
     const target = z
       .object({ connection: z.string(), thread: z.string() })
@@ -653,7 +745,11 @@ function installHandlers() {
     registerShortcut();
   });
   const attachmentDraftStorage = createAttachmentDraftStorage(join(app.getPath("userData"), "attachment-drafts"));
+  const sideChatStorage = createSideChatStorage(join(app.getPath("userData"), "side-chats"));
   handle("attachmentDraft", (_, key: string, value: unknown) => attachmentDraftStorage(key, value));
+  handle("sideChats", (_, key: unknown, value: unknown) =>
+    value === undefined ? sideChatStorage.get(key) : sideChatStorage.set(key, value),
+  );
   const reviewStorage = createReviewStorage(data().values, persist);
   handle("review", async (_, input: ReviewRequest) => {
     bounded(input, 2 * 1024 * 1024);
@@ -694,23 +790,28 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web", "remote-hosts"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "billing-state") return billingState();
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
+    const closed: string[] = [];
     if (input.action === "login") {
       await accountLogin(!!input.device, value => send(win, { kind: "menu", data: { action: "account-login", ...value as object } }));
     } else if (input.action === "web") {
       const result = await accountRequest(input); await shell.openExternal(external(result.url)); return null;
     } else {
       if (["logout", "select"].includes(input.action)) cancelAccountLogin();
-      if (input.action === "logout") closeCloudConnections();
+      if (input.action === "logout") closed.push(...closeCloud());
       const result = await accountRequest(input);
       if (!["logout", "select", "select-router"].includes(input.action)) return result;
-      if (input.action !== "select-router") closeCloudConnections();
+      if (input.action !== "select-router") closed.push(...closeCloud());
     }
+    // Another computer is opened with the account's own sign-in.
+    if (input.action !== "select-router") relay.forget();
     await Promise.allSettled([...connections.values()].filter(c => !c.view.remote).map(c => c.client.refreshProviders()));
     startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
-    broadcast({ kind: "menu", data: { action: "account-changed" } });
+    // After a sign-out or account switch, windows showing another computer
+    // leave it; `closed` names the projects that closed.
+    broadcast({ kind: "menu", data: { action: "account-changed", ...(["logout", "select"].includes(input.action) ? { closed } : {}) } });
     return accountRequest({ action: "status" });
   });
   handle("connect", async (win, raw: unknown) => {
@@ -719,6 +820,8 @@ function installHandlers() {
         workspace: z.string().optional(),
         cloudWorkspace: z.string().uuid().optional(),
         cloudSession: z.string().uuid().optional(),
+        remoteHost: z.string().uuid().optional(),
+        remoteWorkspace: z.string().min(1).max(200).optional(),
         url: z.string().optional(),
         token: z.string().optional(),
         username: z.string().max(1024).optional(),
@@ -740,16 +843,18 @@ function installHandlers() {
         input.url ||
         input.recent ||
         input.cloudSession ||
-        input.cloudWorkspace)
+        input.cloudWorkspace ||
+        input.remoteHost)
     )
       throw new Error("A link can only open a folder on this computer");
     const recent = input.recent
       ? data().recent.find((item) => item.id === input.recent)
       : undefined;
     if (input.recent && !recent) throw new Error("Saved project was not found");
+    const remoteHost = input.remoteHost ?? recent?.remoteHost;
     const cloudSession = input.cloudSession ?? recent?.cloudSession;
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
-    if (cloudSession || cloudWorkspace) {
+    if (!remoteHost && (cloudSession || cloudWorkspace)) {
       const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
       // Removed from the sidebar while it connected: it stays removed.
       const kept = await rememberConnected({
@@ -757,6 +862,50 @@ function installHandlers() {
         saved: view,
         requested: input.recent,
         save: async (next) => {
+          data().recent = next;
+          await persist();
+        },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
+    }
+    if (remoteHost) {
+      const opened = await connectHost(
+        relay,
+        {
+          host: remoteHost,
+          workspace: input.remoteWorkspace ?? recent?.remoteWorkspace,
+          path: input.recent ? undefined : input.workspace,
+          apiUrl: recent?.cloudApiUrl,
+          project: recent?.project,
+          checkout: recent?.checkout,
+        },
+        say,
+      );
+      const { view } = opened;
+      connections.get(view.id)?.client.close();
+      connections.set(view.id, { ...opened, auth: { type: "none" } });
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved: {
+          id: view.id,
+          label: view.label,
+          workspace: view.workspace,
+          remote: true,
+          remoteHost,
+          remoteWorkspace: view.remoteWorkspace,
+          cloudApiUrl: view.cloudApiUrl,
+          // An older Desktop, which knows nothing of other computers, reads
+          // this as a Cloud workspace it cannot attach to, never as a folder
+          // of its own computer that happens to have the same path.
+          cloudWorkspace: remoteHost,
+          trust: false,
+          ...(view.project ? { project: view.project } : {}),
+          ...(view.checkout ? { checkout: view.checkout } : {}),
+        },
+        requested: input.recent,
+        save: async (next) => {
+          saveHostServer(remoteHost, input.label);
           data().recent = next;
           await persist();
         },
@@ -942,22 +1091,32 @@ function installHandlers() {
   handle("forget", async (_, id: string) => {
     for (const item of data().recent)
       if (item.id === id || projectKey(item) === id)
-        { forgetNotifications(item.id); browserHost.disconnect(item.id); }
+        { forgetNotifications(item.id); browserHost.disconnect(item.id); void sideChatStorage.drop(item.id + ":").catch(() => {}); }
     data().recent = data().recent.filter(
       (item) => item.id !== id && projectKey(item) !== id,
     );
     await persist();
     broadcast({ kind: "projects", data: data().recent });
   });
-  handle("server", async (_, raw: unknown) => {
+  handle("server", async (win, raw: unknown) => {
     const input = z
       .object({
         id: z.string(),
-        action: z.enum(["rename", "remove"]),
+        action: z.enum(["rename", "remove", "host", "shown"]),
         label: z.string().trim().min(1).max(200).optional(),
       })
       .strict()
       .parse(raw);
+    if (input.action === "shown") {
+      shownServers.set(win.id, input.id);
+      quietOtherComputers();
+      return data().servers;
+    }
+    if (input.action === "host") {
+      saveHostServer(z.string().uuid().parse(input.id), input.label);
+      await persist();
+      return data().servers;
+    }
     return projectTransaction(input.id, async () => {
       const server = data().servers.find((item) => item.id === input.id);
       if (!server) throw new Error("Saved server was not found");
@@ -1018,10 +1177,10 @@ function installHandlers() {
       if (spec[0] === "GET")
         for (const [key, value] of Object.entries(input))
           url.searchParams.set(key, String(value));
-      const response = await fetch(url, {
+      const response = await (item.fetch ?? fetch)(url, {
         method: spec[0],
         headers: {
-          ...authorizationHeaders(item.auth),
+          ...authorizationHeaders(await connectionAuth(item)),
           "Content-Type": "application/json",
         },
         body: spec[0] === "GET" ? undefined : JSON.stringify(input),
@@ -1063,6 +1222,51 @@ function installHandlers() {
   handle("cancel", (win, id: string) => {
     const child = commands.get(id);
     if (child && commandOwners.get(id) === win.id) stopCommand(child);
+    const side = sideQuestions.get(id);
+    if (side?.owner === win.id) side.abort.abort();
+  });
+  handle("sideChatFocus", (win, focused: unknown) => {
+    if (focused === true) sideChatKeyboard.add(win.id);
+    else sideChatKeyboard.delete(win.id);
+  });
+  // A side question's answer arrives as "btw" events with the id the window
+  // chose, and the call answers with the last of them (done or error), so the
+  // window never depends on an event outrunning the reply. Cancelling that id
+  // ends the request, which stops the provider. A server from before streamed
+  // side questions answers in one piece.
+  handle("btw", async (win, id: string, thread: string, raw: unknown, stream: string) => {
+    z.string().uuid().parse(stream);
+    z.string().min(1).max(200).parse(thread);
+    const body = z
+      .object({
+        question: z.string().trim().min(1).max(200_000),
+        history: z
+          .array(z.object({ question: z.string().trim().min(1), answer: z.string().trim().min(1) }).strict())
+          .max(100)
+          .optional(),
+      })
+      .strict()
+      .parse(raw);
+    const item = connection(id);
+    if (sideQuestions.has(stream)) throw new Error("This side question is already being answered");
+    const abort = new AbortController();
+    sideQuestions.set(stream, { owner: win.id, abort });
+    try {
+      if (!item.view.info.capabilities.includes("btw.stream.v1")) {
+        const answer = await item.client.btw(thread, body, { signal: abort.signal, timeoutMs: 310_000 });
+        return { type: "done" as const, ...answer };
+      }
+      for await (const event of item.client.btwStream(thread, body, {
+        signal: abort.signal,
+        idleTimeoutMs: eventIdleMs(),
+      })) {
+        if (event.type === "done" || event.type === "error") return event;
+        send(win, { kind: "btw", id: stream, data: event });
+      }
+      return undefined;
+    } finally {
+      sideQuestions.delete(stream);
+    }
   });
   handle("subscribe", (win, id: string, cursor: number) => {
     if (!Number.isSafeInteger(cursor) || cursor < 0)
@@ -1077,20 +1281,56 @@ function installHandlers() {
         send(win, { kind: "connection", connection: id, id: key, data: "opened" });
       return response;
     };
-    const client = new Haarness({
-      baseUrl: item.url,
-      auth: item.auth,
-      fetch: (request, init) => fetch(request, init).then(opened),
-    });
-    subscriptions.set(key, { owner: win.id, client });
+    const client = connectionClient(item, opened);
+    subscriptions.set(key, { owner: win.id, client, connection: id });
+    // Cloud ends a stream relayed to another computer when the sign-in it
+    // opened with expires, and when that computer's connector renews its own
+    // (each about every ten minutes; the computer is back within seconds). A
+    // stream that worked for a while follows on from its last event, as if
+    // nothing happened, trying for up to 15 s; a computer gone longer is
+    // reported. Following on needs the same server: one that started again
+    // meanwhile numbers its events afresh, so the window reads it again
+    // ("resync") instead of waiting for numbers it already has.
+    const relayed = !!item.view.remoteHost;
     void (async () => {
       try {
-        for await (const event of client.events({
-          after: cursor,
-          reconnect: false,
-          idleTimeoutMs: eventIdleMs(),
-        })) {
-          send(win, { kind: "server", connection: id, id: key, data: event });
+        let after = cursor;
+        let instance: string | undefined;
+        let quietUntil = 0;
+        let resuming = false;
+        for (;;) {
+          const started = Date.now();
+          let failure: unknown;
+          try {
+            if (resuming) {
+              const info = await item.client.info();
+              if (info.serverInstanceId !== (instance ?? item.view.info.serverInstanceId)) break;
+            }
+            for await (const event of client.events({
+              after,
+              reconnect: false,
+              idleTimeoutMs: eventIdleMs(),
+            })) {
+              send(win, { kind: "server", connection: id, id: key, data: event });
+              if ("eventId" in event) {
+                after = event.eventId;
+                instance = event.serverInstanceId;
+              }
+            }
+          } catch (error) {
+            failure = error;
+          }
+          if (!relayed || !subscriptions.has(key)) {
+            if (failure) throw failure;
+            break;
+          }
+          if (Date.now() - started > relayResumeAfterMs()) quietUntil = Date.now() + RELAY_RESUME_FOR_MS;
+          if (Date.now() >= quietUntil) {
+            if (failure) throw failure;
+            break;
+          }
+          resuming = true;
+          if (Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 1_000));
         }
         send(win, {
           kind: "connection",
@@ -1382,6 +1622,11 @@ function installHandlers() {
     chromeSetup(z.enum(["setup", "status"]).parse(action)),
   );
   handle("chromeReveal", () => revealChromeExtension());
+  // This computer's logs: Detailed logging, and the zip to share.
+  handle("logLevel", (_, action: unknown) =>
+    logLevel(z.enum(["status", "detail-on", "detail-off"]).parse(action)),
+  );
+  handle("exportLogs", (win) => exportLogs(win, say));
   // An image a reply links to on another host, once the person asks for it.
   // End-to-end tests pin fixture host names with `haarnessImageHosts`.
   handle("remoteImage", (_, raw: unknown) =>
@@ -1431,7 +1676,12 @@ function installHandlers() {
       throw new Error(
         "This build has no configured update feed. Install a newer signed release manually.",
       );
-    const { autoUpdater } = await import("electron-updater");
+    // End-to-end tests stand in for the feed with `haarnessUpdater`.
+    const fake = (globalThis as { haarnessUpdater?: typeof import("electron-updater").autoUpdater }).haarnessUpdater;
+    const { autoUpdater } =
+      process.env.HAARNESS_DESKTOP_TEST === "1" && !app.isPackaged && fake
+        ? { autoUpdater: fake }
+        : await import("electron-updater");
     if (action === "install") {
       if (!updateReady)
         throw new Error("Download the update before installing.");
@@ -1450,7 +1700,7 @@ function installHandlers() {
         updateReady = true;
         broadcast({
           kind: "update",
-          data: { status: "ready", version: value.version },
+          data: { status: "ready", version: value.version, notes: releaseNotesText(value.releaseNotes) },
         });
       });
       autoUpdater.on("error", (error) =>
@@ -1474,7 +1724,11 @@ function installHandlers() {
     autoUpdater.autoDownload = false;
     const result = await autoUpdater.checkForUpdates();
     updateAvailable = result?.isUpdateAvailable ?? false;
-    return { available: updateAvailable, info: result?.updateInfo };
+    return {
+      available: updateAvailable,
+      info: result?.updateInfo,
+      notes: releaseNotesText(result?.updateInfo.releaseNotes),
+    };
   });
 }
 /**
@@ -1622,9 +1876,41 @@ function createWindow() {
     data().values.window = { width, height };
     void persist();
   });
-  win.webContents.on("did-start-navigation", () => {
+  win.webContents.on("did-start-navigation", (event) => {
     browserHost.hide(win);
     resumeShortcut(win.id);
+    // A reloaded page has forgotten the answers it was waiting for; an
+    // iframe that navigates (a preview, an MCP app) has not.
+    if (!event.isMainFrame || event.isSameDocument) return;
+    sideChatKeyboard.delete(win.id);
+    for (const side of sideQuestions.values())
+      if (side.owner === win.id) side.abort.abort();
+  });
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const keys = {
+      key: input.key,
+      code: input.code,
+      metaKey: input.meta,
+      ctrlKey: input.control,
+      altKey: input.alt,
+      shiftKey: input.shift,
+    };
+    // The side chat's key reaches the window once: neither the page nor the
+    // menu hears it as well. (The menu still hears it while a page in the
+    // Browser has the keyboard, which this window's contents do not see.)
+    const side = data().preferences.shortcuts.sideChat;
+    if (side && matchesShortcut(keys, side, process.platform)) {
+      event.preventDefault();
+      send(win, { kind: "menu", data: "side-chat" });
+      return;
+    }
+    // ⌘W (Ctrl+W elsewhere) closes the side chat's thread in front while the
+    // keyboard is there, and the window everywhere else.
+    const mod = process.platform === "darwin" ? input.meta : input.control;
+    if (!sideChatKeyboard.has(win.id) || !mod || input.shift || input.alt || input.key.toLowerCase() !== "w") return;
+    event.preventDefault();
+    send(win, { kind: "menu", data: "side-chat-close" });
   });
   win.on("closed", () => {
     screenshotListings.forget(win.id);
@@ -1639,8 +1925,13 @@ function createWindow() {
         subscriptions.delete(id);
         item.client.close();
       }
+    for (const side of sideQuestions.values())
+      if (side.owner === win.id) side.abort.abort();
+    sideChatKeyboard.delete(win.id);
     terminals.close(win.id);
     answerers.forget(win.id);
+    shownServers.delete(win.id);
+    quietOtherComputers();
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -1658,8 +1949,9 @@ function createWindow() {
 }
 function menu() {
   const t = (key: string) => translate(data().preferences.language, key);
-  const action = (name: string) => {
-    const win = BrowserWindow.getFocusedWindow();
+  // Electron names the window a menu item was chosen for; the focused one otherwise.
+  const action = (name: string, target?: BaseWindow) => {
+    const win = target instanceof BrowserWindow ? target : BrowserWindow.getFocusedWindow();
     if (win) send(win, { kind: "menu", data: name });
   };
   Menu.setApplicationMenu(
@@ -1768,6 +2060,23 @@ function menu() {
             ),
             click: () => action("browser"),
           },
+          {
+            label: t("Pick an element"),
+            accelerator: (data().preferences.shortcuts.pick ?? "").replace(
+              /\bMod\b/g,
+              "CmdOrCtrl",
+            ),
+            click: (_item, win) => action("pick", win),
+          },
+          {
+            label: t("Side chat"),
+            accelerator: data().preferences.shortcuts.sideChat
+              ? data().preferences.shortcuts.sideChat.replace(/\bMod\b/g, "CmdOrCtrl")
+              : undefined,
+            // Heard here too while a page in the Browser has the keyboard;
+            // the window toggles once however many hear one press (App.tsx).
+            click: () => action("side-chat"),
+          },
           { type: "separator" },
           { label: t("Actual size"), role: "resetZoom" },
           { label: t("Zoom in"), role: "zoomIn" },
@@ -1781,6 +2090,7 @@ function menu() {
         label: t("Help"),
         submenu: [
           { label: t("Keyboard shortcuts"), click: () => action("shortcuts") },
+          { label: t("Export logs") + "…", click: (_item, win) => action("export-logs", win) },
           { label: t("About Haarness"), click: () => action("about") },
         ],
       },

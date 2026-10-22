@@ -24,6 +24,7 @@ const bridge: Bridge = {
   browserCommand:(connection,thread,action)=>invoke("browserCommand",connection,thread,action),
   browserLayout:(connection,thread,layout)=>invoke("browserLayout",connection,thread,layout),
   browserSnapshot:(connection,thread)=>invoke("browserSnapshot",connection,thread),
+  browserPick: (connection, thread, request) => invoke("browserPick", connection, thread, request),
   notificationReady: () => invoke("notificationReady"),
   notificationHandled: (target) => invoke("notificationHandled", target),
   windowAction: (action) => invoke("windowAction", action),
@@ -33,6 +34,7 @@ const bridge: Bridge = {
   forget: (id) => invoke("forget", id),
   server: (input) => invoke("server", input),
   projects: () => invoke("projects"),
+  remoteCatalog: (server) => invoke("remoteCatalog", server),
   remoteProjects: (server, path, options) =>
     invoke("remoteProjects", server, path, options),
   api: (connection, method, args = []) =>
@@ -44,6 +46,9 @@ const bridge: Bridge = {
   native: (connection, input) => invoke("native", connection, input),
   command: (connection, args, id) => invoke("command", connection, args, id),
   cancel: (id) => invoke("cancel", id),
+  btw: (connection, thread, body, id) => invoke("btw", connection, thread, body, id),
+  sideChatFocus: (focused) => invoke("sideChatFocus", focused),
+  sideChats: (key, value) => invoke("sideChats", key, value),
   preferences: (input) => invoke("preferences", input),
   review: (input) => invoke("review", input),
   storage: (key, value) => invoke("storage", key, value),
@@ -58,6 +63,8 @@ const bridge: Bridge = {
   openExternal: (url) => invoke("external", url),
   chromeSetup: (action) => invoke("chromeSetup", action),
   chromeReveal: () => invoke("chromeReveal"),
+  logLevel: (action) => invoke("logLevel", action),
+  exportLogs: () => invoke("exportLogs"),
   reveal: (connection, path) => invoke("reveal", connection, path),
   terminal: (connection, action, id, input) =>
     invoke("terminal", connection, action, id, input),

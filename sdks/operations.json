@@ -973,6 +973,21 @@
     }
   },
   {
+    "name": "btw_stream",
+    "method": "POST",
+    "path": "/v1/threads/{id}/btw/stream",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "body": {
+      "$ref": "#/components/schemas/BtwRequest"
+    },
+    "stream": "sse"
+  },
+  {
     "name": "compact",
     "method": "POST",
     "path": "/v1/threads/{id}/compact",

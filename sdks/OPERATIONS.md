@@ -80,6 +80,7 @@
 | `input_queue` | `inputQueue` | `GET /v1/threads/{id}/input/queue` |
 | `change_input_queue` | `changeInputQueue` | `POST /v1/threads/{id}/input/queue` |
 | `btw` | `btw` | `POST /v1/threads/{id}/btw` |
+| `btw_stream` | `btwStream` | `POST /v1/threads/{id}/btw/stream` |
 | `compact` | `compact` | `POST /v1/threads/{id}/compact` |
 | `get_goal` | `getGoal` | `GET /v1/threads/{id}/goal` |
 | `set_goal` | `setGoal` | `POST /v1/threads/{id}/goal` |

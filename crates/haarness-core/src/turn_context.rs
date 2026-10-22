@@ -178,6 +178,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic,
+                command_line: None,
             },
             created_at: Utc::now(),
         }

@@ -1299,11 +1299,15 @@ fn running(file: &Path) -> Result<bool> {
 }
 /// Every connector identity this data directory knows, with its file.
 fn identities(paths: &Paths) -> Result<Vec<(std::path::PathBuf, Value)>> {
+    identities_in(paths.config_dir())
+}
+/// [`identities`] of the configuration folder `dir`.
+fn identities_in(dir: &Path) -> Result<Vec<(std::path::PathBuf, Value)>> {
     let mut result = Vec::new();
-    if !paths.config_dir().exists() {
+    if !dir.exists() {
         return Ok(result);
     }
-    for entry in std::fs::read_dir(paths.config_dir())? {
+    for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         if !name.starts_with("remote-") || !name.ends_with(".json") {
@@ -1317,6 +1321,44 @@ fn identities(paths: &Paths) -> Result<Vec<(std::path::PathBuf, Value)>> {
         }
     }
     Ok(result)
+}
+/// The other computers Desktop can open: the account's hosts that share the
+/// whole computer, without this one (any host whose connector identity lives
+/// in `config_dir`) and without chat-only connectors, which Cloud lists under
+/// Sessions instead.
+pub(crate) async fn computers(
+    client: &haarness_account::Client,
+    config_dir: &Path,
+) -> Result<Value> {
+    let hosts = super::account::list_all(
+        client,
+        &format!("/api/v1/remote-hosts{}", account_query(client)),
+    )
+    .await?;
+    let local = identities_in(config_dir)?
+        .into_iter()
+        .filter_map(|(_, identity)| identity["id"].as_str().map(str::to_owned))
+        .collect();
+    Ok(json!({ "items": other_computers(&hosts, &local) }))
+}
+/// [`computers`] without the network: each host as Desktop shows it.
+fn other_computers(hosts: &Value, local: &std::collections::HashSet<String>) -> Vec<Value> {
+    hosts["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|host| host["mode"] == "host")
+        .filter(|host| host["id"].as_str().is_some_and(|id| !local.contains(id)))
+        .map(|host| {
+            json!({
+                "id": host["id"],
+                "name": host["name"],
+                "connected": host["connected"] == true,
+                "lastSeenAt": host["lastSeenAt"],
+                "platform": host["metadata"]["platform"],
+            })
+        })
+        .collect()
 }
 fn local_status(paths: &Paths) -> Result<Vec<Value>> {
     identities(paths)?
@@ -1755,6 +1797,44 @@ mod tests {
             args.extend(command);
             assert!(super::super::Cli::try_parse_from(args).is_ok());
         }
+    }
+    #[test]
+    fn desktop_lists_other_computers_without_this_one_or_shared_chats() {
+        let dir = std::env::temp_dir().join(format!("haarness-computers-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let this = "00000000-0000-4000-8000-0000000000a1";
+        std::fs::write(
+            dir.join("remote-abc.json"),
+            json!({"id": this, "name": "This Mac"}).to_string(),
+        )
+        .unwrap();
+        // Files that are not connector identities never hide a host.
+        std::fs::write(dir.join("remote-abc.log"), this).unwrap();
+        std::fs::write(dir.join("account.json"), json!({"id": "b1"}).to_string()).unwrap();
+        let local = identities_in(&dir)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, identity)| identity["id"].as_str().map(str::to_owned))
+            .collect();
+        let hosts = json!({"items": [
+            {"id": this, "name": "This Mac", "mode": "host", "connected": true, "metadata": {}},
+            {"id": "b1", "name": "Studio", "mode": "host", "connected": true,
+             "lastSeenAt": "2026-10-22T10:00:00Z", "metadata": {"platform": "macos", "version": "0.1.3"}},
+            {"id": "c1", "name": "Shared investigation", "mode": "sessions", "connected": true, "metadata": {}},
+            {"id": "d1", "name": "Linux box", "mode": "host", "connected": false,
+             "lastSeenAt": "2026-10-20T08:00:00Z", "metadata": {"platform": "linux"}},
+        ]});
+        assert_eq!(
+            other_computers(&hosts, &local),
+            vec![
+                json!({"id": "b1", "name": "Studio", "connected": true,
+                       "lastSeenAt": "2026-10-22T10:00:00Z", "platform": "macos"}),
+                json!({"id": "d1", "name": "Linux box", "connected": false,
+                       "lastSeenAt": "2026-10-20T08:00:00Z", "platform": "linux"}),
+            ]
+        );
+        assert!(other_computers(&json!({}), &local).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn exit_reason_prefers_the_final_error_after_the_offset() {
@@ -2901,6 +2981,7 @@ mod tests {
                     haarness_server::auth::ServerAccess::Private.fingerprint("fixture"),
                 ),
                 trace_endpoint: None,
+                base_config_dir: None,
             };
             crate::write_private_json(&folder.join("runtime.json"), &record).unwrap();
         }

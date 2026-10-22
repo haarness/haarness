@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item } from "@haarness/sdk";
 import {
+  answeredByHook,
   toolFailed,
   describeTool,
   errorRecovery,
@@ -40,6 +41,14 @@ test("shell exit status is reflected in tool presentation without interpreting o
   assert.equal(toolFailed("read", result), false);
   assert.equal(toolFailed("bash", { ...result, metadata: null }), false);
   assert.equal(toolFailed("read", { ...result, is_error: true }), true);
+});
+
+test("a question a hook answered says so, and only then", () => {
+  const hook = { output: "Unit tests", is_error: false, metadata: { answeredBy: "hook" } };
+  assert.equal(answeredByHook("question", hook), true);
+  assert.equal(answeredByHook("question", { output: "Unit tests", is_error: false }), false);
+  assert.equal(answeredByHook("question", undefined), false);
+  assert.equal(answeredByHook("bash", hook), false);
 });
 
 test("a step's verb never claims it is done before it is", () => {
@@ -490,7 +499,8 @@ test("tool verbs are whole catalog keys, with their own keys where a word alread
 const haarnessTools = [
   "websearch", "web_search", "execute", "lsp", "preview", "image_generate", "video_generate", "get_goal",
   "update_goal", "propose_goal_criteria", "load_tool", "schedule", "workflow", "marketplace_manage",
-  "capability_manage", "skill_manage", "plugin_manage", "mcp_manage", "agent_manage", "command_manage",
+  "capability_manage", "skill_manage", "plugin_manage", "mcp_manage", "mcp_resource_list", "mcp_resource_read",
+  "agent_manage", "command_manage",
   "cloud_agent_manage", "cloud_agent_session", "cloud_chat", "cloud_schedule", "memory_list", "memory_search",
   "memory_read", "memory_save", "memory_delete", "task_abort", "agent_switch", "session_manage",
   "session_rename", "session_message", "session_wait", "StructuredOutput",
@@ -532,6 +542,17 @@ test("each of Haarness's own tools reads as what it does, never as its id or ano
   assert.equal(describeTool("websearch", { query: "solid 2" }).target, "solid 2");
   assert.equal(describeTool("lsp", { operation: "hover", filePath: "src/a.ts", line: 3 }).target, "src/a.ts");
   assert.equal(describeTool("session_rename", { title: "Release" }).verb, "Renamed a chat");
+  // A resource row names what it read, or the server it listed, never the arguments' names.
+  assert.deepEqual(describeTool("mcp_resource_read", { server: "docs", uri: "docs://guides/setup" }), {
+    icon: "file-text",
+    verb: "Read an MCP resource",
+    doing: "Reading an MCP resource",
+    attempt: "Tried to read an MCP resource",
+    target: "docs://guides/setup",
+  });
+  assert.equal(describeTool("mcp_resource_list", { server: "docs" }).target, "docs");
+  assert.equal(describeTool("mcp_resource_list", {}).target, "");
+  assert.equal(toolActivity("mcp_resource_read"), "Reading an MCP resource");
   // A tool of someone else's is still named, or guessed from its name.
   assert.equal(describeTool("acme_zap", {}).verb, "acme_zap");
   assert.equal(describeTool("github_search_code", {}).verb, "Searched");

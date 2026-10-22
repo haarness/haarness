@@ -17,7 +17,9 @@ import { createBrowserFiles } from "./browser/files";
 import { createProfiling } from "./browser/profiling";
 import { createCornerImages } from "./browser/corners";
 import { returnKeyboard } from "./browser-keyboard";
+import { createPicker } from "./browser-picker";
 import type { BrowserNetwork } from "./browser/network";
+import type { PickRequest, PickedElement, PickEnd } from "../browser-pick";
 
 /** Any stable id outside Electron's own worlds, for the agent cursor; one per page document. */
 const CURSOR_WORLD = 1_779;
@@ -38,6 +40,8 @@ export function createBrowserPage(
     agentCursor?: () => boolean;
     /** The interface language's text for an English key. */
     translate?: (key: string) => string;
+    /** Which modifier keys the window's own page last heard down, for picking. */
+    modifiers?: () => { shift: boolean; alt: boolean };
     popup: (options: Electron.BrowserWindowConstructorOptions) => WebContents;
     initialize?: boolean;
     restore?: Browser.Tab;
@@ -61,7 +65,18 @@ export function createBrowserPage(
   });
   const contents = view.webContents;
   const detachNetwork = options.network?.attach(contents);
+  const picker = createPicker(contents, {
+    zoom: () => contents.getZoomFactor(),
+    origin: () => {
+      const content = win.getContentBounds();
+      const bounds = view.getBounds();
+      return { x: content.x + bounds.x, y: content.y + bounds.y };
+    },
+    window: options.modifiers,
+  });
+  contents.on("blur", () => picker.blur());
   contents.on("before-input-event", (event, input) => {
+    if (picker.key(event, input)) return;
     if (input.type !== "keyDown") return;
     page.personActed();
     if (
@@ -94,10 +109,22 @@ export function createBrowserPage(
   });
   // A press of the person's in the page ends any hold on file choosers the
   // agent's last action left (an agent's own input arrives during its action).
-  contents.on("before-mouse-event", (_event, mouse) => {
+  contents.on("before-mouse-event", (event, mouse) => {
+    if (picker.mouse(event, mouse)) return;
     if (mouse.type === "mouseDown") page.personActed();
   });
-  const cdp = createCdp(contents);
+  const transport = createCdp(contents);
+  // The agent's own input reaches the page through these DevTools commands;
+  // the picker lets exactly the presses and keys they make through.
+  const cdp: typeof transport = {
+    ...transport,
+    send(method, params, sessionID) {
+      if (!method.startsWith("Input.")) return transport.send(method, params, sessionID);
+      return picker.dispatch(method, (params ?? {}) as Record<string, unknown>, () =>
+        transport.send(method, params, sessionID),
+      );
+    },
+  };
   // Electron reports loadURL's navigation start synchronously, before
   // createPage returns; the driver hands the page to `start` for that event.
   let page!: Page<Browser.File>;
@@ -241,7 +268,10 @@ export function createBrowserPage(
     },
   };
   contents.on("did-start-navigation", (event) => {
-    if (event.isMainFrame && !event.isSameDocument) page.navigationStarted();
+    if (!event.isMainFrame || event.isSameDocument) return;
+    // The picker lives in the document that is going.
+    picker.end("navigated");
+    page.navigationStarted();
   });
   contents.on("did-stop-loading", publish);
   contents.on("did-navigate-in-page", publish);
@@ -250,6 +280,7 @@ export function createBrowserPage(
     if (!closed) options.favicon?.(urls);
   });
   contents.on("render-process-gone", () => {
+    picker.end("closed");
     if (!closed) options.fail();
   });
   contents.debugger.on("detach", () => {
@@ -419,16 +450,43 @@ export function createBrowserPage(
       });
     },
     setVisible(visible: boolean) {
-      if (!visible) giveBackKeyboard();
+      if (!visible) {
+        // Picking belongs to the page on screen.
+        picker.end("hidden");
+        giveBackKeyboard();
+      }
       view.setVisible(visible);
       corners.forEach((corner) => corner.setVisible(visible && !!cornerKey));
     },
     execute(command: Browser.Command, signal: AbortSignal): Promise<Browser.Result> {
+      // The agent never sees the person's picking outline.
+      if (command.action.type === "screenshot")
+        return picker.hidden(() => page.execute(command, signal));
       return page.execute(command, signal);
+    },
+    /**
+     * Lets the person pick elements in this page until they stop or a click
+     * picks one; false when picking ended again before the page was ready.
+     */
+    pick(
+      request: PickRequest,
+      callbacks: {
+        picked: (element: PickedElement, more: boolean) => void;
+        ended: (reason: PickEnd) => void;
+      },
+    ) {
+      return picker.start(request, callbacks);
+    },
+    stopPicking(reason: PickEnd = "stopped") {
+      picker.end(reason);
+    },
+    get picking() {
+      return picker.active;
     },
     async dispose() {
       if (closed) return;
       closed = true;
+      picker.end("closed");
       page.dispose();
       detachNetwork?.();
       contents.session.off("will-download", download);

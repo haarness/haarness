@@ -423,6 +423,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         &[],
         "Write this thread's transcript to a markdown file",
     ),
+    command(
+        "logs",
+        &["log"],
+        "This computer's logs · /logs export [path] · /logs detail [on|off] for 30 minutes",
+    ),
     command("editor", &["edit"], "Compose the prompt in $EDITOR"),
     command("cancel", &["stop"], "Interrupt the active turn"),
     command(
@@ -716,8 +721,10 @@ impl App {
                             )
                     })
                     .and_then(|item| match &item.data {
-                        haarness_protocol::ItemData::UserMessage { text, .. } => Some(
-                            crate::prompt_context::display(text)
+                        haarness_protocol::ItemData::UserMessage {
+                            text, command_line, ..
+                        } => Some(
+                            crate::prompt_context::display(command_line.as_deref().unwrap_or(text))
                                 .lines()
                                 .find(|line| !line.trim().is_empty())
                                 .unwrap_or_default()
@@ -902,12 +909,18 @@ impl App {
             .iter()
             .filter(|item| item.sequence > boundary)
             .find_map(|item| match &item.data {
+                // A slash command comes back as the line typed, so sending
+                // it again runs the command rather than its old expansion.
                 haarness_protocol::ItemData::UserMessage {
                     text,
                     attachments,
+                    command_line,
                     synthetic: false,
                     ..
-                } => Some((text.clone(), attachments.clone())),
+                } => Some((
+                    command_line.as_ref().unwrap_or(text).clone(),
+                    attachments.clone(),
+                )),
                 _ => None,
             })
     }
@@ -2722,19 +2735,8 @@ impl App {
                 self.execute_workflow_command(arguments, client).await?;
             }
             "btw" => {
-                if arguments.is_empty() {
-                    self.notice = "Usage: /btw <side question>".into();
-                } else {
-                    let response = client.btw(self.thread.id, arguments.to_owned()).await?;
-                    self.open_overlay(Overlay::Panel {
-                        title: "BTW · isolated read-only answer".into(),
-                        lines: response.answer.lines().map(str::to_owned).collect(),
-                    });
-                    self.notice = format!(
-                        "BTW answer · transcript unchanged · {} input / {} output tokens",
-                        response.input_tokens, response.output_tokens
-                    );
-                }
+                // A bare /btw opens the side chat, where the question is typed.
+                self.open_side_chat(Some(arguments.to_owned()), client);
             }
             "themes" => {
                 if arguments.is_empty() {
@@ -2865,9 +2867,20 @@ impl App {
                             "Add one in .haarness/skills/<name>/SKILL.md".into(),
                         ]
                     } else {
+                        // Skills of the base folder this TUI started with
+                        // (`HAARNESS_BASE_CONFIG_DIR`) say so.
+                        let base = crate::config::base_config_dir();
                         skills
                             .into_iter()
-                            .map(|skill| format!("{}  {}", skill.name, skill.description))
+                            .map(|skill| {
+                                if base.as_ref().is_some_and(|base| {
+                                    std::path::Path::new(&skill.path).starts_with(base)
+                                }) {
+                                    format!("{}  base  {}", skill.name, skill.description)
+                                } else {
+                                    format!("{}  {}", skill.name, skill.description)
+                                }
+                            })
                             .collect()
                     },
                 });
@@ -3211,6 +3224,7 @@ impl App {
                     Err(error) => self.notice = format!("Export failed: {error}"),
                 }
             }
+            "logs" => self.logs_command(arguments),
             "editor" => return Ok(AppAction::OpenEditor),
             "tasks" => self.open_tasks_overlay(),
             "background" => {
@@ -3295,13 +3309,7 @@ impl App {
                 }
             }
             OptionsKind::ReasoningEffort => match value {
-                "display" => {
-                    self.reasoning = !self.reasoning;
-                    self.notice = format!(
-                        "Reasoning display {}",
-                        if self.reasoning { "enabled" } else { "hidden" }
-                    );
-                }
+                "display" => self.cycle_thinking(),
                 "off" => {
                     self.thread.ultracode = false;
                     self.reasoning_effort = None;
@@ -3945,9 +3953,11 @@ impl App {
             match &item.data {
                 haarness_protocol::ItemData::UserMessage {
                     text,
+                    command_line,
                     synthetic: false,
                     ..
                 } => {
+                    let text = command_line.as_ref().unwrap_or(text);
                     let _ = write!(out, "## User\n\n{text}\n\n");
                 }
                 haarness_protocol::ItemData::AssistantMessage { text } => {
@@ -5028,13 +5038,12 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
         value: "ultracode".into(),
     });
     entries.push(OptionEntry {
-        label: if app.reasoning {
-            language.text("hide reasoning text").into()
-        } else {
-            language.text("show reasoning text").into()
-        },
+        label: language.format(
+            "Thinking display: {mode}",
+            &[("mode", app.thinking.label(language))],
+        ),
         description: language
-            .text("Toggle the thinking display in the transcript")
+            .text("Compact, Show or Hide · Enter or Ctrl+T switches")
             .into(),
         value: "display".into(),
     });

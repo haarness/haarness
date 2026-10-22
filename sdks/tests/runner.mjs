@@ -36,6 +36,10 @@ try {
         socket.send({type: "ping"});
         if ((await iterator.next()).value.type !== "pong") throw new Error("Extension ping failed");
       }
+      else if (name === "btw_stream") {
+        value = [];
+        for await (const event of client.btwStream(args[0], args[1])) value.push(event);
+      }
       else if (name === "events") {
         value = [];
         const abort = new AbortController();

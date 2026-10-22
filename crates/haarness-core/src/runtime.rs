@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use haarness_protocol::tokens::{self, Tokenizer};
 use haarness_protocol::{
-    BackgroundTaskInfo, BtwRequest, BtwResponse, CompactRequest, CreateThreadRequest,
+    BackgroundTaskInfo, BtwEvent, BtwRequest, BtwResponse, CompactRequest, CreateThreadRequest,
     ForkThreadRequest, GoalActionRequest, GoalActionResponse, GoalCompletion, GoalLogicalTurnEvent,
     GoalLogicalTurnPhase, GoalState, GoalStatus, GoalUpdateRequest, GoalUpdatedEvent, GoalVerdict,
     Item, ItemData, ItemId, PendingPermissionInfo, PendingQuestionInfo, PermissionReply,
@@ -37,7 +37,7 @@ use crate::{
     CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionEngine,
     PermissionRule, ProviderEvent, ProviderMessage, ProviderRegistry, ProviderRequest,
     RuntimeConfig, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput,
-    ToolRegistry, system_prompt_for, system_prompt_with_context,
+    ToolRegistry,
 };
 
 const MAX_COMPACTIONS_PER_TURN: u8 = 4;
@@ -627,6 +627,62 @@ fn parse_goal_criteria_selection(proposed: &[String], answer: &str) -> CoreResul
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect())
+}
+
+/// The `StopFailure` categories of a turn's terminal error: `error`, as hook
+/// scripts and extensions have always read it (every provider error is
+/// `provider`), and `error_type`, which names a provider error for what its
+/// message says happened, as Claude Code names it (`unknown` when Haarness
+/// recognises nothing, and for any other failure).
+fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
+    let CoreError::Provider(message) = error else {
+        return match error {
+            CoreError::ProviderIncomplete(_) => ("incomplete", "incomplete"),
+            CoreError::ProviderBlocked(_) => ("content_filter", "content_filter"),
+            CoreError::Tool(_) => ("tool", "tool"),
+            _ => ("other", "unknown"),
+        };
+    };
+    let lower = message.to_ascii_lowercase();
+    let status = http_status(&lower);
+    let kind = if matches!(status, Some(401 | 403))
+        || [
+            "unauthorized",
+            "authentication_error",
+            "invalid_api_key",
+            "api key is not configured",
+            "api_key is not configured",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        "authentication_failed"
+    } else if is_provider_usage_limit(error) {
+        "rate_limit"
+    } else if status == Some(529) || lower.contains("overloaded") || lower.contains("high demand") {
+        "overloaded"
+    } else if status.is_some_and(|status| (500..600).contains(&status)) {
+        "server_error"
+    } else if is_provider_context_overflow(error)
+        || status.is_some_and(|status| (400..500).contains(&status))
+    {
+        "invalid_request"
+    } else {
+        "unknown"
+    };
+    ("provider", kind)
+}
+
+/// The HTTP status a provider error names (`HTTP 429 Too Many Requests`,
+/// `status 503`), already in lower case.
+fn http_status(lower: &str) -> Option<u16> {
+    ["http ", "status "].iter().find_map(|marker| {
+        lower.match_indices(marker).find_map(|(at, _)| {
+            let rest = &lower[at + marker.len()..];
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            (digits == 3).then(|| rest[..3].parse().ok()).flatten()
+        })
+    })
 }
 
 fn is_provider_usage_limit(error: &CoreError) -> bool {
@@ -2156,6 +2212,7 @@ impl AgentRuntime {
                     attachments: request.attachments.clone(),
                     queued: true,
                     synthetic: request.synthetic,
+                    command_line: None,
                 },
             )
             .await?;
@@ -2406,9 +2463,57 @@ impl AgentRuntime {
     /// Schemas are context only: this path never invokes tools, hooks, or writes
     /// transcript/usage/turn records. Cold sessions use current stable context.
     pub async fn btw(&self, thread_id: ThreadId, request: BtwRequest) -> CoreResult<BtwResponse> {
+        self.btw_streaming(thread_id, request, CancellationToken::new(), |_| {})
+            .await
+    }
+
+    /// Whether a side question can be asked: the chat exists, the question is
+    /// not empty, and its side chat's earlier questions are whole. A streamed
+    /// question checks this before its response starts, so a bad request is
+    /// an HTTP error rather than an error event.
+    pub async fn check_btw(&self, thread_id: ThreadId, request: &BtwRequest) -> CoreResult<()> {
         if request.question.trim().is_empty() {
             return Err(CoreError::Invalid("btw question is required".into()));
         }
+        if request.history.len() > haarness_protocol::BTW_HISTORY_LIMIT {
+            return Err(CoreError::Invalid(format!(
+                "a side question carries at most {} earlier questions",
+                haarness_protocol::BTW_HISTORY_LIMIT
+            )));
+        }
+        if request
+            .history
+            .iter()
+            .any(|turn| turn.question.trim().is_empty() || turn.answer.trim().is_empty())
+        {
+            return Err(CoreError::Invalid(
+                "each earlier side question needs its question and answer".into(),
+            ));
+        }
+        let size: usize = request
+            .history
+            .iter()
+            .map(|turn| turn.question.len() + turn.answer.len())
+            .sum();
+        if size > haarness_protocol::BTW_HISTORY_BYTES {
+            return Err(CoreError::Invalid(
+                "this side chat's earlier questions and answers are larger than 1 MiB; start a new side chat".into(),
+            ));
+        }
+        self.repository.get_thread(thread_id).await.map(|_| ())
+    }
+
+    /// [`Self::btw`], telling `progress` the answer as it is written: `delta`
+    /// events that add up to it, and an empty `text` when an attempt after a
+    /// refused tool call starts it over. `cancel` ends the provider request.
+    pub async fn btw_streaming(
+        &self,
+        thread_id: ThreadId,
+        request: BtwRequest,
+        cancel: CancellationToken,
+        mut progress: impl FnMut(BtwEvent) + Send,
+    ) -> CoreResult<BtwResponse> {
+        self.check_btw(thread_id, &request).await?;
         let components = self.components();
         let thread = self.repository.get_thread(thread_id).await?;
         let mut items = self.repository.list_items(thread_id, None).await?;
@@ -2447,7 +2552,12 @@ impl AgentRuntime {
                 output_style: components.config.output_style.as_ref(),
             };
             let base = custom.as_ref().map_or_else(
-                || system_prompt_with_context(&thread.agent, &context),
+                || {
+                    crate::agents::instructions_with_context(
+                        &components.config.prompts.agent(&thread.agent),
+                        &context,
+                    )
+                },
                 |custom| custom_system_prompt_with_context(&custom.prompt, &context),
             );
             let ultracode = if let Some(turn) = turn_id {
@@ -2455,8 +2565,14 @@ impl AgentRuntime {
             } else {
                 false
             };
-            let mut system =
-                crate::side_question::system(base, &components.project_context, ultracode, false);
+            let ultracode =
+                ultracode.then(|| components.config.prompts.text(crate::PromptName::Ultracode));
+            let mut system = crate::side_question::system(
+                base,
+                &components.project_context,
+                ultracode.as_deref(),
+                false,
+            );
             let mut engine = components.config.permission_defaults(&thread.agent, "");
             for rule in self.repository_rules.lock().iter().cloned() {
                 engine.add_repository_grant(rule);
@@ -2532,22 +2648,38 @@ impl AgentRuntime {
             )
         };
         provider.prepare_side_question(&mut prepared);
+        // The side chat goes after the chat's own history, oldest first, and
+        // only its first question carries the instructions: a follow-up sends
+        // the previous question's request plus its answer and the new
+        // question, so it reads back what the previous one wrote.
+        for (index, turn) in request.history.iter().enumerate() {
+            prepared.messages.push(ProviderMessage::Text {
+                role: "user".into(),
+                content: crate::side_question::prompt(&turn.question, index == 0),
+            });
+            prepared.messages.push(ProviderMessage::Text {
+                role: "assistant".into(),
+                content: turn.answer.trim().to_owned(),
+            });
+        }
         prepared.messages.push(ProviderMessage::Text {
             role: "user".into(),
-            content: format!(
-                "<btw-side-question>\n{}\n</btw-side-question>\n\nAnswer using the supplied conversation snapshot. This is an isolated read-only side question. Tool schemas describe the main task but every tool call here is refused. Do not invoke tools or continue the main task. Return only the concise answer.",
-                request.question.trim()
-            ),
+            content: crate::side_question::prompt(&request.question, request.history.is_empty()),
         });
         let mut input_tokens = 0_u64;
         let mut output_tokens = 0_u64;
         // Some models call a schema even after being told it is read-only.
         // Return local refusals and allow a bounded text-only recovery; never
         // resolve a live executor or persist these synthetic exchanges.
-        for _ in 0..3 {
-            let mut stream = provider
-                .stream(prepared.clone(), CancellationToken::new())
-                .await?;
+        for attempt in 0..3 {
+            let mut stream = provider.stream(prepared.clone(), cancel.clone()).await?;
+            // An attempt after refused tool calls answers from scratch, so
+            // whatever the previous one wrote before its calls is taken back.
+            if attempt > 0 {
+                progress(BtwEvent::Text {
+                    text: String::new(),
+                });
+            }
             let mut answer = String::new();
             let mut calls = Vec::new();
             let mut finished = false;
@@ -2555,9 +2687,19 @@ impl AgentRuntime {
             // every chunk, Anthropic at start and end): the last report is the
             // request's; only separate attempts add up.
             let mut attempt_usage = (0_u64, 0_u64);
-            while let Some(event) = stream.next().await {
+            loop {
+                let event = tokio::select! {
+                    () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                    event = stream.next() => event,
+                };
+                let Some(event) = event else { break };
                 match event? {
-                    ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
+                    ProviderEvent::TextDelta(delta) => {
+                        answer.push_str(&delta);
+                        if !delta.is_empty() {
+                            progress(BtwEvent::Delta { text: delta });
+                        }
+                    }
                     ProviderEvent::ReasoningDelta(_) | ProviderEvent::ContentStarted => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;
@@ -2838,6 +2980,7 @@ impl AgentRuntime {
                                 attachments: Vec::new(),
                                 queued: false,
                                 synthetic: true,
+                                command_line: None,
                             },
                             ItemData::Error {
                                 message: notice,
@@ -3157,6 +3300,10 @@ impl AgentRuntime {
         let summary = summarize_context(
             &provider,
             &thread.model,
+            self.components()
+                .config
+                .prompts
+                .text(crate::PromptName::Compaction),
             provider_messages(items.clone()),
             CancellationToken::new(),
         )
@@ -3872,6 +4019,22 @@ impl AgentRuntime {
         arguments = tool
             .prepare_arguments(arguments, thread_id, cancel.clone())
             .await?;
+        if is_resource_tool(name) {
+            let custom = self.custom_agent(&thread.agent);
+            arguments = scope_resource_arguments(
+                arguments,
+                components.tools.resource_servers(),
+                |tools| {
+                    !workspace_tool_enabled(
+                        &components.config.tool_availability,
+                        &self.tool_availability,
+                        tools,
+                    ) || custom.as_ref().is_some_and(|custom| {
+                        crate::definitions::tool_override(&custom.tools, tools) == Some(false)
+                    }) || engine.disables_tool(tools)
+                },
+            )?;
+        }
         let confirmed_revert = self.repository.confirm_revert(thread_id).await?;
         let thread = if confirmed_revert {
             self.repository.get_thread(thread_id).await?
@@ -4394,24 +4557,7 @@ impl AgentRuntime {
                 if !matches!(decision, PermissionReplyDecision::AlwaysRepository) {
                     self.session_rules.lock().extend(rules.iter().cloned());
                 }
-                // Any other pending prompt now covered by the new rules
-                // resolves immediately — three parallel children asking for
-                // the same command need one answer, not three.
-                let covered: Vec<String> = self
-                    .permissions
-                    .iter()
-                    .filter(|entry| entry.value().covered_by(&rules))
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                for other in covered {
-                    if let Some((_, other_pending)) = self.permissions.remove(&other) {
-                        self.publish_permission_resolved(&other, &other_pending, true);
-                        let _ = other_pending.sender.send(PermissionResolution {
-                            allowed: true,
-                            feedback: None,
-                        });
-                    }
-                }
+                release_covered_permissions(&self.permissions, &self.events, &rules);
                 true
             }
             PermissionReplyDecision::Reject => false,
@@ -4529,18 +4675,7 @@ impl AgentRuntime {
     /// covering identical siblings, Reject clearing a root) would otherwise
     /// leave stale prompts in client state.
     fn publish_permission_resolved(&self, id: &str, pending: &PendingPermission, allowed: bool) {
-        self.events.publish_scoped(
-            "permission.resolved",
-            Some(pending.thread_id),
-            Some(pending.root_thread_id),
-            pending.turn_id,
-            None,
-            json!({
-                "permissionId": id,
-                "allowed": allowed,
-                "operation": pending.operation,
-            }),
-        );
+        publish_permission_resolved(&self.events, id, pending, allowed);
     }
     pub fn reply_question(&self, id: &str, reply: QuestionReply) -> CoreResult<()> {
         // Registration inserts the REST-visible entry and publishes
@@ -4900,6 +5035,9 @@ impl AgentRuntime {
         // command template cannot activate Ultracode accidentally.
         let keyword_ultracode = !request.synthetic && detects_ultracode_keyword(&request.text);
         let mut prepared_command = None;
+        // The store keeps the line a command was typed as; the runner
+        // expands the command itself, so it no longer travels on `request`.
+        let typed_command = request.command.clone();
         if let Some(name) = request.command.take() {
             let command = self
                 .live_commands
@@ -5014,14 +5152,16 @@ impl AgentRuntime {
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
+        let stored = StartTurnRequest {
+            command: typed_command,
+            ..request.clone()
+        };
         let (turn, user_item, created) = if let Some(revision) = queue_revision {
             self.repository
-                .start_queued_turn(thread_id, request.clone(), revision)
+                .start_queued_turn(thread_id, stored, revision)
                 .await?
         } else {
-            self.repository
-                .start_turn(thread_id, request.clone())
-                .await?
+            self.repository.start_turn(thread_id, stored).await?
         };
         if !created {
             return Ok(turn);
@@ -5337,6 +5477,7 @@ impl AgentRuntime {
             .and_then(|agent| agent.model)
             .or_else(|| components.config.small_model.clone());
         let fallback = (turn.provider.clone(), turn.model.clone());
+        let title_prompt = components.config.prompts.text(crate::PromptName::Title);
         tokio::spawn(
             async move {
                 let guard = job;
@@ -5354,6 +5495,7 @@ impl AgentRuntime {
                         guard.thread_id,
                         small_model.clone(),
                         fallback.clone(),
+                        &title_prompt,
                     )
                     .await
                     {
@@ -5999,6 +6141,51 @@ impl PendingQuestion {
     }
 }
 
+/// See [`AgentRuntime::publish_permission_resolved`].
+fn publish_permission_resolved(
+    events: &EventBus,
+    id: &str,
+    pending: &PendingPermission,
+    allowed: bool,
+) {
+    events.publish_scoped(
+        "permission.resolved",
+        Some(pending.thread_id),
+        Some(pending.root_thread_id),
+        pending.turn_id,
+        None,
+        json!({
+            "permissionId": id,
+            "allowed": allowed,
+            "operation": pending.operation,
+        }),
+    );
+}
+
+/// Allows every waiting prompt that newly remembered `rules` cover, at once:
+/// three parallel children asking for the same command need one answer, not
+/// three.
+fn release_covered_permissions(
+    permissions: &DashMap<String, PendingPermission>,
+    events: &EventBus,
+    rules: &[PermissionRule],
+) {
+    let covered: Vec<String> = permissions
+        .iter()
+        .filter(|entry| entry.value().covered_by(rules))
+        .map(|entry| entry.key().clone())
+        .collect();
+    for other in covered {
+        if let Some((_, pending)) = permissions.remove(&other) {
+            publish_permission_resolved(events, &other, &pending, true);
+            let _ = pending.sender.send(PermissionResolution {
+                allowed: true,
+                feedback: None,
+            });
+        }
+    }
+}
+
 fn resolve_pending_question(
     questions: &DashMap<String, PendingQuestion>,
     question_events: &Mutex<()>,
@@ -6021,6 +6208,51 @@ struct QuestionRequest<'a> {
     choices: Vec<String>,
     multiple: bool,
     custom: bool,
+}
+
+/// A hook's `answers` to one question, as a person's reply reads: the
+/// choices or text it gives, joined with ", " as Desktop joins the answers to
+/// a question that takes several. A question call asks one question, so
+/// `answers` is one list per question (`[["Blue"]]`), the question's answers
+/// (`["Blue"]`) or an object keyed by the question's text (`{"Which color?":
+/// "Blue"}`, several comma-separated). `None` when it does not fit: no
+/// answer, several for a question that takes one, or one that is not a
+/// choice of a question that takes no typed answer.
+fn hook_question_answer(
+    request: &QuestionRequest<'_>,
+    answers: &serde_json::Value,
+) -> Option<String> {
+    let texts = |value: &serde_json::Value| -> Option<Vec<String>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|answer| answer.as_str().map(str::to_owned))
+            .collect()
+    };
+    let given = match answers {
+        serde_json::Value::Array(lists) if lists.len() == 1 && lists[0].is_array() => {
+            texts(&lists[0])?
+        }
+        serde_json::Value::Array(_) => texts(answers)?,
+        serde_json::Value::Object(answers) => match answers.get(request.prompt)? {
+            serde_json::Value::String(text) if request.multiple => {
+                text.split(',').map(str::to_owned).collect()
+            }
+            serde_json::Value::String(text) => vec![text.clone()],
+            list => texts(list)?,
+        },
+        _ => return None,
+    };
+    let given: Vec<String> = given
+        .iter()
+        .map(|answer| answer.trim())
+        .filter(|answer| !answer.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let fits = !given.is_empty()
+        && (request.multiple || given.len() == 1)
+        && (request.custom || given.iter().all(|answer| request.choices.contains(answer)));
+    fits.then(|| given.join(", "))
 }
 
 fn question_request(arguments: &serde_json::Value) -> CoreResult<QuestionRequest<'_>> {
@@ -6340,14 +6572,8 @@ impl RunnerTask {
             && !self.cancel.is_cancelled()
             && let Some(hooks) = &self.hooks
         {
-            let category = match error {
-                CoreError::ProviderIncomplete(_) => "incomplete",
-                CoreError::ProviderBlocked(_) => "content_filter",
-                CoreError::Provider(_) => "provider",
-                CoreError::Tool(_) => "tool",
-                _ => "other",
-            };
-            let detail = json!({"error":category,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            let (category, kind) = stop_failure_categories(error);
+            let detail = json!({"error":category,"error_type":kind,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {},
@@ -6599,6 +6825,7 @@ impl RunnerTask {
         let summary = summarize_context(
             provider,
             model,
+            self.config.prompts.text(crate::PromptName::Compaction),
             provider_messages(items.clone()),
             self.cancel.clone(),
         )
@@ -6900,6 +7127,7 @@ impl RunnerTask {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: true,
+                    command_line: None,
                 })
                 .await?;
             }
@@ -6984,6 +7212,7 @@ impl RunnerTask {
                         let summary = summarize_context(
                             &provider,
                             &model,
+                            self.config.prompts.text(crate::PromptName::Compaction),
                             provider_messages(items),
                             self.cancel.clone(),
                         )
@@ -7117,7 +7346,10 @@ impl RunnerTask {
                 if let Some(state) = &goal_for_request
                     && self.accounted_goal_id().as_deref() == Some(state.goal_id.as_str())
                 {
-                    let doctrine = crate::goal::goal_continuation_prompt(state);
+                    let doctrine = crate::goal::goal_continuation_prompt(
+                        state,
+                        &self.config.prompts.text(crate::PromptName::Goal),
+                    );
                     inject_goal_doctrine(&mut messages, &doctrine, goal_doctrine_insert_at);
                 }
                 for item_id in consumed_now {
@@ -7140,8 +7372,8 @@ impl RunnerTask {
                         },
                     )
                 } else {
-                    system_prompt_with_context(
-                        agent,
+                    crate::agents::instructions_with_context(
+                        &self.config.prompts.agent(agent),
                         &SystemPromptContext {
                             provider: provider_id,
                             model: &model,
@@ -7152,10 +7384,14 @@ impl RunnerTask {
                         },
                     )
                 };
+                let ultracode = self
+                    .turn
+                    .ultracode
+                    .then(|| self.config.prompts.text(crate::PromptName::Ultracode));
                 let mut system = crate::side_question::system(
                     base,
                     &self.project_context,
-                    self.turn.ultracode,
+                    ultracode.as_deref(),
                     self.output_schema.is_some(),
                 );
                 let tool_round_limit_reached = max_rounds.is_some_and(|limit| tool_rounds >= limit);
@@ -7164,7 +7400,7 @@ impl RunnerTask {
                     // prefill, which Claude 4.6 and later answer with a 400.
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
-                        content: "The configured maximum number of tool steps has been reached. Tools are disabled for this response. Summarize the work completed, explain anything unfinished, and respond to the user without calling tools.".into(),
+                        content: self.config.prompts.text(crate::PromptName::MaxSteps),
                     });
                 }
                 // Apply disabled-tool filtering before the
@@ -7180,6 +7416,12 @@ impl RunnerTask {
                 // refused when called, naming the parent's rule.
                 let permission_engine = self.permission_engine(agent);
                 let catalog = self.tools.list();
+                // The resource tools reach only servers whose tools this
+                // agent may have; with none left they would only fail.
+                let resources_open = self.tools.resource_servers().iter().any(|server| {
+                    let tools = mcp_server_tools(server);
+                    self.tool_enabled(&tools) && !permission_engine.hides_tool(&tools)
+                });
                 let eligible_tools = catalog
                     .clone()
                     .into_iter()
@@ -7189,12 +7431,17 @@ impl RunnerTask {
                                 && tool.name == "task")
                             && !permission_engine.hides_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
+                            && (resources_open || !is_resource_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
                 if !tool_round_limit_reached
                     && eligible_tools.iter().any(|tool| tool.name == "preview")
                 {
-                    system.push_str(include_str!("preview.txt"));
+                    // A line break before and after, as the built-in
+                    // section has always been sent.
+                    system.push('\n');
+                    system.push_str(&self.config.prompts.text(crate::PromptName::Preview));
+                    system.push('\n');
                 }
                 let mut lazy_settings = self.config.lazy_tools.clone();
                 if let Some(mode) = *self.lazy_tool_mode.read() {
@@ -7320,6 +7567,9 @@ impl RunnerTask {
                 // as it is sent; a retry starts its own.
                 let mut clock =
                     crate::stream_clock::StreamClock::start(tokio::time::Instant::now().into_std());
+                // Where the reasoning being streamed began: the request, or
+                // the text or tool call that came before it in this round.
+                let mut thought_from = std::time::Instant::now();
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -7461,7 +7711,10 @@ impl RunnerTask {
                             // before publication. Otherwise reasoning/tool items
                             // are appended immediately while all prose is held
                             // until the end, reversing the visible transcript.
-                            self.flush_reasoning_segment(&mut reasoning).await?;
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
+                            // Reasoning after this text begins where it ends.
+                            thought_from = std::time::Instant::now();
                             streamed.push_str(&delta);
                             text.push_str(&delta);
                             self.set_status("responding", None);
@@ -7512,7 +7765,8 @@ impl RunnerTask {
                                 ));
                                 break;
                             }
-                            self.flush_reasoning_segment(&mut reasoning).await?;
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
                             if self.output_schema.is_none() {
                                 self.flush_assistant_segment(
                                     &mut text,
@@ -7520,6 +7774,7 @@ impl RunnerTask {
                                 )
                                 .await?;
                             }
+                            thought_from = std::time::Instant::now();
                             self.publish_item(ItemData::ToolCall {
                                 call_id: call_id.clone(),
                                 name: name.clone(),
@@ -7599,7 +7854,8 @@ impl RunnerTask {
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
-                self.flush_reasoning_segment(&mut reasoning).await?;
+                self.flush_reasoning_segment(&mut reasoning, thought_from)
+                    .await?;
                 if blocked.is_some() {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                         .await?;
@@ -7648,6 +7904,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             queued: false,
                             synthetic: true,
+                            command_line: None,
                         })
                         .await?;
                         continue 'provider_round;
@@ -8143,12 +8400,18 @@ impl RunnerTask {
         Ok(())
     }
 
-    async fn flush_reasoning_segment(&self, reasoning: &mut String) -> CoreResult<()> {
+    /// Persist the reasoning streamed since `started`, with how long it took.
+    async fn flush_reasoning_segment(
+        &self,
+        reasoning: &mut String,
+        started: std::time::Instant,
+    ) -> CoreResult<()> {
         if reasoning.is_empty() {
             return Ok(());
         }
         self.publish_item(ItemData::Reasoning {
             text: std::mem::take(reasoning),
+            duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         })
         .await?;
         Ok(())
@@ -8685,14 +8948,7 @@ impl RunnerTask {
             let _ = self.promote_tools([name.to_owned()]);
         }
         if name == "question" {
-            let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
-            let _execution_authority = execution_gate.read().await;
-            if !self.tool_enabled(name) {
-                return Err(CoreError::PermissionDenied(format!(
-                    "tool {name} was disabled by workspace tool availability before execution"
-                )));
-            }
-            return self.ask_question(&arguments).await.map(plain_tool_output);
+            return self.question_call(call_id, arguments).await;
         }
         if name == "task" {
             let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
@@ -8794,6 +9050,13 @@ impl RunnerTask {
             arguments = tool
                 .prepare_arguments(arguments, self.thread.id, self.cancel.clone())
                 .await?;
+        }
+        if is_resource_tool(name) {
+            let engine = self.permission_engine(agent);
+            arguments =
+                scope_resource_arguments(arguments, self.tools.resource_servers(), |tools| {
+                    !self.tool_enabled(tools) || engine.disables_tool(tools)
+                })?;
         }
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
@@ -9112,20 +9375,34 @@ impl RunnerTask {
             });
         }
         if let Some(hooks) = &self.hooks {
-            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, detail).await {
+            // A hook answers Always only where a person's Always would be
+            // offered and kept: not for a request only a person answers, not
+            // in a run nobody watches (which records nothing), and not in a
+            // chat in Auto, which approves once and records nothing either.
+            let always = (!forced
+                && !explicit
+                && !self.unattended
+                && hook_may_remember(plan)
+                && !self.approval_modes.is_auto(self.thread.id).await)
+                .then_some(plan.always.as_slice());
+            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, always, detail).await
+            {
                 HookAnswer::Refused(feedback) => {
                     return Ok(PermissionResolution {
                         allowed: false,
                         feedback: Some(feedback),
                     });
                 }
-                HookAnswer::Allowed if !forced && !explicit => {
+                HookAnswer::Allowed { always } if !forced && !explicit => {
+                    if always {
+                        self.remember_hook_always(&operation, &always_rules);
+                    }
                     return Ok(PermissionResolution {
                         allowed: true,
                         feedback: None,
                     });
                 }
-                HookAnswer::Allowed | HookAnswer::Open => {}
+                HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
@@ -9271,6 +9548,27 @@ impl RunnerTask {
         self.publish_task_update("running");
         resolution
     }
+    /// A `PermissionRequest` hook answered Always: remember what Always in
+    /// the prompt remembers (the request's "always" rules, for every chat on
+    /// this server until it stops), and allow the prompts they now cover.
+    fn remember_hook_always(&self, operation: &str, always_rules: &[String]) {
+        let rules: Vec<PermissionRule> = always_rules
+            .iter()
+            .map(|pattern| PermissionRule {
+                pattern: pattern.clone(),
+                decision: PermissionDecision::Allow,
+            })
+            .collect();
+        self.session_rules.lock().extend(rules.iter().cloned());
+        release_covered_permissions(&self.permissions, &self.events, &rules);
+        tracing::info!(
+            thread = %self.thread.id,
+            operation = %operation_for_log(operation),
+            rules = always_rules.len(),
+            "approved always by a PermissionRequest hook"
+        );
+    }
+
     /// Record this turn's pre-image immediately before its first approved side
     /// effect. Snapshot failures are fail-closed: running the tool without a
     /// trustworthy pre-image would make a later `/undo` actively misleading.
@@ -9402,6 +9700,96 @@ impl RunnerTask {
         );
         Ok(format!("Todo list updated ({count} items)"))
     }
+    /// The question tool. Hooks run as for other tools: a `PreToolUse` hook
+    /// first, which may block the question, or answer it with `answers` in
+    /// its `updatedInput`, and then nobody is asked and the result records
+    /// that the hook answered (`answeredBy: "hook"`); a `PostToolUse` hook
+    /// after it is answered, with the answer as its output.
+    async fn question_call(
+        &self,
+        call_id: &str,
+        mut arguments: serde_json::Value,
+    ) -> CoreResult<ToolOutput> {
+        use std::fmt::Write as _;
+        let mut answers = None;
+        let mut hook_context = None;
+        if let Some(hooks) = &self.hooks {
+            self.set_status("tool", Some(("question", call_id)));
+            let decision = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                decision = hooks.pre_tool_use(self.thread.id, "question", &arguments) => decision,
+            };
+            if let Some(reason) = decision.block {
+                return Err(CoreError::PermissionDenied(format!(
+                    "blocked by a PreToolUse hook: {reason}"
+                )));
+            }
+            if decision.permission == Some(PermissionDecision::Deny) {
+                return Err(CoreError::PermissionDenied(
+                    "denied by a PreToolUse hook".into(),
+                ));
+            }
+            hook_context = decision.context;
+            if let Some(mut updated) = decision.updated_input {
+                // Only a hook supplies `answers`; the question's own input,
+                // the one the model writes, has no such field.
+                answers = updated
+                    .as_object_mut()
+                    .and_then(|input| input.remove("answers"));
+                self.validate_tool_arguments("question", &updated)?;
+                arguments = updated;
+            }
+        }
+        let execution_gate = tool_execution_gate(&self.tool_execution_gates, "question");
+        let _execution_authority = execution_gate.read().await;
+        if !self.tool_enabled("question") {
+            return Err(CoreError::PermissionDenied(
+                "tool question was disabled by workspace tool availability before execution".into(),
+            ));
+        }
+        let answered = match &answers {
+            Some(answers) => hook_question_answer(&question_request(&arguments)?, answers),
+            None => None,
+        };
+        let mut output = if let Some(answer) = answered {
+            tracing::info!(thread = %self.thread.id, call_id, "a PreToolUse hook answered a question");
+            ToolOutput {
+                text: answer,
+                metadata: json!({"answeredBy": "hook"}),
+            }
+        } else {
+            if answers.is_some() {
+                tracing::warn!(
+                    thread = %self.thread.id,
+                    call_id,
+                    "a PreToolUse hook's answers do not fit the question; asking instead"
+                );
+            }
+            plain_tool_output(self.ask_question(&arguments).await?)
+        };
+        if let Some(context) = hook_context {
+            let _ = write!(
+                output.text,
+                "\n\n<hook-context>\n{context}\n</hook-context>"
+            );
+        }
+        if let Some(hooks) = &self.hooks {
+            let context = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => None,
+                context = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => context,
+            };
+            if let Some(context) = context {
+                let _ = write!(
+                    output.text,
+                    "\n\n<hook-context>\n{context}\n</hook-context>"
+                );
+            }
+        }
+        Ok(output)
+    }
+
     async fn ask_question(&self, arguments: &serde_json::Value) -> CoreResult<String> {
         let QuestionRequest {
             prompt,
@@ -10230,6 +10618,7 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             attachments: Vec::new(),
             queued: false,
             synthetic: true,
+            command_line: None,
         },
         ItemData::Error {
             message: notice,
@@ -10634,6 +11023,7 @@ async fn auto_title(
     thread_id: ThreadId,
     small_model: Option<String>,
     fallback: (String, String),
+    system: &str,
 ) -> CoreResult<()> {
     if !haarness_protocol::is_untitled_chat_title(&repository.get_thread(thread_id).await?.title) {
         return Ok(());
@@ -10674,13 +11064,14 @@ async fn auto_title(
     }];
     let mut failure = CoreError::Provider("title generation returned no text".into());
     for (provider_id, model) in models {
-        let title = match generate_title(providers, &provider_id, model, messages.clone()).await {
-            Ok(title) => title,
-            Err(error) => {
-                failure = error;
-                continue;
-            }
-        };
+        let title =
+            match generate_title(providers, &provider_id, model, system, messages.clone()).await {
+                Ok(title) => title,
+                Err(error) => {
+                    failure = error;
+                    continue;
+                }
+            };
         if let Some(thread) = repository
             .update_generated_title(thread_id, haarness_protocol::UNTITLED_CHAT_TITLE, &title)
             .await?
@@ -10696,6 +11087,7 @@ async fn generate_title(
     providers: &Arc<dyn ProviderRegistry>,
     provider_id: &str,
     model: String,
+    system: &str,
     messages: Vec<ProviderMessage>,
 ) -> CoreResult<String> {
     let provider = providers
@@ -10703,7 +11095,7 @@ async fn generate_title(
         .ok_or_else(|| CoreError::Invalid(format!("unknown provider {provider_id}")))?;
     let request = ProviderRequest {
         model,
-        system: system_prompt_for("title"),
+        system: system.to_owned(),
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
@@ -10786,6 +11178,7 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                 attachments,
                 queued,
                 synthetic,
+                ..
             } => {
                 // A user-authored message queued while the turn was already
                 // running is live steering input. Synthetic runtime delivery
@@ -11053,6 +11446,7 @@ fn compaction_message(message: ProviderMessage) -> ProviderMessage {
 async fn summarize_context(
     provider: &Arc<dyn ModelProvider>,
     model: &str,
+    system: String,
     messages: Vec<ProviderMessage>,
     cancel: CancellationToken,
 ) -> CoreResult<String> {
@@ -11071,7 +11465,7 @@ async fn summarize_context(
     });
     let request = ProviderRequest {
         model: model.to_owned(),
-        system: system_prompt_for("compaction"),
+        system,
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
@@ -11579,7 +11973,11 @@ impl AskPlan {
 /// What `PermissionRequest` hooks and `permission.ask` extensions said about
 /// one prompt.
 enum HookAnswer {
-    Allowed,
+    /// Allowed, and with `always` remembered as Always in the prompt
+    /// remembers it.
+    Allowed {
+        always: bool,
+    },
     Refused(String),
     Open,
 }
@@ -11590,11 +11988,13 @@ enum HookAnswer {
 /// leads is asked about alone, with the arguments' path replaced by it: the
 /// hook would otherwise judge the link it was given (`notes.txt`) and answer
 /// for the file it opens (`.env`). Any refusal refuses the prompt; the hooks
-/// answer it only when every call allowed.
+/// answer it only when every call allowed, and answer Always only when every
+/// call did and `always` offered it.
 async fn permission_hook_answer(
     hooks: &dyn crate::HookPort,
     thread: ThreadId,
     plan: &AskPlan,
+    always: Option<&[String]>,
     detail: &serde_json::Value,
 ) -> HookAnswer {
     let own: Vec<String> = plan
@@ -11611,10 +12011,12 @@ async fn permission_hook_answer(
         calls.push((vec![pattern.clone()], with_target_path(detail, path)));
     }
     let mut allowed = !calls.is_empty();
+    let mut remembered = always.is_some();
     for (patterns, input) in calls {
         let decision = hooks
-            .permission_request(thread, &plan.permission, &patterns, &input)
+            .permission_request(thread, &plan.permission, &patterns, always, &input)
             .await;
+        remembered &= decision.always;
         if let Some(reason) = decision.block {
             return HookAnswer::Refused(reason);
         }
@@ -11643,10 +12045,21 @@ async fn permission_hook_answer(
         }
     }
     if allowed {
-        HookAnswer::Allowed
+        HookAnswer::Allowed { always: remembered }
     } else {
         HookAnswer::Open
     }
+}
+
+/// Whether a hook may answer Always for `plan`: it remembers the plan's
+/// "always" patterns, and never a site rule (the built-in browser's or
+/// Chrome's), which only a person makes last.
+fn hook_may_remember(plan: &AskPlan) -> bool {
+    !plan.always.is_empty()
+        && !matches!(
+            plan.permission.as_str(),
+            "browser" | "browser_site" | "multiple"
+        )
 }
 
 /// Tool arguments with the file path they name replaced by `path`, as a
@@ -11899,6 +12312,40 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         return plans;
     }
 
+    if matches!(name, "mcp_resource_list" | "mcp_resource_read") {
+        let servers: Vec<String> = match arguments["server"].as_str() {
+            Some(server) => vec![server.to_owned()],
+            // A listing of every server names them before it is asked about.
+            None => arguments["__servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        };
+        let servers: Vec<String> = servers
+            .iter()
+            .map(|server| resource_server_pattern(server))
+            .collect();
+        let (patterns, always) = if name == "mcp_resource_read" {
+            let server = servers.first().cloned().unwrap_or_default();
+            let uri = arguments["uri"].as_str().unwrap_or_default();
+            (vec![format!("{server}:{uri}")], vec![format!("{server}:*")])
+        } else if servers.is_empty() {
+            (vec!["*".into()], vec!["*".into()])
+        } else {
+            (servers.clone(), servers)
+        };
+        return vec![AskPlan {
+            permission: name.into(),
+            patterns,
+            always,
+            external_paths: Vec::new(),
+            resolved: Vec::new(),
+            shell: None,
+        }];
+    }
     if matches!(name, "image_generate" | "video_generate") {
         let kind = if name == "image_generate" {
             "image"
@@ -12132,6 +12579,60 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         shell: None,
     });
     plans
+}
+
+/// Whether `name` is one of the model's MCP resource tools.
+fn is_resource_tool(name: &str) -> bool {
+    matches!(name, "mcp_resource_list" | "mcp_resource_read")
+}
+
+/// The name every tool of MCP server `server` matches, as rules and tool
+/// settings that cover all of them are written (`mcp__docs__*`).
+fn mcp_server_tools(server: &str) -> String {
+    format!("mcp__{server}__*")
+}
+
+/// A resource tool's arguments with the servers it may reach (`__servers`).
+/// A rule or setting that takes every tool of a server away (`closed` for
+/// [`mcp_server_tools`]) keeps that server's resources from the model too:
+/// a listing leaves it out without asking, and a call that names it is
+/// refused.
+fn scope_resource_arguments(
+    mut arguments: serde_json::Value,
+    servers: Vec<String>,
+    closed: impl Fn(&str) -> bool,
+) -> CoreResult<serde_json::Value> {
+    if let Some(server) = arguments.get("server").and_then(serde_json::Value::as_str)
+        && closed(&mcp_server_tools(server))
+    {
+        return Err(CoreError::PermissionDenied(format!(
+            "MCP server \"{server}\" is turned off for this chat by a rule or tool setting that covers all of its tools, and so are its resources. This is configured policy — do not retry this action."
+        )));
+    }
+    let open: Vec<String> = servers
+        .into_iter()
+        .filter(|server| !closed(&mcp_server_tools(server)))
+        .collect();
+    if let Some(fields) = arguments.as_object_mut() {
+        fields.insert("__servers".into(), json!(open));
+    }
+    Ok(arguments)
+}
+
+/// An MCP server's name as resource permission patterns spell it: letters,
+/// digits, `.`, `_` and `-` as they are, anything else as `_`, so a server
+/// named `a:b` cannot be reached through a rule `a:*` written for server `a`.
+fn resource_server_pattern(server: &str) -> String {
+    server
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// The address a fetch of `target` reads, written the way rules name it:
@@ -12762,8 +13263,8 @@ mod tests {
 
     use super::{
         CoreError, EventBus, GoalLogicalTurnGuard, Item, ItemData, PendingQuestion,
-        ProviderMessage, parse_goal_criteria_selection, provider_messages, question_request,
-        resolve_pending_question, subagent_title,
+        ProviderMessage, hook_question_answer, parse_goal_criteria_selection, provider_messages,
+        question_request, resolve_pending_question, subagent_title,
     };
 
     #[test]
@@ -12841,6 +13342,98 @@ mod tests {
             question_request(&json!({"choices": ["Green"]})),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn stop_failure_categories_name_what_happened() {
+        let provider =
+            |message: &str| super::stop_failure_categories(&CoreError::Provider(message.into()));
+        // `error` stays what it always was; `error_type` says what happened.
+        for (message, kind) in [
+            (
+                "HTTP 401 Unauthorized: invalid x-api-key",
+                "authentication_failed",
+            ),
+            ("HTTP 403 Forbidden", "authentication_failed"),
+            ("openai api_key is not configured", "authentication_failed"),
+            ("HTTP 429 Too Many Requests: rate limit", "rate_limit"),
+            ("[insufficient_quota] You exceeded your quota", "rate_limit"),
+            ("HTTP 529: Overloaded", "overloaded"),
+            ("This model is experiencing high demand", "overloaded"),
+            ("HTTP 502 Bad Gateway", "server_error"),
+            ("HTTP 400 Bad Request: unknown field", "invalid_request"),
+            ("prompt is too long: 250000 tokens", "invalid_request"),
+            ("provider ended the response with an error", "unknown"),
+            ("HTTP 4000 nonsense", "unknown"),
+        ] {
+            assert_eq!(provider(message), ("provider", kind), "{message}");
+        }
+        let other = |error: CoreError| super::stop_failure_categories(&error);
+        assert_eq!(
+            other(CoreError::ProviderIncomplete("length".into())),
+            ("incomplete", "incomplete")
+        );
+        assert_eq!(
+            other(CoreError::ProviderBlocked("refusal".into())),
+            ("content_filter", "content_filter")
+        );
+        assert_eq!(other(CoreError::Tool("x".into())), ("tool", "tool"));
+        assert_eq!(other(CoreError::Storage("x".into())), ("other", "unknown"));
+    }
+
+    #[test]
+    fn a_hooks_answers_must_fit_the_question() {
+        let single = json!({"prompt": "Which suite?", "choices": ["Unit tests", "Full suite"]});
+        let single = question_request(&single).unwrap();
+        for answers in [
+            json!([["Unit tests"]]),
+            json!(["Unit tests"]),
+            json!({"Which suite?": "Unit tests"}),
+            json!({"Which suite?": ["Unit tests"]}),
+            json!([[" Unit tests "]]),
+        ] {
+            assert_eq!(
+                hook_question_answer(&single, &answers).as_deref(),
+                Some("Unit tests"),
+                "{answers}"
+            );
+        }
+        // Free-form answers are open unless the question turns them off.
+        assert_eq!(
+            hook_question_answer(&single, &json!([["Only the parser"]])).as_deref(),
+            Some("Only the parser")
+        );
+        for answers in [
+            json!([]),
+            json!([[]]),
+            json!([[""]]),
+            json!([["Unit tests"], ["Full suite"]]),
+            json!(["Unit tests", "Full suite"]),
+            json!([[1]]),
+            json!("Unit tests"),
+            json!({"Another question?": "Unit tests"}),
+            json!(null),
+        ] {
+            assert_eq!(hook_question_answer(&single, &answers), None, "{answers}");
+        }
+        let closed = json!({"prompt": "Color?", "choices": ["Red", "Blue"], "custom": false});
+        let closed = question_request(&closed).unwrap();
+        assert_eq!(hook_question_answer(&closed, &json!([["Green"]])), None);
+        assert_eq!(
+            hook_question_answer(&closed, &json!([["Blue"]])).as_deref(),
+            Some("Blue")
+        );
+        let several =
+            json!({"prompt": "Toppings?", "choices": ["Cheese", "Basil"], "multiple": true});
+        let several = question_request(&several).unwrap();
+        assert_eq!(
+            hook_question_answer(&several, &json!([["Cheese", "Basil"]])).as_deref(),
+            Some("Cheese, Basil")
+        );
+        assert_eq!(
+            hook_question_answer(&several, &json!({"Toppings?": "Cheese, Basil"})).as_deref(),
+            Some("Cheese, Basil")
+        );
     }
 
     #[test]
@@ -13479,6 +14072,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13501,6 +14095,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13526,6 +14121,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13549,6 +14145,7 @@ mod tests {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         };
         let messages = provider_messages(vec![
             item(1, user("read the file")),
@@ -13619,6 +14216,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13634,6 +14232,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13665,6 +14264,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13696,6 +14296,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13715,6 +14316,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13826,6 +14428,7 @@ mod tests {
                 ],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -13850,6 +14453,7 @@ mod tests {
                     attachments: vec![source.clone()],
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -13985,6 +14589,7 @@ mod tests {
                 attachments: vec![shot.into(), screen.into()],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )];
         items.extend(tool_round("call-image", shot).into_iter().map(|mut item| {
@@ -14112,6 +14717,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: true,
+                    command_line: None,
                 },
             ),
             item(
@@ -14121,6 +14727,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -14148,6 +14755,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let messages = provider_messages(vec![
@@ -14191,6 +14799,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let text_queued_id = text_queued.id;
@@ -14202,6 +14811,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             text_queued,
@@ -14247,6 +14857,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let tool_queued_id = tool_queued.id;
@@ -14311,6 +14922,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14335,6 +14947,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ];
@@ -14355,6 +14968,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14378,6 +14992,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ];
@@ -14516,6 +15131,51 @@ mod tests {
             );
             assert!(plans[0].external_paths.is_empty());
         }
+    }
+
+    #[test]
+    fn mcp_resource_permissions_name_the_server_and_its_resource() {
+        let workspace = std::path::Path::new("/workspace");
+        let read = super::ask_plans(
+            "mcp_resource_read",
+            &json!({"server":"docs","uri":"docs://guides/setup"}),
+            workspace,
+        );
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].permission, "mcp_resource_read");
+        assert_eq!(read[0].patterns, vec!["docs:docs://guides/setup"]);
+        // Always allows every resource of that server, and no other.
+        assert_eq!(read[0].always, vec!["docs:*"]);
+        let named = super::ask_plans("mcp_resource_list", &json!({"server":"docs"}), workspace);
+        assert_eq!(named[0].patterns, vec!["docs"]);
+        // A listing of every server is asked about each server it lists.
+        let every = super::ask_plans(
+            "mcp_resource_list",
+            &json!({"__servers":["docs","team notes"]}),
+            workspace,
+        );
+        assert_eq!(every[0].patterns, vec!["docs", "team_notes"]);
+        assert_eq!(every[0].always, vec!["docs", "team_notes"]);
+        // A `:` in a server name cannot reach another server's resources.
+        let tricky = super::ask_plans(
+            "mcp_resource_read",
+            &json!({"server":"docs:private","uri":"x"}),
+            workspace,
+        );
+        assert_eq!(tricky[0].patterns, vec!["docs_private:x"]);
+        let mut engine = crate::permissions::PermissionEngine::build_defaults();
+        engine.add_rule(crate::permissions::PermissionRule {
+            pattern: "mcp_resource_read:docs:*".into(),
+            decision: crate::PermissionDecision::Deny,
+        });
+        assert_eq!(
+            read[0].evaluate(&engine, &read[0].patterns[0]).decision,
+            crate::PermissionDecision::Deny
+        );
+        assert_eq!(
+            tricky[0].evaluate(&engine, &tricky[0].patterns[0]).decision,
+            crate::PermissionDecision::Allow
+        );
     }
 
     #[test]

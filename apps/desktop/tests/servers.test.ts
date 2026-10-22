@@ -7,6 +7,7 @@ import {
   serverAfterRemoval,
   serverKey,
   serverProjects,
+  sortComputers,
 } from "../src/servers";
 import { groupProjects } from "../src/projects";
 import type { Recent } from "../src/shared";
@@ -122,4 +123,42 @@ test("a window leaving a removed project stays on its server while it is listed,
     serverAfterRemoval([localServer, remote, ...cloudServers([])], "cloud::account"),
     "local",
   );
+});
+
+test("each of your other computers is a server of its own, apart from Cloud sessions and saved servers", () => {
+  const project = (host: string, workspace: string): Recent => ({
+    ...local,
+    id: `host:${host}/workspaces/${workspace}`,
+    label: workspace,
+    remote: true,
+    remoteHost: host,
+    remoteWorkspace: workspace,
+    cloudApiUrl: "https://api.example",
+  });
+  const studio = [project("h1", "app"), project("h1", "docs")];
+  const recent = [local, remote, ...studio, project("h2", "app")];
+  assert.equal(serverKey(studio[0]), "host:h1");
+  assert.deepEqual(serverProjects(recent, "host:h1"), studio);
+  assert.deepEqual(cloudServers(recent), []);
+  // A saved computer has no address: migrating keeps it as it is.
+  const saved = [{ id: "host:h1", label: "Studio", host: "h1" }];
+  assert.deepEqual(migrateServers(recent, saved), [
+    ...saved,
+    { id: remote.id, label: "Build server", url: "https://one.example" },
+  ]);
+});
+
+test("your other computers list the connected ones first, by name, then the away ones, last seen first", () => {
+  const computers = [
+    { id: "1", name: "zeta", connected: true },
+    { id: "2", name: "Old box", connected: false, lastSeenAt: "2026-09-01T00:00:00Z" },
+    { id: "3", name: "Alpha", connected: true },
+    { id: "4", name: "Laptop", connected: false, lastSeenAt: "2026-10-21T00:00:00Z" },
+    { id: "5", name: "Never seen", connected: false, lastSeenAt: null },
+  ];
+  assert.deepEqual(
+    sortComputers(computers, "en").map((item) => item.name),
+    ["Alpha", "zeta", "Laptop", "Old box", "Never seen"],
+  );
+  assert.equal(computers[0].name, "zeta", "the list it was given is left alone");
 });

@@ -24,6 +24,8 @@ export interface MenuAction {
   submenu?: MenuAction[];
   /** Starts a new group: a hairline is drawn above this item. */
   divider?: boolean;
+  /** Names the group this item starts, in a quiet caption above it. */
+  heading?: string;
   run?: () => void;
 }
 
@@ -31,6 +33,14 @@ export interface MenuAction {
 const Divider = (props: { when?: boolean }) => (
   <Show when={props.when}>
     <div class="menu-divider" role="separator" />
+  </Show>
+);
+/** A group's name; it is not a choice, so keyboard navigation skips it. */
+const Heading = (props: { text?: string }) => (
+  <Show when={props.text}>
+    <div class="menu-heading" role="presentation">
+      {props.text}
+    </div>
   </Show>
 );
 
@@ -222,6 +232,7 @@ export function MenuButton(props: {
                   fallback={
                     <>
                       <Divider when={item.divider} />
+                      <Heading text={item.heading} />
                       <MenuItem
                         item={item}
                         /* Moving to a sibling folds an open branch, as native

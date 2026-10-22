@@ -55,6 +55,7 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+similar.workspace = true
 strsim = "0.11"
 tokio.workspace = true
 tokio-util.workspace = true

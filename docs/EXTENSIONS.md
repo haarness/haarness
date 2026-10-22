@@ -164,8 +164,8 @@ correspond to runtime lifecycle events; `threadId` stands in for `sessionID`.
 | `chat` | `threadId`, `model`, `system`, `reasoningEffort` | `{context}` appends system context; `{reasoningEffort}` overrides that request's effort |
 | `chat.params` | `threadId`, `model`, `temperature`, `topP`, `topK`, `maxOutputTokens`, `reasoningEffort`, `options` | Sampling limits for this request: `{temperature, topP, topK, maxOutputTokens}` set a value, `null` clears it; `{reasoningEffort}`; `{options}` merges extra JSON body fields into OpenAI-compatible requests |
 | `chat.headers` | `threadId`, `model`, `headers` | `{headers}` adds HTTP headers to the provider request |
-| `tool.before` | `threadId`, `tool`, `arguments` | `{arguments}` replaces input before permission evaluation; `{context}` adds context; `{block}` denies execution |
-| `tool.after` | Same identity/input plus `output`, `isError` | `{context}` adds context to the tool result |
+| `tool.before` | `threadId`, `tool`, `arguments` | `{arguments}` replaces input before permission evaluation; `{context}` adds context; `{block}` denies execution. Runs for the `question` tool too, where `{block}` stops the question and `{arguments}` with `answers` answers it without asking (see [lifecycle hooks](CONFIGURATION-SCOPES.md#lifecycle-hooks)) |
+| `tool.after` | Same identity/input plus `output`, `isError` | `{context}` adds context to the tool result; for `question`, `output` is the answer |
 | `tool.definition` | `toolID`, `description`, `parameters` | `{description}`, `{parameters}` rewrite the model-facing definition of that tool |
 | `permission.ask` | `threadId`, `permission`, `patterns`, `detail` | `{status: "allow" \| "deny" \| "ask"}` answers the prompt before the user sees it; `{reason}` explains a denial |
 | `command.execute.before` | `threadId`, `command`, `arguments` | `{block}` aborts the slash command before its template expands; `{context}` joins the turn's hook context |
@@ -173,7 +173,7 @@ correspond to runtime lifecycle events; `threadId` stands in for `sessionID`.
 | `session.start` | `threadId`, `agent`, `directory` | Observation; no result |
 | `session.end` | `threadId`, `reason`, `directory` | Observation; no result |
 | `session.compacted` | `threadId`, `trigger`, `compaction` | After a committed manual or automatic compaction; no result |
-| `chat.turn.failed` | `threadId`, `turnId`, `detail` | Terminal failure after recovery, excluding cancellation; no result |
+| `chat.turn.failed` | `threadId`, `turnId`, `detail` | Terminal failure after recovery, excluding cancellation; `detail` holds `error` (`incomplete`, `content_filter`, `provider`, `tool` or `other`), `error_type` (what happened, as Claude Code names it: `authentication_failed`, `rate_limit`, `overloaded`, `server_error`, `invalid_request` or `unknown` for a provider error, otherwise the same as `error`, and `unknown` for `other`), `error_details`, `provider_id` and `model_id`; no result |
 | `chat.turn.end` | `threadId`, `turnId`, `agent`, `provider`, `model`, `finishReason` | Observation; no result |
 | `config` | Effective configuration summary (`workspace`, `provider`, `model`, `permission`, `mcp`, `agents`, `commands`, `execution`, …) | Observation; no result |
 | `stop` | `threadId` | Completion notification; no result |

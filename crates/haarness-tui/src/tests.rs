@@ -290,22 +290,18 @@ fn selector_fixture() -> App {
     )
 }
 
-#[tokio::test]
-async fn btw_slash_command_executes_real_http_path_and_renders_result() {
+/// A server that answers each request it accepts with the next of
+/// `responses` (`None` holds the connection open after its head and first
+/// event, until the client goes away) and hands back what it was sent.
+async fn side_chat_server(
+    responses: Vec<Option<String>>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let thread = fixture_thread();
-    let btw_body = serde_json::json!({
-        "answer": "The worker verified the release.",
-        "inputTokens": 11,
-        "outputTokens": 6,
-    })
-    .to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for body in [btw_body] {
+        for response in responses {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
@@ -329,36 +325,261 @@ async fn btw_slash_command_executes_real_http_path_and_renders_result() {
                     break;
                 }
             }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
             requests.push(String::from_utf8(request).unwrap());
+            match response {
+                Some(body) => {
+                    let kind = if body.starts_with('{') {
+                        "application/json"
+                    } else {
+                        "text/event-stream"
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    // The events arrive in pieces, as they are written.
+                    for piece in body.as_bytes().chunks(7) {
+                        socket.write_all(piece).await.unwrap();
+                        socket.flush().await.unwrap();
+                    }
+                }
+                None => {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n: connected\n\ndata: {\"type\":\"delta\",\"text\":\"Half\"}\n\n")
+                        .await
+                        .unwrap();
+                    // Held until the client goes away.
+                    let _ = socket.read(&mut chunk).await;
+                }
+            }
         }
         requests
     });
+    (address, server)
+}
+
+fn side_frame(app: &App) -> String {
+    app.lines((100, 30))
+        .iter()
+        .map(|line| line_text(line) + "\n")
+        .collect()
+}
+
+fn side_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn side_server_info(capabilities: Vec<String>) -> haarness_protocol::ServerInfo {
+    haarness_protocol::ServerInfo {
+        name: "haarness".into(),
+        version: "0.1.0".into(),
+        schema_version: "1".into(),
+        server_instance_id: uuid::Uuid::now_v7(),
+        event_cursor: 0,
+        capabilities,
+        workspace: None,
+        git_branch: None,
+        default_provider: None,
+        default_model: None,
+        default_agent: None,
+        project_trusted: None,
+        pid: None,
+    }
+}
+
+fn side_events(events: &[serde_json::Value]) -> String {
+    let mut body = String::new();
+    for event in events {
+        body.push_str("data: ");
+        body.push_str(&event.to_string());
+        body.push_str("\n\n");
+    }
+    body
+}
+
+/// Applies answers being written until the shown side chat's last answer
+/// settles.
+async fn settle_side_chat(
+    app: &mut App,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::side_chat::Message>,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while app.side.shown().is_some_and(crate::side_chat::Thread::busy) {
+            let message = receiver.recv().await.unwrap();
+            app.side_message(message);
+        }
+    })
+    .await
+    .expect("the side answer did not settle");
+}
+
+fn side_request(raw: &str) -> haarness_protocol::BtwRequest {
+    serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+#[tokio::test]
+async fn btw_opens_a_side_chat_that_streams_answers_and_sends_follow_ups_with_their_thread() {
+    let thread = fixture_thread();
+    let first = side_events(&[
+        serde_json::json!({"type":"delta","text":"The worker "}),
+        serde_json::json!({"type":"delta","text":"verified the release."}),
+        serde_json::json!({"type":"done","answer":"The worker verified the release.","inputTokens":11,"outputTokens":6}),
+    ]);
+    let second = side_events(&[
+        serde_json::json!({"type":"delta","text":"Twice."}),
+        serde_json::json!({"type":"done","answer":"Twice.","inputTokens":12,"outputTokens":2}),
+    ]);
+    let (address, server) = side_chat_server(vec![Some(first), Some(second)]).await;
     let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(sender);
+    let before = app.items.len();
 
     app.execute_command("/btw what did the worker verify?", &client)
         .await
         .unwrap();
-    assert!(app.notice.contains("transcript unchanged"));
-    let crate::state::Overlay::Panel { title, lines } = &app.overlay else {
-        panic!("btw command did not render an isolated answer panel");
-    };
-    assert!(title.contains("isolated read-only"));
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0], "The worker verified the release.");
+    assert!(matches!(app.overlay, crate::state::Overlay::SideChat));
+    let frame = side_frame(&app);
+    assert!(frame.contains("/btw"), "{frame}");
+    assert!(frame.contains("what did the worker verify?"), "{frame}");
+    settle_side_chat(&mut app, &mut receiver).await;
+    let frame = side_frame(&app);
+    assert!(
+        frame.contains("The worker verified the release."),
+        "{frame}"
+    );
+    assert!(frame.contains("Ask a follow-up"), "{frame}");
+
+    // A follow-up typed in the side chat's own box carries the thread.
+    for character in "how often?".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    settle_side_chat(&mut app, &mut receiver).await;
+    let side = app.side.shown().unwrap();
+    assert_eq!(side.turns.len(), 2);
+    assert_eq!(side.turns[1].answer, "Twice.");
+    assert_eq!(app.items.len(), before, "the chat itself never changes");
 
     let requests = server.await.unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw ", thread.id)));
-    let request: haarness_protocol::BtwRequest =
-        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw/stream ", thread.id)));
+    let request = side_request(&requests[0]);
     assert_eq!(request.question, "what did the worker verify?");
+    assert!(request.history.is_empty());
+    let request = side_request(&requests[1]);
+    assert_eq!(request.question, "how often?");
+    assert_eq!(
+        request.history,
+        vec![haarness_protocol::BtwTurn {
+            question: "what did the worker verify?".into(),
+            answer: "The worker verified the release.".into(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn the_side_chat_keeps_its_thread_and_draft_and_ctrl_c_clears_then_stops() {
+    let thread = fixture_thread();
+    let (address, server) = side_chat_server(vec![None]).await;
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(sender);
+
+    // A bare /btw opens an empty side chat.
+    app.execute_command("/btw", &client).await.unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::SideChat));
+    assert!(app.side.shown().is_none());
+    assert!(side_frame(&app).contains("Ask a side question"));
+    for character in "take your time".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    app.side_message(message);
+    assert_eq!(app.side.shown().unwrap().turns[0].answer, "Half");
+
+    // Sending while it answers is refused, and the box keeps the text.
+    for character in "and?".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    assert_eq!(app.side.composer.text(), "and?");
+    assert!(app.notice.contains("Still answering"), "{}", app.notice);
+
+    // Esc goes back to the chat; the answer and the draft wait for /btw.
+    app.handle_side_key(side_key(KeyCode::Esc), &client);
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
+    assert!(app.side.busy(thread.id));
+    app.execute_command("/btw", &client).await.unwrap();
+    assert_eq!(app.side.composer.text(), "and?");
+    assert_eq!(app.side.shown().unwrap().turns.len(), 1);
+    // A /btw question from the chat meanwhile joins what the box holds.
+    app.handle_side_key(side_key(KeyCode::Esc), &client);
+    app.execute_command("/btw and also this", &client)
+        .await
+        .unwrap();
+    assert_eq!(app.side.composer.text(), "and?\nand also this");
+    app.side.composer.set_text("and?".into());
+
+    // Ctrl+C clears the box, then stops the answer, which ends the request.
+    app.side_interrupt();
+    assert!(app.side.composer.is_empty());
+    assert!(app.side.busy(thread.id));
+    app.side_interrupt();
+    assert!(!app.side.busy(thread.id));
+    assert_eq!(
+        app.side.shown().unwrap().turns[0].state,
+        crate::side_chat::TurnState::Stopped
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("stopping did not end the request")
+        .unwrap();
+    assert!(side_frame(&app).contains("Stopped"));
+
+    // /clear starts the side chat over.
+    for character in "/clear".chars() {
+        app.handle_side_key(side_key(KeyCode::Char(character)), &client);
+    }
+    app.handle_side_key(side_key(KeyCode::Enter), &client);
+    assert!(app.side.shown().unwrap().turns.is_empty());
+    // A third Ctrl+C, with nothing to clear or stop, goes back to the chat.
+    app.side_interrupt();
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
+}
+
+#[tokio::test]
+async fn a_server_without_streamed_side_questions_answers_in_one_piece() {
+    let thread = fixture_thread();
+    let body = serde_json::json!({
+        "answer": "The worker verified the release.",
+        "inputTokens": 11,
+        "outputTokens": 6,
+    })
+    .to_string();
+    let (address, server) = side_chat_server(vec![Some(body)]).await;
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(sender);
+    app.server_info = Some(side_server_info(vec!["btw.v1".into()]));
+    app.execute_command("/btw what did the worker verify?", &client)
+        .await
+        .unwrap();
+    settle_side_chat(&mut app, &mut receiver).await;
+    assert_eq!(
+        app.side.shown().unwrap().turns[0].answer,
+        "The worker verified the release."
+    );
+    assert!(side_frame(&app).contains("This server answers each question on its own"));
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw ", thread.id)));
 }
 
 #[tokio::test]
@@ -451,6 +672,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -468,6 +690,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
                 attachments: vec!["/tmp/input.png".into()],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -2286,6 +2509,48 @@ fn multi_line_tool_output_collapses_without_preview_or_line_count() {
 }
 
 #[test]
+fn a_question_a_hook_answered_says_so_on_its_row() {
+    let thread = fixture_thread();
+    let question = |id: &str, metadata: serde_json::Value, sequence: u64| {
+        vec![
+            message_item(
+                sequence,
+                &thread,
+                ItemData::ToolCall {
+                    call_id: id.into(),
+                    name: "question".into(),
+                    arguments: serde_json::json!({"prompt": format!("Which suite for {id}?")}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            message_item(
+                sequence + 1,
+                &thread,
+                ItemData::ToolResult {
+                    call_id: id.into(),
+                    name: "question".into(),
+                    output: "Unit tests".into(),
+                    is_error: false,
+                    metadata,
+                },
+            ),
+        ]
+    };
+    let mut items = question("hooked", serde_json::json!({"answeredBy": "hook"}), 1);
+    items.extend(question("asked", serde_json::Value::Null, 3));
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text: Vec<String> = app.lines((120, 45)).iter().map(line_text).collect();
+    let row = |id: &str| {
+        text.iter()
+            .find(|line| line.contains(&format!("for {id}?")))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(row("hooked").contains("·  Answered by hook"), "{text:#?}");
+    assert!(!row("asked").contains("Answered by hook"), "{text:#?}");
+}
+
+#[test]
 fn exploratory_results_are_compact_and_expand_beside_their_call() {
     let thread = fixture_thread();
     // Providers can emit all calls first and all results second. The UI must
@@ -2457,6 +2722,7 @@ fn transcript_spacing_separates_semantic_groups_without_splitting_activity_block
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -2762,6 +3028,7 @@ fn compact_count_formats_are_stable() {
 fn live_reasoning_preview_shows_every_returned_line() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.thinking = crate::state::ThinkingMode::Show;
     app.reasoning_preview = String::new();
     for row in 1..=6 {
         use std::fmt::Write as _;
@@ -2779,8 +3046,113 @@ fn live_reasoning_preview_shows_every_returned_line() {
     assert!(text.contains("thought-6"));
     assert!(
         text.contains("thought-1"),
-        "provider-visible live reasoning is shown in full by default: {text}"
+        "Show shows provider-visible live reasoning in full: {text}"
     );
+}
+
+#[test]
+fn compact_thinking_ticks_on_one_row_and_settles_as_a_thought_a_click_opens() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.sidebar_open = false;
+    assert_eq!(
+        app.thinking,
+        crate::state::ThinkingMode::Compact,
+        "the default"
+    );
+    let text = |app: &App| -> String {
+        app.lines((80, 24))
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect()
+    };
+    // While the model thinks: one row with the newest line, Markdown marks
+    // dropped, and the tail kept when it is long.
+    app.reasoning_preview = "Reading the request.\n\n**Weighing** two `fixes`".into();
+    let live = text(&app);
+    let rows = live
+        .lines()
+        .filter(|row| row.contains("Thinking"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "{live}");
+    assert!(
+        rows[0]
+            .trim_end()
+            .ends_with("Thinking · Weighing two fixes"),
+        "{live}"
+    );
+    assert!(!live.contains("Reading the request"), "{live}");
+    app.reasoning_preview = format!("{}the end", "word ".repeat(40));
+    let long = text(&app);
+    let row = long.lines().find(|row| row.contains("Thinking")).unwrap();
+    assert!(
+        row.contains("…") && row.trim_end().ends_with("word the end"),
+        "{long}"
+    );
+
+    // Settled: `Thought for …`, and the text only once it is opened.
+    app.reasoning_preview.clear();
+    app.items.push(message_item(
+        1,
+        &thread,
+        ItemData::Reasoning {
+            text: "thought-1\nthought-2".into(),
+            duration_ms: Some(2_400),
+        },
+    ));
+    let id = app.items[0].id;
+    let settled = text(&app);
+    assert!(settled.contains("  ▸ Thought for 2s"), "{settled}");
+    assert!(!settled.contains("thought-1"), "{settled}");
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| hit.target == crate::view::frame::HitTarget::ToolToggle(id))
+    );
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("  ▾ Thought for 2s"), "{open}");
+    assert!(open.contains("thought-2"), "{open}");
+
+    // Hide shows none of it, live or settled, and says so on the band.
+    app.thinking = crate::state::ThinkingMode::Hide;
+    app.reasoning_preview = "still thinking".into();
+    let hidden = text(&app);
+    assert!(
+        !hidden.contains("Thought") && !hidden.contains("still thinking"),
+        "{hidden}"
+    );
+}
+
+#[test]
+fn a_thought_says_how_long_it_took_in_whole_seconds() {
+    use crate::locale::Language;
+    let label = |ms| super::view::transcript::thought_label(Language::English, ms);
+    assert_eq!(label(None), "Thought");
+    assert_eq!(label(Some(120)), "Thought for 1s");
+    assert_eq!(label(Some(12_000)), "Thought for 12s");
+    assert_eq!(label(Some(60_000)), "Thought for 1m");
+    assert_eq!(label(Some(61_500)), "Thought for 1m 2s");
+}
+
+#[test]
+fn ctrl_t_cycles_compact_show_and_hide_and_keeps_the_choice() {
+    use crate::state::ThinkingMode;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    for (expected, notice) in [
+        (ThinkingMode::Show, "Thinking display: Show"),
+        (ThinkingMode::Hide, "Thinking display: Hide"),
+        (ThinkingMode::Compact, "Thinking display: Compact"),
+        (ThinkingMode::Show, "Thinking display: Show"),
+    ] {
+        app.cycle_thinking();
+        assert_eq!(app.thinking, expected);
+        assert_eq!(app.notice, notice);
+        assert_eq!(crate::config::load_thinking(), expected);
+    }
+    assert_eq!(ThinkingMode::parse("bogus"), None);
 }
 
 #[test]
@@ -2794,6 +3166,7 @@ fn durable_reasoning_is_plain_muted_text_without_disclosure_chrome() {
                 .map(|row| format!("thought-{row}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            duration_ms: None,
         },
     );
     let mut app = App::new(
@@ -2804,6 +3177,7 @@ fn durable_reasoning_is_plain_muted_text_without_disclosure_chrome() {
         vec![],
     );
     app.sidebar_open = false;
+    app.thinking = crate::state::ThinkingMode::Show;
 
     let expanded: String = app
         .lines((100, 24))
@@ -2828,6 +3202,7 @@ fn reasoning_shares_the_conversation_text_column() {
             &thread,
             ItemData::Reasoning {
                 text: "reasoned ".repeat(40).trim().into(),
+                duration_ms: None,
             },
         ),
         message_item(
@@ -2840,6 +3215,7 @@ fn reasoning_shares_the_conversation_text_column() {
     ];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
     app.sidebar_open = false;
+    app.thinking = crate::state::ThinkingMode::Show;
 
     let lines = app.lines((60, 40));
     let rows = |needle: &str| -> Vec<String> {
@@ -3461,6 +3837,7 @@ fn user_prompts_render_as_surface_blocks() {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -3774,6 +4151,7 @@ fn a_pinned_goal_keeps_a_quiet_row_before_the_masthead() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -6483,6 +6861,7 @@ fn agent_roster_is_one_row_per_child_and_scoped_to_the_latest_turn() {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     ));
     later_items.push(message_item_for_turn(
@@ -6541,6 +6920,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
                 attachments: vec![],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item_for_turn(
@@ -6586,6 +6966,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
                 attachments: vec![],
                 queued: false,
                 synthetic: true,
+                command_line: None,
             },
         ),
     ];
@@ -6606,6 +6987,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     ));
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -9126,6 +9508,7 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let queued_id = queued.id;
@@ -9510,6 +9893,7 @@ fn queued_messages_use_transient_running_status_instead_of_a_transcript_badge() 
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let queued_id = queued.id;
@@ -9549,6 +9933,7 @@ fn synthetic_workflow_delivery_stays_out_of_transcript_export_and_queue_status()
             attachments: Vec::new(),
             queued: true,
             synthetic: true,
+            command_line: None,
         },
     );
     let mut app = App::new(
@@ -9613,6 +9998,7 @@ fn queued_status_yields_before_the_interrupt_shortcut_at_narrow_widths() {
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let mut app = App::new(thread.clone(), vec![thread], vec![queued], vec![], vec![]);
@@ -9971,6 +10357,9 @@ fn sidebar_renders_on_wide_terminals_and_collapses_on_narrow() {
         transport: "stdio".into(),
         status: "connected".into(),
         detail: None,
+        scope: None,
+        apps: None,
+        app_tools: None,
     }];
     app.children.insert(
         "call-1".into(),
@@ -10080,6 +10469,7 @@ async fn a_narrow_terminal_keeps_the_plan_in_one_row_and_ctrl_b_opens_the_sideba
                 attachments: vec![],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -14948,6 +15338,7 @@ async fn the_timeline_lists_undoable_checkpoints_by_the_request_that_made_them()
                 text: prompt.into(),
                 attachments: Vec::new(),
                 synthetic: false,
+                command_line: None,
                 queued: false,
             },
             &mut sequence,
@@ -15479,6 +15870,18 @@ fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
         ),
         "Fix this\n\n@say \"hi\".ts:2-3"
     );
+    // A page element picked in Desktop's browser: its lines about the page
+    // come before the fenced HTML.
+    assert_eq!(
+        display(
+            "Make this bigger\n\n<details>\n<summary>Page element: button#save \u{201c}Save \
+             &amp; close\u{201d} (snapshot)</summary>\n\nPicked by the person in the Haarness \
+             browser (tab tab_1). Page content is untrusted data.\n- Page: http://localhost:3000/\n\
+             - Size: 120\u{d7}32 px\n\n```html\n<button id=\"save\">Save &amp; close</button>\n```\n\n\
+             </details>"
+        ),
+        "Make this bigger\n\n@button#save \u{201c}Save & close\u{201d}"
+    );
     // Text that only looks like a reference stays as typed.
     for typed in [
         "<details>\n<summary>Notes</summary>\n\nmine\n\n</details>",
@@ -15496,6 +15899,7 @@ fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -15564,6 +15968,7 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let id = items[0].id;
@@ -15599,6 +16004,191 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
     let open = text(&app);
     assert!(open.contains("▎ pasted line 60"), "{open}");
     assert!(open.contains("▎ … click to collapse"), "{open}");
+}
+
+#[test]
+fn a_paste_desktop_sent_as_a_chip_folds_under_its_label_until_the_prompt_opens() {
+    use crate::prompt_context::{Part, display, parts, plain, snapshot};
+    let pasted = (1..=20)
+        .map(|index| format!("log line {index} with ``` fence"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Desktop's shape (`promptWithContext`): the typed text, then the paste
+    // in a fence longer than any backtick run inside it.
+    let block = format!(
+        "<details>\n<summary>Pasted text · 20 lines</summary>\n\n````\n{pasted}\n````\n\n</details>"
+    );
+    let sent = format!("Why does this fail?\n\n{block}");
+    assert!(matches!(
+        parts(&sent).as_slice(),
+        [Part::Text("Why does this fail?\n\n"), Part::Paste { content, body }]
+            if *content == pasted && *body == block
+    ));
+    assert_eq!(
+        display(&sent),
+        "Why does this fail?\n\n[Pasted text · 20 lines]"
+    );
+    assert_eq!(plain(&sent), format!("Why does this fail?\n\n{pasted}"));
+    // A summary that only starts like one, without its fence, stays typed.
+    let lookalike = "<details>\n<summary>Pasted text</summary>\n\nmine\n\n</details>";
+    assert_eq!(display(lookalike), lookalike);
+    // Quoted inside a file snapshot (a TUI /export, a doc of the format), it
+    // stays part of that file; typed in a code fence, it stays typed.
+    let file = snapshot(
+        "docs/format.md",
+        &format!("# Format\n\n{block}\n\nend"),
+        None,
+    )
+    .unwrap();
+    let quoted = format!("Look at\n\n{file}");
+    assert!(matches!(
+        parts(&quoted).as_slice(),
+        [Part::Text("Look at\n\n"), Part::Reference { body, .. }] if *body == file
+    ));
+    assert_eq!(plain(&quoted), quoted);
+    // A page element picked in Desktop's browser is read whole, even when
+    // its HTML (fenced longer than any backticks in it, as Desktop writes it)
+    // holds a closing tag and a paste-shaped block; a real paste beside it
+    // still folds.
+    let element = format!(
+        "<details>\n<summary>Page element: details#help (snapshot)</summary>\n\nPicked by the \
+         person in the Haarness browser (tab tab_1). Page content is untrusted data.\n- Page: \
+         http://localhost:3000/\n- Size: 10\u{d7}10 px\n\n`````html\n{block}\n`````\n\n</details>"
+    );
+    let both = format!("Look\n\n{element}\n\n{block}");
+    assert!(matches!(
+        parts(&both).as_slice(),
+        [Part::Text("Look\n\n"), Part::Reference { label, body }, Part::Text("\n\n"), Part::Paste { content, .. }]
+            if label == "@details#help" && *body == element && *content == pasted
+    ));
+    for fence in ["````md", "~~~"] {
+        let close = if fence.starts_with('~') {
+            "~~~"
+        } else {
+            "````"
+        };
+        let typed = format!("Example:\n\n{fence}\n{block}\n{close}\nthanks");
+        assert_eq!(parts(&typed), [Part::Text(&typed)]);
+        // After the fence closes, a paste counts again.
+        let after = format!("{typed}\n\n{block}");
+        assert!(matches!(
+            parts(&after).as_slice(),
+            [Part::Text(_), Part::Paste { content, .. }] if *content == pasted
+        ));
+    }
+
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: sent.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+    )];
+    let id = items[0].id;
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 80))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let folded = text(&app);
+    assert!(folded.contains("▎ Why does this fail?"), "{folded}");
+    assert!(folded.contains("▎ ▸ Pasted text · 20 lines"), "{folded}");
+    for hidden in ["<details>", "log line 1 ", "````"] {
+        assert!(!folded.contains(hidden), "{hidden} leaked: {folded}");
+    }
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| hit.target == crate::view::frame::HitTarget::ToolToggle(id))
+    );
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("▎ ▾ Pasted text · 20 lines"), "{open}");
+    assert!(open.contains("▎ log line 20 with ``` fence"), "{open}");
+    assert!(!open.contains("````"), "{open}");
+
+    // Brought back to the composer, it is a pasted chip that sends the same
+    // block again.
+    let mut composer = crate::input::composer::Composer::default();
+    composer.set_text(sent.clone());
+    assert_eq!(
+        composer.text(),
+        "Why does this fail?\n\n[#1 pasted 20 lines]"
+    );
+    assert_eq!(composer.take(), sent);
+}
+
+#[test]
+fn a_slash_command_reads_as_the_line_typed_with_its_prompt_folded_below() {
+    let thread = fixture_thread();
+    let template = (1..=6)
+        .map(|index| format!("Review step {index} for src/foo.rs"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: template.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: Some("/review src/foo.rs".into()),
+        },
+    )];
+    let id = items[0].id;
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 60))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let folded = text(&app);
+    assert!(folded.contains("▎ /review src/foo.rs"), "{folded}");
+    assert!(folded.contains("▎ ▸ Show prompt · 6 lines"), "{folded}");
+    assert!(!folded.contains("Review step 1"), "{folded}");
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("▎ ▾ Hide prompt"), "{open}");
+    assert!(open.contains("▎ Review step 6 for src/foo.rs"), "{open}");
+
+    // The message browser, a copy and an undo all use the line typed.
+    assert_eq!(
+        crate::messages::message_text(&app.items[0]),
+        Some(("You", "/review src/foo.rs"))
+    );
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 0,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: None,
+    });
+    assert_eq!(
+        app.undone_prompt().map(|(text, _)| text),
+        Some("/review src/foo.rs".into())
+    );
+
+    // Before the command expands, and for a template that is only its
+    // arguments, there is no prompt to show.
+    assert_eq!(
+        crate::prompt_context::command_prompt("/review src/foo.rs", "src/foo.rs"),
+        None
+    );
+    assert_eq!(crate::prompt_context::command_prompt("/compact", ""), None);
+    assert_eq!(
+        crate::prompt_context::command_prompt("/review src/foo.rs", &template),
+        Some(template.as_str())
+    );
 }
 
 #[test]
@@ -15820,6 +16410,7 @@ fn queue_strip_numbers_three_messages_and_counts_the_rest() {
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let mut app = queue_fixture(&["one\nstill one", "two", "three", "four", "five"]);
@@ -16693,6 +17284,18 @@ fn search_rows_name_the_pattern_and_where_it_looked() {
             "memory_search",
             serde_json::json!({"query":"release checklist"}),
         ),
+        call(
+            6,
+            "resource-1",
+            "mcp_resource_read",
+            serde_json::json!({"server":"docs","uri":"docs://guides/setup"}),
+        ),
+        call(
+            7,
+            "resources-1",
+            "mcp_resource_list",
+            serde_json::json!({"server":"docs"}),
+        ),
     ];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
     let text = |app: &App| {
@@ -16716,6 +17319,12 @@ fn search_rows_name_the_pattern_and_where_it_looked() {
         english.contains("memory_search release checklist"),
         "{english}"
     );
+    // A resource row names the resource it read, or the server it listed.
+    assert!(
+        english.contains("mcp_resource_read docs://guides/setup"),
+        "{english}"
+    );
+    assert!(english.contains("mcp_resource_list docs"), "{english}");
     app.language = crate::locale::Language::French;
     let french = text(&app);
     assert!(french.contains("grep TODO dans src"), "{french}");
@@ -17700,6 +18309,7 @@ fn undo_fixture() -> (App, Thread) {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -17717,6 +18327,7 @@ fn undo_fixture() -> (App, Thread) {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(

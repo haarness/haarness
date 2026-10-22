@@ -234,6 +234,7 @@ impl ModelProvider for AzureProvider {
             models: self.models.iter().map(|model| model.id.clone()).collect(),
             discover_models: false,
             server_output_limit: false,
+            replay_observed_reasoning: false,
             model_defaults: self.instance.model_defaults,
             assume_authenticated: true,
             headers,
@@ -402,6 +403,7 @@ impl ModelProvider for CopilotProvider {
                 .collect(),
             discover_models: false,
             server_output_limit: false,
+            replay_observed_reasoning: false,
             model_defaults: self.instance.model_defaults,
             assume_authenticated: false,
             headers,
@@ -781,6 +783,92 @@ mod tests {
         assert_eq!(requests[0].0["x-github-api-version"], "2026-06-01");
         assert_eq!(requests[0].0["openai-intent"], "conversation-edits");
         assert_eq!(requests[0].0["x-initiator"], "user");
+    }
+
+    /// Streams reasoning in `reasoning`, as vLLM does, then calls `read`.
+    async fn reasoning_fixture(
+        State(capture): State<Capture>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        capture.0.lock().push((headers, body));
+        (
+            [(CONTENT_TYPE, "text/event-stream")],
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"Look first.\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn azure_and_copilot_never_get_reasoning_sent_back() {
+        let capture = Capture::default();
+        let router = Router::new()
+            .route("/chat/completions", post(reasoning_fixture))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let base = format!("http://{address}");
+        let providers: Vec<(&str, Box<dyn ModelProvider>)> = vec![
+            (
+                "azure",
+                Box::new(AzureProvider::new(
+                    instance("azure", base.clone(), "key"),
+                    None,
+                )),
+            ),
+            (
+                "github-copilot",
+                Box::new(CopilotProvider::new(
+                    instance("github-copilot", base, "token"),
+                    None,
+                )),
+            ),
+        ];
+        for (id, provider) in providers {
+            let events = collect_text(provider.as_ref()).await;
+            let metadata = events.iter().find_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    provider_metadata, ..
+                } => Some(provider_metadata.clone()),
+                _ => None,
+            });
+            assert_eq!(
+                metadata,
+                Some(Value::Null),
+                "{id} keeps no reasoning to send back"
+            );
+            // Even a call tagged as its own carries no reasoning field back.
+            let mut history = request();
+            history.messages.extend([
+                ProviderMessage::ToolCall {
+                    call_id: "call_a".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                    provider_metadata: serde_json::json!({"reasoning": "Look first.", "reasoning_provider": id}),
+                },
+                ProviderMessage::ToolResult {
+                    call_id: "call_a".into(),
+                    name: "read".into(),
+                    output: "contents".into(),
+                    is_error: false,
+                    attachments: Vec::new(),
+                },
+            ]);
+            provider
+                .stream(history, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let body = capture.0.lock().last().unwrap().1.clone();
+            let assistant = &body["messages"][2];
+            assert_eq!(assistant["tool_calls"][0]["id"], "call_a", "{id}: {body}");
+            assert!(assistant.get("reasoning").is_none(), "{id}: {assistant}");
+            assert!(
+                assistant.get("reasoning_content").is_none(),
+                "{id}: {assistant}"
+            );
+        }
     }
 
     #[tokio::test]

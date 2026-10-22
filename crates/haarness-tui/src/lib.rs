@@ -12,6 +12,7 @@ mod input;
 mod input_queue;
 mod keybindings;
 mod locale;
+mod logs;
 mod management;
 mod markdown;
 mod media;
@@ -21,6 +22,7 @@ mod prompt_context;
 mod pty_view;
 mod remote_control;
 mod servers;
+mod side_chat;
 mod state;
 mod statusline;
 mod terminal;
@@ -473,6 +475,7 @@ async fn run_with_client(
     }
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
+    app.thinking = config::load_thinking();
     // A waiting prompt takes the keyboard unless a restored draft is being
     // written, as one arriving live does; ctrl+g reaches it either way.
     if !app.pending_permissions.is_empty() {
@@ -572,6 +575,9 @@ async fn run_with_client(
     // for a list), applied when they come.
     let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
     app.catalog_tx = Some(catalog_tx.clone());
+    // Side chat answers being written, applied as they arrive.
+    let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.side.sender = Some(side_tx.clone());
     if app.models_loading {
         let client = client.clone();
         tokio::spawn(async move {
@@ -611,6 +617,7 @@ async fn run_with_client(
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
                     catalog_rx = receiver;
                     app.catalog_tx = Some(sender);
+                    app.side.sender = Some(side_tx.clone());
                     force_redraw = true;
                 }
                 Err(error) => {
@@ -738,6 +745,10 @@ async fn run_with_client(
                                     app.notice = format!("Terminal paste failed: {error}");
                                 }
                             }
+                            continue;
+                        }
+                        if matches!(app.overlay, state::Overlay::SideChat) {
+                            app.paste_side_chat(&text);
                             continue;
                         }
                         if app.overlay.is_filterable() {
@@ -953,6 +964,7 @@ async fn run_with_client(
                     }
                 }
             },
+            Some(message) = side_rx.recv() => app.side_message(message),
             Some(listed) = catalog_rx.recv() => {
                 match listed {
                     Some(providers) => app.catalog_arrived(providers, &client).await,
@@ -1044,6 +1056,7 @@ async fn run_with_client(
                 }
                 app.poll_remote_control(&client);
                 app.poll_chrome(&client);
+                app.poll_logs();
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;
                     app.reveal_goal_completion();

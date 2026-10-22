@@ -30,6 +30,10 @@ pub(crate) struct RuntimeDiscovery {
     /// the daemon with different OTEL settings is told its spans go elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) trace_endpoint: Option<String>,
+    /// The base configuration folder the daemon reads, if any. A client started
+    /// with another `HAARNESS_BASE_CONFIG_DIR` is told it is not applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_config_dir: Option<String>,
 }
 
 pub(crate) fn read_runtime_file(path: &Path) -> Result<RuntimeDiscovery> {

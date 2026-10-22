@@ -95,6 +95,49 @@
   color: var(--accent);
   background: var(--accent-soft);
 }
+/* An update's release notes in its confirmation: the same quiet well as
+   the list above, scrolling on its own so the buttons stay in place. */
+.release-notes {
+  margin: var(--s3) 0 0;
+}
+.release-notes > small {
+  display: block;
+  margin-bottom: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.release-notes-body {
+  max-height: min(320px, 40vh);
+  overflow: auto;
+  padding: var(--s1) var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  font-size: var(--ui-lg);
+  line-height: var(--lh-ui);
+}
+.release-notes-body:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.release-notes-body :is(h1, h2, h3, h4) {
+  font-size: var(--ui-lg);
+  font-weight: 600;
+  margin: var(--s3) 0 var(--s1);
+}
+.release-notes-body > :first-child :is(h1, h2, h3, h4):first-child,
+.release-notes-body :is(h1, h2, h3, h4):first-child {
+  margin-top: var(--s1);
+}
+.release-notes-body :is(ul, ol) {
+  padding-inline-start: var(--s5);
+}
+.release-notes-body :is(p, ul, ol) {
+  margin-block: var(--s1);
+}
+.release-notes-body li {
+  margin-block: 2px;
+}
 .field {
   display: flex;
   flex-direction: column;
@@ -324,7 +367,14 @@
   margin-bottom: var(--s2);
 }
 .mcp-pair-row {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) var(--icon-button);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) calc(
+      var(--icon-button) * 2 + var(--s1)
+    );
+}
+/* The place of a row's keep-in-keychain toggle while it is not offered. */
+.mcp-row-actions > .icon-button-space {
+  flex: none;
+  width: var(--icon-button);
 }
 .mcp-argument-row {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) calc(
@@ -909,6 +959,15 @@ dialog .notifications {
   font-size: var(--ui-lg);
   font-weight: 500;
 }
+/* A source tag (Base) beside a row's title or a block's heading: a quiet
+   badge in the label's own words. */
+.badge.setting-tag {
+  text-transform: none;
+  vertical-align: 1px;
+}
+.setting-row strong + .setting-tag {
+  margin-inline-start: var(--s2);
+}
 .setting-row p {
   font-size: var(--ui);
   color: var(--muted);
@@ -988,6 +1047,27 @@ dialog .notifications {
 .setting-block p {
   font-size: var(--ui);
   color: var(--muted);
+}
+/* A server's Interactive apps switch ends its row of actions, quietly. */
+.setting-block .mcp-apps-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-inline-start: auto;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+/* A plugin's server (or one set elsewhere) shows its state, not a control. */
+.setting-block .mcp-apps-switch.locked {
+  cursor: default;
+  opacity: 0.6;
+}
+/* Why an MCP server failed, under its name: a sentence, never a log dump. */
+.setting-block > .mcp-server-detail {
+  margin: 0;
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
 }
 .setting-block pre {
   font-size: var(--ui-sm);
@@ -1254,6 +1334,58 @@ dialog .notifications {
 
 .select-popover.searchable .select-options {
   flex: 1;
+}
+
+/* A text field with suggestions: any text goes, and a quiet caret shows the
+   list by pointer. The list reuses the picker's surface. */
+.combobox {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+.combobox > input {
+  flex: 1;
+  width: 100%;
+  padding-inline-end: var(--control);
+}
+.combobox-toggle {
+  position: absolute;
+  inset-block: 1px;
+  inset-inline-end: 1px;
+  width: calc(var(--control) - 2px);
+  min-height: 0;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--muted);
+}
+.combobox-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: none;
+  border-color: transparent;
+}
+.combobox-toggle:disabled {
+  opacity: 0;
+}
+.combobox-popover .select-option {
+  gap: var(--s4);
+}
+.combobox-value {
+  flex: none;
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+}
+.combobox-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-popover {
@@ -1574,4 +1706,62 @@ dialog .notifications {
   display: flex;
   gap: var(--s2);
   margin-block-start: var(--s5);
+}
+/* Your other computers, below the servers you added. */
+.settings-computers {
+  margin-block-start: var(--s7);
+}
+.settings-computers > header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--hairline);
+}
+.settings-computers > header > div {
+  flex: 1;
+  min-width: 0;
+}
+.settings-computers > header p,
+.settings-computers-note p,
+p.settings-computers-note {
+  margin: 2px 0 0;
+  font-size: var(--ui);
+  color: var(--muted);
+  max-width: 480px;
+}
+.settings-computers-note {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  justify-content: space-between;
+  padding: var(--s4) 0;
+}
+/* Signed out, one line under the servers says computers can be opened here. */
+.settings-computers-signed-out {
+  margin-block-start: var(--s6);
+  border-top: 1px solid var(--hairline);
+}
+.settings-computers-note p[role="alert"] {
+  color: var(--danger);
+}
+.computer-row > svg {
+  flex: none;
+  color: var(--muted);
+}
+.computer-row > div {
+  flex: 1;
+  min-width: 0;
+  margin-inline-end: var(--s2);
+}
+.computer-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A computer that is away is listed, quieter, until it is back. */
+.computer-row.away > svg,
+.computer-row.away strong {
+  opacity: 0.55;
 }

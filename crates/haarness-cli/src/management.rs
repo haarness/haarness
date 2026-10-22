@@ -1,7 +1,8 @@
 use super::{
-    Paths, asset_layers, loaded_mcp_entry, mcp_config_for_display, mcp_config_target,
-    mcp_entry_target, open_browser, read_mcp_entry, receive_oauth_callback, validate_asset_name,
-    validate_mcp_name, validate_qualified_model, write_mcp_changes, write_mcp_entry,
+    Paths, adopt_base_mcp_entry, asset_layers, base_mcp_entry, loaded_mcp_entry,
+    mcp_config_for_display, mcp_config_target, mcp_entry_target, open_browser, read_mcp_entry,
+    receive_oauth_callback, release_base_mcp_copy, validate_asset_name, validate_mcp_name,
+    validate_qualified_model, write_mcp_changes, write_mcp_entry,
 };
 use crate::plugins;
 use anyhow::{Context as _, Result, bail};
@@ -352,7 +353,12 @@ impl ManagementService {
                 let info = self.skills.describe(name).await.map_err(core_error)?;
                 let target = PathBuf::from(&info.path);
                 let mut detail = skill_detail(&info.name, &target, None, false)?;
-                detail["pluginManaged"] = json!(is_plugin_path(&target));
+                if in_base_folder(&target) {
+                    detail["scope"] = json!("base");
+                    detail["pluginManaged"] = json!(false);
+                } else {
+                    detail["pluginManaged"] = json!(is_plugin_path(&target));
+                }
                 Ok(detail)
             }
             "list" => {
@@ -373,17 +379,18 @@ impl ManagementService {
                     if requested.is_some() && requested != scope {
                         continue;
                     }
+                    let base = scope.is_none() && in_base_folder(&path);
                     values.push(json!({
                         "name": info.name,
                         "description": info.description,
-                        "scope": scope.map(Scope::name),
+                        "scope": scope.map(Scope::name).or(base.then_some("base")),
                         "path": info.path,
                         "trusted": info.trusted,
                         "loaded": info.loaded,
                         "managed": scope.is_some(),
                         "customized": skill_detail(&info.name, &path, scope, scope.is_some())?
                             ["customized"],
-                        "pluginManaged": scope.is_none() && is_plugin_path(&path),
+                        "pluginManaged": scope.is_none() && !base && is_plugin_path(&path),
                     }));
                 }
                 Ok(json!(values))
@@ -503,6 +510,7 @@ impl ManagementService {
                     "tools": agent.tools,
                     "permissions": agent.permissions,
                     "prompt": agent.prompt,
+                    "scope": self.base_agent(&agent).then_some("base"),
                     "managed": false,
                     "readOnly": true,
                 }))
@@ -542,6 +550,7 @@ impl ManagementService {
                             "readOnly": true,
                         }));
                     }
+                    let base = self.base_definitions();
                     for agent in
                         asset_layers(&self.paths, &self.workspace, self.trust_project).agents
                     {
@@ -551,6 +560,7 @@ impl ManagementService {
                                 "description": agent.description,
                                 "mode": agent.mode,
                                 "model": agent.model,
+                                "scope": same_agent(&base.0, &agent).then_some("base"),
                                 "managed": false,
                                 "readOnly": true,
                             }));
@@ -764,6 +774,7 @@ impl ManagementService {
             }
             "edit" => {
                 let name = required_string(input, "name")?;
+                self.adopt_base_mcp(name, optional_scope(input)?)?;
                 let (target, scope, before) = self.resolve_mcp(name, optional_scope(input)?)?;
                 let mut entry = before.clone();
                 apply_mcp_edit(&mut entry, input)?;
@@ -786,7 +797,8 @@ impl ManagementService {
             }
             "get" => {
                 let name = required_string(input, "name")?;
-                let (target, scope, entry) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let (target, scope, entry) =
+                    self.resolve_mcp_readable(name, optional_scope(input)?)?;
                 let live = self
                     .mcp
                     .list()
@@ -795,11 +807,11 @@ impl ManagementService {
                     .into_iter()
                     .find(|item| item.name == name);
                 Ok(json!({
-                    "name":name,"scope":scope.name(),"file":target,
+                    "name":name,"scope":scope.map_or("base", Scope::name),"file":target,
                     "config":mcp_config_for_display(&entry, false)?,
                     "runtimeStatus":live.as_ref().map(|item| item.status.as_str()),
                     "runtimeDetail":live.and_then(|item| item.detail),
-                    "managed":true,"pluginManaged":false
+                    "managed":scope.is_some(),"pluginManaged":false,"readOnly":scope.is_none()
                 }))
             }
             "list" => {
@@ -827,30 +839,101 @@ impl ManagementService {
                     }
                 }
                 if requested.is_none() {
-                    for (name, status) in live {
-                        if !configured.contains(&name) {
+                    // Servers the base folder defines and no layer above it
+                    // overrides: listed, never changed in place.
+                    let base = crate::layout::BaseFolder::for_workspace(&self.workspace);
+                    for file in base.iter().flat_map(|base| {
+                        [
+                            "opencode.jsonc",
+                            "opencode.json",
+                            "haarness.jsonc",
+                            "haarness.json",
+                        ]
+                        .into_iter()
+                        .filter_map(|name| base.entry(name))
+                    }) {
+                        for (name, entry) in mcp_entries(&file).unwrap_or_default() {
+                            if configured.contains(&name) {
+                                continue;
+                            }
+                            // A later base file replaces an earlier one's entry.
+                            values.retain(|row| row["name"] != name.as_str());
+                            let status = live.get(&name);
                             values.push(json!({
-                                "name":name,"runtimeStatus":status.status,"runtimeDetail":status.detail,
-                                "managed":false,"pluginManaged":true,"readOnly":true
+                                "name":name,"scope":"base","file":file,
+                                "config":mcp_config_for_display(&entry, false)?,
+                                "runtimeStatus":status.map(|item| item.status.as_str()),
+                                "runtimeDetail":status.and_then(|item| item.detail.as_deref()),
+                                "managed":false,"pluginManaged":false,"readOnly":true
                             }));
                         }
+                    }
+                    configured.extend(
+                        values
+                            .iter()
+                            .filter_map(|row| row["name"].as_str().map(str::to_owned)),
+                    );
+                    // Desktop names the servers its own connection runs (this
+                    // process has no live registry of its own).
+                    let mut extra: BTreeSet<String> = input
+                        .get("names")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|name| !live.contains_key(*name))
+                        .map(str::to_owned)
+                        .collect();
+                    // A server from a file of either scope other than the one listed
+                    // above is edited where it is; one from a plugin (or anything else
+                    // outside the person's settings) is read-only here.
+                    let editable = |name: &str| self.resolve_mcp(name, None).is_ok();
+                    for (name, status) in live {
+                        extra.remove(&name);
+                        if !configured.contains(&name) {
+                            let editable = editable(&name);
+                            values.push(json!({
+                                "name":name,"runtimeStatus":status.status,"runtimeDetail":status.detail,
+                                "managed":editable,"pluginManaged":!editable,"readOnly":!editable
+                            }));
+                        }
+                    }
+                    for name in extra.into_iter().filter(|name| !configured.contains(name)) {
+                        let editable = editable(&name);
+                        values.push(json!({
+                            "name":name,"managed":editable,"pluginManaged":!editable,"readOnly":!editable
+                        }));
                     }
                 }
                 Ok(json!(values))
             }
             "enable" | "disable" => {
                 let name = required_string(input, "name")?;
+                self.adopt_base_mcp(name, optional_scope(input)?)?;
                 let (target, scope, before) = self.resolve_mcp(name, optional_scope(input)?)?;
                 let mut entry = before.clone();
                 entry.enabled = action == "enable";
                 write_mcp_changes(&target, name, &before, &entry)?;
+                // Turned back on as the base folder has it: its entry applies again.
+                if action == "enable"
+                    && let Some(source) = release_base_mcp_copy(
+                        &self.paths,
+                        &self.workspace,
+                        name,
+                        scope == Scope::Local,
+                    )?
+                {
+                    return Ok(
+                        json!({"action":action,"resource":"mcp","name":name,"scope":"base","file":source,"runtimeStatus":"reload_queued","restartRequired":false,"usableFrom":"after_active_work_is_idle"}),
+                    );
+                }
                 Ok(
                     json!({"action":action,"resource":"mcp","name":name,"scope":scope.name(),"file":target,"runtimeStatus":"reload_queued","restartRequired":false,"usableFrom":"after_active_work_is_idle"}),
                 )
             }
             "logout" => {
                 let name = required_string(input, "name")?;
-                let (target, _, entry) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let (target, _, entry) = self.resolve_mcp_readable(name, optional_scope(input)?)?;
                 let entry = loaded_mcp_entry(&target, entry);
                 self.mcp.clear_oauth(name).await.map_err(core_error)?;
                 let live = if entry.enabled {
@@ -864,7 +947,7 @@ impl ManagementService {
             }
             "auth" => {
                 let name = required_string(input, "name")?;
-                self.resolve_mcp(name, optional_scope(input)?)?;
+                self.resolve_mcp_readable(name, optional_scope(input)?)?;
                 let callback_port = input
                     .get("callbackPort")
                     .and_then(Value::as_u64)
@@ -932,7 +1015,11 @@ impl ManagementService {
                         .into_iter()
                         .find(|command| command.name == name)
                         .with_context(|| format!("command '{name}' not found"))?;
+                    let base = same_command(&self.base_definitions().1, &command);
                     let mut value = serde_json::to_value(command)?;
+                    if base {
+                        value["scope"] = json!("base");
+                    }
                     value["managed"] = json!(false);
                     value["readOnly"] = json!(true);
                     value
@@ -957,11 +1044,16 @@ impl ManagementService {
                     }
                 }
                 if requested.is_none() {
+                    let base = self.base_definitions();
                     for command in
                         asset_layers(&self.paths, &self.workspace, self.trust_project).commands
                     {
                         if !managed.contains(&command.name) {
+                            let from_base = same_command(&base.1, &command);
                             let mut value = serde_json::to_value(command)?;
+                            if from_base {
+                                value["scope"] = json!("base");
+                            }
                             value["managed"] = json!(false);
                             value["readOnly"] = json!(true);
                             values.push(value);
@@ -1668,6 +1760,12 @@ impl ManagementService {
                 return Ok((target, scope, entry));
             }
         }
+        if let Some((file, _)) = base_mcp_entry(&self.workspace, name) {
+            bail!(
+                "MCP server '{name}' comes from the base folder ({}), which Haarness does not change; turn it off instead",
+                file.display()
+            );
+        }
         if asset_layers(&self.paths, &self.workspace, self.trust_project)
             .mcp
             .contains_key(name)
@@ -1678,6 +1776,87 @@ impl ManagementService {
         }
         bail!("MCP server '{name}' not found in local or global configuration")
     }
+
+    /// The agents and commands the base folder defines, empty without one.
+    fn base_definitions(
+        &self,
+    ) -> (
+        Vec<haarness_core::CustomAgent>,
+        Vec<haarness_protocol::CommandInfo>,
+    ) {
+        crate::layout::BaseFolder::for_workspace(&self.workspace)
+            .map(|base| crate::jsonconfig::base_definitions(&base))
+            .unwrap_or_default()
+    }
+
+    /// Whether the agent in effect is the base folder's own definition.
+    fn base_agent(&self, agent: &haarness_core::CustomAgent) -> bool {
+        same_agent(&self.base_definitions().0, agent)
+    }
+
+    /// [`Self::resolve_mcp`], else the base folder's entry (no scope), for an
+    /// action that only reads the server or its sign-in.
+    fn resolve_mcp_readable(
+        &self,
+        name: &str,
+        scope: Option<Scope>,
+    ) -> Result<(PathBuf, Option<Scope>, McpConfigureRequest)> {
+        match self.resolve_mcp(name, scope) {
+            Ok((target, scope, entry)) => Ok((target, Some(scope), entry)),
+            Err(error) => base_mcp_entry(&self.workspace, name)
+                .filter(|_| scope.is_none())
+                .map(|(file, entry)| (file, None, entry))
+                .ok_or(error),
+        }
+    }
+
+    /// Before changing MCP server `name`: a server only the base folder
+    /// defines is copied into the chosen layer (global by default) first, so
+    /// the change is the person's own version over it.
+    fn adopt_base_mcp(&self, name: &str, scope: Option<Scope>) -> Result<()> {
+        adopt_base_mcp_entry(
+            &self.paths,
+            &self.workspace,
+            name,
+            scope == Some(Scope::Local),
+        )
+    }
+}
+
+/// Whether `path` is in the base folder (`HAARNESS_BASE_CONFIG_DIR`), whose
+/// definitions are listed with a `base` scope and never changed in place.
+fn in_base_folder(path: &Path) -> bool {
+    crate::layout::base_config_dir().is_some_and(|base| {
+        path.starts_with(&base)
+            || path
+                .canonicalize()
+                .ok()
+                .zip(base.canonicalize().ok())
+                .is_some_and(|(path, base)| path.starts_with(base))
+    })
+}
+
+/// Whether `agent`, as configuration resolved it, is one of the base folder's
+/// definitions rather than a version of a layer above it.
+fn same_agent(base: &[haarness_core::CustomAgent], agent: &haarness_core::CustomAgent) -> bool {
+    base.iter().any(|candidate| {
+        candidate.id == agent.id
+            && candidate.prompt == agent.prompt
+            && candidate.description == agent.description
+            && candidate.model == agent.model
+    })
+}
+
+/// [`same_agent`] for a command.
+fn same_command(
+    base: &[haarness_protocol::CommandInfo],
+    command: &haarness_protocol::CommandInfo,
+) -> bool {
+    base.iter().any(|candidate| {
+        candidate.name == command.name
+            && candidate.template == command.template
+            && candidate.execution.path == command.execution.path
+    })
 }
 
 pub(super) fn memory_root_for(paths: &Paths, workspace: &Path) -> PathBuf {
@@ -1870,7 +2049,10 @@ impl Scope {
 
 fn optional_scope(input: &Value) -> Result<Option<Scope>> {
     match input.get("scope").and_then(Value::as_str) {
-        None => Ok(None),
+        // A row of the base folder sends its scope back: nothing is written
+        // there, so it reads as no scope (project, then global, then what
+        // the configuration resolves).
+        None | Some("base") => Ok(None),
         Some("local") => Ok(Some(Scope::Local)),
         Some("global") => Ok(Some(Scope::Global)),
         Some(value) => bail!("scope must be local or global, got '{value}'"),
@@ -2120,7 +2302,9 @@ fn item_visible_text(data: &ItemData) -> Option<String> {
         ItemData::UserMessage {
             text, synthetic, ..
         } if !synthetic => Some(text.clone()),
-        ItemData::AssistantMessage { text } | ItemData::Reasoning { text } => Some(text.clone()),
+        ItemData::AssistantMessage { text } | ItemData::Reasoning { text, .. } => {
+            Some(text.clone())
+        }
         ItemData::ToolCall {
             name, arguments, ..
         } => Some(format!("{name} {arguments}")),
@@ -2443,6 +2627,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled,
+            apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
         },
         "remote" => McpConfigureRequest {
             transport: "streamable_http".into(),
@@ -2458,6 +2643,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_client_id: optional_string(input, "oauthClientId").map(ToOwned::to_owned),
             oauth_scopes: string_array(input, "oauthScopes")?,
             enabled,
+            apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
         },
         _ => bail!("MCP type must be local or remote"),
     };
@@ -2505,6 +2691,14 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
     }
     if input.get("oauthScopes").is_some() {
         entry.oauth_scopes = string_array(input, "oauthScopes")?;
+    }
+    if let Some(apps) = input.get("apps") {
+        // On is the default and is saved as no setting at all.
+        entry.apps = match apps {
+            Value::Bool(false) => Some(false),
+            Value::Bool(true) | Value::Null => None,
+            _ => bail!("apps must be true or false"),
+        };
     }
     Ok(())
 }
@@ -3784,6 +3978,98 @@ mod tests {
             error.contains("\"mcp.twice.enabled\" is written more than once"),
             "{error}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Desktop names the servers its connection runs; those Haarness cannot
+    /// edit (a plugin's, or set outside the person's files) are read-only,
+    /// while one in another file of the same scope is edited where it is.
+    #[tokio::test]
+    async fn the_list_says_which_named_servers_are_read_only() {
+        let (root, workspace, _, service) = isolated_service("mcp-read-only");
+        fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        fs::write(
+            workspace.join(".haarness/haarness.json"),
+            r#"{"mcp": {"own": {"command": "own-mcp"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("opencode.json"),
+            r#"{"mcp": {"shared": {"type": "local", "command": ["shared-mcp"]}}}"#,
+        )
+        .unwrap();
+        let listed = service
+            .mcp(&json!({"action": "list", "names": ["own", "shared", "from-plugin"]}))
+            .await
+            .unwrap();
+        let entry = |name: &str| {
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} is not listed: {listed}"))
+        };
+        assert_eq!(entry("own")["managed"], true);
+        assert_ne!(entry("own")["readOnly"], true);
+        assert_eq!(entry("shared")["readOnly"], false);
+        assert_eq!(entry("from-plugin")["readOnly"], true);
+        assert_eq!(entry("from-plugin")["pluginManaged"], true);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interactive_apps_turn_off_as_a_setting_and_back_on_as_none() {
+        let (root, workspace, _, service) = isolated_service("mcp-apps-switch");
+        let file = workspace.join("haarness.json");
+        fs::write(
+            &file,
+            r#"{
+  // Servers for this project.
+  "mcp": {
+    "weather": {"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}}
+  }
+}
+"#,
+        )
+        .unwrap();
+        let read = || -> Value {
+            jsonc_parser::parse_to_serde_value(
+                &fs::read_to_string(&file).unwrap(),
+                &jsonc_parser::ParseOptions::default(),
+            )
+            .unwrap()
+        };
+        service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": false}))
+            .await
+            .unwrap();
+        // Only the switch is written; the references stay as written.
+        assert_eq!(
+            read()["mcp"]["weather"],
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}, "apps": false})
+        );
+        assert_eq!(read_mcp_entry(&file, "weather").unwrap().apps, Some(false));
+        service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            read()["mcp"]["weather"],
+            json!({"command": "weather-mcp", "env": {"TOKEN": "${WEATHER_TOKEN}", "KEY": "${keychain:weather-key}"}})
+        );
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains("// Servers for this project.")
+        );
+        let error = service
+            .mcp(&json!({"action": "edit", "name": "weather", "apps": "no"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("apps must be true or false"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 

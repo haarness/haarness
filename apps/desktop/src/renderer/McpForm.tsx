@@ -3,10 +3,26 @@ import { For, Show, createSignal, onMount } from "solid-js";
 import { createStore } from "solid-js/store";
 import { Select } from "./Select";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
-import { mcpInput, newMcpDraft, type McpPair } from "./mcp-form";
+import { keychainInput, newMcpDraft, renameKeychainReference, secretLooking, type McpPair } from "./mcp-form";
+
+/** What this computer calls the store a secret is kept in. */
+function keepLabel(platform: string) {
+  return platform === "darwin"
+    ? t("Store in Keychain")
+    : platform === "win32"
+      ? t("Store in Credential Manager")
+      : t("Store in keyring");
+}
 
 export function McpForm(props: {
   save: (input: Record<string, unknown>) => Promise<unknown>;
+  /** Keeps a secret in the system's keychain as a new entry, never replacing
+   * one, and returns the entry's name (`name`, or `name-2` when that is taken). */
+  storeSecret: (name: string, secret: string) => Promise<string>;
+  /** Takes entries this form just stored out again. */
+  removeSecrets: (names: string[]) => Promise<unknown>;
+  /** The platform the server runs on, which names the keychain. */
+  platform: string;
   close: () => void;
 }) {
   const [draft, setDraft] = createStore(newMcpDraft());
@@ -24,13 +40,22 @@ export function McpForm(props: {
     event.preventDefault();
     if (saving()) return;
     setError("");
+    // Entries stored for this server, taken out again if it is not added.
+    const stored: string[] = [];
     try {
-      const input = mcpInput(draft);
+      const { input, secrets } = keychainInput(draft);
       setSaving(true);
+      // The secrets first: settings that name a missing entry would fail.
+      for (const { name, secret } of secrets) {
+        const entry = await props.storeSecret(name, secret);
+        stored.push(entry);
+        if (entry !== name) renameKeychainReference(input, name, entry);
+      }
       await props.save(input);
       setSaving(false);
       close();
     } catch (error) {
+      if (stored.length) await props.removeSecrets(stored).catch(() => undefined);
       setSaving(false);
       setError(error instanceof Error ? error.message : String(error));
       failure?.focus();
@@ -135,6 +160,7 @@ export function McpForm(props: {
                   kind="headers"
                   rows={draft.headers}
                   disabled={saving()}
+                  keep={keepLabel(props.platform)}
                   add={() =>
                     setDraft("headers", (rows) => [
                       ...rows,
@@ -149,6 +175,7 @@ export function McpForm(props: {
                   change={(index, field, value) =>
                     setDraft("headers", index, field, value)
                   }
+                  vault={(index, on) => setDraft("headers", index, "vault", on)}
                 />
                 <label class="field">
                   <span>{t("OAuth")}</span>
@@ -331,6 +358,7 @@ export function McpForm(props: {
               kind="environment"
               rows={draft.environment}
               disabled={saving()}
+              keep={keepLabel(props.platform)}
               add={() =>
                 setDraft("environment", (rows) => [
                   ...rows,
@@ -345,6 +373,7 @@ export function McpForm(props: {
               change={(index, field, value) =>
                 setDraft("environment", index, field, value)
               }
+              vault={(index, on) => setDraft("environment", index, "vault", on)}
             />
           </Show>
           <label class="mcp-enabled">
@@ -417,7 +446,10 @@ function Pairs(props: {
   disabled: boolean;
   add: () => void;
   remove: (index: number) => void;
-  change: (index: number, field: keyof McpPair, value: string) => void;
+  change: (index: number, field: "key" | "value", value: string) => void;
+  /** The label of the keep-in-keychain toggle a secret-looking value offers. */
+  keep: string;
+  vault: (index: number, on: boolean) => void;
 }) {
   const [visible, setVisible] = createSignal(false);
   const text = () => pairText[props.kind];
@@ -471,12 +503,30 @@ function Pairs(props: {
                 props.change(index(), "value", event.currentTarget.value)
               }
             />
-            <Button
-              icon="close"
-              label={text().remove(index() + 1)}
-              disabled={props.disabled}
-              onClick={() => props.remove(index())}
-            />
+            <div class="mcp-row-actions">
+              {/* Offered while the value looks like a secret; the column
+                  stays reserved so typing never moves the fields. */}
+              <Show
+                when={secretLooking(row) || row.vault}
+                fallback={<span class="icon-button-space" aria-hidden="true" />}
+              >
+                <Button
+                  icon="key"
+                  class="mcp-keep"
+                  label={`${props.keep}: ${row.key || text().keyLabel()}`}
+                  hint={t("Saved there when you add the server; the settings keep only a reference.")}
+                  active={!!row.vault}
+                  disabled={props.disabled}
+                  onClick={() => props.vault(index(), !row.vault)}
+                />
+              </Show>
+              <Button
+                icon="close"
+                label={text().remove(index() + 1)}
+                disabled={props.disabled}
+                onClick={() => props.remove(index())}
+              />
+            </div>
           </div>
         )}
       </For>

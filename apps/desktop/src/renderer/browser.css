@@ -208,3 +208,9 @@
 .browser-status p {
   margin: 0;
 }
+/* Picking: the crosshair stays lit while the page takes picks. */
+.browser-toolbar button.browser-pick[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-edge);
+  color: var(--accent);
+}

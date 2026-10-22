@@ -6,6 +6,7 @@ pub mod diffview;
 pub mod frame;
 pub mod home;
 pub mod menu;
+pub mod side_chat;
 pub mod sidebar;
 pub mod span;
 pub mod transcript;
@@ -226,6 +227,12 @@ impl App {
             && height >= 12
         {
             let (lines, hits) = diffview::frame(self, viewer, width, height);
+            return self.finish_frame(lines, hits, height);
+        }
+        // The side chat is a place too, at any size: its box must stay usable.
+        if matches!(self.overlay, Overlay::SideChat) {
+            let (mut lines, mut hits) = side_chat::frame(self, width, height);
+            apply_toast(self, &mut lines, &mut hits, width, height);
             return self.finish_frame(lines, hits, height);
         }
         if width < 40 || height < 12 {
@@ -593,6 +600,17 @@ impl App {
         self.sidebar_overlay = !shown;
     }
 
+    /// Ctrl+T: the next thinking display (Compact, Show, Hide), kept for the
+    /// next launch.
+    pub fn cycle_thinking(&mut self) {
+        self.thinking = self.thinking.next();
+        crate::config::save_thinking(self.thinking);
+        self.notice = self.language.format(
+            "Thinking display: {mode}",
+            &[("mode", self.thinking.label(self.language))],
+        );
+    }
+
     fn is_home(&self) -> bool {
         self.items.is_empty()
             && self.todos.is_empty()
@@ -806,6 +824,7 @@ fn apply_dialog(
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
             | Overlay::Chrome
+            | Overlay::SideChat
     );
     // A tall terminal should show more of the list, not the same fifteen rows
     // with empty space above and below the card.

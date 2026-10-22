@@ -360,6 +360,21 @@ impl Client {
         })
     }
     pub async fn bearer(&self, rejected: Option<&str>) -> Result<String> {
+        Ok(self
+            .bearer_until(rejected, chrono::Duration::seconds(30))
+            .await?
+            .0)
+    }
+
+    /// The access token with its expiry, renewed first unless it stays valid
+    /// for `headroom` more (or when `rejected` names it). For a client that
+    /// keeps a token a while, such as Desktop holding relayed connections
+    /// open. An API key has no expiry.
+    pub async fn bearer_until(
+        &self,
+        rejected: Option<&str>,
+        headroom: chrono::Duration,
+    ) -> Result<(String, Option<DateTime<Utc>>)> {
         if let Some(key) = self.config.api_key() {
             return if rejected.is_some() {
                 Err(Error::Api {
@@ -367,7 +382,7 @@ impl Client {
                     message: "API key invalid, expired or revoked. Update HAARNESS_API_KEY.".into(),
                 })
             } else {
-                Ok(key.into())
+                Ok((key.into(), None))
             };
         }
         // Cloud spends a refresh token the moment it answers, and revokes the
@@ -378,22 +393,25 @@ impl Client {
         // sent. Its requests time out after 30 s, which bounds it.
         let client = self.clone();
         let rejected = rejected.map(str::to_owned);
-        renewals::spawn(async move { client.current_bearer(rejected.as_deref()).await })
+        renewals::spawn(async move { client.current_bearer(rejected.as_deref(), headroom).await })
             .await
             .map_err(|_| {
                 Error::Other("Renewing the Haarness Cloud sign-in stopped unexpectedly".into())
             })?
     }
 
-    /// [`Self::bearer`]'s work under the credential lock: the saved access
-    /// token, renewed first when it expired or `rejected` names it.
-    async fn current_bearer(&self, rejected: Option<&str>) -> Result<String> {
+    /// [`Self::bearer_until`]'s work under the credential lock: the saved
+    /// access token, renewed first when it expires within `headroom` or
+    /// `rejected` names it.
+    async fn current_bearer(
+        &self,
+        rejected: Option<&str>,
+        headroom: chrono::Duration,
+    ) -> Result<(String, Option<DateTime<Utc>>)> {
         let _lock = self.config.lock().await?;
         let mut c = credentials::load(&self.config.path())?.ok_or(Error::NotLoggedIn)?;
         self.validate(&c)?;
-        if c.access_expired(Utc::now(), chrono::Duration::seconds(30))
-            || rejected == Some(c.access_token.as_str())
-        {
+        if c.access_expired(Utc::now(), headroom) || rejected == Some(c.access_token.as_str()) {
             let result = self
                 .token(&[
                     ("grant_type", "refresh_token"),
@@ -413,7 +431,7 @@ impl Client {
                 Err(e) => return Err(e),
             }
         }
-        Ok(c.access_token)
+        Ok((c.access_token, Some(c.access_expires_at)))
     }
     pub async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = self.endpoint(path)?;

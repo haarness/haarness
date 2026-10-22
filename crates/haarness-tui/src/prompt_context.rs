@@ -57,38 +57,82 @@ pub(crate) fn snapshot(path: &str, content: &str, lines: Option<(usize, usize)>)
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Part<'a> {
     Text(&'a str),
-    Reference { label: String, body: &'a str },
+    Reference {
+        label: String,
+        body: &'a str,
+    },
+    /// A long paste Desktop sent as one chip: the text as pasted, and the
+    /// fenced block it travels in.
+    Paste {
+        content: &'a str,
+        body: &'a str,
+    },
 }
+
+/// The summary Desktop gives a pasted text's block; the label after it (its
+/// line count) is recounted from the content wherever it is shown.
+const PASTE_SUMMARY: &str = "Pasted text";
 
 const DELEGATION: &str = "Delegate the relevant work from this message and attached context using the task tool with agent ";
 const DELEGATION_END: &str = ". Keep normal permissions in effect.";
 
 /// Split a prompt into typed text and the references the TUI, Desktop and
 /// server expand `@` mentions into, so they can be shown as the chips they
-/// were typed as while the model still receives the full text.
+/// were typed as while the model still receives the full text. A reference
+/// is taken whole, so one quoted inside a file snapshot stays part of that
+/// file, and nothing inside a code fence the person typed counts; Desktop
+/// reads a message the same way (`sentParts` in `prompt-context.ts`).
 pub(crate) fn parts(text: &str) -> Vec<Part<'_>> {
     let mut parts = Vec::new();
     let mut typed = 0;
     let mut cursor = 0;
+    let mut line_start = true;
+    let mut fence: Option<&str> = None;
     while cursor < text.len() {
-        let rest = &text[cursor..];
-        let next = [rest.find("<details>\n<summary>"), rest.find(DELEGATION)]
-            .into_iter()
-            .flatten()
-            .min();
-        let Some(offset) = next else {
-            break;
+        let end = text[cursor..]
+            .find('\n')
+            .map_or(text.len(), |offset| cursor + offset);
+        let line = &text[cursor..end];
+        if line_start {
+            if let Some(open) = fence {
+                if fence_marker(line).is_some_and(|(marker, rest)| {
+                    marker.as_bytes()[0] == open.as_bytes()[0]
+                        && marker.len() >= open.len()
+                        && rest.trim().is_empty()
+                }) {
+                    fence = None;
+                }
+                cursor = end + 1;
+                continue;
+            }
+            // A backtick fence's info string holds no backtick.
+            if let Some((marker, rest)) = fence_marker(line)
+                && !(marker.starts_with('`') && rest.contains('`'))
+            {
+                fence = Some(marker);
+                cursor = end + 1;
+                continue;
+            }
+        }
+        // The next reference on this line: a delegation anywhere in it, or a
+        // block that opens at its end (`<details>`, then its summary).
+        let block = line
+            .ends_with("<details>")
+            .then(|| end - "<details>".len())
+            .filter(|start| text[*start..].starts_with("<details>\n<summary>"));
+        let delegation = line.find(DELEGATION).map(|offset| cursor + offset);
+        let Some(start) = [delegation, block].into_iter().flatten().min() else {
+            cursor = end + 1;
+            line_start = true;
+            continue;
         };
-        let start = cursor + offset;
+        line_start = false;
         match reference_at(&text[start..]) {
-            Some((label, length)) => {
+            Some((part, length)) => {
                 if typed < start {
                     parts.push(Part::Text(&text[typed..start]));
                 }
-                parts.push(Part::Reference {
-                    label,
-                    body: &text[start..start + length],
-                });
+                parts.push(part);
                 typed = start + length;
                 cursor = typed;
             }
@@ -102,37 +146,97 @@ pub(crate) fn parts(text: &str) -> Vec<Part<'_>> {
     parts
 }
 
-/// The chip label and byte length of the reference `text` starts with.
-fn reference_at(text: &str) -> Option<(String, usize)> {
+/// The marker a typed line opens or closes a Markdown code fence with
+/// (three or more backticks or tildes, indented at most three spaces), and
+/// what follows it.
+fn fence_marker(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let mark = *trimmed
+        .as_bytes()
+        .first()
+        .filter(|b| matches!(b, b'`' | b'~'))?;
+    let count = trimmed.bytes().take_while(|b| *b == mark).count();
+    (count >= 3).then(|| trimmed.split_at(count))
+}
+
+/// The reference `text` starts with, and its byte length.
+fn reference_at(text: &str) -> Option<(Part<'_>, usize)> {
     if let Some(rest) = text.strip_prefix(DELEGATION) {
         let mut values = serde_json::Deserializer::from_str(rest).into_iter::<String>();
         let name = values.next()?.ok()?;
         let after = values.byte_offset();
+        let length = DELEGATION.len() + after + DELEGATION_END.len();
         rest[after..].starts_with(DELEGATION_END).then(|| {
             (
-                format!("@{name}"),
-                DELEGATION.len() + after + DELEGATION_END.len(),
+                Part::Reference {
+                    label: format!("@{name}"),
+                    body: &text[..length],
+                },
+                length,
             )
         })
     } else {
         let rest = text.strip_prefix("<details>\n<summary>")?;
         let (summary, body) = rest.split_once("</summary>\n\n")?;
-        let label = ["File context: ", "Directory listing: "]
-            .iter()
-            .find_map(|kind| summary.strip_prefix(kind))?;
-        let label = [" (snapshot)", " (unsaved editor snapshot)"]
-            .iter()
-            .find_map(|suffix| label.strip_suffix(suffix))
-            .unwrap_or(label);
+        let paste = summary.starts_with(PASTE_SUMMARY);
+        // A page element Desktop's browser picked carries a few lines about
+        // the page before its fenced HTML.
+        let element = summary.starts_with("Page element: ");
+        let label = if paste {
+            ""
+        } else {
+            let label = ["File context: ", "Directory listing: ", "Page element: "]
+                .iter()
+                .find_map(|kind| summary.strip_prefix(kind))?;
+            [" (snapshot)", " (unsaved editor snapshot)"]
+                .iter()
+                .find_map(|suffix| label.strip_suffix(suffix))
+                .unwrap_or(label)
+        };
         // A snapshot's fence is longer than any backtick run inside it, so
-        // the first matching fence closes it.
-        let end = match body.split_once('\n') {
+        // the first matching fence closes it. A paste always has one.
+        let (end, content) = match body.split_once('\n') {
             Some((fence, _)) if fence.len() >= 3 && fence.bytes().all(|b| b == b'`') => {
                 let close = format!("\n{fence}\n\n</details>");
-                body[fence.len()..].find(&close)? + fence.len() + close.len()
+                let inner = body[fence.len()..].find(&close)? + fence.len();
+                (
+                    inner + close.len(),
+                    body.get(fence.len() + 1..inner).unwrap_or_default(),
+                )
             }
-            _ => body.find("\n\n</details>")? + "\n\n</details>".len(),
+            _ if paste => return None,
+            // Its HTML's fence closes the element, so a `</details>` in the
+            // page's own HTML stays inside it.
+            _ if element => {
+                let at = body
+                    .split_inclusive('\n')
+                    .scan(0, |offset, line| {
+                        let start = *offset;
+                        *offset += line.len();
+                        Some((start, line))
+                    })
+                    .find(|(_, line)| line.starts_with("```"))?
+                    .0;
+                let fence = &body[at..at + body[at..].bytes().take_while(|b| *b == b'`').count()];
+                let close = format!("\n{fence}\n\n</details>");
+                let inner = body[at + fence.len()..].find(&close)? + at + fence.len();
+                (inner + close.len(), "")
+            }
+            _ => (body.find("\n\n</details>")? + "\n\n</details>".len(), ""),
         };
+        let length = text.len() - rest.len() + summary.len() + "</summary>\n\n".len() + end;
+        if paste {
+            return Some((
+                Part::Paste {
+                    content,
+                    body: &text[..length],
+                },
+                length,
+            ));
+        }
         // Desktop also escapes quotes.
         let label = label
             .replace("&lt;", "<")
@@ -140,10 +244,73 @@ fn reference_at(text: &str) -> Option<(String, usize)> {
             .replace("&quot;", "\"")
             .replace("&amp;", "&");
         Some((
-            format!("@{label}"),
-            text.len() - rest.len() + summary.len() + "</summary>\n\n".len() + end,
+            Part::Reference {
+                label: format!("@{label}"),
+                body: &text[..length],
+            },
+            length,
         ))
     }
+}
+
+/// A sent prompt with every folded paste back to the text pasted, for
+/// reading or copying it whole.
+pub(crate) fn plain(text: &str) -> std::borrow::Cow<'_, str> {
+    if !has_paste(text) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    parts(text)
+        .into_iter()
+        .map(|part| match part {
+            Part::Text(text) | Part::Reference { body: text, .. } => text,
+            Part::Paste { content, .. } => content,
+        })
+        .collect::<String>()
+        .into()
+}
+
+/// How a paste reads where it is folded: `Pasted text · 214 lines`.
+pub(crate) fn paste_label(language: crate::locale::Language, content: &str) -> String {
+    match content.lines().count() {
+        0 | 1 => language.text("Pasted text · 1 line").to_owned(),
+        lines => language.format(
+            "Pasted text · {count} lines",
+            &[("count", &lines.to_string())],
+        ),
+    }
+}
+
+/// The folded prompt of a slash command: `Show prompt · 24 lines`.
+pub(crate) fn show_prompt(language: crate::locale::Language, prompt: &str) -> String {
+    match prompt.lines().count() {
+        0 | 1 => language.text("Show prompt · 1 line").to_owned(),
+        lines => language.format(
+            "Show prompt · {count} lines",
+            &[("count", &lines.to_string())],
+        ),
+    }
+}
+
+/// Whether a sent prompt holds a paste Desktop folded into a chip.
+pub(crate) fn has_paste(text: &str) -> bool {
+    parts(text)
+        .iter()
+        .any(|part| matches!(part, Part::Paste { .. }))
+}
+
+/// The prompt a slash command expanded to, when it says more than the line
+/// typed: `line` is `/name arguments`, `text` what the model received. A
+/// command that has not expanded yet, or whose template is just its
+/// arguments, has nothing more to show.
+pub(crate) fn command_prompt<'a>(line: &str, text: &'a str) -> Option<&'a str> {
+    let arguments = line
+        .strip_prefix('/')
+        .map(|rest| {
+            rest.split_once(char::is_whitespace)
+                .map_or("", |(_, args)| args)
+        })
+        .unwrap_or(line);
+    (text.trim() != arguments.trim()).then_some(text)
 }
 
 /// A sent prompt as the person typed it, references back to `@` chips.
@@ -157,6 +324,13 @@ pub(crate) fn display(text: &str) -> std::borrow::Cow<'_, str> {
         .map(|part| match part {
             Part::Text(text) => std::borrow::Cow::Borrowed(text),
             Part::Reference { label, .. } => std::borrow::Cow::Owned(label),
+            Part::Paste { content, .. } => {
+                // Labels where no language is at hand, as `@` chips are.
+                std::borrow::Cow::Owned(format!(
+                    "[{}]",
+                    paste_label(crate::locale::Language::English, content)
+                ))
+            }
         })
         .collect::<String>()
         .into()

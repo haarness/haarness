@@ -2875,9 +2875,12 @@ return {{ workflow: "{name}", input: args.input }}
         wait_done(&runtime, &turn).await.status,
         TurnStatus::Completed
     );
+    // The model gets the expanded template; the line as typed is kept for
+    // the person reading the chat.
     assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
-        |item| matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, .. }
-            if text == "Prompt command: preserve this tail")
+        |item| matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, command_line, .. }
+            if text == "Prompt command: preserve this tail"
+                && command_line.as_deref() == Some("/prompt preserve this tail"))
     ));
 
     let collision: haarness_protocol::CommandExecutionResponse = client
@@ -3471,6 +3474,7 @@ async fn semantic_fork_remaps_consumed_queue_and_excludes_selected_prompt() {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         )
         .await
@@ -3502,6 +3506,7 @@ async fn semantic_fork_remaps_consumed_queue_and_excludes_selected_prompt() {
                 attachments: vec!["/tmp/reference.png".into()],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )
         .await
@@ -4873,6 +4878,7 @@ async fn automatic_compaction_uses_each_models_context_and_output_limits() {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             )
             .await
@@ -6924,7 +6930,7 @@ async fn assistant_preface_is_persisted_before_its_tool_activity() {
     let reasoning = items
         .iter()
         .filter_map(|item| match &item.data {
-            haarness_protocol::ItemData::Reasoning { text } => Some(text.as_str()),
+            haarness_protocol::ItemData::Reasoning { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();

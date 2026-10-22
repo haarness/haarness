@@ -1,11 +1,13 @@
 import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
-import { SettingRow as Row } from "./SettingRow";
+import { BaseTag, SettingRow as Row } from "./SettingRow";
+import { DiagnosticsSetting } from "./Diagnostics";
+import { Markdown } from "./Markdown";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
-import { formatNumber, t, languages } from "./i18n";
+import { formatNumber, splitAround, t, languages } from "./i18n";
 import { InputSettings } from "./InputSettings";
 import { openServerConnection } from "./ServerConnect";
 import { ManagementPanel } from "./ManagementPanel";
@@ -14,6 +16,7 @@ import { modelName } from "../model-names";
 import { Schedules } from "./Schedules";
 import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
+import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
@@ -23,12 +26,15 @@ import { Select } from "./Select";
 import { MenuButton } from "./MenuButton";
 import {
   For,
+  Match,
   Show,
+  Switch,
   createSignal,
   createEffect,
   onCleanup,
   onMount,
 } from "solid-js";
+import { computers, lastSeen, loadComputers, platformName, watchComputers } from "./computers";
 import type * as T from "@haarness/sdk";
 import type { Preferences } from "../shared";
 import { themes, themeColors } from "../themes";
@@ -508,11 +514,6 @@ function General() {
               "Keep commands and tool output folded until you open them.",
             ],
             [
-              "showReasoning",
-              "Show reasoning",
-              "Display the reasoning supplied by your selected model.",
-            ],
-            [
               "editorWrap",
               "Wrap editor lines",
               "Keep long lines within the editor width.",
@@ -536,6 +537,25 @@ function General() {
           </Row>
         )}
       </For>
+      <Row
+        title="Thinking display"
+        description="Compact keeps the model's thinking to one line that opens on click, Show writes it out in full, and Hide leaves it out."
+      >
+        <Select
+          aria-label={t("Thinking display")}
+          value={app.state.preferences.thinking}
+          onChange={(value) =>
+            app.run(() =>
+              app.settings({ thinking: value as Preferences["thinking"] }),
+            )
+          }
+          options={[
+            { value: "compact", label: t("Compact") },
+            { value: "show", label: t("Show") },
+            { value: "hide", label: t("Hide") },
+          ]}
+        />
+      </Row>
       <Row title="Turn completion notifications" description="Choose when completed or failed tasks notify you.">
         <Select aria-label={t("Turn completion notifications")} value={app.state.preferences.completionNotifications}
           options={[{ value: "background", label: t("Only when unfocused") }, { value: "always", label: t("Always") }, { value: "never", label: t("Never") }]}
@@ -560,6 +580,7 @@ function General() {
         />
       </Row>
       <UsageStatisticsSetting />
+      <DiagnosticsSetting />
       <p class="muted">
         {t("Drafts, appearance and saved projects are saved on this computer. Chats and tasks are saved separately for each project folder or worktree.")}
       </p>
@@ -728,7 +749,7 @@ function Servers() {
       <p class="muted">
         {t("Select a server to see its projects and chats.")}
       </p>
-      <For each={app.servers()}>
+      <For each={app.servers().filter((item) => !item.host)}>
         {(item) => (
           <Row
             title={item.label}
@@ -799,7 +820,106 @@ function Servers() {
           {t("Add remote server")}
         </button>
       </div>
+      <Computers />
     </>
+  );
+}
+/** Your other computers, read from the account when this page opens.
+ * Signed out, one quiet line is all there is: the only place that says the
+ * computers can be opened here at all. */
+function Computers() {
+  const app = useApp();
+  onCleanup(watchComputers());
+  const active = () => app.currentServer().host;
+  return (
+    <Show
+      when={computers.status !== "signed-out"}
+      fallback={
+        <div class="settings-computers-note settings-computers-signed-out" data-setting="Your computers">
+          <p>{t("Sign in to Haarness to open your other computers here.")}</p>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent("haarness:account"))}
+          >
+            {t("Sign in")}
+          </button>
+        </div>
+      }
+    >
+    <section class="settings-computers" aria-label={t("Your computers")} data-setting="Your computers">
+      <header>
+        <div>
+          <h3>{t("Your computers")}</h3>
+          <p>
+            {splitAround(
+              t("Open a computer you share with {command}, through Haarness Cloud. Its prompts, tools and terminals run there."),
+              () => <code>haarness remote enable</code>,
+              "{command}",
+            )}
+          </p>
+        </div>
+        <Button
+          icon="refresh"
+          label={t("Refresh")}
+          disabled={computers.status === "loading"}
+          onClick={() => void loadComputers()}
+        />
+      </header>
+      <Switch>
+        <Match when={computers.status === "error"}>
+          <div class="settings-computers-note">
+            <p role="alert" title={computers.error}>
+              {t("Couldn’t list your computers. Check your connection and try again.")}
+            </p>
+            <button onClick={() => void loadComputers()}>{t("Try again")}</button>
+          </div>
+        </Match>
+        <Match when={!computers.items.length && computers.status !== "ready"}>
+          <p class="settings-computers-note" role="status">
+            {t("Looking for your computers…")}
+          </p>
+        </Match>
+        <Match when={!computers.items.length}>
+          <p class="settings-computers-note">
+            {splitAround(
+              t("No other computers yet. Run {command} on one to open it here."),
+              () => <code>haarness remote enable</code>,
+              "{command}",
+            )}
+          </p>
+        </Match>
+      </Switch>
+      <For each={computers.items}>
+        {(computer) => (
+          <div
+            class="setting-row computer-row"
+            classList={{ away: !computer.connected }}
+            data-setting={"server:host:" + computer.id}
+          >
+            <Icon name="host" size="md" />
+            <div>
+              <strong>{computer.name}</strong>
+              <p>
+                {computer.connected
+                  ? platformName(computer.platform) || t("Connected")
+                  : lastSeen(computer)}
+              </p>
+            </div>
+            <button
+              disabled={
+                active() === computer.id
+                  ? !app.state.openingProject
+                  : !computer.connected
+              }
+              onClick={() => app.run(() => app.openComputer(computer))}
+            >
+              {active() === computer.id ? t("Selected") : t("Switch")}
+            </button>
+          </div>
+        )}
+      </For>
+    </section>
+    </Show>
   );
 }
 function Projects() {
@@ -1153,7 +1273,8 @@ function Assets(props: { kind: string; cli: Cli }) {
       action: on ? "enable" : "disable",
       kind: kind(),
       name: item.name,
-      scope: item.scope === "global" ? "global" : "local",
+      // A base folder item is shared by every project, as a global one is.
+      scope: item.scope === "global" || item.scope === "base" ? "global" : "local",
     });
     await app.catalogs();
     await refresh();
@@ -1219,10 +1340,13 @@ function Assets(props: { kind: string; cli: Cli }) {
                 ? t("This project")
                 : item.scope === "global"
                   ? t("All projects")
-                  : t("Built-in / plugin"),
+                  : item.scope === "base"
+                    ? undefined
+                    : t("Built-in / plugin"),
             ]
               .filter(Boolean)
               .join(" · ")}
+            tag={item.scope === "base" ? <BaseTag /> : undefined}
             target={props.kind + ":" + item.name}
           >
             <Show when={item.name in enabled()}>
@@ -1360,9 +1484,19 @@ function Tools() {
 function Mcp(props: { cli: Cli }) {
   const app = useApp();
   const [rows, setRows] = createSignal<T.McpServerInfo[]>([]);
+  const connection = () => app.state.connection?.id ?? "";
   async function refresh() {
-    setRows(await app.api("mcpServers"));
+    const servers = await app.api<T.McpServerInfo[]>("mcpServers");
+    setRows(servers);
+    noteMcpServers(connection(), servers);
+    if (!app.state.connection?.remote)
+      await loadReadOnlyServers(
+        connection(),
+        servers.map((server) => server.name),
+      ).catch(() => undefined);
   }
+  // A server of the base folder, which Haarness lists but never changes.
+  const fromBase = (server: T.McpServerInfo) => server.scope === "base";
   createEffect(() => {
     app.state.catalogVersion;
     void app.run(refresh);
@@ -1378,6 +1512,11 @@ function Mcp(props: { cli: Cli }) {
       <Show when={adding()}>
         <McpForm
           close={() => setAdding(false)}
+          platform={app.state.platform}
+          storeSecret={async (name, secret) =>
+            (await app.native<{ name: string }>({ action: "store_mcp_secret", name, secret })).name
+          }
+          removeSecrets={(names) => app.native({ action: "remove_mcp_secrets", names })}
           save={async (input) => {
             await app.native({ action: "asset", kind: "mcp", input });
             // Asset events refresh the live registry once the daemon has reloaded.
@@ -1393,8 +1532,15 @@ function Mcp(props: { cli: Cli }) {
           <div class="setting-block">
             <header>
               <h3 data-setting={"mcp:" + server.name}>{server.name}</h3>
+              <Show when={fromBase(server)}>
+                <BaseTag />
+              </Show>
               <span class="badge">{server.status}</span>
             </header>
+            {/* Why a server failed is what decides the next step (reconnect, fix a setting). */}
+            <Show when={server.status === "failed" && server.detail}>
+              <p class="mcp-server-detail">{server.detail}</p>
+            </Show>
             <div class="toolbar">
               <button
                 onClick={() =>
@@ -1430,7 +1576,8 @@ function Mcp(props: { cli: Cli }) {
                   items={[
                     { label: "Enable", command: "enable" },
                     { label: "Disable", command: "disable" },
-                    { label: "Remove", command: "remove" },
+                    // The base folder's servers are turned off, not removed.
+                    ...(fromBase(server) ? [] : [{ label: "Remove", command: "remove" }]),
                     { label: "Sign out", command: "logout" },
                   ].map((item) => ({
                     label: t(item.label),
@@ -1460,6 +1607,31 @@ function Mcp(props: { cli: Cli }) {
                       }),
                   }))}
                 />
+                <Show when={offersApps(connection(), server)}>
+                  {/* Pages this server shows under its tools; off, it is a plain MCP server. */}
+                  <label
+                    class="mcp-apps-switch"
+                    classList={{ locked: readOnlyServer(connection(), server.name) }}
+                    title={
+                      readOnlyServer(connection(), server.name)
+                        ? t("Set outside your settings")
+                        : t("Show this server's pages under its tools in chats. Off, its tools show as text.")
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      aria-label={t("Interactive apps for {name}", { name: server.name })}
+                      disabled={readOnlyServer(connection(), server.name)}
+                      checked={!appsOff(connection(), server.name)}
+                      onChange={(event) => {
+                        const on = event.currentTarget.checked;
+                        void app.run(() => setApps(connection(), server.name, on));
+                      }}
+                    />
+                    <span>{t("Interactive apps")}</span>
+                  </label>
+                </Show>
               </Show>
             </div>
           </div>
@@ -1526,6 +1698,7 @@ function Plugins() {
             title={plugin.name}
             target={"plugin:" + plugin.name}
             description={plugin.description || plugin.source}
+            tag={plugin.source === "haarness-base" ? <BaseTag /> : undefined}
           >
             <Show when={plugin.managed}>
               <input
@@ -1867,6 +2040,34 @@ function Profiles(props: { cli: Cli }) {
     </>
   );
 }
+/**
+ * A link in release notes opens in the system browser when it is a web
+ * address; anything else (a relative link, a file, an app link) does nothing:
+ * the notes come from the update feed, not from a project.
+ */
+function openReleaseLink(href: string) {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return;
+  }
+  if (url.protocol === "https:" || url.protocol === "http:")
+    void window.haarness.openExternal(url.href).catch(() => {});
+}
+/** An update's release notes, rendered and sanitized, in a scroll area of their own. */
+function ReleaseNotes(props: { version?: string; notes: string }) {
+  return (
+    <section class="release-notes" aria-label={t("Release notes")}>
+      <small>
+        {props.version ? t("What’s new in {version}", { version: props.version }) : t("What’s new")}
+      </small>
+      <div class="release-notes-body" tabindex="0">
+        <Markdown text={props.notes} document onLink={openReleaseLink} />
+      </div>
+    </section>
+  );
+}
 function About() {
   const app = useApp();
   const [update, setUpdate] = createSignal<{
@@ -1874,10 +2075,18 @@ function About() {
     percent?: number;
     version?: string;
     message?: string;
+    /** The feed's release notes for the update, as Markdown; "" without any. */
+    notes?: string;
   }>({});
   const off = window.haarness.onEvent((event) => {
-    if (event.kind === "update")
-      setUpdate(event.data as ReturnType<typeof update>);
+    if (event.kind !== "update") return;
+    const next = event.data as ReturnType<typeof update>;
+    // Progress events carry no version or notes; the ones the check found stay.
+    setUpdate((current) => ({
+      ...next,
+      version: next.version ?? current.version,
+      notes: next.notes || current.notes,
+    }));
   });
   onCleanup(off);
   return (
@@ -1892,10 +2101,12 @@ function About() {
               const result = (await window.haarness.update("check")) as {
                 available: boolean;
                 info?: { version: string };
+                notes?: string;
               };
               setUpdate({
                 status: result.available ? "available" : "current",
                 version: result.info?.version,
+                notes: result.notes,
               });
             })
           }
@@ -1914,11 +2125,18 @@ function About() {
             class="primary"
             onClick={() =>
               app.run(async () => {
+                const { version, notes } = update();
                 if (
                   await confirm(
                     t("Install update?"),
                     t("Haarness will restart. Save your file edits before continuing."),
-                    { submit: t("Restart & install") },
+                    {
+                      submit: t("Restart & install"),
+                      // What the update brings, when the feed says.
+                      content: notes
+                        ? () => <ReleaseNotes version={version} notes={notes} />
+                        : undefined,
+                    },
                   )
                 )
                   await window.haarness.update("install");
