@@ -45,8 +45,10 @@ fn rows(source: &jsonconfig::HookSource, workspace: &Path) -> Result<Vec<Value>>
                     {
                         continue;
                     }
+                    let matcher = group["matcher"].as_str().unwrap_or("*");
                     rows.push(json!({"id": id(&source.path,event,gi,hi), "event": event,
-                        "matcher": group["matcher"].as_str().unwrap_or("*"), "handler": hook,
+                        "matcher": matcher, "neverRuns": haarness_server::hooks::never_runs(event, matcher),
+                        "handler": hook,
                         "revision": revision, "groupDisabled": group["disabled"].as_bool().unwrap_or(false),
                         "source": {"path": source.path, "editable": !source.plugin,
                             "scope": if source.plugin {"plugin"} else if workspace.starts_with(source.path.parent().unwrap_or(workspace)) || source.path.starts_with(workspace) {"local"} else {"global"},
@@ -56,6 +58,25 @@ fn rows(source: &jsonconfig::HookSource, workspace: &Path) -> Result<Vec<Value>>
         }
     }
     Ok(rows)
+}
+/// What each event's matcher is compared with, for editors: `tool`,
+/// `permission`, `value` (one of `values`, the only ones Haarness sends) or
+/// `nothing` (the matcher is ignored).
+fn matchers() -> Value {
+    use haarness_server::hooks::{MatcherTarget, matcher_target};
+    EVENTS
+        .iter()
+        .map(|event| {
+            let target = match matcher_target(event) {
+                MatcherTarget::Tool => json!({"compares": "tool"}),
+                MatcherTarget::Permission => json!({"compares": "permission"}),
+                MatcherTarget::Values(values) => json!({"compares": "value", "values": values}),
+                MatcherTarget::Nothing => json!({"compares": "nothing"}),
+            };
+            ((*event).to_owned(), target)
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 fn validated(input: &Value, prior: Option<&Value>) -> Result<(String, String, Value)> {
     let event = input["event"].as_str().context("Choose a hook event")?;
@@ -123,7 +144,7 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
             .flatten()
             .collect::<Vec<_>>();
         return Ok(
-            json!({"items":items,"events":EVENTS,"errors":layers.errors,"projectTrusted":trust}),
+            json!({"items":items,"events":EVENTS,"matchers":matchers(),"errors":layers.errors,"projectTrusted":trust}),
         );
     }
     if action == "create" {
@@ -325,6 +346,20 @@ mod tests {
                 .iter()
                 .any(|row| row["handler"]["disabled"] == true)
         );
+        let listed = list();
+        assert_eq!(listed["matchers"]["PreToolUse"]["compares"], "tool");
+        assert_eq!(listed["matchers"]["Stop"]["compares"], "nothing");
+        assert_eq!(
+            listed["matchers"]["PostCompact"],
+            json!({"compares": "value", "values": ["manual", "automatic"]})
+        );
+        assert!(
+            listed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["neverRuns"] == false)
+        );
         let untrusted = execute(&paths, &workspace, false, &json!({"action":"list"})).unwrap();
         assert!(
             untrusted["items"]
@@ -407,6 +442,14 @@ mod tests {
         let row = rows(&source, Path::new("/project")).unwrap().remove(0);
         assert_eq!(row["source"]["editable"], false);
         assert_eq!(row["source"]["scope"], "plugin");
+        let never = jsonconfig::HookSource {
+            block: json!({"SessionEnd":[{"matcher":"clear","hooks":[{"command":"echo never"}]}]}),
+            ..source
+        };
+        assert_eq!(
+            rows(&never, Path::new("/project")).unwrap()[0]["neverRuns"],
+            true
+        );
         fs::remove_file(path).unwrap();
     }
 }

@@ -157,7 +157,12 @@ impl ConfiguredHooks {
             .filter(|entry| entry.event == event)
             .filter(|entry| match (&entry.matcher, tool) {
                 (None, _) | (Some(_), None) => true,
-                (Some(matcher), Some(tool)) => matcher_matches(matcher, tool),
+                (Some(matcher), Some(tool)) => {
+                    matcher_matches(matcher, tool)
+                        || (event == "StopFailure"
+                            && PROVIDER_FAILURES.contains(&tool)
+                            && matcher_matches(matcher, "provider"))
+                }
             })
             .collect()
     }
@@ -954,6 +959,73 @@ fn changed_file(tool: &str, arguments: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The `StopFailure` categories of provider errors. Before they were told
+/// apart every provider error was `provider`, which still matches them all.
+const PROVIDER_FAILURES: &[&str] = &[
+    "authentication_failed",
+    "rate_limit",
+    "overloaded",
+    "server_error",
+    "invalid_request",
+];
+
+/// What a hook's matcher is compared with for an event: what an editor
+/// suggests, and what decides whether a matcher can ever match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatcherTarget {
+    /// The tool's name (Claude aliases accepted).
+    Tool,
+    /// The permission asked (`bash`, `edit`, `external_directory`, …).
+    Permission,
+    /// One of these values, the only ones Haarness sends for the event.
+    Values(&'static [&'static str]),
+    /// Nothing: the matcher is ignored and the hook runs every time.
+    Nothing,
+}
+
+/// See [`MatcherTarget`].
+#[must_use]
+pub fn matcher_target(event: &str) -> MatcherTarget {
+    match event {
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => MatcherTarget::Tool,
+        "PermissionRequest" => MatcherTarget::Permission,
+        "SessionStart" => MatcherTarget::Values(&["startup"]),
+        "SessionEnd" => MatcherTarget::Values(&["archived"]),
+        "Notification" => MatcherTarget::Values(&["permission_prompt", "turn_completed"]),
+        "PostCompact" => MatcherTarget::Values(&["manual", "automatic"]),
+        "StopFailure" => MatcherTarget::Values(&[
+            "authentication_failed",
+            "rate_limit",
+            "overloaded",
+            "server_error",
+            "invalid_request",
+            "provider",
+            "incomplete",
+            "content_filter",
+            "tool",
+            "other",
+        ]),
+        "FileChanged" => MatcherTarget::Values(&["write", "edit", "multiedit", "notebook_edit"]),
+        _ => MatcherTarget::Nothing,
+    }
+}
+
+/// Whether a hook for `event` with `matcher` can never run: the event sends
+/// only certain values, and the matcher matches none of them.
+#[must_use]
+pub fn never_runs(event: &str, matcher: &str) -> bool {
+    let matcher = matcher.trim();
+    if matcher.is_empty() || matcher == "*" {
+        return false;
+    }
+    match matcher_target(event) {
+        MatcherTarget::Values(values) => {
+            !values.iter().any(|value| matcher_matches(matcher, value))
+        }
+        _ => false,
+    }
+}
+
 /// `A|B` alternation or a literal, matched against the haarness tool name,
 /// accepting Claude tool aliases (Bash → bash, Edit → edit, …).
 fn matcher_matches(matcher: &str, tool: &str) -> bool {
@@ -1358,6 +1430,58 @@ mod tests {
         assert_eq!(entries[0].matcher.as_deref(), Some("Bash|Edit"));
         assert_eq!(entries[0].timeout, Duration::from_secs(10));
         assert!(entries[1].matcher.is_none());
+    }
+
+    #[test]
+    fn a_matcher_that_can_never_match_its_event_is_told_apart() {
+        assert!(!never_runs("SessionEnd", "archived"));
+        assert!(!never_runs("SessionEnd", "*"));
+        assert!(!never_runs("SessionEnd", " "));
+        assert!(never_runs("SessionEnd", "clear"));
+        assert!(never_runs("SessionStart", "resume"));
+        assert!(!never_runs("PostCompact", "manual|automatic"));
+        assert!(never_runs("PostCompact", "auto"));
+        assert!(!never_runs("PostCompact", "auto.*"));
+        assert!(never_runs("FileChanged", "Bash"));
+        assert!(!never_runs("FileChanged", "Edit"));
+        assert!(!never_runs("StopFailure", "rate_limit|provider"));
+        assert!(never_runs("StopFailure", "billing_error"));
+        // Tools and permissions are open-ended, and an event with nothing
+        // to match ignores its matcher.
+        assert!(!never_runs("PreToolUse", "mcp__github__create_issue"));
+        assert!(!never_runs("PermissionRequest", "bash"));
+        assert!(!never_runs("Stop", "bash"));
+        assert_eq!(matcher_target("UserPromptSubmit"), MatcherTarget::Nothing);
+    }
+
+    #[tokio::test]
+    async fn a_stop_failure_matcher_for_provider_still_matches_every_provider_error() {
+        let thread = ThreadId::new();
+        let turn = haarness_protocol::TurnId::new();
+        let events = captured(
+            json!({"StopFailure": [{"matcher": "provider"}, {"matcher": "rate_limit"}]}),
+            async |hooks| {
+                for error in ["rate_limit", "authentication_failed", "provider", "tool"] {
+                    hooks
+                        .stop_failure(thread, turn, &json!({"error": error}))
+                        .await;
+                }
+            },
+        )
+        .await;
+        let errors: Vec<&str> = events
+            .iter()
+            .map(|event| event["error"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                "rate_limit",
+                "rate_limit",
+                "authentication_failed",
+                "provider"
+            ]
+        );
     }
 
     #[test]
