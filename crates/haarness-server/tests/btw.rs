@@ -501,9 +501,14 @@ async fn a_follow_up_sends_its_side_chat_after_the_chat_and_extends_the_question
     for history in [
         json!([{"question": "What is the codename?", "answer": "  "}]),
         Value::Array(vec![json!({"question": "q", "answer": "a"}); 101]),
+        // Larger than the 1 MiB a thread may hold, and than the usual body
+        // limit: still a 400 that says why.
+        json!([{"question": "Long?", "answer": "x".repeat(3 * 1024 * 1024)}]),
     ] {
         let refused = ask(json!({"question": "Again?", "history": history})).await;
         assert_eq!(refused.status(), 400);
+        let body: Value = refused.json().await.unwrap();
+        assert_eq!(body["code"], "invalid_request", "{body}");
     }
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
     server.handle.shutdown().await.unwrap();
@@ -621,6 +626,12 @@ async fn a_streamed_side_question_sends_its_answer_as_it_is_written() {
     assert_eq!(ask(json!({"question": "  "})).await.status(), 400);
     assert_eq!(
         ask(json!({"question": "Again?", "history": [{"question": "", "answer": "a"}]}))
+            .await
+            .status(),
+        400
+    );
+    assert_eq!(
+        ask(json!({"question": "Again?", "history": [{"question": "q", "answer": "x".repeat(2 * 1024 * 1024)}]}))
             .await
             .status(),
         400
