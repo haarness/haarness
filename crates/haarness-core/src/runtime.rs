@@ -266,6 +266,10 @@ fn workspace_tool_enabled(
 
 const TOOL_AVAILABILITY_SETTING: &str = "tool_availability.v1";
 const LAZY_TOOL_MODE_SETTING: &str = "lazy_tool_mode.v1";
+/// How often a background result is offered again to a chat whose storage
+/// failed, and the first wait (it grows by this much each time).
+const BACKGROUND_STORAGE_RETRIES: u32 = 3;
+const BACKGROUND_STORAGE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 /// Paired workspace checkpoints for one durable turn. For each checkpoint pair,
 /// these record what happened without serializing tool execution in other
 /// sessions or child agents.
@@ -927,6 +931,18 @@ fn refused_image<'a>(message: &str, sent: &'a [SentImage]) -> Option<&'a SentIma
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
     describe_error(error, None)
+}
+
+/// Why a chat refused input, as a notice quotes it: the refusal's own words,
+/// without the category the error type adds ("invalid request: …").
+fn refusal_reason(error: &CoreError) -> String {
+    match error {
+        CoreError::Invalid(reason)
+        | CoreError::Conflict(reason)
+        | CoreError::NotFound(reason)
+        | CoreError::PermissionDenied(reason) => reason.clone(),
+        other => user_facing_error(other),
+    }
 }
 
 /// `user_facing_error`, naming the provider (when known) that has no
@@ -2746,6 +2762,60 @@ impl AgentRuntime {
             Some(handoff),
         )
         .await
+    }
+
+    /// Keep a background result that `thread` refused as input with `error`
+    /// (its agent was removed or disabled meanwhile, or storage kept
+    /// failing), as a restart keeps one it held: a hidden message the model
+    /// reads with the person's next one, and a notice that says so. Only a
+    /// chat that is gone loses it.
+    pub async fn keep_refused_background_result(
+        &self,
+        thread: ThreadId,
+        text: String,
+        notice: String,
+        error: &CoreError,
+    ) {
+        if matches!(error, CoreError::NotFound(_)) {
+            tracing::info!(%thread, %error, "background result dropped: its chat is gone");
+            return;
+        }
+        let kept = async {
+            let thread = self.repository.get_thread(thread).await?;
+            let root = self.resolve_root(&thread).await;
+            for data in [
+                ItemData::UserMessage {
+                    text,
+                    attachments: Vec::new(),
+                    queued: false,
+                    synthetic: true,
+                },
+                ItemData::Error {
+                    message: notice,
+                    retryable: false,
+                },
+            ] {
+                let item = self.repository.append_item(thread.id, None, data).await?;
+                self.events.publish_scoped(
+                    "item.created",
+                    Some(thread.id),
+                    Some(root),
+                    None,
+                    Some(item.id),
+                    json!(item),
+                );
+            }
+            CoreResult::Ok(())
+        }
+        .await;
+        match kept {
+            Ok(()) => {
+                tracing::warn!(%thread, %error, "background result kept for the chat's next message");
+            }
+            Err(kept) => {
+                tracing::error!(%thread, %error, %kept, "failed to deliver or keep a background result");
+            }
+        }
     }
 
     /// Stop exactly one child task owned by `parent`. The selected child may
@@ -9918,28 +9988,48 @@ impl RunnerTask {
             let handoff = ledger.hand_off(info.parent_thread_id, RequestId::new(), || {
                 task.handed_off.store(true, Ordering::SeqCst);
             });
-            let delivered = runtime
-                .queue_input_with_options(
-                    info.parent_thread_id,
-                    QueueInputRequest {
-                        preview: None,
-                        reasoning_effort: None,
-                        delivery: haarness_protocol::InputDelivery::Steer,
-                        request_id: handoff.request_id(),
-                        text: task.envelope(&info, state, &text),
-                        attachments: Vec::new(),
-                        synthetic: true,
-                    },
-                    task.delivery_auto_approve,
-                    task.delivery_unattended,
-                    task.delivery_tools.clone(),
-                    Some(&handoff),
-                )
-                .await;
-            drop(handoff);
+            let envelope = task.envelope(&info, state, &text);
+            let mut attempt = 0_u32;
+            let delivered = loop {
+                let delivered = runtime
+                    .queue_input_with_options(
+                        info.parent_thread_id,
+                        QueueInputRequest {
+                            preview: None,
+                            reasoning_effort: None,
+                            delivery: haarness_protocol::InputDelivery::Steer,
+                            request_id: handoff.request_id(),
+                            text: envelope.clone(),
+                            attachments: Vec::new(),
+                            synthetic: true,
+                        },
+                        task.delivery_auto_approve,
+                        task.delivery_unattended,
+                        task.delivery_tools.clone(),
+                        Some(&handoff),
+                    )
+                    .await;
+                // A busy database clears; the same request id makes a retry
+                // of an admission that did land a no-op.
+                match delivered {
+                    Err(CoreError::Storage(_)) if attempt < BACKGROUND_STORAGE_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(BACKGROUND_STORAGE_BACKOFF * attempt).await;
+                    }
+                    delivered => break delivered,
+                }
+            };
             if let Err(error) = delivered {
-                tracing::error!(%error, child = %info.child_thread_id, "failed to deliver background task result");
+                let notice = format!(
+                    "The result of the background task \u{201c}{}\u{201d} could not start a turn in this chat ({}); your next message passes it to the agent.",
+                    info.description,
+                    refusal_reason(&error)
+                );
+                runtime
+                    .keep_refused_background_result(info.parent_thread_id, envelope, notice, &error)
+                    .await;
             }
+            drop(handoff);
             tasks.remove(&info.child_thread_id);
             task.delivered.store(true, Ordering::SeqCst);
             task.delivery_done.notify_waiters();
