@@ -4,6 +4,7 @@ All changes are confined to a fresh data root; provider traffic uses local fixtu
 """
 import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time,urllib.request,urllib.error,uuid
 import e2e_scratch
+import e2e_tmux
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-tui-parity-')).resolve()
 workspace=root/'workspace'; workspace.mkdir()
@@ -104,8 +105,8 @@ try:
     original=endpoint;endpoint=endpoint2
     other=api('/threads',{'provider':'echo','model':'echo-1','agent':'build','title':'SERVER TWO ONLY'})
     endpoint=original
-    args=['env','HAARNESS_DATA_DIR='+str(root),'HAARNESS_TEST_PROVIDER=1',str(binary),'--workspace',str(workspace),'--trust-project']
-    run(['tmux','new-session','-d','-x','155','-y','44','-s',name,shlex.join(args)]);until(lambda:'Echo 1' in capture(),'TUI failed to start')
+    args=[str(binary),'--workspace',str(workspace),'--trust-project']
+    run(['tmux','new-session','-d','-x','155','-y','44','-s',name,e2e_tmux.pane_command(env,args)]);until(lambda:'Echo 1' in capture(),'TUI failed to start')
     command('/servers');choose('Add server');fill('Name','Second test host');fill('Server URL',endpoint2['url']);fill('Password','second-host-password');choose('Save');until(lambda:'Second test host' in capture(),'Server not saved');keys('Escape')
     literal('draft belongs to original');palette('servers');choose('Second test host');choose('Connect');until(lambda:'Connected to selected server' in capture(),'Server switch failed');assert 'draft belongs to original' not in capture()
     palette('sessions');until(lambda:'SERVER TWO ONLY' in capture(),'Target catalog missing');assert 'Frozen shared conversation' not in capture();keys('Escape')
@@ -117,7 +118,7 @@ try:
     assert 'draft belongs to original' not in capture()
     keys('Escape');literal('draft survives remote client restart');until(lambda:'draft survives remote client restart' in capture(),'Restart draft was not entered');evidence('remote-draft-before-restart');palette('quit')
     until(lambda:subprocess.run(['tmux','has-session','-t',name],capture_output=True).returncode!=0,'TUI did not exit')
-    run(['tmux','new-session','-d','-x','155','-y','44','-s',name,shlex.join(args)]);until(lambda:'Echo 1' in capture(),'TUI restart failed')
+    run(['tmux','new-session','-d','-x','155','-y','44','-s',name,e2e_tmux.pane_command(env,args)]);until(lambda:'Echo 1' in capture(),'TUI restart failed')
     palette('servers');choose('Second test host');choose('Connect');until(lambda:'draft belongs to second' in capture(),'Saved host draft missing after restart')
     palette('servers');choose('Projects on this server');choose('another-project');until(lambda:'draft survives remote client restart' in capture(),'Project draft missing after restart');evidence('remote-draft-after-restart')
     (root/'result.json').write_text(json.dumps({'passed':True,'checks':['ordinary workspace and permitted external writes','host networking','retired policy ignored','private frozen share preview','public HTML escaping','share revoke','tmux server switching','per-server drafts','host project gateway and real turn']},indent=2))

@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 import e2e_scratch
+import e2e_tmux
 
 repo = Path(__file__).resolve().parents[1]
 binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
@@ -236,7 +237,7 @@ try:
         sessions.append(session)
         args = [str(binary), "--workspace", str(project)]
         if attached: args += ["attach", connection["url"], "--token", connection["token"]]
-        launch = shlex.join(["env", *[f"{key}={env[key]}" for key in ["HOME", "HAARNESS_HOME", "HAARNESS_DATA_DIR", "HAARNESS_TEST_PROVIDER"]], *args])
+        launch = e2e_tmux.pane_command(env, args)
         run("tmux", "new-session", "-d", "-x", "112", "-y", "34", "-s", session, launch)
         def pane(): return run("tmux", "capture-pane", "-p", "-t", session)
         until(lambda: "/ commands" in pane(), "TUI did not open")
