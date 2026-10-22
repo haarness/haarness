@@ -535,8 +535,27 @@ impl Client {
                 .await?
                 .error_for_status()?;
             let value: Device = response.json().await?;
+            // The link is printed and opened in a browser: one that is not
+            // http or https (a local file, an app's own scheme) stops here,
+            // and the parsed address is used, so no control character in it
+            // or in the code reaches a terminal.
+            let url = Url::parse(&value.verification_uri_complete)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+                .ok_or_else(|| {
+                    Error::Other(
+                        "The sign-in server sent a link that is not http or https, so sign-in stopped."
+                            .into(),
+                    )
+                })?;
+            if value.user_code.contains(char::is_control) {
+                return Err(Error::Other(
+                    "The sign-in server sent a code with control characters, so sign-in stopped."
+                        .into(),
+                ));
+            }
             return Ok(Login {
-                url: value.verification_uri_complete.clone(),
+                url: url.to_string(),
                 code: Some(value.user_code.clone()),
                 generation,
                 device_label,

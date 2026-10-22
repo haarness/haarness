@@ -370,3 +370,51 @@ async fn both_sign_in_flows_name_this_computer_in_their_token_request() {
     server.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_device_sign_in_stops_at_a_link_that_is_not_http_or_https() {
+    for (link, code, said) in [
+        (
+            "file:///Applications/Calculator.app",
+            "ABCD-EFGH",
+            "The sign-in server sent a link that is not http or https, so sign-in stopped.",
+        ),
+        (
+            "x-fixture-app://open?code=ABCD-EFGH",
+            "ABCD-EFGH",
+            "The sign-in server sent a link that is not http or https, so sign-in stopped.",
+        ),
+        (
+            "https://cloud.fixture.test/device",
+            "ABCD\u{1b}]0;title\u{7}",
+            "The sign-in server sent a code with control characters, so sign-in stopped.",
+        ),
+    ] {
+        let app = Router::new().route(
+            "/oauth/device_authorization",
+            post(move || async move {
+                Json(json!({"device_code": "dc-1", "user_code": code,
+                    "verification_uri_complete": link, "expires_in": 60, "interval": 1}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+        let config = Config::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            dir.clone(),
+            "haarness-cli",
+        )
+        .unwrap();
+        let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+        let error = Client::new(config)
+            .unwrap()
+            .begin_login(true)
+            .await
+            .err()
+            .expect("the sign-in stops");
+        assert_eq!(error.to_string(), said);
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
