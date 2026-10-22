@@ -2433,6 +2433,16 @@ impl AgentRuntime {
                 "each earlier side question needs its question and answer".into(),
             ));
         }
+        let size: usize = request
+            .history
+            .iter()
+            .map(|turn| turn.question.len() + turn.answer.len())
+            .sum();
+        if size > haarness_protocol::BTW_HISTORY_BYTES {
+            return Err(CoreError::Invalid(
+                "this side chat's earlier questions and answers are larger than 1 MiB; start a new side chat".into(),
+            ));
+        }
         self.repository.get_thread(thread_id).await.map(|_| ())
     }
 
@@ -2586,10 +2596,7 @@ impl AgentRuntime {
         }
         prepared.messages.push(ProviderMessage::Text {
             role: "user".into(),
-            content: crate::side_question::prompt(
-                &request.question,
-                request.history.is_empty(),
-            ),
+            content: crate::side_question::prompt(&request.question, request.history.is_empty()),
         });
         let mut input_tokens = 0_u64;
         let mut output_tokens = 0_u64;

@@ -269,8 +269,16 @@ pub async fn serve_with_access(
             "/threads/{id}/input/queue",
             get(input_queue).post(change_input_queue),
         )
-        .route("/threads/{id}/btw", post(btw))
-        .route("/threads/{id}/btw/stream", post(btw_stream))
+        // Room for a side chat's whole thread, so one that has grown too long
+        // is refused with a reason (400) rather than for its size alone (413).
+        .route(
+            "/threads/{id}/btw",
+            post(btw).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/threads/{id}/btw/stream",
+            post(btw_stream).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/threads/{id}/compact", post(compact))
         .route("/threads/{id}/goal", get(get_goal).post(set_goal))
         .route(

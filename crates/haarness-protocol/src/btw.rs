@@ -5,6 +5,8 @@ use crate::RequestId;
 
 /// The most earlier questions one side question may carry.
 pub const BTW_HISTORY_LIMIT: usize = 100;
+/// The most bytes of earlier questions and answers one side question may carry.
+pub const BTW_HISTORY_BYTES: usize = 1024 * 1024;
 /// The server streams side questions (`POST /v1/threads/{id}/btw/stream`) and
 /// takes their side chat's earlier questions (`history`).
 pub const BTW_STREAM_CAPABILITY: &str = "btw.stream.v1";
