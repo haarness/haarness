@@ -111,6 +111,7 @@ export const shortcutTitles: Record<string, string> = {
   diff: "Review changes",
   terminal: "Toggle terminal",
   browser: "Open browser",
+  sideChat: "Side chat",
   agentNext: "Next agent",
   agentPrev: "Previous agent",
   tabNext: "Next tab",

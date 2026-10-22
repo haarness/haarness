@@ -1,0 +1,249 @@
+import { Haarness } from "@haarness/sdk";
+import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+
+// The /btw side chat in real Electron against a project daemon on the echo
+// provider, which answers a side question with "Echo: <question>" and names
+// the side chat's question before it, so follow-ups prove they carried their
+// thread. Only the native folder picker is given a deterministic answer.
+// HAARNESS_SIDE_CHAT_SCREENSHOTS=<folder> keeps the light and dark shots there.
+const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
+const shots = process.env.HAARNESS_SIDE_CHAT_SCREENSHOTS;
+let app: ElectronApplication;
+let page: Page;
+let temporary: string;
+let workspace: string;
+let env: Record<string, string>;
+let client: Haarness;
+let errors: string[] = [];
+
+const panel = () => page.locator(".side-chat-panel");
+const box = () => panel().getByRole("textbox", { name: "Ask a side question", exact: true });
+const threadTabs = () => panel().getByRole("tab");
+const composer = () => page.getByRole("textbox", { name: "Message", exact: true });
+const mod = process.platform === "darwin" ? "Meta" : "Control";
+
+test.beforeAll(async () => {
+  temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-side-chat-")));
+  workspace = join(temporary, "workspace");
+  await mkdir(join(workspace, ".haarness"), { recursive: true });
+  await writeFile(join(workspace, ".haarness", "config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  env = {
+    ...process.env,
+    HAARNESS_BIN: binary,
+    HAARNESS_HOME: join(temporary, "home"),
+    HAARNESS_DATA_DIR: join(temporary, "data"),
+    HAARNESS_DESKTOP_DATA: join(temporary, "desktop"),
+    HAARNESS_TEST_PROVIDER: "1",
+    HAARNESS_DESKTOP_TEST: "1",
+  } as Record<string, string>;
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_RENDERER_URL;
+  app = await electron.launch({ args: ["."], env, timeout: 60000 });
+  page = await app.firstWindow();
+  page.on("pageerror", (error) => errors.push(error.message));
+  await app.evaluate(({ dialog, BrowserWindow }, directory) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+    BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
+  }, workspace);
+  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+  const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
+    env, input: JSON.stringify({ action: "connect" }), encoding: "utf8", timeout: 60000,
+  }));
+  client = new Haarness({ baseUrl: connection.url, token: connection.token });
+});
+
+test.afterAll(async () => {
+  test.setTimeout(180000);
+  client?.close();
+  if (app) {
+    const child = app.process();
+    const exited = new Promise<void>((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once("exit", () => resolve());
+    });
+    const within = (ms: number) => Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, ms))]);
+    await Promise.race([
+      app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.destroy(); }).catch(() => {}),
+      within(10000),
+    ]);
+    void app.close().catch(() => {});
+    await within(15000);
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await within(5000);
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+  try { execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
+  if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 10 }).catch(() => {});
+});
+
+test.beforeEach(() => { errors = []; });
+
+async function send(text: string) {
+  await composer().fill(text);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+}
+
+async function ask(text: string) {
+  await box().fill(text);
+  await box().press("Enter");
+}
+
+async function shoot(name: string) {
+  if (!shots) return;
+  await mkdir(shots, { recursive: true });
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(150);
+    await page.screenshot({ path: join(shots, `${theme}-${name}.png`) });
+    await panel().screenshot({ path: join(shots, `${theme}-${name}-panel.png`) });
+  }
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+}
+
+/** The chat whose first message was `text`, and its transcript rows. */
+async function chatRows(text: string) {
+  for (const thread of await client.listThreads()) {
+    const items = await client.listItems(thread.id);
+    if (items.some((item) => item.data.type === "user_message" && item.data.text === text))
+      return { id: thread.id, rows: items.length };
+  }
+  throw new Error("No chat began with " + text);
+}
+
+test("/btw opens a side chat beside the chat that streams answers and keeps follow-ups in a thread", async () => {
+  test.setTimeout(240000);
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await send("Plan the release notes");
+  await expect(page.locator(".transcript")).toContainText("Echo: Plan the release notes");
+  const before = await chatRows("Plan the release notes");
+
+  // /btw in the composer asks in a panel of its own, and the keyboard follows.
+  await send("/btw what changed in the plan?");
+  await expect(panel()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show side chat panel", exact: true })).toHaveAttribute("aria-current", "true");
+  await expect(panel()).toContainText("Echo: what changed in the plan?");
+  await expect(threadTabs()).toHaveText(["what changed in the plan?"]);
+  await expect(box()).toBeFocused();
+  await expect(box()).toHaveAttribute("placeholder", "Ask a follow-up");
+  await expect(composer()).toHaveValue("");
+  await expect(page.locator(".transcript")).not.toContainText("what changed in the plan?");
+
+  // A follow-up carries the thread.
+  await ask("and why?");
+  await expect(panel()).toContainText("Echo: and why? (after: what changed in the plan?)");
+  await expect(panel().locator(".side-chat-turn")).toHaveCount(2);
+  await shoot("2-thread");
+
+  // Answers stream: the first piece shows while Stop stands in for Send.
+  await ask("::mdslow");
+  await expect(panel().getByText("Live markdown")).toBeVisible();
+  await expect(panel().getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+  await expect(panel()).toContainText("streams while working");
+  await expect(panel().getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+
+  // Stop, Retry, and Esc in the box stopping an answer.
+  await ask("!linger 9000 take your time");
+  await expect(panel().getByText("Thinking…")).toBeVisible();
+  await shoot("3-thinking");
+  await panel().getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(panel().locator(".side-chat-status").last()).toContainText("Stopped");
+  await panel().getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(panel().getByText("Thinking…")).toBeVisible();
+  await box().press("Escape");
+  await expect(panel().locator(".side-chat-status").last()).toContainText("Stopped");
+  await expect(panel().locator(".side-chat-turn")).toHaveCount(4);
+  // With nothing being written, Esc goes back to the chat's message box.
+  await box().press("Escape");
+  await expect(composer()).toBeFocused();
+
+  // A finished answer offers Copy, a stopped one Retry instead.
+  await panel().locator(".side-chat-turn").first().hover();
+  await expect(panel().locator(".side-chat-turn").first().getByRole("button", { name: "Copy message", exact: true })).toBeVisible();
+  await expect(panel().locator(".side-chat-turn").last().getByRole("button", { name: "Copy message", exact: true })).toHaveCount(0);
+
+  // The chat itself never changed.
+  expect((await client.listItems(before.id)).length).toBe(before.rows);
+  expect(errors).toEqual([]);
+});
+
+test("side chats keep their threads per chat, across a reload, and come and go from the keyboard", async () => {
+  test.setTimeout(240000);
+  // Another thread from +, named after its first question.
+  await panel().getByRole("button", { name: "New side chat", exact: true }).click();
+  await expect(threadTabs()).toHaveCount(2);
+  await expect(panel().getByRole("heading", { name: "Ask a side question" })).toBeVisible();
+  await expect(box()).toBeFocused();
+  await shoot("1-empty");
+  await ask("Summarize the last answer in one sentence");
+  await expect(panel()).toContainText("Echo: Summarize the last answer in one sentence");
+  await expect(threadTabs().nth(1)).toHaveText("Summarize the last answer in on…");
+
+  // A /btw while that thread is in front asks there; the first thread is untouched.
+  await composer().click();
+  await send("/btw second question here");
+  await expect(panel()).toContainText("Echo: second question here (after: Summarize the last answer in one sentence)");
+
+  // Threads and their answers survive a reload; a draft too.
+  await box().fill("a draft for later");
+  await page.waitForTimeout(1000);
+  await page.reload();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+  await expect(panel()).toBeVisible();
+  await expect(threadTabs()).toHaveCount(2);
+  await expect(panel()).toContainText("Echo: second question here");
+  await expect(box()).toHaveValue("a draft for later");
+  await threadTabs().first().click();
+  await expect(panel()).toContainText("Echo: and why? (after: what changed in the plan?)");
+  await expect(panel().locator(".side-chat-status").last()).toContainText("Stopped");
+
+  // Another chat has side chats of its own.
+  await page.getByRole("button", { name: "New chat tab", exact: true }).click();
+  await send("A different chat");
+  await expect(page.locator(".transcript")).toContainText("Echo: A different chat");
+  await composer().click();
+  await page.keyboard.press(`${mod}+Shift+J`);
+  await expect(box()).toBeFocused();
+  await expect(threadTabs()).toHaveCount(1);
+  await expect(panel().getByRole("heading", { name: "Ask a side question" })).toBeVisible();
+  // The same key from the side chat puts it away and goes back to the message box.
+  await page.keyboard.press(`${mod}+Shift+J`);
+  await expect(panel()).toBeHidden();
+  await expect(composer()).toBeFocused();
+
+  // Back on the first chat, its threads are there; the palette starts another.
+  await page.locator(".workspace-tabs [role=tab]").first().click();
+  await expect(page.locator(".transcript")).toContainText("Echo: Plan the release notes");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
+  await search.fill("New side chat");
+  await expect(page.getByRole("option", { name: /New side chat/ })).toBeVisible();
+  await search.press("Enter");
+  await expect(panel()).toBeVisible();
+  await expect(threadTabs()).toHaveCount(3);
+  await expect(box()).toBeFocused();
+
+  // Closing a tab discards its thread; closing the last puts the panel away.
+  for (let count = 3; count > 0; count--) {
+    await panel().getByRole("button", { name: /^Close / }).last().click();
+    if (count > 1) await expect(threadTabs()).toHaveCount(count - 1);
+  }
+  await expect(panel()).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("a /btw on a chat not started yet says how to begin, and leaves the draft", async () => {
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await composer().fill("/btw anything?");
+  await composer().press("Enter");
+  await expect(page.getByText("Send a first message, then ask side questions with /btw.")).toBeVisible();
+  await expect(composer()).toHaveValue("/btw anything?");
+  await expect(panel()).toBeHidden();
+  expect(errors).toEqual([]);
+});

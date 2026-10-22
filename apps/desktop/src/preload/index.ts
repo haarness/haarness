@@ -44,6 +44,7 @@ const bridge: Bridge = {
   native: (connection, input) => invoke("native", connection, input),
   command: (connection, args, id) => invoke("command", connection, args, id),
   cancel: (id) => invoke("cancel", id),
+  btw: (connection, thread, body, id) => invoke("btw", connection, thread, body, id),
   preferences: (input) => invoke("preferences", input),
   review: (input) => invoke("review", input),
   storage: (key, value) => invoke("storage", key, value),

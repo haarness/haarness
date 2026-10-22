@@ -67,6 +67,32 @@ refused with a notice, and a `/btw <question>` from the chat meanwhile leaves
 the question in the box. Against a server without `btw.stream.v1` the answer
 arrives in one piece.
 
+## Desktop
+
+The side chat is a panel of its own in the side panel, beside Files, Review
+and the Browser. Each thread is a tab named after its first question, with
+**+** for another; the answer streams in the conversation's own style, with
+**Copy** on a finished answer, **Retry** under one that failed or was stopped,
+and a slim box of its own at the bottom whose send key turns into **Stop**
+while an answer is written.
+
+| Action | How |
+| --- | --- |
+| Ask | `/btw <question>` in the message box: the panel opens with its box focused. A bare `/btw` just opens it |
+| Open the side chat | **⇧⌘J** (Ctrl+Shift+J elsewhere; change it in **Settings → Keyboard shortcuts**), **Open side chat** in **Search**, the side panel's launcher, or **View → Side chat** |
+| Back to the message box | **⇧⌘J** again from the side chat's box (it puts the panel away), or `esc` in an idle box |
+| Another thread | **+** in its tab strip, or **New side chat** in **Search** |
+| Stop an answer | The stop key, or `esc` in its box |
+| Close a thread | Its tab's ×, or a middle click. Closing the last one puts the panel away |
+
+Threads are kept per chat (at most 12 per chat, for the 20 chats used most
+recently) and survive a reload, as does what was typed in each box; an answer
+still being written when the window reloads comes back stopped, with Retry.
+An answer keeps streaming while another chat is shown. A chat that has not
+been started yet has nothing to ask about: `/btw` there says to send a first
+message. Against a server without `btw.stream.v1` the answer arrives in one
+piece.
+
 ## Isolation
 
 Tool schemas provide context only. Every attempted tool call is refused locally;
