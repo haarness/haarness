@@ -1040,6 +1040,51 @@ fn user_block(
     lines
 }
 
+/// `Thought for 12s`: how long the model thought, or `Thought` for a record
+/// made before that was measured.
+pub(crate) fn thought_label(language: crate::locale::Language, duration_ms: Option<u64>) -> String {
+    let Some(ms) = duration_ms else {
+        return language.text("Thought").to_owned();
+    };
+    let seconds = (ms.saturating_add(500) / 1000).max(1);
+    let duration = match (seconds / 60, seconds % 60) {
+        (0, seconds) => format!("{seconds}s"),
+        (minutes, 0) => format!("{minutes}m"),
+        (minutes, seconds) => format!("{minutes}m {seconds}s"),
+    };
+    language.format("Thought for {duration}", &[("duration", &duration)])
+}
+
+/// The newest line of a thought, without the Markdown marks around it.
+fn latest_thought(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let line = line.trim_start_matches(|c: char| matches!(c, '#' | '>' | '-' | '*' | ' '));
+    line.replace("**", "").replace('`', "")
+}
+
+/// The end of `value` within `width` cells, so the newest words show.
+fn tail_line(value: &str, width: usize) -> String {
+    use crate::width::DisplayWidth as _;
+    use unicode_segmentation::UnicodeSegmentation as _;
+    if value.width() <= width {
+        return value.to_owned();
+    }
+    let mut used = 1;
+    let mut kept = Vec::new();
+    for grapheme in value.graphemes(true).rev() {
+        used += grapheme.width();
+        if used > width {
+            break;
+        }
+        kept.push(grapheme);
+    }
+    std::iter::once("…").chain(kept.into_iter().rev()).collect()
+}
+
 /// Muted gutter row inside a tool output block.
 fn gutter_row(text: &str, width: usize, color: haarness_opentui::Color, theme: &Theme) -> Line {
     Line::new(vec![
@@ -1394,7 +1439,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     lines
                 }));
             }
-            ItemData::Reasoning { text } if app.reasoning => {
+            ItemData::Reasoning { text, duration_ms }
+                if app.thinking != crate::state::ThinkingMode::Hide =>
+            {
                 let mut rows = app.cached_render(item.id, width, || {
                     render_markdown(text, width, theme, REASONING_INDENT)
                 });
@@ -1403,7 +1450,26 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         span.fg = theme.muted;
                     }
                 }
-                block.extend(rows);
+                if app.thinking == crate::state::ThinkingMode::Compact {
+                    // One row that a click opens: the transcript keeps its
+                    // shape whatever the model thought.
+                    let open = app.expanded.contains(&item.id);
+                    block.push_tagged(
+                        Line::new(vec![
+                            Span::new(REASONING_INDENT, theme.muted),
+                            Span::new(if open { "▾ " } else { "▸ " }, theme.muted),
+                            Span::new(thought_label(app.language, *duration_ms), theme.muted),
+                        ]),
+                        HitTarget::ToolToggle(item.id),
+                    );
+                    if open {
+                        for row in rows {
+                            block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                        }
+                    }
+                } else {
+                    block.extend(rows);
+                }
             }
             ItemData::ToolCall {
                 call_id,
@@ -1975,15 +2041,35 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             &mut previous_group,
         );
     }
-    if app.reasoning && !app.reasoning_preview.is_empty() {
+    if app.thinking != crate::state::ThinkingMode::Hide && !app.reasoning_preview.is_empty() {
         let mut block = TaggedLines::default();
-        let mut live = render_markdown(&app.reasoning_preview, width, theme, REASONING_INDENT);
-        for row in &mut live {
-            for span in &mut row.spans {
-                span.fg = theme.muted;
+        if app.thinking == crate::state::ThinkingMode::Compact {
+            use crate::width::DisplayWidth as _;
+            // A single row ticking with the newest line of thought; it
+            // becomes the `Thought for …` row in the same place.
+            let label = format!(
+                "{}{} {} · ",
+                REASONING_INDENT,
+                spinner(app.tick),
+                app.language.text("Thinking")
+            );
+            let latest = tail_line(
+                &latest_thought(&app.reasoning_preview),
+                width.saturating_sub(label.width()),
+            );
+            block.push(Line::new(vec![
+                Span::new(label, theme.muted),
+                Span::new(latest, theme.muted),
+            ]));
+        } else {
+            let mut live = render_markdown(&app.reasoning_preview, width, theme, REASONING_INDENT);
+            for row in &mut live {
+                for span in &mut row.spans {
+                    span.fg = theme.muted;
+                }
             }
+            block.extend(live);
         }
-        block.extend(live);
         append_block(
             &mut transcript,
             block,

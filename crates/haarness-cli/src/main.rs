@@ -5789,7 +5789,7 @@ async fn print_run_output_client(
     {
         let (kind, text) = match item.data {
             ItemData::AssistantMessage { text } => ("assistant", text),
-            ItemData::Reasoning { text } if thinking => ("reasoning", text),
+            ItemData::Reasoning { text, .. } if thinking => ("reasoning", text),
             _ => continue,
         };
         if format == RunFormat::Json {
@@ -5891,7 +5891,7 @@ async fn settle_cli_subagents_client(
                     println!("{text}");
                 }
             }
-            ItemData::Reasoning { text } if thinking => {
+            ItemData::Reasoning { text, .. } if thinking => {
                 if format == RunFormat::Json {
                     println!(
                         "{}",

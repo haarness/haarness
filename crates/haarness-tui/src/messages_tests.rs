@@ -61,6 +61,7 @@ fn messages_search_full_text_unicode_and_hide_internal_records() {
         &app.thread,
         ItemData::Reasoning {
             text: "private reasoning".into(),
+            duration_ms: None,
         },
     ));
     app.items.push(message_item(

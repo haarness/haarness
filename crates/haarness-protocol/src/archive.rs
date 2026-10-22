@@ -364,7 +364,7 @@ fn sanitize_item(item: &mut Item) {
         ItemData::AssistantMessage { text } => {
             *text = redact(text, "assistant-message", item.id);
         }
-        ItemData::Reasoning { text } => *text = redact(text, "reasoning", item.id),
+        ItemData::Reasoning { text, .. } => *text = redact(text, "reasoning", item.id),
         ItemData::ToolCall {
             arguments,
             provider_metadata,

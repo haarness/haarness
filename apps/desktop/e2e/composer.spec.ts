@@ -5,12 +5,21 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 /** An isolated Desktop on the echo provider, opened on a fresh project. */
-async function launch(info: TestInfo, prepare?: (workspace: string) => Promise<void>) {
+async function launch(
+  info: TestInfo,
+  prepare?: (workspace: string) => Promise<void>,
+  preferences?: Record<string, unknown>,
+) {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-composer-")));
   const workspace = join(temporary, "workspace");
   await mkdir(join(workspace, ".haarness"), { recursive: true });
   await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
   await prepare?.(workspace);
+  // Preferences an earlier Desktop saved.
+  if (preferences) {
+    await mkdir(join(temporary, "desktop"), { recursive: true });
+    await writeFile(join(temporary, "desktop/desktop.json"), JSON.stringify({ preferences }));
+  }
   const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   const env: Record<string, string> = {
     ...process.env,
@@ -285,6 +294,107 @@ test("a slash command shows the line typed, folds the prompt it expanded to, and
     await input.fill("/undo");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
     await expect(input).toHaveValue("/review-file src/foo.rs");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+const settings = (page: Page) => page.getByRole("dialog", { name: "Settings", exact: true });
+async function chooseThinking(page: Page, value: "Compact" | "Show" | "Hide") {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await settings(page).getByRole("textbox", { name: "Filter settings" }).fill("Thinking");
+  await settings(page).getByRole("button", { name: "Thinking display Settings › General", exact: true }).click();
+  const select = settings(page).getByRole("combobox", { name: "Thinking display", exact: true });
+  await select.click();
+  await page.getByRole("option", { name: value, exact: true }).click();
+  await expect(select).toContainText(value);
+  await settings(page).getByRole("button", { name: "Close settings", exact: true }).click();
+}
+
+test("thinking is Compact by default: one ticking activity line, then a Thought step that opens in place", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("::thinkslow");
+    await input.press("Enter");
+    const activity = page.locator(".assistant-activity");
+    const ticker = activity.locator(".activity-thought");
+    // The newest line of thought ticks on the activity row, which keeps its
+    // height, and nothing else of the thought is drawn while it streams.
+    await expect(ticker).toContainText("and the files it names.");
+    const before = await activity.boundingBox();
+    await expect(activity).toContainText("Thinking");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await activity.screenshot({ path: info.outputPath(`thinking-live-${value}.png`) });
+    }
+    await theme(page, "light");
+    await expect(ticker).toContainText("Weighing two ways to fix the parser.");
+    const after = await activity.boundingBox();
+    expect(after?.height).toBe(before?.height);
+    await expect(page.locator(".message.reasoning")).toHaveCount(0);
+    await expect(page.locator(".transcript")).not.toContainText("Reading the request");
+
+    // Settled: one quiet step, closed, and the reply under it.
+    const reply = page.locator(".message.assistant").last();
+    await expect(reply).toContainText("Thought it through");
+    const thought = page.locator(".tool-call.thought");
+    await expect(thought).toHaveCount(1);
+    await expect(thought.locator("summary")).toHaveText(/^Thought for \d+s$/);
+    await expect(thought).not.toHaveAttribute("open", "");
+    await expect(page.locator(".transcript")).not.toContainText("keeps the public API stable");
+    await expect(ticker).toHaveCount(0);
+    const step = await thought.locator("summary").boundingBox();
+    expect(step!.height).toBeLessThanOrEqual(32);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await page.locator(".transcript").screenshot({ path: info.outputPath(`thought-folded-${value}.png`) });
+    }
+    await theme(page, "light");
+    // It opens in place from the keyboard, and closes again.
+    await thought.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    await expect(thought.locator(".thought-body")).toContainText("The second keeps the public API stable.");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await page.locator(".transcript").screenshot({ path: info.outputPath(`thought-open-${value}.png`) });
+    }
+    await theme(page, "light");
+    await page.keyboard.press("Enter");
+    await expect(thought.locator(".thought-body")).toHaveCount(0);
+
+    // Show writes the thought out in full; Hide leaves it out.
+    await chooseThinking(page, "Show");
+    await expect(page.locator(".message.reasoning")).toContainText("The second keeps the public API stable.");
+    await expect(page.locator(".tool-call.thought")).toHaveCount(0);
+    await chooseThinking(page, "Hide");
+    await expect(page.locator(".message.reasoning")).toHaveCount(0);
+    await expect(page.locator(".tool-call.thought")).toHaveCount(0);
+    await expect(reply).toContainText("Thought it through");
+    await input.fill("::thinkslow");
+    await input.press("Enter");
+    await expect(activity).toContainText("Thinking");
+    await expect(activity.locator(".activity-thought")).toHaveCount(0);
+    await expect(page.locator(".message.assistant").last()).toContainText("Thought it through");
+    await expect(page.locator(".transcript")).not.toContainText("Weighing two ways");
+    expect((await page.evaluate(() => window.haarness.boot())).preferences.thinking).toBe("hide");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("someone who had turned Show reasoning on keeps seeing thinking in full", async ({}, info) => {
+  const { page, errors, close } = await launch(info, undefined, { showReasoning: true });
+  try {
+    expect((await page.evaluate(() => window.haarness.boot())).preferences.thinking).toBe("show");
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("::thinkslow");
+    await input.press("Enter");
+    await expect(page.locator(".message.reasoning").first()).toContainText("Reading the request");
+    await expect(page.locator(".message.assistant").last()).toContainText("Thought it through");
+    await expect(page.locator(".message.reasoning")).toContainText("The second keeps the public API stable.");
     expect(errors).toEqual([]);
   } finally {
     await close();

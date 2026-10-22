@@ -27,6 +27,8 @@ import {
   sentParts,
 } from "./prompt-context";
 import { UserMessageBody } from "./UserMessage";
+import { ThoughtRow } from "./ThoughtRow";
+import { latestThought } from "./thinking";
 import { sessionKey } from "../projects";
 import {
   isLive,
@@ -961,7 +963,7 @@ export function Session() {
           "todo",
         ].includes(item.data.type) &&
         !(item.data.type === "user_message" && item.data.synthetic) &&
-        !(item.data.type === "reasoning" && !state.preferences.showReasoning) &&
+        !(item.data.type === "reasoning" && state.preferences.thinking === "hide") &&
         item.data.type !== "tool_result" &&
         !(
           item.data.type === "tool_call" &&
@@ -1604,6 +1606,11 @@ export function Session() {
   createEffect(() => {
     if (state.ready && effort() && !efforts().includes(effort())) setEffort("");
   });
+  const thought = createMemo(() =>
+    state.preferences.thinking === "compact" && !stream()?.text
+      ? latestThought(stream()?.reasoning ?? "")
+      : "",
+  );
   const activity = createMemo(() => {
     const turn = active();
     if (!turn) return "";
@@ -1881,7 +1888,7 @@ export function Session() {
           <Show when={hasForkOrigin() && forkDividerIndex() === -1}>
             <ForkDivider />
           </Show>
-          <Show when={stream()?.reasoning && state.preferences.showReasoning}>
+          <Show when={stream()?.reasoning && state.preferences.thinking === "show"}>
             <div class="message reasoning">
               <div class="message-label">
                 <span class="author">{t("Thinking")}</span>
@@ -1923,6 +1930,14 @@ export function Session() {
           <Show when={active() && !pending()}>
             <div class="assistant-activity" role="status" aria-live="polite">
               <Shimmer>{activity()}</Shimmer>
+              {/* Compact: the newest line of thought ticks here, on the one
+                  row already holding the activity, so nothing moves; screen
+                  readers hear only the activity. */}
+              <Show when={thought()}>
+                <span class="activity-thought" aria-hidden="true">
+                  <span>{thought()}</span>
+                </span>
+              </Show>
             </div>
           </Show>
           <div class="transcript-tail" />
@@ -2476,7 +2491,10 @@ function Message(props: {
     return type === "user_message"
       ? "user"
       : type === "reasoning"
-        ? "reasoning"
+        ? // A compact thought is a step on the rail, like a tool.
+          app.state.preferences.thinking === "compact"
+          ? "step"
+          : "reasoning"
         : props.task || type === "tool_call" || type === "compaction"
           ? "step"
           : "assistant";
@@ -2593,6 +2611,21 @@ function Message(props: {
             </div>
           </Match>
 
+          <Match
+            when={
+              content().type === "reasoning" &&
+              app.state.preferences.thinking === "compact"
+            }
+          >
+            <ThoughtRow
+              id={props.item.id}
+              text={(content() as { text: string }).text}
+              durationMs={
+                (content() as Extract<T.ItemData, { type: "reasoning" }>)
+                  .duration_ms
+              }
+            />
+          </Match>
           <Match when={content().type === "reasoning"}>
             <div class="message-label">
               <span class="author">{t("Thinking")}</span>

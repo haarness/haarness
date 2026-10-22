@@ -7328,6 +7328,9 @@ impl RunnerTask {
                 // as it is sent; a retry starts its own.
                 let mut clock =
                     crate::stream_clock::StreamClock::start(tokio::time::Instant::now().into_std());
+                // Where the reasoning being streamed began: the request, or
+                // the text or tool call that came before it in this round.
+                let mut thought_from = std::time::Instant::now();
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -7469,7 +7472,10 @@ impl RunnerTask {
                             // before publication. Otherwise reasoning/tool items
                             // are appended immediately while all prose is held
                             // until the end, reversing the visible transcript.
-                            self.flush_reasoning_segment(&mut reasoning).await?;
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
+                            // Reasoning after this text begins where it ends.
+                            thought_from = std::time::Instant::now();
                             streamed.push_str(&delta);
                             text.push_str(&delta);
                             self.set_status("responding", None);
@@ -7520,7 +7526,8 @@ impl RunnerTask {
                                 ));
                                 break;
                             }
-                            self.flush_reasoning_segment(&mut reasoning).await?;
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
                             if self.output_schema.is_none() {
                                 self.flush_assistant_segment(
                                     &mut text,
@@ -7528,6 +7535,7 @@ impl RunnerTask {
                                 )
                                 .await?;
                             }
+                            thought_from = std::time::Instant::now();
                             self.publish_item(ItemData::ToolCall {
                                 call_id: call_id.clone(),
                                 name: name.clone(),
@@ -7607,7 +7615,8 @@ impl RunnerTask {
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
-                self.flush_reasoning_segment(&mut reasoning).await?;
+                self.flush_reasoning_segment(&mut reasoning, thought_from)
+                    .await?;
                 if blocked.is_some() {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                         .await?;
@@ -8152,12 +8161,18 @@ impl RunnerTask {
         Ok(())
     }
 
-    async fn flush_reasoning_segment(&self, reasoning: &mut String) -> CoreResult<()> {
+    /// Persist the reasoning streamed since `started`, with how long it took.
+    async fn flush_reasoning_segment(
+        &self,
+        reasoning: &mut String,
+        started: std::time::Instant,
+    ) -> CoreResult<()> {
         if reasoning.is_empty() {
             return Ok(());
         }
         self.publish_item(ItemData::Reasoning {
             text: std::mem::take(reasoning),
+            duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         })
         .await?;
         Ok(())

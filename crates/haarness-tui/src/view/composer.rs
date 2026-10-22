@@ -559,7 +559,7 @@ fn badges(app: &App) -> Vec<(String, Color)> {
     } else if let Some(effort) = &app.reasoning_effort {
         badges.push((effort.clone(), theme.muted));
     }
-    if !app.reasoning {
+    if app.thinking == crate::state::ThinkingMode::Hide {
         badges.push((app.language.text("thinking_hidden").to_owned(), theme.muted));
     }
     if app.remote.shared(app.thread.id) {

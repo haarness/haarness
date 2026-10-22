@@ -51,7 +51,9 @@ export interface Preferences {
   browserAgentCursor: boolean;
   sound: boolean;
   compactTools: boolean;
-  showReasoning: boolean;
+  /** How the model's reasoning shows in the chat: one row that opens on
+   * click (`compact`), in full, or not at all. */
+  thinking: ThinkingDisplay;
   sendKey: "enter" | "mod-enter";
   editorWrap: boolean;
   diffLayout: "split" | "unified";
@@ -63,6 +65,19 @@ export interface Preferences {
   /** Shows and hides Haarness from any app; off by default. */
   globalShortcut: GlobalShortcut;
   language: string;
+}
+export type ThinkingDisplay = "compact" | "show" | "hide";
+/**
+ * The thinking display saved preferences ask for. It used to be a "Show
+ * reasoning" switch that was off by default and saved with every other
+ * preference, so an off switch cannot be told from one never touched: on
+ * becomes Show, anything else the Compact default.
+ */
+export function savedThinking(saved: unknown): ThinkingDisplay {
+  const value = saved && typeof saved === "object" ? (saved as Record<string, unknown>) : {};
+  if (value.thinking === "compact" || value.thinking === "show" || value.thinking === "hide")
+    return value.thinking;
+  return value.showReasoning === true ? "show" : "compact";
 }
 export const defaults: Preferences = {
   // A new install follows the system until someone picks Light or Dark.
@@ -80,7 +95,7 @@ export const defaults: Preferences = {
   browserAgentCursor: true,
   sound: false,
   compactTools: true,
-  showReasoning: false,
+  thinking: "compact",
   sendKey: "enter",
   editorWrap: false,
   diffLayout: "split",

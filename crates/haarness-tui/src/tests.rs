@@ -2765,6 +2765,7 @@ fn compact_count_formats_are_stable() {
 fn live_reasoning_preview_shows_every_returned_line() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.thinking = crate::state::ThinkingMode::Show;
     app.reasoning_preview = String::new();
     for row in 1..=6 {
         use std::fmt::Write as _;
@@ -2782,8 +2783,113 @@ fn live_reasoning_preview_shows_every_returned_line() {
     assert!(text.contains("thought-6"));
     assert!(
         text.contains("thought-1"),
-        "provider-visible live reasoning is shown in full by default: {text}"
+        "Show shows provider-visible live reasoning in full: {text}"
     );
+}
+
+#[test]
+fn compact_thinking_ticks_on_one_row_and_settles_as_a_thought_a_click_opens() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.sidebar_open = false;
+    assert_eq!(
+        app.thinking,
+        crate::state::ThinkingMode::Compact,
+        "the default"
+    );
+    let text = |app: &App| -> String {
+        app.lines((80, 24))
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect()
+    };
+    // While the model thinks: one row with the newest line, Markdown marks
+    // dropped, and the tail kept when it is long.
+    app.reasoning_preview = "Reading the request.\n\n**Weighing** two `fixes`".into();
+    let live = text(&app);
+    let rows = live
+        .lines()
+        .filter(|row| row.contains("Thinking"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "{live}");
+    assert!(
+        rows[0]
+            .trim_end()
+            .ends_with("Thinking · Weighing two fixes"),
+        "{live}"
+    );
+    assert!(!live.contains("Reading the request"), "{live}");
+    app.reasoning_preview = format!("{}the end", "word ".repeat(40));
+    let long = text(&app);
+    let row = long.lines().find(|row| row.contains("Thinking")).unwrap();
+    assert!(
+        row.contains("…") && row.trim_end().ends_with("word the end"),
+        "{long}"
+    );
+
+    // Settled: `Thought for …`, and the text only once it is opened.
+    app.reasoning_preview.clear();
+    app.items.push(message_item(
+        1,
+        &thread,
+        ItemData::Reasoning {
+            text: "thought-1\nthought-2".into(),
+            duration_ms: Some(2_400),
+        },
+    ));
+    let id = app.items[0].id;
+    let settled = text(&app);
+    assert!(settled.contains("  ▸ Thought for 2s"), "{settled}");
+    assert!(!settled.contains("thought-1"), "{settled}");
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| hit.target == crate::view::frame::HitTarget::ToolToggle(id))
+    );
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("  ▾ Thought for 2s"), "{open}");
+    assert!(open.contains("thought-2"), "{open}");
+
+    // Hide shows none of it, live or settled, and says so on the band.
+    app.thinking = crate::state::ThinkingMode::Hide;
+    app.reasoning_preview = "still thinking".into();
+    let hidden = text(&app);
+    assert!(
+        !hidden.contains("Thought") && !hidden.contains("still thinking"),
+        "{hidden}"
+    );
+}
+
+#[test]
+fn a_thought_says_how_long_it_took_in_whole_seconds() {
+    use crate::locale::Language;
+    let label = |ms| super::view::transcript::thought_label(Language::English, ms);
+    assert_eq!(label(None), "Thought");
+    assert_eq!(label(Some(120)), "Thought for 1s");
+    assert_eq!(label(Some(12_000)), "Thought for 12s");
+    assert_eq!(label(Some(60_000)), "Thought for 1m");
+    assert_eq!(label(Some(61_500)), "Thought for 1m 2s");
+}
+
+#[test]
+fn ctrl_t_cycles_compact_show_and_hide_and_keeps_the_choice() {
+    use crate::state::ThinkingMode;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    for (expected, notice) in [
+        (ThinkingMode::Show, "Thinking display: Show"),
+        (ThinkingMode::Hide, "Thinking display: Hide"),
+        (ThinkingMode::Compact, "Thinking display: Compact"),
+        (ThinkingMode::Show, "Thinking display: Show"),
+    ] {
+        app.cycle_thinking();
+        assert_eq!(app.thinking, expected);
+        assert_eq!(app.notice, notice);
+        assert_eq!(crate::config::load_thinking(), expected);
+    }
+    assert_eq!(ThinkingMode::parse("bogus"), None);
 }
 
 #[test]
@@ -2797,6 +2903,7 @@ fn durable_reasoning_is_plain_muted_text_without_disclosure_chrome() {
                 .map(|row| format!("thought-{row}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            duration_ms: None,
         },
     );
     let mut app = App::new(
@@ -2807,6 +2914,7 @@ fn durable_reasoning_is_plain_muted_text_without_disclosure_chrome() {
         vec![],
     );
     app.sidebar_open = false;
+    app.thinking = crate::state::ThinkingMode::Show;
 
     let expanded: String = app
         .lines((100, 24))
@@ -2831,6 +2939,7 @@ fn reasoning_shares_the_conversation_text_column() {
             &thread,
             ItemData::Reasoning {
                 text: "reasoned ".repeat(40).trim().into(),
+                duration_ms: None,
             },
         ),
         message_item(
@@ -2843,6 +2952,7 @@ fn reasoning_shares_the_conversation_text_column() {
     ];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
     app.sidebar_open = false;
+    app.thinking = crate::state::ThinkingMode::Show;
 
     let lines = app.lines((60, 40));
     let rows = |needle: &str| -> Vec<String> {

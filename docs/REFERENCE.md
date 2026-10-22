@@ -282,6 +282,8 @@ Drop a local PDF, image, audio file or short video into the terminal to attach i
 
 A paste longer than eight lines or 1,000 bytes stays one `[#1 pasted 20 lines]` chip in the prompt and is sent whole; Desktop folds a paste at the same size. A prompt taller than twelve rows shows its first eight with `… +N more lines · click to expand`, and a paste sent from Desktop reads as `▸ Pasted text · 20 lines` until the prompt is clicked open. A slash command reads as the line typed (`/review src/foo.rs`), with `▸ Show prompt · 24 lines` under it once the command has expanded to a longer prompt, the text the model received; click the prompt to read it. The message browser, `/undo` and `/export` use the line typed, so a restored command runs again when sent.
 
+**Ctrl+T** cycles the thinking display through Compact, Show and Hide, and the TUI keeps the choice for its next launch (`thinking` in `tui-state.toml`; `/reasoning` offers the same switch). Compact, the default, gives a thought one row: `⠋ Thinking · ` and the newest line of thought while the model thinks, then `▸ Thought for 12s`, which a click opens, so the transcript never jumps. Show writes the thinking out in full, and Hide leaves it out, marked `thinking hidden` on the prompt band.
+
 Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. See [TUI message browser](TUI-MESSAGES.md).
 
 See [Side questions with `/btw`](SIDE-QUESTIONS.md) for isolated questions that leave the main transcript unchanged.

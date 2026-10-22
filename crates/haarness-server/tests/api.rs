@@ -6930,7 +6930,7 @@ async fn assistant_preface_is_persisted_before_its_tool_activity() {
     let reasoning = items
         .iter()
         .filter_map(|item| match &item.data {
-            haarness_protocol::ItemData::Reasoning { text } => Some(text.as_str()),
+            haarness_protocol::ItemData::Reasoning { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
