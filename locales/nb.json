@@ -2652,5 +2652,7 @@
   "New side chat": "Ny sidechat",
   "The answer ended before it finished.": "Svaret stoppet før det var ferdig.",
   "Open side chat": "Åpne sidechat",
-  "Ask about this chat without adding to it": "Spør om denne chatten uten å legge til noe i den"
+  "Ask about this chat without adding to it": "Spør om denne chatten uten å legge til noe i den",
+  "Hide side chat": "Skjul sidechat",
+  "Resize side chat": "Endre størrelse på sidechat"
 }

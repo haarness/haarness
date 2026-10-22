@@ -2652,5 +2652,7 @@
   "New side chat": "Yeni yan sohbet",
   "The answer ended before it finished.": "Yanıt tamamlanmadan sona erdi.",
   "Open side chat": "Yan sohbeti aç",
-  "Ask about this chat without adding to it": "Bu sohbet hakkında ona bir şey eklemeden sorun"
+  "Ask about this chat without adding to it": "Bu sohbet hakkında ona bir şey eklemeden sorun",
+  "Hide side chat": "Yan sohbeti gizle",
+  "Resize side chat": "Yan sohbeti yeniden boyutlandır"
 }

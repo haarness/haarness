@@ -2652,5 +2652,7 @@
   "New side chat": "新增側邊對話",
   "The answer ended before it finished.": "回答在完成前中斷了。",
   "Open side chat": "開啟側邊對話",
-  "Ask about this chat without adding to it": "詢問此對話，但不加入任何內容"
+  "Ask about this chat without adding to it": "詢問此對話，但不加入任何內容",
+  "Hide side chat": "隱藏側邊對話",
+  "Resize side chat": "調整側邊對話大小"
 }

@@ -2652,5 +2652,7 @@
   "New side chat": "แชทข้างเคียงใหม่",
   "The answer ended before it finished.": "คำตอบสิ้นสุดก่อนที่จะเสร็จ",
   "Open side chat": "เปิดแชทข้างเคียง",
-  "Ask about this chat without adding to it": "ถามเกี่ยวกับแชทนี้โดยไม่เพิ่มอะไรลงไป"
+  "Ask about this chat without adding to it": "ถามเกี่ยวกับแชทนี้โดยไม่เพิ่มอะไรลงไป",
+  "Hide side chat": "ซ่อนแชทข้างเคียง",
+  "Resize side chat": "ปรับขนาดแชทข้างเคียง"
 }

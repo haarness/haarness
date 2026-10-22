@@ -47,7 +47,8 @@ import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
 import { SideChatPanel, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
-type Dock = "files" | "diff" | "context" | "browser" | "side-chat";
+import { SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
+type Dock = "files" | "diff" | "context" | "browser";
 
 /** Workbench panels and their launcher copy. */
 const panelChoices: {
@@ -93,22 +94,12 @@ const dockNames: Record<Dock, string> = {
   files: "Files",
   diff: "Review",
   context: "Context",
-  "side-chat": "Side chat",
-};
-/** How a dock tab's buttons name it to assistive technology ("Show files panel"). */
-const dockLabels: Record<Dock, string> = {
-  browser: "browser",
-  files: "files",
-  diff: "diff",
-  context: "context",
-  "side-chat": "side chat",
 };
 const dockIcons: Record<Dock, IconName> = {
   browser: "web",
   files: "folder",
   diff: "diff",
   context: "chart",
-  "side-chat": "side-chat",
 };
 const Explorer = lazy(() =>
   import("./Explorer").then((module) => ({ default: module.Explorer })),
@@ -164,6 +155,18 @@ export function App() {
   const [dockWidth, setDockWidth] = createSignal(460);
   const [terminalHeight, setTerminalHeight] = createSignal(260);
   const [dockExpanded, setDockExpanded] = createSignal(false);
+  /** The side chat: wanted on screen, how wide, and whether it is in front
+   * when it and the side panel cannot both show. */
+  const [sideOpen, setSideOpen] = createSignal(false);
+  const [sideWidth, setSideWidth] = createSignal(SIDE_WIDTH);
+  const [sideFront, setSideFront] = createSignal(true);
+  const [workbenchWidth, setWorkbenchWidth] = createSignal(1050);
+  // The side panel lies over the whole workbench in a window this narrow (shell.css).
+  const narrowQuery = window.matchMedia("(max-width: 1100px)");
+  const [narrow, setNarrow] = createSignal(narrowQuery.matches);
+  const followNarrow = () => setNarrow(narrowQuery.matches);
+  narrowQuery.addEventListener("change", followNarrow);
+  onCleanup(() => narrowQuery.removeEventListener("change", followNarrow));
   /** Whether the sidebar groups chats under their project or lists them flat. */
   const [sidebarLayout, setSidebarLayout] = createSignal<"project" | "flat">(
     "project",
@@ -174,10 +177,27 @@ export function App() {
   let workbench!: HTMLDivElement;
   const clamp = (value: number, min: number, max: number) =>
     Math.max(min, Math.min(max, value));
-  const dockMax = () => Math.max(360, (workbench?.clientWidth ?? 1050) - 480);
   const dockVisible = () =>
     !!state.connection && !!dock() && state.panel === "chat";
-  function openDock(value: Dock) {
+  const sideWanted = () => !!state.connection && sideOpen() && state.panel === "chat";
+  /** Where the side chat stands beside the conversation and the side panel (see `sidePlace`). */
+  const side = createMemo(() =>
+    sidePlace({
+      width: workbenchWidth(),
+      wanted: sideWidth(),
+      dock: !dockVisible() ? "none" : dockExpanded() ? "expanded" : narrow() ? "overlay" : "column",
+    }),
+  );
+  /** Both show side by side, or the one in front does. */
+  const sideOnScreen = () => sideWanted() && (side().place === "column" || !dockVisible() || sideFront());
+  const dockOnScreen = () => dockVisible() && (!sideWanted() || side().place === "column" || !sideFront());
+  const sideRoom = () => (sideOnScreen() && side().place === "column" ? side().width + 1 : 0);
+  const dockMax = () => Math.max(360, (workbench?.clientWidth ?? 1050) - 480 - sideRoom());
+  const sideMax = () =>
+    Math.max(SIDE_MIN, Math.min(SIDE_MAX, workbenchWidth() - 481 - (dockOnScreen() && !dockExpanded() ? 361 : 0)));
+  /** `forward`: the person asked for it, so it comes in front of the side chat where both cannot show. */
+  function openDock(value: Dock, forward = true) {
+    if (forward) setSideFront(false);
     setDock(value);
     if (!dockTabs().includes(value)) setDockTabs((tabs) => [...tabs, value]);
     if (value === "files") setFilesVisited(true);
@@ -185,7 +205,7 @@ export function App() {
   }
   createEffect(() => {
     const request = state.fileRequest;
-    if ((request?.preview || request?.link) && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files");
+    if ((request?.preview || request?.link) && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files", !!request.link);
   });
   /** The agent took the Browser's tab to another page while another panel held the side panel. */
   const [browserMoved, setBrowserMoved] = createSignal(false);
@@ -203,7 +223,7 @@ export function App() {
   /** Where the Browser stands: on screen, the side panel hidden or on its launcher, a tab of its own. */
   const browserStage = (): BrowserStage => ({
     chat: JSON.stringify([state.connection?.id ?? "", state.selected ?? ""]),
-    shown: dockVisible() && dock() === "browser",
+    shown: dockOnScreen() && dock() === "browser",
     hidden: dock() === null,
     launcher: dock() === "tools",
     tab: dockTabs().includes("browser"),
@@ -235,6 +255,7 @@ export function App() {
   }
   /** Shows the side panel: on the Browser when the agent left it a dot. */
   function showDock(fallback: Dock | "tools") {
+    setSideFront(false);
     setDock(browserMoved() ? "browser" : fallback);
   }
   function closeDock(value: Dock) {
@@ -256,17 +277,36 @@ export function App() {
     }
     void openSideChat({ connection: state.connection.id, chat: state.selected, fresh });
   }
-  /**
-   * The side chat's key: brings it on screen with its box focused, and from
-   * that box puts it away again, back to the panel before it and the message box.
-   */
-  function toggleSide() {
-    if (!(dockVisible() && dock() === "side-chat" && sideChatFocused())) return openSide();
-    setDock(dockTabs().filter((tab) => tab !== "side-chat").at(-1) ?? null);
+  /** Puts the side chat away; the keyboard goes back to the message box. */
+  function hideSide() {
+    setSideOpen(false);
     document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
   }
-  createEffect(on(sideChatRequested, () => openDock("side-chat"), { defer: true }));
-  createEffect(on(sideChatEmptied, () => closeDock("side-chat"), { defer: true }));
+  /**
+   * The side chat's key: brings it on screen with its box focused, and from
+   * that box puts it away again, back to the message box.
+   */
+  function toggleSide() {
+    if (sideOnScreen() && sideChatFocused()) return hideSide();
+    openSide();
+  }
+  createEffect(
+    on(
+      sideChatRequested,
+      () => {
+        setSideFront(true);
+        setSideOpen(true);
+        set("panel", "chat");
+      },
+      { defer: true },
+    ),
+  );
+  createEffect(on(sideChatEmptied, hideSide, { defer: true }));
+  onMount(() => {
+    const observer = new ResizeObserver(() => setWorkbenchWidth(workbench.clientWidth));
+    observer.observe(workbench);
+    onCleanup(() => observer.disconnect());
+  });
   onMount(async () => {
     const raw = (await window.haarness.storage("layout:v2")) as Record<
       string,
@@ -289,7 +329,10 @@ export function App() {
         setTerminalHeight(clamp(raw.terminalHeight, 160, 600));
       if (raw.sidebarLayout === "flat" || raw.sidebarLayout === "project")
         setSidebarLayout(raw.sidebarLayout);
-      if (["files", "diff", "context", "browser", "side-chat"].includes(String(raw.dock)))
+      if (typeof raw.sideChatWidth === "number" && Number.isFinite(raw.sideChatWidth))
+        setSideWidth(clamp(raw.sideChatWidth, SIDE_MIN, SIDE_MAX));
+      if (raw.sideChat === true) setSideOpen(true);
+      if (["files", "diff", "context", "browser"].includes(String(raw.dock)))
         openDock(raw.dock as Dock);
       else if (raw.dock === "tools") setDock("tools");
     }
@@ -313,6 +356,8 @@ export function App() {
       terminalHeight: terminalHeight(),
       dock: dock(),
       sidebarLayout: sidebarLayout(),
+      sideChat: sideOpen(),
+      sideChatWidth: sideWidth(),
     };
     const timer = setTimeout(saveLayout, 200);
     onCleanup(() => clearTimeout(timer));
@@ -374,7 +419,7 @@ export function App() {
   onCleanup(
     registerCyclePanel({
       id: "dock",
-      tabs: () => (dockVisible() ? panelTabs.ordered() : []),
+      tabs: () => (dockOnScreen() ? panelTabs.ordered() : []),
       active: () => dock() ?? undefined,
       select: (tab) => openDock(tab as Dock),
     }),
@@ -652,12 +697,12 @@ export function App() {
       {
         key: "panel",
         group: "Commands",
-        name: dockVisible() ? t("Hide side panel") : t("Show side panel"),
+        name: dockOnScreen() ? t("Hide side panel") : t("Show side panel"),
         icon: "panel",
         disabled: !connected,
         action: () => {
           set("panel", "chat");
-          if (dockVisible()) setDock(null);
+          if (dockOnScreen()) setDock(null);
           else showDock("tools");
         },
       },
@@ -965,17 +1010,17 @@ export function App() {
             <span class="titlebar-divider" />
             <Button
               icon="panel"
-              label={dockVisible() ? t("Hide side panel") : t("Show side panel")}
+              label={dockOnScreen() ? t("Hide side panel") : t("Show side panel")}
               disabled={!state.connection}
-              active={dockVisible()}
-              dot={!dockVisible() && browserMoved()}
+              active={dockOnScreen()}
+              dot={!dockOnScreen() && browserMoved()}
               description={
-                !dockVisible() && browserMoved()
+                !dockOnScreen() && browserMoved()
                   ? t("The agent opened another page")
                   : undefined
               }
               onClick={() =>
-                dockVisible()
+                dockOnScreen()
                   ? setDock(null)
                   : showDock(dockTabs().at(-1) ?? "tools")
               }
@@ -1163,9 +1208,11 @@ export function App() {
             class="workbench"
             ref={workbench}
             classList={{
-              "has-dock": dockVisible(),
-              "dock-expanded": dockVisible() && dockExpanded(),
+              "has-dock": dockOnScreen(),
+              "dock-expanded": dockOnScreen() && dockExpanded(),
+              "side-over": sideOnScreen() && side().place === "over",
             }}
+            style={{ "--side-chat-room": sideRoom() + "px" }}
           >
             <div class="chat-pane" data-cycle-panel="chats">
               <Show when={state.panel === "chat" && !!state.selected && !loading()}>
@@ -1289,7 +1336,26 @@ export function App() {
                 </div>
               </div>
             </div>
-            <Show when={dockVisible() && !dockExpanded()}>
+            <Show when={sideOnScreen()}>
+              <Show when={side().place !== "over"}>
+                <ResizeHandle
+                  label={t("Resize side chat")}
+                  value={side().width}
+                  min={SIDE_MIN}
+                  max={sideMax()}
+                  onDelta={(delta) => setSideWidth(clamp(side().width - delta, SIDE_MIN, sideMax()))}
+                  onReset={() => setSideWidth(SIDE_WIDTH)}
+                />
+              </Show>
+              <section
+                class="side-chat-column"
+                classList={{ over: side().place === "over" }}
+                style={{ width: side().place === "over" ? undefined : side().width + "px" }}
+              >
+                <SideChatPanel onHide={hideSide} />
+              </section>
+            </Show>
+            <Show when={dockOnScreen() && !dockExpanded()}>
               <ResizeHandle
                 label={t("Resize side panel")}
                 value={dockWidth()}
@@ -1307,7 +1373,7 @@ export function App() {
               class="side-panel"
               data-cycle-panel="dock"
               aria-label={t("Project side panel")}
-              style={{ display: dockVisible() ? "flex" : "none" }}
+              style={{ display: dockOnScreen() ? "flex" : "none" }}
             >
               <div class="dock-tabs">
                 <For each={panelTabs.ordered() as Dock[]}>
@@ -1324,7 +1390,7 @@ export function App() {
                       <button
                         data-cycle-tab={tab}
                         aria-current={tab === dock() ? "true" : undefined}
-                        aria-label={t("Show {name} panel", { name: dockLabels[tab] })}
+                        aria-label={t("Show {name} panel", { name: tab })}
                         aria-description={
                           tab === "browser" && browserMoved()
                             ? t("The agent opened another page")
@@ -1340,7 +1406,7 @@ export function App() {
                       </button>
                       <Button
                         icon="close"
-                        label={t("Close {name} panel", { name: dockLabels[tab] })}
+                        label={t("Close {name} panel", { name: tab })}
                         onClick={() => closeDock(tab)}
                       />
                     </div>
@@ -1417,10 +1483,7 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <Show when={state.connection && dock() === "side-chat"}>
-                <SideChatPanel />
-              </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
+              <BrowserPanel visible={dockOnScreen() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>

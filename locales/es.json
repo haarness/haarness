@@ -2652,5 +2652,7 @@
   "New side chat": "Nuevo chat lateral",
   "The answer ended before it finished.": "La respuesta terminó antes de completarse.",
   "Open side chat": "Abrir chat lateral",
-  "Ask about this chat without adding to it": "Pregunta sobre este chat sin añadirle nada"
+  "Ask about this chat without adding to it": "Pregunta sobre este chat sin añadirle nada",
+  "Hide side chat": "Ocultar chat lateral",
+  "Resize side chat": "Cambiar el tamaño del chat lateral"
 }

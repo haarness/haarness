@@ -2652,5 +2652,7 @@
   "New side chat": "Nowy czat poboczny",
   "The answer ended before it finished.": "Odpowiedź urwała się przed końcem.",
   "Open side chat": "Otwórz czat poboczny",
-  "Ask about this chat without adding to it": "Pytaj o ten czat, niczego do niego nie dodając"
+  "Ask about this chat without adding to it": "Pytaj o ten czat, niczego do niego nie dodając",
+  "Hide side chat": "Ukryj czat poboczny",
+  "Resize side chat": "Zmień rozmiar czatu pobocznego"
 }
