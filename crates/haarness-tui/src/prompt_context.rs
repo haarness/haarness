@@ -252,7 +252,11 @@ pub(crate) fn display(text: &str) -> std::borrow::Cow<'_, str> {
             Part::Text(text) => std::borrow::Cow::Borrowed(text),
             Part::Reference { label, .. } => std::borrow::Cow::Owned(label),
             Part::Paste { content, .. } => {
-                std::borrow::Cow::Owned(format!("[{}]", paste_label(Default::default(), content)))
+                // Labels where no language is at hand, as `@` chips are.
+                std::borrow::Cow::Owned(format!(
+                    "[{}]",
+                    paste_label(crate::locale::Language::English, content)
+                ))
             }
         })
         .collect::<String>()

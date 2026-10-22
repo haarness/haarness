@@ -1062,7 +1062,7 @@ fn latest_thought(text: &str) -> String {
         .map(str::trim)
         .rfind(|line| !line.is_empty())
         .unwrap_or_default();
-    let line = line.trim_start_matches(|c: char| matches!(c, '#' | '>' | '-' | '*' | ' '));
+    let line = line.trim_start_matches(['#', '>', '-', '*', ' ']);
     line.replace("**", "").replace('`', "")
 }
 
