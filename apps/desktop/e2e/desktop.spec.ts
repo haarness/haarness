@@ -3111,21 +3111,28 @@ test("the global shortcut is off until turned on, registers only a free combinat
   expect(errors).toEqual([]);
 });
 
-test("a slash command's message shows what the command expanded to while the chat is open, as after reopening", async () => {
+test("a slash command's message shows the line typed, and what it expanded to once it runs, while the chat is open as after reopening", async () => {
   await showChat();
   await newSession();
   await send("/ui-layout-short expand-proof");
   await expect(page.locator(".transcript")).toContainText("Echo:");
-  // The server keeps the message as the command expanded it.
-  let stored = "";
+  // The server keeps the message as the command expanded it, with the line
+  // typed beside it.
+  let stored: { text: string; command_line?: string | null } | undefined;
   for (const thread of await client.listThreads()) {
     const found = (await client.listItems(thread.id)).find(
       (item) => item.data.type === "user_message" && item.data.text.includes("Return UI command evidence."),
     );
-    if (found?.data.type === "user_message") stored = found.data.text;
+    if (found?.data.type === "user_message") stored = found.data;
   }
-  expect(stored).not.toBe("");
-  await expect(page.locator("article.message.user").last()).toContainText("Return UI command evidence.");
+  expect(stored?.command_line).toBe("/ui-layout-short expand-proof");
+  // The open chat merges the expansion as it arrives (`item.updated`): the
+  // bubble keeps the line typed and gains the expanded prompt behind
+  // Show prompt, as a reopened chat shows it.
+  const message = page.locator("article.message.user").last();
+  await expect(message.locator(".bubble-body")).toHaveText("/ui-layout-short expand-proof");
+  await message.getByRole("button", { name: /Show prompt/ }).click();
+  await expect(message.locator(".command-prompt-text")).toContainText("Return UI command evidence.");
   expect(errors).toEqual([]);
 });
 
