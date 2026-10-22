@@ -237,6 +237,7 @@ export function granted(meta?: Meta) {
 export const WHEEL = "haarnessWheel";
 export const LEFT = "haarnessLeft";
 export const INPUT = "haarnessInput";
+export const HOVER = "haarnessHover";
 
 const attribute = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -248,9 +249,12 @@ const attribute = (text: string) =>
  * page can replace it: wheel events inside a frame never reach the conversation, so it reports
  * them for the conversation to scroll; it reports the document going away with this
  * render's `token`, so a page that leaves is closed rather than left showing something else;
- * and it reports each press of the person's (a trusted pointer or key event, which page script
- * cannot make) with the token, so one press allows one link or message. The script removes
- * itself before the page runs, so the page cannot read the token and speak for the person.
+ * it reports each press of the person's (a trusted pointer or key event, which page script
+ * cannot make) with the token, so one press allows one link or message; and it says when the
+ * pointer comes into the page and leaves it, which the window cannot see past the frame, so the
+ * page's options show while it is pointed at (a page saying so itself only shows them). The
+ * script removes itself before the page runs, so the page cannot read the token and speak for
+ * the person.
  */
 export function document(html: string, meta: Meta | undefined, token: string) {
   const secret = JSON.stringify(token).replace(/</g, "\\u003c");
@@ -260,6 +264,9 @@ export function document(html: string, meta: Meta | undefined, token: string) {
     `addEventListener("pagehide",function(){p.postMessage({${LEFT}:s},"*")});` +
     `function press(e){if(e.isTrusted&&!e.repeat)p.postMessage({${INPUT}:s},"*")}` +
     `addEventListener("pointerdown",press,true);addEventListener("keydown",press,true);` +
+    `var h=0;function hover(v){if(h!==v){h=v;p.postMessage({${HOVER}:v},"*")}}` +
+    `addEventListener("pointerover",function(){hover(1)},{passive:true,capture:true});` +
+    `addEventListener("pointerout",function(e){if(!e.relatedTarget)hover(0)},{passive:true,capture:true});` +
     `document.currentScript&&document.currentScript.remove()})(parent,${secret})</script>`;
   const doctype = html.match(/^\s*<!doctype[^>]*>/i)?.[0] ?? "<!doctype html>";
   return `${doctype}${head}${html.replace(/^\s*<!doctype[^>]*>/i, "")}`;
