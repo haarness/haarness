@@ -45,17 +45,41 @@ fn rows(source: &jsonconfig::HookSource, workspace: &Path) -> Result<Vec<Value>>
                     {
                         continue;
                     }
+                    let matcher = group["matcher"].as_str().unwrap_or("*");
                     rows.push(json!({"id": id(&source.path,event,gi,hi), "event": event,
-                        "matcher": group["matcher"].as_str().unwrap_or("*"), "handler": hook,
+                        "matcher": matcher, "neverRuns": haarness_server::hooks::never_runs(event, matcher),
+                        "handler": hook,
                         "revision": revision, "groupDisabled": group["disabled"].as_bool().unwrap_or(false),
-                        "source": {"path": source.path, "editable": !source.plugin,
-                            "scope": if source.plugin {"plugin"} else if workspace.starts_with(source.path.parent().unwrap_or(workspace)) || source.path.starts_with(workspace) {"local"} else {"global"},
+                        "source": {"path": source.path, "editable": !source.plugin && !source.base,
+                            "scope": if source.plugin {"plugin"} else if source.base {"base"} else if workspace.starts_with(source.path.parent().unwrap_or(workspace)) || source.path.starts_with(workspace) {"local"} else {"global"},
                             "trusted": source.trusted}}));
                 }
             }
         }
     }
     Ok(rows)
+}
+/// What each event's matcher is compared with, for editors: `tool`,
+/// `permission`, `value` (one of `values`, the only ones Haarness sends, or
+/// of `aliases`, other names it accepts) or `nothing` (the matcher is
+/// ignored).
+fn matchers() -> Value {
+    use haarness_server::hooks::{MatcherTarget, matcher_aliases, matcher_target};
+    EVENTS
+        .iter()
+        .map(|event| {
+            let target = match matcher_target(event) {
+                MatcherTarget::Tool => json!({"compares": "tool"}),
+                MatcherTarget::Permission => json!({"compares": "permission"}),
+                MatcherTarget::Values(values) => {
+                    json!({"compares": "value", "values": values, "aliases": matcher_aliases(event)})
+                }
+                MatcherTarget::Nothing => json!({"compares": "nothing"}),
+            };
+            ((*event).to_owned(), target)
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 fn validated(input: &Value, prior: Option<&Value>) -> Result<(String, String, Value)> {
     let event = input["event"].as_str().context("Choose a hook event")?;
@@ -123,7 +147,7 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
             .flatten()
             .collect::<Vec<_>>();
         return Ok(
-            json!({"items":items,"events":EVENTS,"errors":layers.errors,"projectTrusted":trust}),
+            json!({"items":items,"events":EVENTS,"matchers":matchers(),"errors":layers.errors,"projectTrusted":trust}),
         );
     }
     if action == "create" {
@@ -174,6 +198,10 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
             ensure!(
                 !source.plugin,
                 "Plugin hooks are read-only; manage the contributing plugin instead"
+            );
+            ensure!(
+                !source.base,
+                "Hooks from the base folder are read-only; Haarness does not change that folder"
             );
             haarness_profiles::check_path(&source.path)?;
             ensure!(
@@ -325,6 +353,24 @@ mod tests {
                 .iter()
                 .any(|row| row["handler"]["disabled"] == true)
         );
+        let listed = list();
+        assert_eq!(listed["matchers"]["PreToolUse"]["compares"], "tool");
+        assert_eq!(listed["matchers"]["Stop"]["compares"], "nothing");
+        assert_eq!(
+            listed["matchers"]["PostCompact"],
+            json!({"compares": "value", "values": ["manual", "automatic"], "aliases": []})
+        );
+        assert_eq!(
+            listed["matchers"]["StopFailure"]["aliases"],
+            json!(["unknown", "billing_error", "max_output_tokens"])
+        );
+        assert!(
+            listed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["neverRuns"] == false)
+        );
         let untrusted = execute(&paths, &workspace, false, &json!({"action":"list"})).unwrap();
         assert!(
             untrusted["items"]
@@ -403,10 +449,30 @@ mod tests {
             plugin: true,
             trusted: true,
             block: json!({"Stop":[{"hooks":[{"command":"echo plugin"}]}]}),
+            base: false,
         };
         let row = rows(&source, Path::new("/project")).unwrap().remove(0);
         assert_eq!(row["source"]["editable"], false);
         assert_eq!(row["source"]["scope"], "plugin");
+        let never = jsonconfig::HookSource {
+            path: path.clone(),
+            plugin: true,
+            trusted: true,
+            block: json!({"SessionEnd":[{"matcher":"clear","hooks":[{"command":"echo never"}]}]}),
+            base: false,
+        };
+        assert_eq!(
+            rows(&never, Path::new("/project")).unwrap()[0]["neverRuns"],
+            true
+        );
+        let base = jsonconfig::HookSource {
+            plugin: false,
+            base: true,
+            ..source
+        };
+        let row = rows(&base, Path::new("/project")).unwrap().remove(0);
+        assert_eq!(row["source"]["editable"], false);
+        assert_eq!(row["source"]["scope"], "base");
         fs::remove_file(path).unwrap();
     }
 }

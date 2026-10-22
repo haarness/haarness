@@ -5,8 +5,8 @@ import { open } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { Api } from "./api.js";
 import { PtyConnection } from "./pty.js";
-import type { RequestOptions } from "./transport.js";
-import type { StartTurnRequest, Turn, Item } from "./types.js";
+import { TransportError, type RequestOptions } from "./transport.js";
+import type { BtwEvent, BtwRequest, StartTurnRequest, Turn, Item } from "./types.js";
 export * from "./types.js";
 export * from "./capabilities.js";
 export * from "./transport.js";
@@ -67,6 +67,74 @@ export class Haarness extends Api {
       )
       .join("");
     return { turn: result, items, text: output };
+  }
+  /**
+   * POST /v1/threads/{id}/btw/stream: a side question whose answer streams as
+   * it is written. `delta` extends the answer, `text` replaces it, and the
+   * stream ends with `done` or `error`. Aborting `options.signal` stops the
+   * answer; a connection silent for `idleTimeoutMs` (default 45 s, three of
+   * the server's keepalives) fails with a `TransportError`. The request is
+   * never sent twice. Servers without `btw.stream.v1` lack the route.
+   */
+  async *btwStream(
+    id: string,
+    body: BtwRequest,
+    options: Omit<RequestOptions, "timeoutMs"> & { idleTimeoutMs?: number } = {},
+  ): AsyncGenerator<BtwEvent> {
+    const quiet = new AbortController();
+    const signal = AbortSignal.any([this.signal(options.signal), quiet.signal]);
+    const limit = options.idleTimeoutMs ?? 45_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const heard = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        quiet.abort();
+        void reader?.cancel().catch(() => {});
+      }, limit);
+    };
+    try {
+      heard();
+      const response = await this.fetcher(this.url(`/v1/threads/${this.segment(id)}/btw/stream`), {
+        method: "POST",
+        headers: { ...await this.headers(), ...options.headers, Accept: "text/event-stream", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal,
+      });
+      if (!response.ok) return await this.failure(response);
+      if (!response.body) throw new TransportError("Side question stream has no body");
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let data: string[] = [];
+      while (true) {
+        const chunk = await reader.read();
+        heard();
+        buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+        if (chunk.done) buffer += "\n\n";
+        if (buffer.length > 8 * 1024 * 1024) throw new TransportError("Event exceeds 8 MiB");
+        let match: RegExpExecArray | null;
+        while ((match = /\r\n|\r(?!$)|\n/.exec(buffer))) {
+          const line = buffer.slice(0, match.index);
+          buffer = buffer.slice(match.index + match[0].length);
+          if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+          if (line !== "" || !data.length) continue;
+          const event = JSON.parse(data.join("\n")) as BtwEvent;
+          data = [];
+          yield event;
+          if (event.type === "done" || event.type === "error") return;
+        }
+        if (chunk.done) throw new TransportError("The answer ended before it finished");
+      }
+    } catch (error) {
+      if (quiet.signal.aborted && !options.signal?.aborted)
+        throw new TransportError(`The side question sent nothing for ${limit} ms`, { cause: error });
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      await reader?.cancel().catch(() => {});
+    }
   }
   async connectBrowserHost(id: string, query: {version?: 1 | 2} = {version: 2}, options: RequestOptions = {}): Promise<JsonSocket> {
     return JsonSocket.connect(this.url(`/v1/threads/${this.segment(id)}/browser/host`, query).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);

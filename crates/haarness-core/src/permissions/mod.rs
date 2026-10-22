@@ -51,11 +51,13 @@ pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 /// `.haarness/config.toml`, `.haarness/extensions.json` and the extension code
 /// under `.haarness/extensions/`, `.claude/settings.json`,
 /// `.claude/settings.local.json`, `.mcp.json`, a plugin's `hooks/hooks.json`
-/// and `.claude-plugin/plugin.json`, and the global configuration folder's
-/// `config.toml`, `extensions.json` and `extensions/`. An agent that changes
-/// one could widen its own permissions at the next reload, so an edit asks a
-/// person unless a rule naming the file allows it. Names compare without
-/// case and without the trailing dots and spaces Windows drops.
+/// and `.claude-plugin/plugin.json`, the global configuration folder's
+/// `config.toml`, `extensions.json`, `extensions/` and `prompts/`, and every
+/// file of the base configuration folder (`HAARNESS_BASE_CONFIG_DIR`). An
+/// agent that changes one could widen its own permissions, or rewrite its own
+/// instructions, at the next reload, so an edit asks a person unless a rule
+/// naming the file allows it. Names compare without case and without the
+/// trailing dots and spaces Windows drops.
 #[must_use]
 pub fn is_config_path(path: &Path) -> bool {
     let path = normalize_absolute(path);
@@ -94,13 +96,14 @@ pub fn is_config_path(path: &Path) -> bool {
         return true;
     }
     global_config_dir().is_some_and(|global| is_global_config_path(&path, &global))
+        || base_config_dir().is_some_and(|base| is_base_config_path(&path, &base))
 }
 
 /// Whether `path` is one of the global configuration folder's own files:
-/// `config.toml`, `extensions.json`, `haarness.json{,c}`, `opencode.json{,c}`
-/// or extension code under `extensions/`. The folder and each of those may
-/// be a link (dotfiles kept elsewhere and linked in, as `stow` does), so the
-/// files they really lead to count too.
+/// `config.toml`, `extensions.json`, `haarness.json{,c}`, `opencode.json{,c}`,
+/// extension code under `extensions/` or a prompt file under `prompts/`. The
+/// folder and each of those may be a link (dotfiles kept elsewhere and linked
+/// in, as `stow` does), so the files they really lead to count too.
 #[must_use]
 pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
     const FILES: [&str; 6] = [
@@ -129,23 +132,44 @@ pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
                         .collect();
                     match rest.as_slice() {
                         [name] => FILES.contains(&name.as_str()),
-                        [folder, _, ..] => folder == "extensions",
+                        [folder, _, ..] => folder == "extensions" || folder == "prompts",
                         [] => false,
                     }
                 })
             })
     });
-    // Or where one of the files, or the extensions folder, really is.
+    // Or where one of the files, or the extensions or prompts folder, really is.
     inside
         || FILES
             .iter()
             .filter_map(|name| global.join(name).canonicalize().ok())
             .any(|real| names(&real))
-        || global.join("extensions").canonicalize().is_ok_and(|real| {
+        || ["extensions", "prompts"].iter().any(|folder| {
+            global.join(folder).canonicalize().is_ok_and(|real| {
+                [Some(&path), real_path.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|path| path.starts_with(&real) && path != &real)
+            })
+        })
+}
+
+/// Whether `path` is inside the base configuration folder, as written or
+/// where the folder (or the file) really is: all of it is configuration that
+/// a team or device management ships, and Haarness only reads it.
+#[must_use]
+pub fn is_base_config_path(path: &Path, base: &Path) -> bool {
+    let path = normalize_absolute(path);
+    let real_path = path.canonicalize().ok();
+    let base = normalize_absolute(base);
+    [Some(base.clone()), base.canonicalize().ok()]
+        .iter()
+        .flatten()
+        .any(|root| {
             [Some(&path), real_path.as_ref()]
                 .into_iter()
                 .flatten()
-                .any(|path| path.starts_with(&real) && path != &real)
+                .any(|path| path.starts_with(root) && path != root)
         })
 }
 
@@ -162,6 +186,27 @@ static GLOBAL_CONFIG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::ne
 /// The first call wins.
 pub fn set_global_config_dir(dir: PathBuf) {
     let _ = GLOBAL_CONFIG_DIR.set(dir);
+}
+
+static BASE_CONFIG_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Record the base configuration folder this process reads, if any (the
+/// CLI's resolved `HAARNESS_BASE_CONFIG_DIR`), so [`is_config_path`] protects
+/// all of it. The first call wins.
+pub fn set_base_config_dir(dir: Option<PathBuf>) {
+    let _ = BASE_CONFIG_DIR.set(dir);
+}
+
+/// The base configuration folder: the one the CLI recorded, else the
+/// process environment's; never the machine's own in this crate's tests.
+fn base_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = BASE_CONFIG_DIR.get() {
+        return dir.clone();
+    }
+    if cfg!(test) {
+        return None;
+    }
+    haarness_protocol::base_config_dir()
 }
 
 /// The global configuration folder: the one the CLI recorded, else
@@ -1888,8 +1933,36 @@ mod tests {
         ] {
             assert!(is_global_config_path(&global.join(name), global), "{name}");
         }
-        for name in ["AGENTS.md", "commands/x.md", "extensions"] {
+        for name in ["AGENTS.md", "commands/x.md", "extensions", "prompts"] {
             assert!(!is_global_config_path(&global.join(name), global), "{name}");
+        }
+        // Its prompt files: an agent must not rewrite its own instructions.
+        for name in ["prompts/system.md", "Prompts/Plan.md", "prompts/new.md"] {
+            assert!(is_global_config_path(&global.join(name), global), "{name}");
+        }
+        // Every file of the base folder, at any depth.
+        let base = Path::new("/opt/team/haarness");
+        for name in [
+            "haarness.json",
+            "prompts/system.md",
+            "agents/reviewer.md",
+            "skills/check/SKILL.md",
+            "plugins/local/kit/hooks/hooks.json",
+            "AGENTS.md",
+            "new-file.txt",
+        ] {
+            assert!(is_base_config_path(&base.join(name), base), "{name}");
+        }
+        assert!(is_base_config_path(
+            Path::new("/opt/team/haarness/x/../y.md"),
+            base
+        ));
+        for path in [
+            "/opt/team/haarness",
+            "/opt/team/other.md",
+            "/opt/team/haarness-2/x.md",
+        ] {
+            assert!(!is_base_config_path(Path::new(path), base), "{path}");
         }
         for path in [
             "config.toml",
@@ -1907,6 +1980,26 @@ mod tests {
         ] {
             assert!(!is_config_path(Path::new(path)), "{path}");
         }
+    }
+
+    #[test]
+    fn an_edit_in_the_base_folder_always_asks_a_person() {
+        // The only test that records a base folder: a path nothing else edits.
+        let base = std::env::temp_dir().join("haarness-permission-base-fixture");
+        set_base_config_dir(Some(base.clone()));
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("edit:*", PermissionDecision::Allow));
+        engine.add_rule(rule("*", PermissionDecision::Allow));
+        engine.approve_always("edit:*");
+        for file in ["prompts/system.md", "agents/reviewer.md", "notes.txt"] {
+            let operation = format!("edit:{}", base.join(file).display());
+            let evaluation = engine.evaluate_detailed(&operation);
+            assert_eq!(evaluation.decision, PermissionDecision::Ask, "{operation}");
+            assert!(evaluation.protected, "{operation}");
+            assert_eq!(evaluation.matched.as_deref(), Some(CONFIG_EDIT_RULE));
+        }
+        let beside = format!("edit:{}-other/notes.txt", base.display());
+        assert_eq!(engine.evaluate(&beside), PermissionDecision::Allow);
     }
 
     #[test]

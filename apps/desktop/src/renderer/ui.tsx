@@ -68,6 +68,8 @@ interface Form {
   /** What the action touches, under the description. */
   list?: ListItem[];
   fields: Field[];
+  /** Read-only content under the description, such as release notes. */
+  content?: () => JSX.Element;
   submit: string;
   /** The submit removes, deletes or discards something: style it as such. */
   danger?: boolean;
@@ -83,7 +85,7 @@ const [form, setForm] = createSignal<Form | null>(null);
 export function ask(
   title: string,
   fields: Field[],
-  options: { description?: string; list?: ListItem[]; submit?: string; danger?: boolean; onSubmit?: Form["onSubmit"] } = {},
+  options: { description?: string; list?: ListItem[]; content?: Form["content"]; submit?: string; danger?: boolean; onSubmit?: Form["onSubmit"] } = {},
 ) {
   return new Promise<Record<string, string> | null>((resolve) =>
     setForm({
@@ -91,6 +93,7 @@ export function ask(
       fields,
       description: options.description,
       list: options.list,
+      content: options.content,
       onSubmit: options.onSubmit,
       submit: options.submit ?? "Save",
       danger: options.danger,
@@ -106,7 +109,7 @@ export function ask(
 export async function confirm(
   title: string,
   description: string,
-  options: { submit: string; danger?: boolean; list?: ListItem[] },
+  options: { submit: string; danger?: boolean; list?: ListItem[]; content?: Form["content"] },
 ) {
   return !!(await ask(title, [], { description, ...options }));
 }
@@ -226,6 +229,7 @@ export function Forms() {
               <Show when={current.description}>
                 {(description) => <p class="muted">{t(description())}</p>}
               </Show>
+              <Show when={current.content}>{(content) => content()()}</Show>
               <Show when={current.list?.length}>
                 <ul class="dialog-list">
                   <For each={current.list}>

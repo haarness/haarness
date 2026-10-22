@@ -63,7 +63,7 @@ Primary resources:
 - CLI-hosted daemons also expose authenticated remote project discovery and routing: `GET /v1/host/projects`, `GET /v1/host/directories?path=...`, `POST /v1/host/open`, `DELETE /v1/host/projects/{workspaceId}` (closes a project for remote access), and `/v1/host/workspaces/{workspaceId}/v1/...`. Both take the catalog's workspace id (`workspaces[].id`), not `projects[].id`. These optional host routes are separate from the directory SDK/OpenAPI contract; the routed directory API uses the normal SDK with a project base URL. See [remote host architecture](DESKTOP-PROJECT-MODEL.md#remote-hosts-with-multiple-projects).
 
 - `POST /v1/providers/refresh` refreshes connected model catalogs (same response as `GET /v1/providers`; `providers.refresh.v1` capability). See [Model catalogs](MODELS.md).
-- `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/plugins`, `/v1/mcp`, `/v1/tools[?threadId=...]`
+- `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/plugins`, `/v1/mcp`, `/v1/tools[?threadId=...]`; a `/v1/mcp` server of the [base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` (absent otherwise)
 - `GET /v1/lsp` for configured server lifecycle/availability and `GET /v1/formatter` for configured formatter availability (`lsp.v1` and `formatter.v1` capabilities)
 - `POST /v1/tools/{name}` with `{enabled:true|false|null}` for a durable workspace override; `POST /v1/tools/lazy` with `{mode:"off"|"auto"|"always"|null}` (null or omitted resets to configured/default mode)
 - `GET /v1/projects`; `GET|POST /v1/workspaces`; `GET /v1/workspaces/refs`; `POST /v1/workspaces/resolve-ref`; `GET|DELETE /v1/workspaces/{reference}`; `POST /v1/workspaces/{reference}/open`, `/reset`, and `/cleanup`
@@ -336,6 +336,19 @@ Names resolve case-insensitively and collisions use one explicit precedence:
 the reserved `workflow` and `goal` managers, then configured prompt commands,
 then direct discovered workflow invocations. Collision losers are omitted, so
 every advertised entry is executable by `POST /v1/threads/{id}/commands`.
+A prompt command's `user_message` item keeps the line it was typed as in
+`command_line` (`/review src/foo.rs`), while its `text` becomes the prompt the
+command expands to once it runs (`item.updated`), which is what the model
+receives. Clients show `command_line` when it is present; messages saved
+before it was kept, and ordinary messages, have none.
+
+A `reasoning` item carries `duration_ms`, how long the model took over that
+thought as the person waited for it, on a monotonic clock: from the moment
+its request was sent (or from the text or tool call before it in the same
+response) to the end of the reasoning. It therefore includes the wait for
+the first reasoning token, and each request after a tool round starts its
+own count. Clients read it as "Thought for 12s"; records made before it was
+measured have none.
 
 MCP configuration accepts stdio, Streamable HTTP, and legacy SSE transports.
 Remote entries may set `oauth`, `oauthClientId`, and `oauthScopes`; bearer and
@@ -358,6 +371,13 @@ requires. Requests to Claude (Anthropic Messages, Bedrock, and Haarness Cloud
 routers) omit any tool whose root input schema has `oneOf`, `anyOf`, or `allOf`,
 or a root `type` other than `object`, which Claude rejects for the whole
 request. A WARN line names each such tool once per process.
+`apps: false` turns a server's interactive apps (MCP App pages) off: it is not
+told that pages render, its results carry no `mcp_app` page and a read of one
+of its `ui://` resources is refused (403); on is the default and is saved as
+no key. A server's status (`GET /v1/mcp`) carries `apps: false` while they are
+off and `appTools`, how many of its tools pair with a page, while it is
+connected with them on; both are absent otherwise, so older clients see the
+shape they knew.
 Connected servers expose tool list/call, resource and resource-template lists,
 resource reads, prompt lists, and prompt resolution through the corresponding
 `/v1/mcp/{name}/...` routes. Unsupported prompt/resource capabilities return
@@ -460,7 +480,9 @@ model tool execution. Errors leave the client draft intact.
 (`agent`, `command`, or `skill`) and `action` (`list`, `get`, `create`, `edit`,
 `customize`, or `delete`). It returns definition rows/details or a mutation result,
 rather than a `ManagementView`. Writes use the connected server's configuration;
-`scope` is `global` or `local`. `customize` creates a same-name override from a
+`scope` is `global` or `local`. A listed row from the
+[base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` and is
+read-only; sent back as a request's scope, `base` reads as no scope. `customize` creates a same-name override from a
 built-in or inherited definition, retains agent permissions and skill support
 files, and refuses to overwrite an existing custom definition. Returned
 `customized` metadata identifies overrides; deleting one restores the underlying

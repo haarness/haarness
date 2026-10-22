@@ -255,6 +255,26 @@ impl TestServer {
             .unwrap()
     }
 
+    /// A chat with a title, so no title request takes a script meanwhile.
+    async fn titled_thread(&self) -> Thread {
+        self.client
+            .post(format!("{}/v1/threads", self.base))
+            .json(&CreateThreadRequest {
+                title: Some("Scripted chat".into()),
+                provider: Some("echo".into()),
+                model: Some("echo-1".into()),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
     /// Starts a turn and returns its id.
     async fn start(&self, thread: &Thread, text: &str) -> String {
         let turn: Value = self
@@ -442,6 +462,107 @@ async fn a_finished_request_records_its_first_token_time_and_streaming_span() {
     // Output speed divides what streamed, not the provider's 5,000.
     let streamed = usages[0]["stream_tokens"].as_u64().unwrap();
     assert!((1..50).contains(&streamed), "{usages:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A thought records how long the model took over it, from the request (or
+/// the text before it) to the end of its reasoning, so a client can say
+/// "Thought for 3s".
+#[tokio::test]
+async fn reasoning_records_how_long_the_model_thought() {
+    let (server, provider, root) = server("thought").await;
+    let thread = server.titled_thread().await;
+    provider.push_paced(vec![
+        (
+            300,
+            ProviderEvent::ReasoningDelta("Reading the request.".into()),
+        ),
+        (400, ProviderEvent::ReasoningDelta(" Deciding.".into())),
+        (300, ProviderEvent::TextDelta("First answer.".into())),
+        (600, ProviderEvent::ReasoningDelta("Second thought.".into())),
+        (200, ProviderEvent::TextDelta(" Second answer.".into())),
+        (0, finished()),
+    ]);
+    let id = server.start(&thread, "think").await;
+    server.wait(&thread, &id).await;
+    let items: Value = server
+        .client
+        .get(format!("{}/v1/threads/{}/items", server.base, thread.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let thoughts = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["data"]["type"] == "reasoning")
+        .map(|item| item["data"]["duration_ms"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(thoughts.len(), 2, "{items:?}");
+    // From the request to the end of the first reasoning, then from the
+    // first text to the end of the second.
+    assert!((700..10_000).contains(&thoughts[0]), "{thoughts:?}");
+    assert!((600..10_000).contains(&thoughts[1]), "{thoughts:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Each request after a tool round times its own thought, from when it was
+/// sent: the time the first request and its tool took never counts again.
+#[tokio::test]
+async fn a_thought_after_a_tool_round_counts_from_its_own_request() {
+    let (server, provider, root) = server("thought-rounds").await;
+    let thread = server.titled_thread().await;
+    provider.push_paced(vec![
+        (700, ProviderEvent::ReasoningDelta("Reading first.".into())),
+        (
+            100,
+            ProviderEvent::ToolCall {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "missing.txt"}),
+                provider_metadata: Value::Null,
+            },
+        ),
+        (
+            0,
+            ProviderEvent::Finished {
+                reason: "tool_use".into(),
+            },
+        ),
+    ]);
+    provider.push_paced(vec![
+        (200, ProviderEvent::ReasoningDelta("Then this.".into())),
+        (100, ProviderEvent::TextDelta("Done.".into())),
+        (0, finished()),
+    ]);
+    let id = server.start(&thread, "think twice").await;
+    server.wait(&thread, &id).await;
+    let items: Value = server
+        .client
+        .get(format!("{}/v1/threads/{}/items", server.base, thread.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let thoughts = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["data"]["type"] == "reasoning")
+        .map(|item| item["data"]["duration_ms"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(thoughts.len(), 2, "{items:?}");
+    // The first counts its wait for the first token and its own stream; the
+    // second only its own request's 300 ms, not the 800 ms before it.
+    assert!((700..10_000).contains(&thoughts[0]), "{thoughts:?}");
+    assert!((200..700).contains(&thoughts[1]), "{thoughts:?}");
     server.handle.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).ok();
 }

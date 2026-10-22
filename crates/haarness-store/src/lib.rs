@@ -669,6 +669,12 @@ impl SqliteStore {
             turn_id: Some(turn.id),
             sequence: Self::next_sequence(&tx, id)?,
             data: ItemData::UserMessage {
+                // The arguments become the expanded prompt once the command
+                // runs; the line as typed stays for the person reading it.
+                command_line: request
+                    .command
+                    .as_deref()
+                    .map(|name| typed_command_line(name, &request.text)),
                 text: request.text,
                 attachments: request.attachments,
                 queued: false,
@@ -1767,6 +1773,16 @@ fn item_id(value: &str) -> CoreResult<ItemId> {
 fn request_id(value: &str) -> CoreResult<RequestId> {
     Ok(RequestId(Uuid::parse_str(value).map_err(storage)?))
 }
+/// `/name arguments`, the way the person typed a slash command.
+fn typed_command_line(name: &str, arguments: &str) -> String {
+    let arguments = arguments.trim();
+    if arguments.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{name} {arguments}")
+    }
+}
+
 fn time(value: DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
@@ -2165,6 +2181,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             )
             .await
@@ -2474,6 +2491,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: false,
+                    command_line: None,
                 },
             )
             .await
@@ -2989,6 +3007,7 @@ mod tests {
                     attachments: vec![],
                     queued: false,
                     synthetic: true,
+                    command_line: None,
                 },
             )
             .await

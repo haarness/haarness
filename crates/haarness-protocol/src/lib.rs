@@ -19,7 +19,9 @@ pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
-pub use home::home_dir;
+pub use home::{
+    BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, base_config_dir_problem, home_dir,
+};
 pub use input::*;
 pub use management::*;
 pub use model_names::{
@@ -231,6 +233,12 @@ pub enum ItemData {
         /// provider still receives its text as normal context.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         synthetic: bool,
+        /// The line typed to run a slash command (`/review src/foo.rs`).
+        /// `text` becomes the prompt the command expands to, which is what
+        /// the model receives; clients show this line instead. Absent for
+        /// ordinary messages and for messages saved before it was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_line: Option<String>,
     },
     /// Durable boundary recording that a queued user message was included in
     /// a provider-round snapshot. The original message keeps `queued=true` as
@@ -243,6 +251,12 @@ pub enum ItemData {
     },
     Reasoning {
         text: String,
+        /// How long the model thought before this text was complete: from
+        /// the request (or the text or tool call before it) to the end of the
+        /// reasoning, read off a monotonic clock. Absent in records made
+        /// before it was measured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     ToolCall {
         call_id: String,
@@ -916,7 +930,9 @@ pub struct PluginInfo {
     pub name: String,
     pub spec: String,
     /// `haarness` for installed bundles; `haarness-global` or
-    /// `haarness-local` for directly loaded Haarness plugin directories.
+    /// `haarness-local` for directly loaded Haarness plugin directories, and
+    /// `haarness-base` for those of the base configuration folder, which
+    /// Haarness does not change (`managed` is false).
     pub source: String,
     #[serde(default)]
     pub marketplace: Option<String>,
@@ -954,6 +970,20 @@ pub struct McpServerInfo {
     pub transport: String,
     pub status: String,
     pub detail: Option<String>,
+    /// `base` for a server of the base configuration folder
+    /// (`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes:
+    /// an edit saves the person's own copy. Absent for every other server and
+    /// from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// `false` when the server's interactive apps (MCP App pages) are
+    /// turned off in its configuration; absent while they are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<bool>,
+    /// How many of the server's tools pair with an interactive page, while
+    /// it is connected with its apps on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_tools: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -992,6 +1022,11 @@ pub struct McpConfigureRequest {
     pub oauth_scopes: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Interactive apps (MCP App pages). `Some(false)` makes it a plain MCP
+    /// server to Haarness: it is not told that pages render, its results
+    /// carry no page and its `ui://` pages are not served. On when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<bool>,
 }
 fn default_true() -> bool {
     true
@@ -1256,7 +1291,9 @@ pub struct ApiError {
         ToolSettingsUpdate,
         LazyToolSettingsUpdate,
         BtwRequest,
+        BtwTurn,
         BtwResponse,
+        BtwEvent,
         PtyId,
         PtyStatus,
         PtyInfo,

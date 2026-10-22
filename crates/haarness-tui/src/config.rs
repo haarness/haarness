@@ -313,19 +313,46 @@ mod history_tests {
     }
 }
 
-/// Themes discovered from `<config>/themes/*.toml`, appended after the
-/// built-ins. Unparseable files are skipped with a stderr note.
+/// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) this TUI
+/// started with; never the machine's own in this crate's tests.
+pub(crate) fn base_config_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        haarness_protocol::base_config_dir()
+    }
+}
+
+/// Themes discovered from `<config>/themes/*.toml`, then from the base
+/// configuration folder's `themes` (`HAARNESS_BASE_CONFIG_DIR`), appended
+/// after the built-ins; the first theme of a name wins, so a global theme
+/// replaces the base folder's. Unparseable files are skipped with a stderr
+/// note.
 pub fn load_theme_entries() -> Vec<crate::theme::ThemeEntry> {
     let mut entries = crate::theme::builtin_entries();
-    let Some(directory) = config_dir().map(|directory| directory.join("themes")) else {
-        return entries;
-    };
-    let Ok(files) = std::fs::read_dir(directory) else {
-        return entries;
-    };
     let mut names: std::collections::HashSet<String> =
         entries.iter().map(|entry| entry.name.clone()).collect();
-    for file in files.flatten() {
+    let directories = config_dir()
+        .into_iter()
+        .chain(base_config_dir())
+        .map(|directory| directory.join("themes"));
+    for directory in directories {
+        add_theme_entries(&mut entries, &mut names, &directory);
+    }
+    entries
+}
+
+fn add_theme_entries(
+    entries: &mut Vec<crate::theme::ThemeEntry>,
+    names: &mut std::collections::HashSet<String>,
+    directory: &std::path::Path,
+) {
+    let Ok(files) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut files: Vec<_> = files.flatten().collect();
+    files.sort_by_key(std::fs::DirEntry::path);
+    for file in files {
         let path = file.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
             continue;
@@ -347,7 +374,6 @@ pub fn load_theme_entries() -> Vec<crate::theme::ThemeEntry> {
             Err(error) => eprintln!("Theme {}: {error}", path.display()),
         }
     }
-    entries
 }
 
 /// Session-scoped TUI state persisted across restarts (`tui-state.toml`):
@@ -362,6 +388,8 @@ pub struct TuiState {
     pub theme: Option<String>,
     pub variant: Option<String>,
     pub language: Option<String>,
+    /// `compact`, `show` or `hide`; absent until Ctrl+T changes it.
+    pub thinking: Option<String>,
     pub last_thread: Option<String>,
     /// Legacy single-thread scroll value; read as a fallback for two release
     /// cycles after per-thread view state shipped.
@@ -583,6 +611,19 @@ pub fn load_language() -> crate::locale::Language {
 
 pub fn save_language(language: crate::locale::Language) {
     save_state(move |state| state.language = Some(language.code().to_owned()));
+}
+
+/// The thinking display chosen last, Compact until one is chosen.
+pub fn load_thinking() -> crate::state::ThinkingMode {
+    load_state()
+        .thinking
+        .as_deref()
+        .and_then(crate::state::ThinkingMode::parse)
+        .unwrap_or_default()
+}
+
+pub fn save_thinking(mode: crate::state::ThinkingMode) {
+    save_state(move |state| state.thinking = Some(mode.key().to_owned()));
 }
 
 pub(crate) fn load_client_json<T: serde::de::DeserializeOwned + Default>(

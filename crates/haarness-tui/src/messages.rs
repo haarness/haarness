@@ -15,11 +15,13 @@ pub struct BrowserPosition {
 
 pub(crate) fn message_text(item: &Item) -> Option<(&str, &str)> {
     match &item.data {
+        // A slash command is the line typed, as the transcript shows it.
         ItemData::UserMessage {
             text,
+            command_line,
             synthetic: false,
             ..
-        } => Some(("You", text)),
+        } => Some(("You", command_line.as_deref().unwrap_or(text))),
         ItemData::AssistantMessage { text } if !text.trim().is_empty() => Some(("Assistant", text)),
         _ => None,
     }
@@ -221,7 +223,10 @@ impl App {
                 lines: if text.is_empty() {
                     vec!["[Attachments]".into()]
                 } else {
-                    text.lines().map(str::to_owned).collect()
+                    crate::prompt_context::plain(text)
+                        .lines()
+                        .map(str::to_owned)
+                        .collect()
                 },
             }),
             "jump" => {
@@ -235,7 +240,7 @@ impl App {
                 );
             }
             "copy" => {
-                crate::terminal::copy_to_clipboard(text);
+                crate::terminal::copy_to_clipboard(&crate::prompt_context::plain(text));
                 self.close_overlay();
                 self.notice = "Message copied".into();
             }

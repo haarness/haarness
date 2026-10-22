@@ -142,6 +142,7 @@ async fn transport_failures_keep_endpoint_context_without_url_credentials() {
                 models: vec!["fixture-model".into()],
                 discover_models: false,
                 server_output_limit: false,
+                replay_observed_reasoning: false,
                 model_defaults: CompatibleModelDefaults::default(),
                 assume_authenticated: false,
                 headers: ProviderHeaders::default(),
@@ -416,6 +417,7 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
             models: vec![model.into()],
             discover_models: false,
             server_output_limit: false,
+            replay_observed_reasoning: id == "custom",
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: ProviderHeaders::default(),
@@ -455,6 +457,14 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
                 } else {
                     "enabled"
                 }
+            );
+        } else if id == "custom" {
+            // A server of the user's own gets its reasoning back in the
+            // field it streamed it in; it is no DeepSeek, so no `thinking`.
+            assert!(body.get("thinking").is_none());
+            assert_eq!(
+                body["messages"][2]["reasoning_content"],
+                "Read the fixture."
             );
         } else {
             assert!(body.get("thinking").is_none());
@@ -498,6 +508,7 @@ async fn truncated_http_streams_never_fabricate_successful_completion() {
         models: vec!["fixture-model".into()],
         discover_models: false,
         server_output_limit: false,
+        replay_observed_reasoning: false,
         model_defaults: CompatibleModelDefaults::default(),
         assume_authenticated: false,
         headers: ProviderHeaders::default(),

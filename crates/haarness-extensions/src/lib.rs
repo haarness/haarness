@@ -589,6 +589,9 @@ impl ToolRegistry for CombinedTools {
             None => tool,
         })
     }
+    fn resource_servers(&self) -> Vec<String> {
+        self.inner.resource_servers()
+    }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut tools = self.inner.list();
         tools.extend(self.extensions.tools.values().map(|tool| tool.definition()));
@@ -753,6 +756,7 @@ impl HookPort for CombinedHooks {
         thread: ThreadId,
         permission: &str,
         patterns: &[String],
+        always: Option<&[String]>,
         detail: &Value,
     ) -> HookDecision {
         // Extensions answer first; command hooks only see
@@ -792,7 +796,7 @@ impl HookPort for CombinedHooks {
         }
         if let Some(inner) = &self.inner {
             inner
-                .permission_request(thread, permission, patterns, detail)
+                .permission_request(thread, permission, patterns, always, detail)
                 .await
         } else {
             HookDecision::default()

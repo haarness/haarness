@@ -425,6 +425,8 @@ pub enum Overlay {
     RemoteControl,
     /// `/chrome`; the state lives in `App::chrome`.
     Chrome,
+    /// `/btw`: the open chat's side chat; the state lives in `App::side`.
+    SideChat,
 }
 
 /// What the workflow inspector is showing: a durable run, or a definition you
@@ -536,7 +538,8 @@ impl Overlay {
             | Self::Workflow { .. }
             | Self::ProviderLogin
             | Self::RemoteControl
-            | Self::Chrome => false,
+            | Self::Chrome
+            | Self::SideChat => false,
         }
     }
 }
@@ -594,6 +597,55 @@ pub struct Toast {
 /// and undo boundary, with the tokens it came to.
 pub type ContextEstimate = ((usize, u64, Option<u64>), u64);
 
+/// How the model's reasoning shows in the transcript; Ctrl+T cycles them in
+/// this order, and the choice is kept for the next launch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThinkingMode {
+    /// One row while the model thinks, with its latest line, that becomes
+    /// `Thought for 12s` and opens on a click: the transcript never jumps.
+    #[default]
+    Compact,
+    /// The reasoning in full.
+    Show,
+    /// None of it.
+    Hide,
+}
+
+impl ThinkingMode {
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Compact => Self::Show,
+            Self::Show => Self::Hide,
+            Self::Hide => Self::Compact,
+        }
+    }
+    /// The word saved in `tui-state.toml`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Show => "show",
+            Self::Hide => "hide",
+        }
+    }
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Compact, Self::Show, Self::Hide]
+            .into_iter()
+            .find(|mode| mode.key() == value)
+    }
+    /// Its name as the interface shows it.
+    #[must_use]
+    pub fn label(self, language: crate::locale::Language) -> &'static str {
+        match self {
+            Self::Compact => language.text("Compact"),
+            Self::Show => language.text("Show"),
+            Self::Hide => language.text("Hide"),
+        }
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)] // independent UI toggles, not a state machine
 pub struct App {
     pub input_queue: haarness_protocol::InputQueue,
@@ -614,6 +666,10 @@ pub struct App {
     pub(crate) remote: crate::remote_control::RemoteControl,
     /// `/chrome`: whether agents can use the person's own Chrome.
     pub(crate) chrome: crate::chrome::Chrome,
+    /// `/logs`: an export or a change of detailed logging in flight.
+    pub(crate) logs: crate::logs::Logs,
+    /// `/btw`: each chat's side chat.
+    pub(crate) side: crate::side_chat::SideChats,
     pub thread: Thread,
     pub threads: Vec<Thread>,
     /// Whether the current session catalog includes archived conversations.
@@ -673,7 +729,7 @@ pub struct App {
     /// back, or failed to.
     pub(crate) server_restart: Option<ServerRestart>,
     pub overlay: Overlay,
-    pub reasoning: bool,
+    pub thinking: ThinkingMode,
     pub active_turn: Option<TurnId>,
     pub refresh_needed: bool,
     /// Root of the conversation this view follows: the current thread for
@@ -998,7 +1054,7 @@ impl App {
             auto_model: None,
             server_restart: None,
             overlay: Overlay::None,
-            reasoning: true,
+            thinking: ThinkingMode::default(),
             active_turn: None,
             refresh_needed: false,
             input_queue: haarness_protocol::InputQueue::default(),
@@ -1050,6 +1106,8 @@ impl App {
             connect: crate::connect::ConnectFlow::default(),
             remote: crate::remote_control::RemoteControl::default(),
             chrome: crate::chrome::Chrome::default(),
+            logs: crate::logs::Logs::default(),
+            side: crate::side_chat::SideChats::default(),
             pending_server: None,
             original_client: None,
             keybindings: crate::keybindings::load().unwrap_or_default(),
@@ -2407,7 +2465,8 @@ impl App {
             Overlay::Workflow { .. }
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
-            | Overlay::Chrome => 0,
+            | Overlay::Chrome
+            | Overlay::SideChat => 0,
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
@@ -2813,7 +2872,8 @@ impl App {
             | Overlay::Workflow { .. }
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
-            | Overlay::Chrome => None,
+            | Overlay::Chrome
+            | Overlay::SideChat => None,
         }
     }
 }

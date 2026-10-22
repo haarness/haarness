@@ -18,8 +18,20 @@ import {
   historyCommands,
 } from "./conversation-controls";
 import { retainedItems } from "./conversation-history";
-import { PromptContextControls } from "./PromptContext";
-import { mentionAgents } from "./prompt-context";
+import { PromptContextControls, pasteLabel } from "./PromptContext";
+import {
+  commandPrompt,
+  countLines,
+  mentionAgents,
+  pasteFolds,
+  pastedText,
+  plainMessage,
+  promptWithContext,
+  sentParts,
+} from "./prompt-context";
+import { UserMessageBody } from "./UserMessage";
+import { ThoughtRow, ThoughtTicker } from "./ThoughtRow";
+import { latestThought } from "./thinking";
 import { sessionKey } from "../projects";
 import {
   isLive,
@@ -28,6 +40,7 @@ import {
   remoteAliases,
   remoteCommand,
 } from "./remote-control";
+import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
@@ -401,6 +414,7 @@ export function Session() {
           { name: "language", description: t("select_language"), template: "" },
           { name: "settings", description: t("Open settings"), template: "" },
           { name: "input-mode", description: `${t("Toggle project Steer/Queue")} · /input-mode [steer|queue|toggle|reset]`, template: "" },
+          { name: "btw", description: t("Ask a read-only side question without changing this transcript"), template: "" },
           {
             name: "remote-control",
             description: `${t("Continue this chat from your phone or any browser")} · /rc`,
@@ -411,7 +425,7 @@ export function Session() {
           ...state.commands.filter(
             (item) =>
               item.name !== "language" && item.name !== "memory" && item.name !== "settings" && item.name !== "input-mode" &&
-              item.name !== "remote-control" &&
+              item.name !== "remote-control" && item.name !== "btw" &&
               !historyCommands.some((command) => command.name === item.name),
           ),
         ]
@@ -612,6 +626,9 @@ export function Session() {
     persistDraft();
   });
   const active = () => state.turns.find((t) => t.threadId === state.selected);
+  /** Page elements picked into this draft: the box then asks what to do with them. */
+  const pickedElements = () =>
+    app.promptContext().filter((item) => item.kind === "element").length;
   const queue = createInputQueue({
     owner,
     working: () => !!active(),
@@ -684,6 +701,8 @@ export function Session() {
     attachments: string;
     baseText: string;
     baseAttachments: { name: string; data: string }[];
+    /** Chips the undone prompt's pastes came back as. */
+    pastes?: string[];
   };
   let restoredDraft: RestoredDraft | undefined;
   const pristineUndoDraft = () =>
@@ -709,7 +728,23 @@ export function Session() {
     openFind,
     restored: (item) => {
       if (item?.data.type !== "user_message") return;
-      const text = item.data.text;
+      // A slash command comes back as the line typed, so sending it again
+      // runs the command; pastes come back as their chips.
+      const parts = sentParts(item.data.command_line || item.data.text);
+      const pastes = parts.flatMap((part) =>
+        part.kind === "paste"
+          ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }]
+          : [],
+      );
+      const text = pastes.length
+        ? parts
+            .flatMap((part) => (part.kind === "text" ? [part.text] : []))
+            .join("")
+            .trimEnd()
+        : parts.map((part) => part.text).join("");
+      const key = app.draftKey();
+      for (const paste of pastes)
+        void app.run(() => app.addPromptContext(paste, key));
       const baseText = pristineUndoDraft()
         ? restoredDraft!.baseText
         : /^\/(undo|redo|compact)\s*$/.test(draft())
@@ -737,6 +772,7 @@ export function Session() {
         attachments: JSON.stringify(attachments()),
         baseText,
         baseAttachments,
+        pastes: pastes.map((paste) => paste.id),
       };
       void window.haarness.storage("history-draft:" + owner(), restoredDraft);
       persistDraft();
@@ -747,6 +783,15 @@ export function Session() {
       if (pristineUndoDraft()) {
         change(restoredDraft!.baseText);
         setAttachments(restoredDraft!.baseAttachments);
+        const pastes = new Set(restoredDraft!.pastes ?? []);
+        const key = app.draftKey();
+        if (pastes.size)
+          void app.run(() =>
+            app.setPromptContext(
+              key,
+              app.promptContext().filter((item) => item.kind !== "paste" || !pastes.has(item.id)),
+            ),
+          );
         persistDraft();
       }
       restoredDraft = undefined;
@@ -834,7 +879,7 @@ export function Session() {
       if (!text || !editable() || !composer?.isConnected || composer.disabled)
         return;
       event.preventDefault();
-      insertText(text);
+      if (!foldPaste(text)) insertText(text);
     };
     document.addEventListener("paste", paste);
     onCleanup(() => document.removeEventListener("paste", paste));
@@ -926,7 +971,7 @@ export function Session() {
           "todo",
         ].includes(item.data.type) &&
         !(item.data.type === "user_message" && item.data.synthetic) &&
-        !(item.data.type === "reasoning" && !state.preferences.showReasoning) &&
+        !(item.data.type === "reasoning" && state.preferences.thinking === "hide") &&
         item.data.type !== "tool_result" &&
         !(
           item.data.type === "tool_call" &&
@@ -952,13 +997,21 @@ export function Session() {
   // The outline lists every prompt the user wrote and marks the one being
   // read. It is measured from the virtualizer's own row offsets, at most once
   // a frame, so streaming and scrolling never read every row's layout.
+  /** A prompt's first written line, or for one that is only a paste, the
+   * paste's label. */
+  const outlineTitle = (text: string, attachments: readonly string[]) => {
+    const parts = sentParts(text);
+    const paste = parts.find((part) => part.kind === "paste");
+    const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("");
+    return promptTitle(typed, attachments, attachmentName, paste ? pasteLabel(paste.text) : t("Attachment"));
+  };
   const outline = createMemo(() =>
     rows().flatMap((item, index) =>
       item.data.type === "user_message"
         ? [{
             id: item.id,
             index,
-            title: promptTitle(item.data.text, item.data.attachments ?? [], attachmentName, t("Attachment")),
+            title: outlineTitle(item.data.command_line || item.data.text, item.data.attachments ?? []),
           }]
         : [],
     ),
@@ -1286,6 +1339,21 @@ export function Session() {
       change(composer.value);
     }
   }
+  /**
+   * A long paste becomes one chip beside the message box, at the size the
+   * TUI folds one, and is sent whole. Says whether it folded.
+   */
+  function foldPaste(raw: string) {
+    const text = pastedText(raw);
+    if (!text || !pasteFolds(text) || !project() || !editable())
+      return false;
+    const key = app.draftKey();
+    void app.run(() =>
+      app.addPromptContext({ kind: "paste", id: crypto.randomUUID(), text }, key),
+    );
+    composer?.focus({ preventScroll: true });
+    return true;
+  }
   function change(text: string, spoken = false) {
     resetRecall();
     if (!spoken) voice.cancel();
@@ -1302,7 +1370,11 @@ export function Session() {
   const waitingForModels = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
-      await queue.save({ text: draft(), attachments: attachments() });
+      // A queued message keeps only its pastes among the chips.
+      await queue.save({
+        text: promptWithContext(draft(), app.promptContext().filter((item) => item.kind === "paste")),
+        attachments: attachments(),
+      });
       return;
     }
     const remote = remoteCommand.exec(draft().trim());
@@ -1316,6 +1388,17 @@ export function Session() {
         throw new Error(t("Share the chat that started this agent; its agents come with it."));
       change("");
       app.openRemoteControl(action);
+      return;
+    }
+    // /btw asks in the side chat, its own panel beside the chat; a bare
+    // /btw just opens it. The chat itself never sees either.
+    const side = btwQuestion(draft());
+    if (side !== undefined) {
+      if (!state.connection) return;
+      if (!state.selected)
+        throw new Error(t("Send a first message, then ask side questions with /btw."));
+      change("");
+      await openSideChat({ connection: state.connection.id, chat: state.selected, question: side });
       return;
     }
     const localCommand = /^\/(settings|input-mode|language)(?:\s+([\s\S]*))?$/.exec(draft().trim());
@@ -1553,6 +1636,11 @@ export function Session() {
   createEffect(() => {
     if (state.ready && effort() && !efforts().includes(effort())) setEffort("");
   });
+  const thought = createMemo(() =>
+    state.preferences.thinking === "compact" && !stream()?.text
+      ? latestThought(stream()?.reasoning ?? "")
+      : "",
+  );
   const activity = createMemo(() => {
     const turn = active();
     if (!turn) return "";
@@ -1809,6 +1897,7 @@ export function Session() {
                   </Show>
                   <Message
                     item={rows()[row.index]}
+                    matched={rows()[row.index]?.id === findMatch()}
                     task={(() => {
                       const item = rows()[row.index];
                       return item && "call_id" in item.data
@@ -1829,7 +1918,7 @@ export function Session() {
           <Show when={hasForkOrigin() && forkDividerIndex() === -1}>
             <ForkDivider />
           </Show>
-          <Show when={stream()?.reasoning && state.preferences.showReasoning}>
+          <Show when={stream()?.reasoning && state.preferences.thinking === "show"}>
             <div class="message reasoning">
               <div class="message-label">
                 <span class="author">{t("Thinking")}</span>
@@ -1871,6 +1960,12 @@ export function Session() {
           <Show when={active() && !pending()}>
             <div class="assistant-activity" role="status" aria-live="polite">
               <Shimmer>{activity()}</Shimmer>
+              {/* Compact: the newest line of thought ticks here, on the one
+                  row already holding the activity, so nothing moves; screen
+                  readers hear only the activity. */}
+              <Show when={thought()}>
+                <ThoughtTicker text={thought()} />
+              </Show>
             </div>
           </Show>
           <div class="transcript-tail" />
@@ -2003,7 +2098,14 @@ export function Session() {
               classList={{ running: !!active(), waiting: pending() }}
               onPaste={(event) => {
                 const files = Array.from(event.clipboardData?.files ?? []);
-                if (!files.length) return;
+                if (!files.length) {
+                  if (
+                    event.target === composer &&
+                    foldPaste(event.clipboardData?.getData("text/plain") ?? "")
+                  )
+                    event.preventDefault();
+                  return;
+                }
                 event.preventDefault();
                 const uris = event.clipboardData?.getData("text/uri-list");
                 void app.run(() => receiveFiles(files, uris));
@@ -2063,11 +2165,15 @@ export function Session() {
                 placeholder={
                   !project()
                     ? t("Choose a project to start a chat")
-                    : active()
-                      ? t("Send a follow-up message…")
-                      : state.selected
-                        ? t("Reply, or @ to add files and agents")
-                        : t("Do anything, or @ to add files and agents")
+                    : pickedElements()
+                      ? pickedElements() > 1
+                        ? t("Ask about these elements…")
+                        : t("Ask about this element…")
+                      : active()
+                        ? t("Send a follow-up message…")
+                        : state.selected
+                          ? t("Reply, or @ to add files and agents")
+                          : t("Do anything, or @ to add files and agents")
                 }
                 value={draft()}
                 onInput={(event) => change(event.currentTarget.value)}
@@ -2146,6 +2252,7 @@ export function Session() {
                 text={draft()}
                 textarea={() => composer}
                 change={change}
+                insert={insertText}
                 disabled={submitting() || stopping() || !state.ready}
               />
               <Show when={slashOpen()}>
@@ -2406,6 +2513,8 @@ function Message(props: {
   result?: T.Item;
   task?: Task;
   fork: () => Promise<unknown>;
+  /** The message is the current Find match. */
+  matched?: boolean;
 }) {
   const app = useApp();
   const content = () => props.item?.data;
@@ -2414,10 +2523,29 @@ function Message(props: {
     return type === "user_message"
       ? "user"
       : type === "reasoning"
-        ? "reasoning"
+        ? // A compact thought is a step on the rail, like a tool.
+          app.state.preferences.thinking === "compact"
+          ? "step"
+          : "reasoning"
         : props.task || type === "tool_call" || type === "compaction"
           ? "step"
           : "assistant";
+  };
+  /**
+   * A slash command whose turn is still starting has not expanded yet: its
+   * "Show prompt" row is held at the size of the command's template, so it
+   * does not appear under the reader a moment later. Undefined once it has
+   * expanded, after its turn, or for a template that is only its arguments.
+   */
+  const pendingPromptLines = () => {
+    const data = content();
+    if (data.type !== "user_message" || !data.command_line) return undefined;
+    if (commandPrompt(data.command_line, data.text) !== undefined) return undefined;
+    if (!app.state.turns.some((turn) => turn.id === props.item.turnId)) return undefined;
+    const name = /^\/(\S+)/.exec(data.command_line)?.[1]?.toLowerCase();
+    const template = app.state.commands.find((command) => command.name.toLowerCase() === name)?.template ?? "";
+    if (!template.replace(/\$(?:ARGUMENTS|\d+)/g, "").trim()) return undefined;
+    return Math.max(1, countLines(template.trim()));
   };
   const [copied, setCopied] = createSignal(false);
   let copiedTimer: ReturnType<typeof setTimeout>;
@@ -2441,7 +2569,16 @@ function Message(props: {
         aria-label={copied() ? t("Copied") : t("Copy message")}
         title={copied() ? t("Copied") : t("Copy message")}
         onClick={() =>
-          app.run(() => copy((content() as { text: string }).text))
+          app.run(() => {
+            const data = content();
+            // A slash command copies the line typed, a message with pastes
+            // the text pasted, as the bubble shows them.
+            return copy(
+              data.type === "user_message"
+                ? plainMessage(data.command_line || data.text)
+                : (data as { text: string }).text,
+            );
+          })
         }
       >
         <Icon name={copied() ? "check" : "copy"} size="sm" />
@@ -2476,28 +2613,38 @@ function Message(props: {
           </Match>
           <Match when={content().type === "user_message"}>
             <div class="bubble">
-              <Markdown text={(content() as { text: string }).text} />
-              <For
-                each={
+              <UserMessageBody
+                id={props.item.id}
+                text={(content() as { text: string }).text}
+                commandLine={
                   (content() as Extract<T.ItemData, { type: "user_message" }>)
-                    .attachments
+                    .command_line
                 }
+                revealed={props.matched}
+                pendingPromptLines={pendingPromptLines()}
               >
-                {(attachment) => (
-                  <span class="attachment-chip">
-                    {attachment.startsWith("data:image/") ? (
-                      <img src={attachment} alt={t("Attached image")} />
-                    ) : (
-                      <>
-                        <Icon name="file" size="sm" />
-                        <span class="attachment-name">
-                          {attachmentName(attachment)}
-                        </span>
-                      </>
-                    )}
-                  </span>
-                )}
-              </For>
+                <For
+                  each={
+                    (content() as Extract<T.ItemData, { type: "user_message" }>)
+                      .attachments
+                  }
+                >
+                  {(attachment) => (
+                    <span class="attachment-chip">
+                      {attachment.startsWith("data:image/") ? (
+                        <img src={attachment} alt={t("Attached image")} />
+                      ) : (
+                        <>
+                          <Icon name="file" size="sm" />
+                          <span class="attachment-name">
+                            {attachmentName(attachment)}
+                          </span>
+                        </>
+                      )}
+                    </span>
+                  )}
+                </For>
+              </UserMessageBody>
             </div>
             <div class="message-footer">
               <span class="message-time">{time(props.item.createdAt)}</span>
@@ -2513,6 +2660,22 @@ function Message(props: {
             </div>
           </Match>
 
+          <Match
+            when={
+              content().type === "reasoning" &&
+              app.state.preferences.thinking === "compact"
+            }
+          >
+            <ThoughtRow
+              id={props.item.id}
+              matched={props.matched}
+              text={(content() as { text: string }).text}
+              durationMs={
+                (content() as Extract<T.ItemData, { type: "reasoning" }>)
+                  .duration_ms
+              }
+            />
+          </Match>
           <Match when={content().type === "reasoning"}>
             <div class="message-label">
               <span class="author">{t("Thinking")}</span>
@@ -2662,6 +2825,8 @@ const permissionTitles: Record<string, string> = {
   workflow: "Run a workflow",
   agent_switch: "Switch the active agent",
   media_generate: "Generate media",
+  mcp_resource_list: "List an MCP server's resources",
+  mcp_resource_read: "Read a resource from an MCP server",
   browser: "Use the browser",
   browser_site: "Allow site access",
   multiple: "Allow browser and file access",

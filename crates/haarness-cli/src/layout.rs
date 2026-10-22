@@ -212,6 +212,144 @@ pub fn project_directories(workspace: &Path) -> Vec<PathBuf> {
     vec![workspace.to_path_buf()]
 }
 
+/// The base configuration folder this process reads
+/// (`HAARNESS_BASE_CONFIG_DIR`, absolute, see
+/// [`haarness_protocol::base_config_dir`]). This crate's own tests never read
+/// one from the machine they run on: a test that needs a base folder passes
+/// it ([`BaseFolder::at`], `jsonconfig::load_layers_with_base`).
+#[cfg(not(test))]
+pub fn base_config_dir() -> Option<PathBuf> {
+    haarness_protocol::base_config_dir()
+}
+
+#[cfg(test)]
+pub fn base_config_dir() -> Option<PathBuf> {
+    None
+}
+
+/// The real roots of `workspace`'s project, where a cloned repository puts
+/// what it likes: its worktree root and the workspace itself.
+pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = [
+        project_directories(workspace).first().cloned(),
+        Some(workspace.to_path_buf()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| path.canonicalize().ok())
+    .collect();
+    roots.dedup();
+    roots
+}
+
+/// Whether `path`, where links really lead it, is inside one of `roots` (real
+/// paths). A path that does not exist is inside none.
+pub fn real_path_within(path: &Path, roots: &[PathBuf]) -> bool {
+    !roots.is_empty()
+        && path
+            .canonicalize()
+            .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
+}
+
+/// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) as one
+/// workspace reads it: the lowest configuration layer, below the global
+/// folder, which a team or device management ships. Haarness only reads it,
+/// and never through a link that leads into the project, where a cloned
+/// repository puts what it likes. A base folder the person points into the
+/// project stays theirs, so everything in it is read.
+#[derive(Clone, Debug)]
+pub struct BaseFolder {
+    root: PathBuf,
+    /// The project's real roots, unless the folder itself is inside them.
+    project: Vec<PathBuf>,
+}
+
+impl BaseFolder {
+    /// The folder `HAARNESS_BASE_CONFIG_DIR` names, for `workspace`; `None`
+    /// when the variable is unset or blank.
+    pub fn for_workspace(workspace: &Path) -> Option<Self> {
+        base_config_dir().map(|root| Self::at(root, workspace))
+    }
+
+    pub fn at(root: PathBuf, workspace: &Path) -> Self {
+        let mut project = project_roots(workspace);
+        if real_path_within(&root, &project) {
+            project.clear();
+        }
+        Self { root, project }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Whether `path` really is inside the project, through a link.
+    pub fn leads_into_project(&self, path: &Path) -> bool {
+        real_path_within(path, &self.project)
+    }
+
+    /// Whether `path`, an entry found in the folder, is left out because a link
+    /// leads it into the project; logged when it is.
+    pub fn excluded(&self, path: &Path) -> bool {
+        let excluded = self.leads_into_project(path);
+        if excluded {
+            tracing::warn!(
+                path = %path.display(),
+                "config: base folder entry not read: a link leads it into the project"
+            );
+        }
+        excluded
+    }
+
+    /// The folders under the folder's `name` that hold a `SKILL.md`, each read
+    /// where it is, leaving out every one a link leads into the project.
+    pub fn skill_folders(&self, name: &str) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = self
+            .files(name)
+            .into_iter()
+            .filter(|file| file.file_name().is_some_and(|file| file == "SKILL.md"))
+            .filter_map(|file| file.parent().map(Path::to_path_buf))
+            .collect();
+        folders.dedup();
+        folders
+    }
+
+    /// `name` in the folder, unless a link leads it into the project (which is
+    /// logged and left out).
+    pub fn entry(&self, name: &str) -> Option<PathBuf> {
+        let path = self.root.join(name);
+        (!self.excluded(&path)).then_some(path)
+    }
+
+    /// The files under the folder's `name`, at any depth, leaving out each one
+    /// a link leads into the project.
+    pub fn files(&self, name: &str) -> Vec<PathBuf> {
+        fn walk(base: &BaseFolder, path: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+            if depth > 16 {
+                return;
+            }
+            if base.excluded(path) {
+                return;
+            }
+            if path.is_file() {
+                out.push(path.to_path_buf());
+                return;
+            }
+            let Ok(entries) = fs::read_dir(path) else {
+                return;
+            };
+            let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+            children.sort();
+            for child in children {
+                walk(base, &child, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &self.root.join(name), 0, &mut out);
+        out
+    }
+}
+
 pub fn resource_roots(
     config: &Path,
     home: Option<&Path>,

@@ -57,6 +57,13 @@ fn primary_argument(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
     };
+    // A resource row names the resource it read, or the server it listed.
+    if same_tool(name, "mcp_resource_read") {
+        return text("uri").map(str::to_owned);
+    }
+    if same_tool(name, "mcp_resource_list") {
+        return text("server").map(str::to_owned);
+    }
     if (same_tool(name, "grep") || same_tool(name, "glob"))
         && let Some(pattern) = text("pattern")
     {
@@ -516,18 +523,26 @@ fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Valu
 
 /// A successful result that carries an MCP App page (`metadata.mcp_app`, a
 /// `ui://` page on the tool's server), which only Desktop renders.
-fn has_mcp_app(result: &ItemData) -> bool {
+/// Whether a result comes with a page Desktop shows: not one of a server
+/// whose interactive apps are off since, which Desktop shows as text too.
+fn has_mcp_app(result: &ItemData, servers: &[haarness_protocol::McpServerInfo]) -> bool {
     let ItemData::ToolResult {
         is_error, metadata, ..
     } = result
     else {
         return false;
     };
+    let server = metadata
+        .pointer("/mcp_app/server")
+        .and_then(serde_json::Value::as_str);
     !is_error
         && metadata
             .pointer("/mcp_app/uri")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|uri| uri.starts_with("ui://"))
+        && !servers
+            .iter()
+            .any(|info| Some(info.name.as_str()) == server && info.apps == Some(false))
 }
 
 /// Every successful paired tool result is a compact activity row by default,
@@ -932,7 +947,7 @@ fn render_tool_result(
 
 /// Anchor the first line of an assistant reply with a small identity mark,
 /// so even one-word answers read as "haarness said this".
-fn mark_reply(lines: &mut [Line], theme: &Theme) {
+pub(crate) fn mark_reply(lines: &mut [Line], theme: &Theme) {
     // Keep the anchor on visible content even if another block renderer adds
     // a leading boundary row in the future.
     let Some(first) = lines.iter_mut().find(|line| !blank(line)) else {
@@ -952,31 +967,57 @@ fn mark_reply(lines: &mut [Line], theme: &Theme) {
 /// activity is the only thing that indents.
 ///
 /// Files and agents attached with `@` show as the chips they were typed as;
-/// the snapshot or delegation they expand to is for the model.
-fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
+/// the snapshot or delegation they expand to is for the model. A paste
+/// Desktop folded reads as one `▸ Pasted text · N lines` row until the
+/// message is opened (`open`), then as the text pasted.
+pub(crate) fn user_block(
+    text: &str,
+    width: usize,
+    theme: &Theme,
+    language: crate::locale::Language,
+    open: bool,
+) -> Vec<Line> {
     use crate::width::DisplayWidth as _;
     let inner = width.saturating_sub(4).max(10);
     let mut paragraphs: Vec<Vec<Span>> = vec![Vec::new()];
+    let typed_text = |paragraphs: &mut Vec<Vec<Span>>, typed: &str, color| {
+        for (index, piece) in typed.split('\n').enumerate() {
+            if index > 0 {
+                paragraphs.push(Vec::new());
+            }
+            let piece = piece.trim_end_matches('\r');
+            if !piece.is_empty() {
+                paragraphs
+                    .last_mut()
+                    .expect("one paragraph")
+                    .push(Span::new(piece, color));
+            }
+        }
+    };
     for part in crate::prompt_context::parts(text) {
         match part {
             crate::prompt_context::Part::Text(typed) => {
-                for (index, piece) in typed.split('\n').enumerate() {
-                    if index > 0 {
-                        paragraphs.push(Vec::new());
-                    }
-                    let piece = piece.trim_end_matches('\r');
-                    if !piece.is_empty() {
-                        paragraphs
-                            .last_mut()
-                            .expect("one paragraph")
-                            .push(Span::new(piece, theme.text));
-                    }
-                }
+                typed_text(&mut paragraphs, typed, theme.text);
             }
             crate::prompt_context::Part::Reference { label, .. } => paragraphs
                 .last_mut()
                 .expect("one paragraph")
                 .push(Span::new(label, theme.primary).with_attributes(attr::BOLD)),
+            crate::prompt_context::Part::Paste { content, .. } => {
+                let paragraph = paragraphs.last_mut().expect("one paragraph");
+                paragraph.push(Span::new(if open { "▾ " } else { "▸ " }, theme.muted));
+                paragraph.push(
+                    Span::new(
+                        crate::prompt_context::paste_label(language, content),
+                        theme.primary,
+                    )
+                    .with_attributes(attr::BOLD),
+                );
+                if open {
+                    paragraphs.push(Vec::new());
+                    typed_text(&mut paragraphs, content.trim_end_matches('\n'), theme.text);
+                }
+            }
         }
     }
     if paragraphs.last().is_some_and(Vec::is_empty) && text.ends_with('\n') {
@@ -1012,6 +1053,57 @@ fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
         lines.push(Line::empty());
     }
     lines
+}
+
+/// `Thought for 12s`: how long the model thought, or `Thought` for a record
+/// made before that was measured.
+pub(crate) fn thought_label(language: crate::locale::Language, duration_ms: Option<u64>) -> String {
+    let Some(ms) = duration_ms else {
+        return language.text("Thought").to_owned();
+    };
+    let seconds = (ms.saturating_add(500) / 1000).max(1);
+    let duration = match (seconds / 60, seconds % 60) {
+        (0, seconds) => language.format("{seconds}s", &[("seconds", &seconds.to_string())]),
+        (minutes, 0) => language.format("{minutes}m", &[("minutes", &minutes.to_string())]),
+        (minutes, seconds) => language.format(
+            "{minutes}m {seconds}s",
+            &[
+                ("minutes", &minutes.to_string()),
+                ("seconds", &seconds.to_string()),
+            ],
+        ),
+    };
+    language.format("Thought for {duration}", &[("duration", &duration)])
+}
+
+/// The newest line of a thought, without the Markdown marks around it.
+fn latest_thought(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let line = line.trim_start_matches(['#', '>', '-', '*', ' ']);
+    line.replace("**", "").replace('`', "")
+}
+
+/// The end of `value` within `width` cells, so the newest words show.
+fn tail_line(value: &str, width: usize) -> String {
+    use crate::width::DisplayWidth as _;
+    use unicode_segmentation::UnicodeSegmentation as _;
+    if value.width() <= width {
+        return value.to_owned();
+    }
+    let mut used = 1;
+    let mut kept = Vec::new();
+    for grapheme in value.graphemes(true).rev() {
+        used += grapheme.width();
+        if used > width {
+            break;
+        }
+        kept.push(grapheme);
+    }
+    std::iter::once("…").chain(kept.into_iter().rev()).collect()
 }
 
 /// Muted gutter row inside a tool output block.
@@ -1278,16 +1370,34 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         let mut block = TaggedLines::default();
         match &item.data {
             ItemData::UserMessage {
-                text, attachments, ..
+                text,
+                attachments,
+                command_line,
+                ..
             } => {
                 if waiting.contains(&item.id) {
                     continue;
                 }
+                let expanded = app.expanded.contains(&item.id);
+                // Muted rows inside the prompt's block: the fold toggles and
+                // the prompt a command expanded to.
+                let quiet = |value: &str| {
+                    let mut rows = user_block(value, width, theme, app.language, false);
+                    for span in rows.iter_mut().flat_map(|row| row.spans.iter_mut().skip(1)) {
+                        span.fg = theme.muted;
+                    }
+                    rows
+                };
+                // A slash command reads as the line typed; the prompt it
+                // expanded to is what the model got, folded below it.
+                let shown = command_line.as_deref().unwrap_or(text);
+                let prompt = command_line
+                    .as_deref()
+                    .and_then(|line| crate::prompt_context::command_prompt(line, text));
                 // A long paste reads as its opening lines until asked for;
                 // the whole of it is still what was sent.
-                let rows = user_block(text, width, theme);
+                let rows = user_block(shown, width, theme, app.language, expanded);
                 if rows.len() > USER_BLOCK_ROWS {
-                    let expanded = app.expanded.contains(&item.id);
                     let shown = if expanded {
                         rows.len()
                     } else {
@@ -1302,18 +1412,33 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } else {
                         format!("… +{hidden} more lines · click to expand")
                     };
-                    let mut toggle_row = user_block(&toggle, width, theme);
-                    for span in toggle_row
-                        .iter_mut()
-                        .flat_map(|row| row.spans.iter_mut().skip(1))
-                    {
-                        span.fg = theme.muted;
+                    for row in quiet(&toggle) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
-                    for row in toggle_row {
+                } else if prompt.is_some() || crate::prompt_context::has_paste(shown) {
+                    for row in rows {
                         block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
                 } else {
                     block.extend(rows);
+                }
+                if let Some(prompt) = prompt {
+                    let toggle = if expanded {
+                        format!("▾ {}", app.language.text("Hide prompt"))
+                    } else {
+                        format!(
+                            "▸ {}",
+                            crate::prompt_context::show_prompt(app.language, prompt)
+                        )
+                    };
+                    for row in quiet(&toggle) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                    }
+                    if expanded {
+                        for row in quiet(prompt) {
+                            block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                        }
+                    }
                 }
                 if !attachments.is_empty() {
                     let mut spans = vec![Span::new("  ", theme.muted)];
@@ -1334,7 +1459,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     lines
                 }));
             }
-            ItemData::Reasoning { text } if app.reasoning => {
+            ItemData::Reasoning { text, duration_ms }
+                if app.thinking != crate::state::ThinkingMode::Hide =>
+            {
                 let mut rows = app.cached_render(item.id, width, || {
                     render_markdown(text, width, theme, REASONING_INDENT)
                 });
@@ -1343,7 +1470,26 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         span.fg = theme.muted;
                     }
                 }
-                block.extend(rows);
+                if app.thinking == crate::state::ThinkingMode::Compact {
+                    // One row that a click opens: the transcript keeps its
+                    // shape whatever the model thought.
+                    let open = app.expanded.contains(&item.id);
+                    block.push_tagged(
+                        Line::new(vec![
+                            Span::new(REASONING_INDENT, theme.muted),
+                            Span::new(if open { "▾ " } else { "▸ " }, theme.muted),
+                            Span::new(thought_label(app.language, *duration_ms), theme.muted),
+                        ]),
+                        HitTarget::ToolToggle(item.id),
+                    );
+                    if open {
+                        for row in rows {
+                            block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                        }
+                    }
+                } else {
+                    block.extend(rows);
+                }
             }
             ItemData::ToolCall {
                 call_id,
@@ -1542,8 +1688,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                             _ => None,
                         },
                     ) == Some("chrome");
+                // A question a hook answered was never put to the person,
+                // which the row says as quietly as where a browser step ran.
+                let answered_by_hook = name == "question"
+                    && result.is_some_and(|item| {
+                        matches!(&item.data, ItemData::ToolResult { metadata, .. }
+                            if metadata.get("answeredBy").and_then(serde_json::Value::as_str) == Some("hook"))
+                    });
                 let browser = if chrome {
                     format!("  ·  {}", app.language.text("Chrome"))
+                } else if answered_by_hook {
+                    format!("  ·  {}", app.language.text("Answered by hook"))
                 } else {
                     String::new()
                 };
@@ -1600,7 +1755,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 }
                 // An MCP tool whose server pairs it with a page: the page
                 // renders in Desktop, so the row says where to find it.
-                if result.is_some_and(|item| has_mcp_app(&item.data)) {
+                if result.is_some_and(|item| has_mcp_app(&item.data, &app.mcp_status)) {
                     let notice = app.language.text(
                         "This tool comes with an app; open the chat in Haarness Desktop to use it.",
                     );
@@ -1915,15 +2070,35 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             &mut previous_group,
         );
     }
-    if app.reasoning && !app.reasoning_preview.is_empty() {
+    if app.thinking != crate::state::ThinkingMode::Hide && !app.reasoning_preview.is_empty() {
         let mut block = TaggedLines::default();
-        let mut live = render_markdown(&app.reasoning_preview, width, theme, REASONING_INDENT);
-        for row in &mut live {
-            for span in &mut row.spans {
-                span.fg = theme.muted;
+        if app.thinking == crate::state::ThinkingMode::Compact {
+            use crate::width::DisplayWidth as _;
+            // A single row ticking with the newest line of thought; it
+            // becomes the `Thought for …` row in the same place.
+            let label = format!(
+                "{}{} {} · ",
+                REASONING_INDENT,
+                spinner(app.tick),
+                app.language.text("Thinking")
+            );
+            let latest = tail_line(
+                &latest_thought(&app.reasoning_preview),
+                width.saturating_sub(label.width()),
+            );
+            block.push(Line::new(vec![
+                Span::new(label, theme.muted),
+                Span::new(latest, theme.muted),
+            ]));
+        } else {
+            let mut live = render_markdown(&app.reasoning_preview, width, theme, REASONING_INDENT);
+            for row in &mut live {
+                for span in &mut row.spans {
+                    span.fg = theme.muted;
+                }
             }
+            block.extend(live);
         }
-        block.extend(live);
         append_block(
             &mut transcript,
             block,

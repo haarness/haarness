@@ -52,6 +52,13 @@ async def main():
                         socket.send(args[0])
                         socket.send({"type":"ping"})
                         assert socket.recv(timeout=5)["type"] == "pong"
+                elif name == "btw_stream":
+                    stream = client.btw_stream(args[0], args[1])
+                    value = (
+                        [event async for event in stream]
+                        if asynchronous
+                        else list(stream)
+                    )
                 elif name == "events":
                     events = client.events(after=args[0])
                     value = []

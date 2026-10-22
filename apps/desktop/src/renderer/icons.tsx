@@ -32,6 +32,7 @@ import ChevronUp from "lucide-solid/icons/chevron-up";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import ChartColumn from "lucide-solid/icons/chart-column";
 import CreditCard from "lucide-solid/icons/credit-card";
+import Crosshair from "lucide-solid/icons/crosshair";
 import Laptop from "lucide-solid/icons/laptop";
 import LogOut from "lucide-solid/icons/log-out";
 import Play from "lucide-solid/icons/play";
@@ -41,6 +42,7 @@ import CircleCheck from "lucide-solid/icons/circle-check";
 import CircleDashed from "lucide-solid/icons/circle-dashed";
 import CircleMinus from "lucide-solid/icons/circle-minus";
 import CircleHelp from "lucide-solid/icons/circle-help";
+import ClipboardPaste from "lucide-solid/icons/clipboard-paste";
 import Cloud from "lucide-solid/icons/cloud";
 import Code from "lucide-solid/icons/code";
 import Copy from "lucide-solid/icons/copy";
@@ -64,8 +66,10 @@ import Link from "lucide-solid/icons/link-2";
 import List from "lucide-solid/icons/list";
 import ListTodo from "lucide-solid/icons/list-todo";
 import Maximize from "lucide-solid/icons/maximize-2";
+import MessageCircle from "lucide-solid/icons/message-circle";
 import MessageSquare from "lucide-solid/icons/message-square";
 import MonitorSmartphone from "lucide-solid/icons/monitor-smartphone";
+import Monitor from "lucide-solid/icons/monitor";
 import Mic from "lucide-solid/icons/mic";
 import Minimize from "lucide-solid/icons/minimize-2";
 import PanelLeft from "lucide-solid/icons/panel-left";
@@ -128,6 +132,7 @@ const catalog = {
   // Projects, conversations and history
   compose: SquarePen,
   chat: MessageSquare,
+  "side-chat": MessageCircle,
   folder: Folder,
   "folder-open": FolderOpen,
   "folder-new": FolderPlus,
@@ -159,6 +164,7 @@ const catalog = {
   copy: Copy,
   attach: Paperclip,
   image: ImageIcon,
+  paste: ClipboardPaste,
 
   // Engine capabilities
   agents: Bot,
@@ -171,6 +177,8 @@ const catalog = {
   cloud: Cloud,
   reasoning: Zap,
   web: Globe,
+  // Picking an element in the browser's page, and the chip it becomes.
+  pick: Crosshair,
   key: KeyRound,
   todo: ListTodo,
   "todo-open": CircleDashed,
@@ -193,6 +201,8 @@ const catalog = {
   start: Play,
   billing: CreditCard,
   computer: Laptop,
+  /** Another of your computers, opened through Haarness Cloud. */
+  host: Monitor,
   server: Server,
   remote: MonitorSmartphone,
 } satisfies Record<string, Glyph>;

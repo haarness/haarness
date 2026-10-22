@@ -17,6 +17,9 @@ export interface ProjectLocation {
   cloudAccount?: string;
   cloudApiUrl?: string;
   remoteWorkspace?: string;
+  /** Another of your computers, opened through Haarness Cloud's relay: its
+   * Cloud host id. `remoteWorkspace` names the folder there. */
+  remoteHost?: string;
   project?: { id: string; name: string; root: string; git: boolean };
   checkout?: Pick<
     Types.WorkspaceInfo,
@@ -51,7 +54,9 @@ export interface Preferences {
   browserAgentCursor: boolean;
   sound: boolean;
   compactTools: boolean;
-  showReasoning: boolean;
+  /** How the model's reasoning shows in the chat: one row that opens on
+   * click (`compact`), in full, or not at all. */
+  thinking: ThinkingDisplay;
   sendKey: "enter" | "mod-enter";
   editorWrap: boolean;
   diffLayout: "split" | "unified";
@@ -63,6 +68,19 @@ export interface Preferences {
   /** Shows and hides Haarness from any app; off by default. */
   globalShortcut: GlobalShortcut;
   language: string;
+}
+export type ThinkingDisplay = "compact" | "show" | "hide";
+/**
+ * The thinking display saved preferences ask for. It used to be a "Show
+ * reasoning" switch that was off by default and saved with every other
+ * preference, so an off switch cannot be told from one never touched: on
+ * becomes Show, anything else the Compact default.
+ */
+export function savedThinking(saved: unknown): ThinkingDisplay {
+  const value = saved && typeof saved === "object" ? (saved as Record<string, unknown>) : {};
+  if (value.thinking === "compact" || value.thinking === "show" || value.thinking === "hide")
+    return value.thinking;
+  return value.showReasoning === true ? "show" : "compact";
 }
 export const defaults: Preferences = {
   // A new install follows the system until someone picks Light or Dark.
@@ -80,7 +98,7 @@ export const defaults: Preferences = {
   browserAgentCursor: true,
   sound: false,
   compactTools: true,
-  showReasoning: false,
+  thinking: "compact",
   sendKey: "enter",
   editorWrap: false,
   diffLayout: "split",
@@ -94,6 +112,10 @@ export const defaults: Preferences = {
     diff: "Mod+Shift+D",
     terminal: "Mod+J",
     browser: "Mod+Shift+B",
+    // The Chromium DevTools key for inspecting an element.
+    pick: "Mod+Shift+C",
+    // ⌘J is the terminal; the side chat takes the key beside it.
+    sideChat: "Mod+Shift+J",
     // Composer keys, matched while the message box has focus rather than by
     // the native menu. The TUI switches agents with Tab, but here Tab has to
     // keep moving keyboard focus, so the defaults are chords.
@@ -166,6 +188,8 @@ export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
 /** Shortcuts that may be left unset: the ones added after people could
  * choose their own keys. */
 export const optionalShortcuts = new Set([
+  "pick",
+  "sideChat",
   "tabNext",
   "tabPrev",
   "chatPrev",
@@ -177,27 +201,52 @@ export const optionalShortcuts = new Set([
   "promptLast",
 ]);
 /**
- * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar and
- * prompt keys, came after people chose their own keys. A new default that is
- * already another action's key in `saved` (a `Mod+Tab` agent key off macOS,
- * say) is left unset, so that action keeps it and Settings still saves; a key
- * saved before is kept as it is.
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar,
+ * prompt and pick keys, came after people chose their own keys. A new
+ * default that is already a key the person has (another action's key in
+ * `saved`, such as a `Mod+Tab` agent key off macOS or a chat key moved to
+ * `Mod+Shift+C`, or their `global` shortcut) is left unset, so they keep it
+ * and Settings still saves; a key saved before is kept as it is.
  */
 export function migrateTabKeys(
   saved: Record<string, string> | undefined,
   shortcuts: Preferences["shortcuts"],
   platform: string,
+  global?: string,
 ) {
   let next = shortcuts;
   for (const name of optionalShortcuts) {
     if (!next[name] || (saved && name in saved)) continue;
     const mine = shortcutKeys(next[name], platform);
-    const taken = Object.entries(next).some(
-      ([other, value]) => other !== name && !optionalShortcuts.has(other) && value && shortcutKeys(value, platform) === mine,
-    );
+    const theirs = (other: string) => !optionalShortcuts.has(other) || (!!saved && other in saved);
+    const taken =
+      Object.entries(next).some(
+        ([other, value]) => other !== name && theirs(other) && value && shortcutKeys(value, platform) === mine,
+      ) || (!!global && shortcutKeys(global, platform) === mine);
     if (taken) next = { ...next, [name]: "" };
   }
   return next;
+}
+/** Optional shortcuts that are native menu accelerators, not keys the page matches. */
+export const menuShortcuts = new Set(["pick"]);
+// Menu shortcuts become native accelerators, so they need a modifier and a
+// single character. Composer, tab, chat and prompt shortcuts are matched in
+// the page and may also use a named key, such as Tab for people who want
+// the TUI's, or the arrows the page reports as ArrowUp and so on.
+const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
+const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown`;
+const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
+const accelerator = new RegExp(`^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
+const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
+/**
+ * Whether Settings may save `value` for the shortcut `name`: an optional one
+ * may be unset (""), the keys the page matches may be a named key, and the
+ * rest, menu accelerators (Pick an element included), need a modifier.
+ */
+export function shortcutAccepted(name: string, value: string) {
+  if (value === "" && optionalShortcuts.has(name)) return true;
+  const page = (name === "agentNext" || name === "agentPrev" || optionalShortcuts.has(name)) && !menuShortcuts.has(name);
+  return (page ? composer : accelerator).test(value);
 }
 export interface SavedServer {
   id: string;
@@ -205,6 +254,16 @@ export interface SavedServer {
   url?: string;
   /** Haarness Cloud sessions of one account, derived from saved locations. */
   cloud?: boolean;
+  /** Another of your computers, opened through Haarness Cloud: its host id. */
+  host?: string;
+}
+/** One of your other computers, as the account lists it (`haarness remote enable`). */
+export interface Computer {
+  id: string;
+  name: string;
+  connected: boolean;
+  lastSeenAt?: string | null;
+  platform?: string | null;
 }
 export interface Recent extends ProjectLocation {
   id: string;
@@ -250,7 +309,8 @@ export interface DesktopEvent {
     | "command"
     | "menu"
     | "update"
-    | "projects";
+    | "projects"
+    | "btw";
   connection?: string;
   id?: string;
   data: unknown;
@@ -281,9 +341,13 @@ export interface Bridge {
   browserLayout(connection:string,thread:string,layout:BrowserLayout):Promise<void>;
   /** A JPEG data URL of the focused page, or null when nothing is drawn. */
   browserSnapshot(connection:string,thread:string):Promise<string | null>;
+  /** Starts picking an element in the page the window shows for this chat, or stops (null). */
+  browserPick(connection: string, thread: string, request: import("./browser-pick").PickRequest | null): Promise<{ tab: string } | null>;
 
   notificationReady(): Promise<NotificationTarget | null>;
   notificationHandled(target: NotificationTarget): Promise<void>;
+  /** The projects another computer offers (`server` is its `host:` id). */
+  remoteCatalog(server: string): Promise<Types.WorkspaceListResponse>;
   remoteProjects(
     server: string,
     path?: string,
@@ -308,6 +372,10 @@ export interface Bridge {
   connect(input: {
     cloudWorkspace?: string;
     cloudSession?: string;
+    /** Another of your computers (its Cloud host id), with `remoteWorkspace`
+     * from its catalog or `workspace`, a folder to open there. */
+    remoteHost?: string;
+    remoteWorkspace?: string;
     workspace?: string;
     url?: string;
     token?: string;
@@ -327,7 +395,10 @@ export interface Bridge {
   forget(id: string): Promise<void>;
   server(input: {
     id: string;
-    action: "rename" | "remove";
+    /** `host` saves another computer (`id` is its Cloud host id) as a
+     * server to switch to, or renames it; `shown` says which server the
+     * window shows now. */
+    action: "rename" | "remove" | "host" | "shown";
     label?: string;
   }): Promise<SavedServer[]>;
   projects(): Promise<Recent[]>;
@@ -353,6 +424,26 @@ export interface Bridge {
     id: string,
   ): Promise<{ output: string; value: unknown }>;
   cancel(id: string): Promise<void>;
+  /** Asks a side question of `thread`. Its answer arrives as `btw` events
+   * with `id` (`delta`, `text`), and the call answers with how it ended
+   * (`done` or `error`; nothing when the stream broke off); `cancel(id)`
+   * stops it. */
+  btw(
+    connection: string,
+    thread: string,
+    body: { question: string; history?: { question: string; answer: string }[] },
+    id: string,
+  ): Promise<
+    | { type: "done"; answer: string; inputTokens: number; outputTokens: number }
+    | { type: "error"; code: string; message: string; retryable: boolean }
+    | undefined
+  >;
+  /** The keyboard came into (or left) the side chat, where ⌘W closes the
+   * thread in front instead of the window. */
+  sideChatFocus(focused: boolean): Promise<void>;
+  /** A chat's stored side chats (`key` is its project and chat), or with
+   * `value` saves them; null forgets them. Kept in files of their own. */
+  sideChats(key: string, value?: unknown): Promise<unknown>;
   preferences(input: Partial<Preferences>): Promise<Preferences>;
   storage(key: string, value?: unknown): Promise<unknown>;
   review(input: import("./review-drafts").ReviewRequest): Promise<import("./review-drafts").ReviewResponse>;
@@ -372,6 +463,10 @@ export interface Bridge {
   chromeSetup(action: "setup" | "status"): Promise<import("./chrome").ChromeSetupInfo>;
   /** Shows the unpacked Haarness for Chrome folder the last report named. */
   chromeReveal(): Promise<void>;
+  /** The raised log level on this computer, or Detailed logging turned on or off. */
+  logLevel(action: "status" | "detail-on" | "detail-off"): Promise<import("./diagnostics").LogLevelStatus>;
+  /** Saves this computer's logs where the person chooses and shows the zip; null when cancelled. */
+  exportLogs(): Promise<import("./diagnostics").ExportedLogs | null>;
   reveal(connection: string, path?: string): Promise<void>;
   /** `write` (the person's keys) and `answer` (xterm answering a program's
    * query, which only one window does per terminal) answer false when the

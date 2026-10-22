@@ -158,6 +158,9 @@ test("keys translated through a variable are in the catalog", () => {
     // Keyboard shortcut names and notes, from `shortcutTitles` and
     // `shortcutDescriptions`.
     "Next agent", "Previous agent", "While the message box has focus",
+    "Pick an element", "Adds part of the browser's page to your message",
+    // Settings rows SettingRow translates, and the save dialog's labels from the main process.
+    "Diagnostics", "Detailed logging", "Export logs", "Export", "Zip archive",
     "Browser", "Review", "Terminal", "Context",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",
@@ -272,7 +275,6 @@ test("keys translated through a variable are in the catalog", () => {
     // Settings › General switches, from their title/description tuples.
     "Task notifications", "Enable desktop notifications. Choose which alerts appear below.",
     "Compact tool activity", "Keep commands and tool output folded until you open them.",
-    "Show reasoning", "Display the reasoning supplied by your selected model.",
     "Wrap editor lines", "Keep long lines within the editor width.",
     // Desktop notification titles, chosen by event in `notifications.ts`.
     "Task finished", "Task failed", "Approval needed", "Answer needed",

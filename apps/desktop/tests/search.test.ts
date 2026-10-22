@@ -15,6 +15,7 @@ import {
   defaultShortcuts,
   migrateAgentKeys,
   migrateTabKeys,
+  shortcutAccepted,
   shortcutKeys,
   shortcutsClash,
 } from "../src/shared";
@@ -203,6 +204,38 @@ test("the chat, sidebar and prompt keys clash with nothing on any platform", () 
   assert.equal(migrated.chatNext, "");
   assert.equal(migrated.chatPrev, "Alt+ArrowUp");
   assert.equal(shortcutsClash(migrated, "darwin"), false);
+});
+
+test("Pick an element arrives unset when its key is already one the person has, and Settings still saves", () => {
+  const before = (shortcuts: Record<string, string>) =>
+    Object.fromEntries(Object.entries(shortcuts).filter(([name]) => name !== "pick"));
+  // An optional key the person moved to ⇧⌘C before Pick existed.
+  const moved = { ...defaultShortcuts("darwin"), chatPrev: "Mod+Shift+C" };
+  const fromOptional = migrateTabKeys(before(moved), moved, "darwin");
+  assert.equal(fromOptional.pick, "");
+  assert.equal(fromOptional.chatPrev, "Mod+Shift+C");
+  assert.equal(shortcutsClash(fromOptional, "darwin"), false);
+  // A menu key, and off macOS an agent key, on Ctrl+Shift+C.
+  const files = { ...defaultShortcuts("darwin"), files: "Mod+Shift+C" };
+  assert.equal(migrateTabKeys(before(files), files, "darwin").pick, "");
+  const agent = { ...defaultShortcuts("linux"), agentNext: "Ctrl+Shift+C" };
+  assert.equal(migrateTabKeys(before(agent), agent, "linux").pick, "");
+  // The person's own show-and-hide shortcut.
+  const fresh = defaultShortcuts("darwin");
+  assert.equal(migrateTabKeys(before(fresh), fresh, "darwin", "Mod+Shift+C").pick, "");
+  assert.equal(migrateTabKeys(before(fresh), fresh, "darwin", "Alt+Space").pick, "Mod+Shift+C");
+  // An optional default nobody chose does not keep Pick out.
+  assert.equal(migrateTabKeys(before(fresh), fresh, "darwin").pick, "Mod+Shift+C");
+  // Pick is a menu accelerator: a modifier and one key, or unset.
+  assert.equal(shortcutAccepted("pick", "Mod+Shift+C"), true);
+  assert.equal(shortcutAccepted("pick", ""), true);
+  assert.equal(shortcutAccepted("pick", "Tab"), false);
+  assert.equal(shortcutAccepted("pick", "Mod+ArrowUp"), false);
+  assert.equal(shortcutAccepted("files", ""), false);
+  assert.equal(shortcutAccepted("tabNext", "Ctrl+Tab"), true);
+  assert.equal(shortcutAccepted("agentNext", "Tab"), true);
+  for (const [name, value] of Object.entries(defaultShortcuts("darwin")))
+    assert.equal(shortcutAccepted(name, value), true, name);
 });
 
 test("shortcut fields write Ctrl off macOS and save it as Mod, the same key there", () => {

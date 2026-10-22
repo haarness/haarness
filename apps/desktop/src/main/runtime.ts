@@ -8,10 +8,30 @@ import { fileURLToPath } from "node:url";
 import { Haarness, type ServerAuth } from "@haarness/sdk";
 import type { Connection, DesktopEvent } from "../shared";
 import { localArgs } from "./validation";
-export const connections = new Map<
-  string,
-  { view: Connection; client: Haarness; url: string; auth: ServerAuth }
->();
+export interface ProjectConnection {
+  view: Connection;
+  client: Haarness;
+  url: string;
+  auth: ServerAuth;
+  /** Short-lived credentials asked for before each request or stream (a
+   * computer reached through Haarness Cloud); `auth` is unused then. */
+  resolveAuth?: () => Promise<ServerAuth>;
+  /** Sends the connection's requests, renewing credentials Cloud refused. */
+  fetch?: typeof fetch;
+}
+export const connections = new Map<string, ProjectConnection>();
+/** The credentials for one request or stream on this connection now. */
+export const connectionAuth = (item: ProjectConnection) =>
+  item.resolveAuth ? item.resolveAuth() : Promise.resolve(item.auth);
+/** A new client of this connection's server, for a stream of its own. */
+export function connectionClient(item: ProjectConnection, wrap?: (response: Response) => Response) {
+  const send = item.fetch ?? fetch;
+  return new Haarness({
+    baseUrl: item.url,
+    ...(item.resolveAuth ? { resolveAuth: item.resolveAuth } : { auth: item.auth }),
+    ...(wrap || item.fetch ? { fetch: (input: RequestInfo | URL, init?: RequestInit) => send(input, init).then(wrap ?? ((response) => response)) } : {}),
+  });
+}
 export const commands = new Map<string, ChildProcess>();
 export function stopCommand(child: ChildProcess) {
   if (child.exitCode !== null || child.signalCode !== null) return;

@@ -145,6 +145,17 @@ pub(crate) fn qr_rows(text: &str) -> Vec<String> {
 fn output(view: View) -> Result<Value> {
     Ok(serde_json::to_value(view)?)
 }
+/// Why a hook for `event` never runs: the values the event sends, none of
+/// which its matcher matches.
+fn never_runs_line(event: &str) -> String {
+    match haarness_server::hooks::matcher_target(event) {
+        haarness_server::hooks::MatcherTarget::Values(values) => format!(
+            "Never runs: {event} matches only {}, and this matcher matches none of them.",
+            values.join(", ")
+        ),
+        _ => "Never runs: its matcher matches nothing this event sends.".into(),
+    }
+}
 fn row_request(action: &str, row: &Value) -> Value {
     json!({"action":action,"name":row["name"],"id":row["id"],"scope":row["scope"],"revision":row["revision"]})
 }
@@ -1441,38 +1452,54 @@ impl ManagementService {
                 .mcp(&json!({"action":"get","name":name,"scope":input["scope"]}))
                 .await?;
             let enabled = row["config"]["enabled"].as_bool().unwrap_or(true);
+            // A server of the base folder is never changed there: turning it
+            // off saves the person's own copy, and it has no Edit or Remove.
+            let base = row["scope"] == "base";
             let mut view = View {
                 title: format!("MCP · {name}"),
                 lines: vec![
                     format!("Status: {}", text(&row, "runtimeStatus")),
-                    format!("Source: {}", text(&row, "file")),
+                    if base {
+                        format!("Source: {} (base folder, read-only)", text(&row, "file"))
+                    } else {
+                        format!("Source: {}", text(&row, "file"))
+                    },
                 ],
-                entries: vec![
-                    entry(
-                        if enabled { "Disable" } else { "Enable" },
-                        "Persist this server's availability",
-                        row_request(if enabled { "disable" } else { "enable" }, &row),
-                    ),
-                    entry(
-                        "Edit connection",
-                        "Change executable or endpoint",
-                        row_request("edit_form", &row),
-                    ),
-                    entry(
-                        "Restart",
-                        "Reconnect this server",
-                        row_request("restart", &row),
-                    ),
-                    entry(
-                        "Authenticate",
-                        "Open the OAuth authorization URL",
-                        row_request("login", &row),
-                    ),
-                    destructive("Clear authorization", row_request("logout", &row)),
-                    destructive("Remove server", row_request("remove", &row)),
-                ],
+                entries: vec![entry(
+                    if enabled { "Disable" } else { "Enable" },
+                    if base {
+                        "Saved as your own setting over the base folder's"
+                    } else {
+                        "Persist this server's availability"
+                    },
+                    row_request(if enabled { "disable" } else { "enable" }, &row),
+                )],
                 ..View::default()
             };
+            if !base {
+                view.entries.push(entry(
+                    "Edit connection",
+                    "Change executable or endpoint",
+                    row_request("edit_form", &row),
+                ));
+            }
+            view.entries.extend([
+                entry(
+                    "Restart",
+                    "Reconnect this server",
+                    row_request("restart", &row),
+                ),
+                entry(
+                    "Authenticate",
+                    "Open the OAuth authorization URL",
+                    row_request("login", &row),
+                ),
+                destructive("Clear authorization", row_request("logout", &row)),
+            ]);
+            if !base {
+                view.entries
+                    .push(destructive("Remove server", row_request("remove", &row)));
+            }
             view.lines
                 .push(serde_json::to_string_pretty(&row["config"])?);
             return Ok(view);
@@ -1495,7 +1522,13 @@ impl ManagementService {
             ..View::default()
         };
         for row in rows.as_array().into_iter().flatten() {
-            if row["readOnly"] == true {
+            if row["scope"] == "base" {
+                view.entries.push(entry(
+                    text(row, "name"),
+                    format!("{} · base", text(row, "runtimeStatus")),
+                    row_request("inspect", row),
+                ));
+            } else if row["readOnly"] == true {
                 view.lines.push(format!(
                     "{} · {} · managed by plugin",
                     text(row, "name"),
@@ -1632,7 +1665,7 @@ impl ManagementService {
                 ),
                 field(
                     "matcher",
-                    "Tool matcher",
+                    "Matcher",
                     if id.is_empty() {
                         "*"
                     } else {
@@ -1666,10 +1699,20 @@ impl ManagementService {
                 title: format!("{} · {}", text(&row, "event"), text(&row, "matcher")),
                 lines: vec![
                     text(&row["handler"], "command").into(),
-                    format!("Source: {}", text(&row["source"], "path")),
+                    if row["source"]["scope"] == "base" {
+                        format!(
+                            "Source: {} (base folder, read-only)",
+                            text(&row["source"], "path")
+                        )
+                    } else {
+                        format!("Source: {}", text(&row["source"], "path"))
+                    },
                 ],
                 ..View::default()
             };
+            if row["neverRuns"] == true {
+                view.lines.push(never_runs_line(text(&row, "event")));
+            }
             if row["source"]["editable"] == true {
                 view.entries
                     .push(entry("Edit", "", row_request("form", &row)));
@@ -1694,13 +1737,18 @@ impl ManagementService {
             ..View::default()
         };
         for row in status["items"].as_array().into_iter().flatten() {
+            let scope = text(&row["source"], "scope");
             view.entries.push(entry(
                 format!(
                     "{} · {}",
                     text(row, "event"),
                     text(&row["handler"], "command")
                 ),
-                text(&row["source"], "scope"),
+                if row["neverRuns"] == true {
+                    format!("{scope} · never runs")
+                } else {
+                    scope.to_owned()
+                },
                 row_request("inspect", row),
             ));
         }
@@ -1996,7 +2044,7 @@ impl ManagementService {
         let provider_id = name.clone();
         let mut callback_sender = None;
         let (url, code, completion): (String, String, Completion) = if resource == "mcp" {
-            self.resolve_mcp(&name, optional_scope(input)?)?;
+            self.resolve_mcp_readable(&name, optional_scope(input)?)?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let redirect = format!("http://{}/mcp/oauth/callback", listener.local_addr()?);
             let session = self

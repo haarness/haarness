@@ -1448,13 +1448,28 @@ if echo "$pane" | grep -q "▾ todo"; then
 fi
 tmux resize-window -t "$session":0 -x 100 -y 30
 
-# Reasoning: every provider-visible thought renders without disclosure chrome.
+# Reasoning: Compact (the default) keeps a thought to one "Thought for" row;
+# Ctrl+T shows every provider-visible thought in full, without disclosure
+# chrome.
 tmux send-keys -l -t "$session":0.0 '::reason deeply'
 tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Considering deeply" && echo "$pane" | grep -q "Reasoned reply" && break
+  echo "$pane" | grep -q "▸ Thought for" && echo "$pane" | grep -q "Reasoned reply" && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if ! echo "$pane" | grep -q "▸ Thought for" || echo "$pane" | grep -q "Considering deeply"; then
+  echo "$pane" >&2
+  echo "Compact reasoning did not settle as one Thought row" >&2
+  exit 1
+fi
+tmux send-keys -t "$session":0.0 C-t
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
+  echo "$pane" | grep -q "Considering deeply" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
@@ -1474,7 +1489,7 @@ tmux send-keys -t "$session":0.0 "/reasoning" Enter
 attempt=0
 while [ "$attempt" -lt 50 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "provider default" && echo "$pane" | grep -q "hide reasoning text" && break
+  echo "$pane" | grep -q "provider default" && echo "$pane" | grep -q "Thinking display: Show" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done

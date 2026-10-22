@@ -282,8 +282,113 @@
         ],
         "type": "object"
       },
+      "BtwEvent": {
+        "description": "What `POST /v1/threads/{id}/btw/stream` sends, one per event: `delta`\nextends the answer, `text` replaces it (an attempt after a refused tool\ncall starts over), and the stream ends with `done` or `error`.",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "delta"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "text"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "answer": {
+                "type": "string"
+              },
+              "inputTokens": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outputTokens": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "done"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "answer",
+              "inputTokens",
+              "outputTokens",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The same code, message and retryable flag a failed `POST /btw` answers with.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "type": {
+                "enum": [
+                  "error"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable",
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BtwRequest": {
         "properties": {
+          "history": {
+            "description": "Earlier questions of the same side chat and their answers, oldest\nfirst. The server keeps no side chat: a follow-up carries its thread,\nand it is sent after the chat's own history, so each follow-up reads\nback the previous question's request. At most 100.",
+            "items": {
+              "$ref": "#/components/schemas/BtwTurn"
+            },
+            "type": "array"
+          },
           "question": {
             "type": "string"
           },
@@ -316,6 +421,22 @@
           "answer",
           "inputTokens",
           "outputTokens"
+        ],
+        "type": "object"
+      },
+      "BtwTurn": {
+        "description": "One finished question of a side chat.",
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "answer"
         ],
         "type": "object"
       },
@@ -2298,6 +2419,13 @@
                 },
                 "type": "array"
               },
+              "command_line": {
+                "description": "The line typed to run a slash command (`/review src/foo.rs`).\n`text` becomes the prompt the command expands to, which is what\nthe model receives; clients show this line instead. Absent for\nordinary messages and for messages saved before it was kept.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "queued": {
                 "description": "True when the message arrived while a turn was already running and\nwas queued for steering into that turn's next provider round.",
                 "type": "boolean"
@@ -2361,6 +2489,15 @@
           },
           {
             "properties": {
+              "duration_ms": {
+                "description": "How long the model thought before this text was complete: from\nthe request (or the text or tool call before it) to the end of the\nreasoning, read off a monotonic clock. Absent in records made\nbefore it was measured.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "text": {
                 "type": "string"
               },
@@ -3068,6 +3205,13 @@
       },
       "McpConfigureRequest": {
         "properties": {
+          "apps": {
+            "description": "Interactive apps (MCP App pages). `Some(false)` makes it a plain MCP\nserver to Haarness: it is not told that pages render, its results\ncarry no page and its `ui://` pages are not served. On when absent.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "args": {
             "items": {
               "type": "string"
@@ -3164,6 +3308,22 @@
       },
       "McpServerInfo": {
         "properties": {
+          "appTools": {
+            "description": "How many of the server's tools pair with an interactive page, while\nit is connected with its apps on.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "apps": {
+            "description": "`false` when the server's interactive apps (MCP App pages) are\nturned off in its configuration; absent while they are on.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "detail": {
             "type": [
               "string",
@@ -3172,6 +3332,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "scope": {
+            "description": "`base` for a server of the base configuration folder\n(`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes:\nan edit saves the person's own copy. Absent for every other server and\nfrom older servers.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -3701,7 +3868,7 @@
             "type": "string"
           },
           "source": {
-            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories.",
+            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories, and\n`haarness-base` for those of the base configuration folder, which\nHaarness does not change (`managed` is false).",
             "type": "string"
           },
           "spec": {

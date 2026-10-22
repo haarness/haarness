@@ -148,14 +148,25 @@ export function RemoteProjectPicker(props: {
         try {
           if (
             !(await app.connect(
-              { url: props.server.url, workspace: path().trim() },
+              props.server.host
+                ? { remoteHost: props.server.host, workspace: path().trim() }
+                : { url: props.server.url, workspace: path().trim() },
               props.newChat,
               true,
             ))
           )
             throw new Error("Cancelled");
         } catch (error) {
-          throw new Error(remoteProjectError(error));
+          const plain = remoteProjectError(error);
+          // Main already says in plain words why another computer cannot
+          // be reached (offline, signed out, no longer shared).
+          throw new Error(
+            props.server.host && plain === remoteProjectError("")
+              ? error instanceof Error
+                ? error.message
+                : String(error)
+              : plain,
+          );
         }
       }}
     >

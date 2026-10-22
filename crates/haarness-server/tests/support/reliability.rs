@@ -75,6 +75,7 @@ impl HookPort for Hooks {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
         HookDecision::default()
@@ -546,6 +547,7 @@ async fn reliability_automatic_and_overflow_compaction_emit_hooks_after_commit()
                     attachments: vec![],
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             )
             .await

@@ -104,7 +104,13 @@ fn classify(name: &str) -> Classification {
         || name.starts_with("mcp__")
         || matches!(
             name,
-            "mcp_manage" | "plugin_manage" | "skill_manage" | "command_manage" | "skill"
+            "mcp_manage"
+                | "mcp_resource_list"
+                | "mcp_resource_read"
+                | "plugin_manage"
+                | "skill_manage"
+                | "command_manage"
+                | "skill"
         )
     {
         ("extensions", "Extensions", false)

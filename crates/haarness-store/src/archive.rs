@@ -582,6 +582,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             )
             .await

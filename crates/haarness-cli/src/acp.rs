@@ -790,7 +790,7 @@ impl Service {
             ItemData::AssistantMessage { text } => Some(SessionUpdate::AgentMessageChunk(
                 ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
             )),
-            ItemData::Reasoning { text } => Some(SessionUpdate::AgentThoughtChunk(
+            ItemData::Reasoning { text, .. } => Some(SessionUpdate::AgentThoughtChunk(
                 ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
             )),
             ItemData::ToolCall {
@@ -1156,6 +1156,7 @@ fn mcp_config(server: McpServer, cwd: &Path) -> AcpResult<(String, McpConfigureR
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled: true,
+            apps: None,
         },
     ))
 }

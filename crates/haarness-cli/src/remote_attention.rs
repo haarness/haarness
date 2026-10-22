@@ -3115,6 +3115,7 @@ mod tests {
             executable_fingerprint: executable.map(str::to_owned),
             access_fingerprint: access,
             trace_endpoint: None,
+            base_config_dir: None,
         }
     }
 

@@ -20,7 +20,14 @@ import {
  * break. `base` is the folder its relative links start from (the file's own
  * folder); a reply's links start from the project.
  */
-export function Markdown(props: { text: string; live?: boolean; document?: boolean; base?: string }) {
+export function Markdown(props: {
+  text: string;
+  live?: boolean;
+  document?: boolean;
+  base?: string;
+  /** Takes every link instead of the usual web, file and chat handling. */
+  onLink?: (href: string) => void;
+}) {
   const app = useApp();
   /** Web links leave through the desktop's link check; file links open in the Files panel. */
   function follow(href: string) {
@@ -193,7 +200,9 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
         if (link) {
           event.preventDefault();
           // The written address: `link.href` would resolve a path against this window's own file.
-          follow(link.getAttribute("href") ?? "");
+          const href = link.getAttribute("href") ?? "";
+          if (props.onLink) props.onLink(href);
+          else follow(href);
         }
       }}
     />

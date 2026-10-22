@@ -10,6 +10,7 @@ Haarness uses one runtime policy for Desktop, attached TUI, CLI, workflows and n
 - **Always** in the TUI remembers it for every chat on the running server, until that server stops.
 - **Always for this folder** persists it for the exact workspace.
 - **Always for this repository** explicitly shares it with linked Git worktrees. In the TUI choose **Repository** (`r`), review the displayed rules, then press Enter.
+- A `PermissionRequest` hook can answer **Always** as well; it remembers what the TUI's **Always** remembers, never on disk. See [lifecycle hooks](CONFIGURATION-SCOPES.md#lifecycle-hooks).
 
 A website in the user's Chrome is the exception: it offers only **Allow once** and **Allow in this chat**, which lasts until the server stops and never applies to another chat. See [Chrome approvals](#chrome-approvals).
 
@@ -99,7 +100,7 @@ A `bash` rule, such as `"bash": {"git push *": "ask"}`, meets each command in th
 
 ## Haarness's own configuration files
 
-An agent that rewrites the files Haarness takes permissions, hooks, MCP servers and providers from could widen its own permissions at the next reload: a project whose rules ask before `bash` would stop asking once the agent added `"bash": "allow"` to its `haarness.json`. So `edit`, `write`, `multiedit` and `apply_patch` ask a person before changing `haarness.json` or `haarness.jsonc`, `opencode.json` or `opencode.jsonc`, `.haarness/config.toml` (and `.haarness/cloud/haarness.json`), `.haarness/extensions.json` and any file under `.haarness/extensions/` (extension code, which can answer approvals), `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, a plugin's `hooks/hooks.json` and `.claude-plugin/plugin.json` (a project's own plugins under `.haarness/plugins/` load as trusted), and the global configuration folder's `config.toml`, `extensions.json` and `extensions/`, also where they really are when the folder or a file in it is a link (dotfiles linked in with `stow`) (the folder this server really reads: `<data dir>/config` with `--data-dir` or `HAARNESS_DATA_DIR`, else `$HAARNESS_HOME/config`, else `$XDG_CONFIG_HOME/haarness`, else `.config/haarness` in the home folder). They are matched at any depth, case-insensitively, without the trailing dots and spaces Windows drops (so `haarness.json ` and `.mcp.json.` count), and after `.`, `..` and links (a link `notes.json -> haarness.json` asks too) (`is_config_path` in `crates/haarness-core/src/permissions/mod.rs`). Reading them is unchanged.
+An agent that rewrites the files Haarness takes permissions, hooks, MCP servers and providers from could widen its own permissions at the next reload: a project whose rules ask before `bash` would stop asking once the agent added `"bash": "allow"` to its `haarness.json`. So `edit`, `write`, `multiedit` and `apply_patch` ask a person before changing `haarness.json` or `haarness.jsonc`, `opencode.json` or `opencode.jsonc`, `.haarness/config.toml` (and `.haarness/cloud/haarness.json`), `.haarness/extensions.json` and any file under `.haarness/extensions/` (extension code, which can answer approvals), `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, a plugin's `hooks/hooks.json` and `.claude-plugin/plugin.json` (a project's own plugins under `.haarness/plugins/` load as trusted), the global configuration folder's `config.toml`, `extensions.json`, `extensions/` and `prompts/` (the [prompt files](PROMPT-FILES.md) that are the agent's own instructions), also where they really are when the folder or a file in it is a link (dotfiles linked in with `stow`) (the folder this server really reads: `<data dir>/config` with `--data-dir` or `HAARNESS_DATA_DIR`, else `$HAARNESS_HOME/config`, else `$XDG_CONFIG_HOME/haarness`, else `.config/haarness` in the home folder), and every file of the [base folder](CONFIGURATION-SCOPES.md#base-folder) (`HAARNESS_BASE_CONFIG_DIR`), as written or where it really is. They are matched at any depth, case-insensitively, without the trailing dots and spaces Windows drops (so `haarness.json ` and `.mcp.json.` count), and after `.`, `..` and links (a link `notes.json -> haarness.json` asks too) (`is_config_path` in `crates/haarness-core/src/permissions/mod.rs`). Reading them is unchanged.
 
 - **Only a person answers.** The request offers **Allow once** and **Reject**, never **Always**, and nothing answers it in a person's place: not Auto, not a turn that approves its own requests (`haarness run --yolo`, a `--yolo` terminal UI, ACP), not `serve --yolo`, not a `PreToolUse` or `PermissionRequest` hook. A scheduled run, which cannot ask, refuses it at once ("'edit:haarness.json' needs the user's approval every time, and this scheduled run cannot ask …") and goes on, as it does for Cloud actions. `haarness run` without a terminal stops on it.
 - **Rules that open it.** An allow rule whose last path segment holds the file's name, such as `"edit": {"haarness.json": "allow"}`, `"**/haarness.json": "allow"` or `"*.mcp.json": "allow"`, lets the edit run without asking, even when a blanket allow comes after it. Other allows never do: `"edit": "allow"`, `"*": "allow"`, `"**/*"`, a folder (`".claude/**"`, `".haarness/**"`), a kind of file (`"*.json"`) and an **Always** answer to another edit (which remembers `edit:*`) leave it asking. A deny refuses it as usual, and the plan agent still cannot write it.
@@ -111,6 +112,25 @@ An agent that rewrites the files Haarness takes permissions, hooks, MCP servers 
 `webfetch` rules (`webfetch:<address>`) meet the address as written and, when it is written differently, the address the fetch really reads: scheme and host in lower case, without a user name or password, a trailing dot on the host, the default port or `.`/`..` path segments. So a rule for `https://example.com/*` also applies to `HTTPS://user@Example.com.:443/a/../b`; another port is another address.
 
 A fetch follows redirects only while they stay on the host it asked for (the same host and port, or the same host moving from http to https). Any other redirect (to another host, another port, or from https to plain http) is not followed: the result names the new address and why, and fetching it is the model's next call, checked against the rules like any other. Image and video generation follow their configured backend's redirects as before. A redirect within the host is followed without a new check, so a rule for one path of a host does not stop a redirect to it from another path of the same host.
+
+## MCP resources
+
+When a connected MCP server declares resources, the model can list and read them with `mcp_resource_list` and `mcp_resource_read` (see [MCP resources](REFERENCE.md#plugins-skills-and-tools)). Like MCP tools, both run without asking unless a rule says otherwise. Rules use these names:
+
+| Permission | Pattern it matches |
+| --- | --- |
+| `mcp_resource_list` | The server name. Listing every server asks about each server it lists, so a rule about one server still applies. |
+| `mcp_resource_read` | `<server>:<uri>`. **Always** remembers `<server>:*`, every resource of that server and no other. |
+
+In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. A rule or setting that takes every tool of a server away (`"mcp__docs__*": "deny"`) keeps its resources from the model as well, before either permission is asked: a listing of every server leaves it out, and a read naming it is refused as configured policy. To be asked before reading anything but one server's resources:
+
+```json
+{
+  "permission": {
+    "mcp_resource_read": { "*": "ask", "docs:*": "allow" }
+  }
+}
+```
 
 ## Skills and plan mode
 

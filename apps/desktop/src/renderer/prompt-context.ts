@@ -1,4 +1,12 @@
 import type { AgentProfile } from "@haarness/sdk";
+import {
+  elementKey,
+  elementLabel,
+  elementPrompt,
+  fence,
+  isElementContext,
+  type ElementContext,
+} from "./element-context";
 
 export type PromptContext =
   | {
@@ -9,28 +17,99 @@ export type PromptContext =
       endLine?: number;
       unsaved?: boolean;
     }
-  | { kind: "agent"; name: string };
+  | { kind: "agent"; name: string }
+  | ElementContext
+  /** A long paste kept as one chip instead of flooding the message box. */
+  | { kind: "paste"; id: string; text: string };
 const MAX_CONTEXT_BYTES = 128 * 1024;
+/** Enough for a page's worth of picked elements; the byte bound is the real limit. */
+const MAX_CONTEXT_ITEMS = 50;
+/** A paste of more lines or bytes than these becomes a chip: the sizes the
+ * TUI's composer folds a paste at (`input/composer.rs`). */
+const PASTE_LINES = 8;
+const PASTE_BYTES = 1000;
 export const contextKey = (item: PromptContext) =>
   item.kind === "agent"
     ? JSON.stringify([item.kind, item.name])
-    : JSON.stringify([item.kind, item.path, item.startLine, item.endLine]);
+    : item.kind === "element"
+      ? elementKey(item)
+      : item.kind === "paste"
+        ? JSON.stringify([item.kind, item.id])
+        : JSON.stringify([item.kind, item.path, item.startLine, item.endLine]);
 export const contextLabel = (item: PromptContext) =>
   item.kind === "agent"
     ? "@" + item.name
-    : item.path +
-      (item.startLine
-        ? `:${item.startLine}${item.endLine !== item.startLine ? "-" + item.endLine : ""}`
-        : "");
+    : item.kind === "element"
+      ? elementLabel(item)
+      : item.kind === "paste"
+        ? pasteSummary(item.text)
+        : item.path +
+          (item.startLine
+            ? `:${item.startLine}${item.endLine !== item.startLine ? "-" + item.endLine : ""}`
+            : "");
 export const mentionAgents = (agents: AgentProfile[]) =>
   agents.filter((agent) => !agent.hidden && agent.mode !== "primary");
+/** Lines as the TUI counts them: a final newline ends the last line rather
+ * than starting another. */
+export function countLines(text: string) {
+  return text ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0;
+}
+/** Pasted text with Windows and old Mac line endings made plain newlines. */
+export const pastedText = (text: string) => text.replace(/\r\n?/g, "\n");
+/** Whether pasting `text` (line endings already made plain) makes a chip. */
+export const pasteFolds = (text: string) =>
+  countLines(text) > PASTE_LINES ||
+  new TextEncoder().encode(text).length > PASTE_BYTES;
+/** The English summary a paste travels under; clients recount its lines. */
+const pasteSummary = (text: string) => {
+  const lines = Math.max(1, countLines(text));
+  return `Pasted text · ${lines} ${lines === 1 ? "line" : "lines"}`;
+};
+/** What the desktop keeps in one stored value (`bounded` in the main
+ * process), counted as it counts it. */
+const STORED_LIMIT = 2 * 1024 * 1024;
+/**
+ * The draft's context as it can be kept across a reload: everything, unless
+ * pastes push it past what Desktop stores in one value; then the pastes that
+ * do not fit are left out (they stay in the open draft and are sent), and
+ * `dropped` names them.
+ */
+export function keptContext(items: PromptContext[]) {
+  if (JSON.stringify(items).length <= STORED_LIMIT) return { kept: items, dropped: [] as string[] };
+  const dropped: string[] = [];
+  let kept: PromptContext[] = items.filter((item) => item.kind !== "paste");
+  for (const item of items) {
+    if (item.kind !== "paste") continue;
+    const next = items.filter((value) => kept.includes(value) || value === item);
+    if (JSON.stringify(next).length <= STORED_LIMIT) kept = next;
+    else dropped.push(item.id);
+  }
+  return { kept, dropped };
+}
+/** How big a paste is, said only once it is big enough to matter: "2.4 MB". */
+export function pasteSize(text: string, locale: string) {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes < 100 * 1000) return "";
+  const [unit, value] = bytes < 1000 * 1000 ? (["kilobyte", bytes / 1000] as const) : (["megabyte", bytes / 1000 / 1000] as const);
+  return new Intl.NumberFormat(locale, {
+    style: "unit",
+    unit,
+    unitDisplay: "short",
+    maximumFractionDigits: unit === "megabyte" ? 1 : 0,
+  }).format(value);
+}
+/** File snapshots, delegations and picked elements are bounded; a paste
+ * stands for text the message box would have taken whole, so it counts
+ * toward neither limit. */
 function checkContext(items: PromptContext[]) {
-  if (
-    items.length > 20 ||
-    new TextEncoder().encode(JSON.stringify(items)).length > MAX_CONTEXT_BYTES
-  )
+  const bounded = items.filter((item) => item.kind !== "paste");
+  if (bounded.length > MAX_CONTEXT_ITEMS)
     throw Error(
-      "Context must fit within 128 KiB and 20 items. Select a smaller code range.",
+      `A message holds up to ${MAX_CONTEXT_ITEMS} context items. Remove some before adding more.`,
+    );
+  if (new TextEncoder().encode(JSON.stringify(bounded)).length > MAX_CONTEXT_BYTES)
+    throw Error(
+      "Context must fit within 128 KiB. Select a smaller code range, or remove some context.",
     );
   return items;
 }
@@ -40,6 +119,14 @@ export function readContext(value: unknown): PromptContext[] {
     if (!item || typeof item !== "object") return false;
     if (item.kind === "agent")
       return typeof item.name === "string" && !!item.name;
+    if (item.kind === "element") return isElementContext(item);
+    if (item.kind === "paste")
+      return (
+        typeof item.id === "string" &&
+        !!item.id &&
+        typeof item.text === "string" &&
+        !!item.text
+      );
     return (
       item.kind === "file" &&
       typeof item.path === "string" &&
@@ -122,13 +209,131 @@ export function promptWithContext(text: string, items: PromptContext[]) {
   const parts = items.map((item) => {
     if (item.kind === "agent")
       return `Delegate the relevant work from this message and attached context using the task tool with agent ${JSON.stringify(item.name)}. Keep normal permissions in effect.`;
-    const fence = "`".repeat(
-      Array.from(item.content.matchAll(/`+/g)).reduce(
-        (size, match) => Math.max(size, match[0].length + 1),
-        3,
-      ),
-    );
-    return `<details>\n<summary>File context: ${escapeHtml(contextLabel(item))}${item.unsaved ? " (unsaved editor snapshot)" : " (snapshot)"}</summary>\n\n${fence}\n${item.content}\n${fence}\n\n</details>`;
+    if (item.kind === "element") return elementPrompt(item, escapeHtml);
+    // A paste goes whole to the model, fenced so it reads as given; the
+    // block lets every client fold it under its summary.
+    if (item.kind === "paste") {
+      const marks = fence(item.text);
+      return `<details>\n<summary>${pasteSummary(item.text)}</summary>\n\n${marks}\n${item.text}\n${marks}\n\n</details>`;
+    }
+    const marks = fence(item.content);
+    return `<details>\n<summary>File context: ${escapeHtml(contextLabel(item))}${item.unsaved ? " (unsaved editor snapshot)" : " (snapshot)"}</summary>\n\n${marks}\n${item.content}\n${marks}\n\n</details>`;
   });
   return [text.trimEnd(), ...parts].filter(Boolean).join("\n\n");
+}
+/** One piece of a sent message: what was typed (file snapshots, picked
+ * page elements and delegations included, which Markdown shows as written),
+ * or a paste that was sent as a chip, with the text pasted. */
+export type SentPart =
+  | { kind: "text"; text: string }
+  | { kind: "paste"; text: string };
+const BLOCK_OPEN = "<details>\n<summary>";
+/**
+ * The context block `message` holds at `start`, as `promptWithContext` (and
+ * the TUI) write them: a paste, a file snapshot, a folder listing or a page
+ * element, each fenced. Its end, and for a paste the text pasted; undefined
+ * when the text there only looks like one.
+ */
+function blockAt(message: string, start: number) {
+  const from = start + BLOCK_OPEN.length;
+  const close = message.indexOf("</summary>\n\n", from);
+  if (close < 0) return undefined;
+  const summary = message.slice(from, close);
+  const paste = summary.startsWith("Pasted text");
+  const element = summary.startsWith("Page element: ");
+  if (
+    summary.includes("\n") ||
+    !(paste || element || summary.startsWith("File context: ") || summary.startsWith("Directory listing: "))
+  )
+    return undefined;
+  const body = close + "</summary>\n\n".length;
+  // A page element's lines about the page come before its fenced HTML (each
+  // on one line, its strings quoted); its fence is the first line that opens one.
+  const marker = element ? /^(`{3,})/gm : /`{3,}(?=\n)/y;
+  marker.lastIndex = body;
+  const marks = marker.exec(message)?.[element ? 1 : 0];
+  if (!marks) {
+    // An unfenced listing, as older clients wrote one; a paste always has a fence.
+    const end = paste ? -1 : message.indexOf("\n\n</details>", body);
+    return end < 0 ? undefined : { end: end + "\n\n</details>".length };
+  }
+  // The fence is longer than any run of backticks inside, so the first
+  // matching close is this block's.
+  const opened = element ? marker.lastIndex : body + marks.length;
+  const end = message.indexOf(`\n${marks}\n\n</details>`, opened);
+  if (end < 0) return undefined;
+  const inner = body + marks.length + 1;
+  return {
+    end: end + `\n${marks}\n\n</details>`.length,
+    paste: paste ? message.slice(inner, Math.max(inner, end)) : undefined,
+  };
+}
+/** The marker a typed line opens or closes a Markdown code fence with. */
+const fenceLine = (line: string) => /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+/**
+ * A sent message split around its pastes, the inverse of `promptWithContext`
+ * for them, read the way the TUI reads one (`prompt_context::parts`): a
+ * context block is taken whole, so a paste-shaped block inside a file
+ * snapshot stays part of that file, and nothing inside a code fence the
+ * person typed counts. Text that only looks like a paste stays text.
+ */
+export function sentParts(message: string): SentPart[] {
+  const parts: SentPart[] = [];
+  let typed = 0;
+  let typedFence: string | undefined;
+  let lineStart = true;
+  let at = 0;
+  while (at < message.length) {
+    const newline = message.indexOf("\n", at);
+    const end = newline < 0 ? message.length : newline;
+    const line = message.slice(at, end);
+    if (lineStart) {
+      const marker = fenceLine(line);
+      if (typedFence) {
+        if (marker && marker[1][0] === typedFence[0] && marker[1].length >= typedFence.length && !marker[2].trim())
+          typedFence = undefined;
+        at = end + 1;
+        continue;
+      }
+      // A backtick fence's info string holds no backtick.
+      if (marker && !(marker[1][0] === "`" && marker[2].includes("`"))) {
+        typedFence = marker[1];
+        at = end + 1;
+        continue;
+      }
+    }
+    // A block opens at the end of a line: `<details>`, then its summary.
+    const start = end - "<details>".length;
+    const block =
+      start >= at && message.startsWith(BLOCK_OPEN, start) ? blockAt(message, start) : undefined;
+    if (!block) {
+      at = end + 1;
+      lineStart = true;
+      continue;
+    }
+    if (block.paste !== undefined) {
+      if (typed < start) parts.push({ kind: "text", text: message.slice(typed, start) });
+      parts.push({ kind: "paste", text: block.paste });
+      typed = block.end;
+    }
+    at = block.end;
+    lineStart = false;
+  }
+  if (typed < message.length) parts.push({ kind: "text", text: message.slice(typed) });
+  return parts;
+}
+/** A sent message with its pastes back as the text pasted: what Copy copies. */
+export const plainMessage = (message: string) =>
+  sentParts(message)
+    .map((part) => part.text)
+    .join("");
+/**
+ * The prompt a slash command expanded to, when it says more than the line
+ * typed (`/name arguments`): what the model received. A command that has
+ * not expanded yet, or whose template is only its arguments, has nothing
+ * more to show.
+ */
+export function commandPrompt(line: string, text: string) {
+  const args = /^\/\S*\s*([\s\S]*)$/.exec(line)?.[1] ?? line;
+  return text.trim() !== args.trim() ? text : undefined;
 }

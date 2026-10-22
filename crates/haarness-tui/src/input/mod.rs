@@ -341,6 +341,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.notice = "Folder operation is still running · it cannot be safely cancelled".into();
         } else if matches!(app.overlay, Overlay::ProviderLogin) {
             app.cancel_login(client).await;
+        } else if matches!(app.overlay, Overlay::SideChat) {
+            app.side_interrupt();
         } else if !matches!(app.overlay, Overlay::None) {
             app.management = crate::management::Management::default();
             app.close_overlay();
@@ -524,10 +526,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.mcp_status = client.mcp().await.unwrap_or_default();
                 }
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                app.reasoning = !app.reasoning;
-                app.notice = format!("Reasoning {}", if app.reasoning { "on" } else { "off" });
-            }
+            (KeyModifiers::CONTROL, KeyCode::Char('t')) => app.cycle_thinking(),
             (KeyModifiers::CONTROL, KeyCode::Char('g')) => {
                 if app.pending_permissions.is_empty() {
                     app.notice = "No approvals pending".into();
@@ -798,10 +797,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.mcp_status = client.mcp().await.unwrap_or_default();
                 }
             }
-            KeyCode::Char('t') => {
-                app.reasoning = !app.reasoning;
-                app.notice = format!("Reasoning {}", if app.reasoning { "on" } else { "off" });
-            }
+            KeyCode::Char('t') => app.cycle_thinking(),
             KeyCode::Char('a') => app.composer.move_home(),
             KeyCode::Char('e') => app.composer.move_end(),
             KeyCode::Char('f') => app.composer.move_right(),
@@ -1517,6 +1513,9 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
     }
     if matches!(app.overlay, Overlay::Diff(_)) && handle_diff_key(app, key, client).await? {
         return Ok(AppAction::Continue);
+    }
+    if matches!(app.overlay, Overlay::SideChat) {
+        return Ok(app.handle_side_key(key, client));
     }
     if matches!(app.overlay, Overlay::RemoteControl) {
         match key.code {

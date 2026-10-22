@@ -31,6 +31,16 @@ export function eventIdleMs(env: NodeJS.ProcessEnv = process.env) {
   return limit(env, "HAARNESS_DESKTOP_EVENT_IDLE_MS", EVENT_IDLE_MS);
 }
 
+/** How long a stream relayed through Haarness Cloud must have worked before
+ * its end counts as Cloud's routine cut rather than the computer going away. */
+export const RELAY_RESUME_AFTER_MS = 30_000;
+/** How long a relayed stream that ended that way tries to follow on. */
+export const RELAY_RESUME_FOR_MS = 15_000;
+/** {@link RELAY_RESUME_AFTER_MS}; end-to-end tests may shorten it. */
+export function relayResumeAfterMs(env: NodeJS.ProcessEnv = process.env) {
+  return limit(env, "HAARNESS_DESKTOP_RELAY_RESUME_MS", RELAY_RESUME_AFTER_MS);
+}
+
 /** How long a terminal's answer may take. An end-to-end test may shorten it
  * for itself alone, through `haarnessTerminalPingTimeoutMs`. */
 export function terminalPingTimeoutMs(env: NodeJS.ProcessEnv = process.env) {

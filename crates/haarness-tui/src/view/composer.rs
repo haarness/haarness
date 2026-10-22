@@ -288,6 +288,18 @@ fn activity_rule(app: &App, width: usize) -> Line {
     Line::new(vec![Span::new(glyph.to_string().repeat(width), color)])
 }
 
+/// The same hairline under another box: breathing in the agent color while
+/// `active`, a quiet rule otherwise.
+pub(crate) fn pulse_rule(app: &App, width: usize, active: bool) -> Line {
+    let theme = &app.theme;
+    let (glyph, color) = if active {
+        ('━', theme.pulse(theme.primary, breath(app.tick)))
+    } else {
+        ('─', theme.hairline())
+    };
+    Line::new(vec![Span::new(glyph.to_string().repeat(width), color)])
+}
+
 fn rule_state(app: &App, theme: &Theme) -> (char, Color) {
     if app.connection_lost.is_some() {
         return ('━', theme.pulse(theme.danger, breath(app.tick)));
@@ -559,7 +571,7 @@ fn badges(app: &App) -> Vec<(String, Color)> {
     } else if let Some(effort) = &app.reasoning_effort {
         badges.push((effort.clone(), theme.muted));
     }
-    if !app.reasoning {
+    if app.thinking == crate::state::ThinkingMode::Hide {
         badges.push((app.language.text("thinking_hidden").to_owned(), theme.muted));
     }
     if app.remote.shared(app.thread.id) {
@@ -964,19 +976,41 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
             })
             .collect();
     }
-    if app.composer.is_empty() {
-        let placeholder = if app.shell_mode {
-            "shell command…"
-        } else if app.attachments.is_empty() {
-            "Ask anything…"
-        } else {
-            "Add a question, or Enter to send media"
-        };
+    let placeholder = if app.shell_mode {
+        "shell command…"
+    } else if app.attachments.is_empty() {
+        "Ask anything…"
+    } else {
+        "Add a question, or Enter to send media"
+    };
+    let lead = app
+        .shell_mode
+        .then(|| Span::new("! ", theme.accent).with_attributes(attr::BOLD));
+    editor_rows(
+        app,
+        &app.composer,
+        app.language.text(placeholder),
+        lead,
+        !card_owns_keys,
+        width,
+    )
+}
+
+/// What `composer` holds, wrapped to `width` with its cursor, or its
+/// `placeholder` while it is empty; `lead` opens the first row. Without
+/// `focused` the cursor is not drawn.
+pub(crate) fn editor_rows(
+    app: &App,
+    composer: &crate::input::composer::Composer,
+    placeholder: &str,
+    lead: Option<Span>,
+    focused: bool,
+    width: usize,
+) -> Vec<Line> {
+    let theme = &app.theme;
+    if composer.is_empty() {
         let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
-        if app.shell_mode {
-            spans.push(Span::new("! ", theme.accent).with_attributes(attr::BOLD));
-        }
-        let placeholder = app.language.text(placeholder);
+        spans.extend(lead);
         if app.language.is_rtl() {
             // A bidi-aware terminal reverses a right-to-left placeholder in
             // place, which would carry a cursor drawn on its first letter to
@@ -993,8 +1027,8 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
         spans.push(Span::new(characters.as_str().to_owned(), theme.muted));
         return vec![clamp(spans, width)];
     }
-    let text = app.composer.text();
-    let cursor = app.composer.cursor();
+    let text = composer.text();
+    let cursor = composer.cursor();
     let inner_width = width.saturating_sub(INSET * 2 + 2).max(10);
 
     // Flatten logical rows into display-cell-wrapped rows, tracking the cursor
@@ -1044,14 +1078,15 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
         .saturating_sub(visible)
         .min(display.len().saturating_sub(visible));
 
+    let mut lead = lead;
     let mut lines = Vec::new();
     for (index, (row, cursor_column)) in display.iter().enumerate() {
         if index < start || index >= start + visible {
             continue;
         }
         let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
-        if app.shell_mode && index == start {
-            spans.push(Span::new("! ", theme.accent).with_attributes(attr::BOLD));
+        if index == start {
+            spans.extend(lead.take());
         }
         if let Some(column) = cursor_column {
             let column = (*column).min(row.len());
@@ -1065,10 +1100,10 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
             }
             let after: String = tail.collect();
             spans.push(Span::new(before, theme.text));
-            if card_owns_keys {
-                spans.push(Span::new(at, theme.text));
-            } else {
+            if focused {
                 spans.push(cursor_span(at, app));
+            } else {
+                spans.push(Span::new(at, theme.text));
             }
             spans.push(Span::new(after, theme.text));
         } else {
