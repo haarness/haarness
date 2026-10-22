@@ -172,101 +172,88 @@ fn delta_text(payload: &Value) -> Option<&str> {
     fields.get("delta")?.as_str()
 }
 
-/// `events` with each run of adjacent deltas joined, as [`join_delta`] joins
-/// them: a reconnecting client's replay.
-#[must_use]
-pub fn join_deltas(events: Vec<EventEnvelope>) -> Vec<EventEnvelope> {
-    let mut joined: Vec<EventEnvelope> = Vec::with_capacity(events.len());
-    for event in events {
-        if let Some(run) = joined.last_mut()
-            && join_delta(run, &event)
-        {
-            continue;
-        }
-        joined.push(event);
-    }
-    joined
+/// How much one connection's queue may hold, counted as text: a client
+/// stalled for minutes behind a fast stream fits, one that stopped reading
+/// does not hold more.
+pub const PENDING_EVENTS_LIMIT: usize = 16 * 1024 * 1024;
+
+/// The events waiting for one connection, oldest first. The connection takes
+/// every event as it is published and keeps it here until its client reads
+/// it, so a client slower than the model never falls out of the bus's bounded
+/// queue; while deltas wait, each one continuing the run of the one before it
+/// joins it (see [`join_delta`]), so the client reads fewer, longer ones and
+/// catches up. Past its limit the queue gives up what it holds and the
+/// client must reload what it shows.
+pub struct PendingEvents {
+    entries: VecDeque<(EventEnvelope, usize)>,
+    size: usize,
+    limit: usize,
 }
 
-/// What a subscriber's [`JoinedEvents`] hands over next.
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)] // Handed straight to its caller, never stored.
-pub enum LiveEvent {
-    Event(EventEnvelope),
-    /// The subscriber fell further behind than the queue holds: this many
-    /// events are gone, and its client must reload what it shows.
-    Behind(u64),
-    Closed,
-}
-
-/// A subscriber's live events, each run of deltas already waiting for it
-/// joined into one (see [`join_delta`]). A client that reads more slowly than
-/// a model writes still reads whole runs, so it keeps its place in the
-/// bounded queue instead of falling out of it and starting over.
-pub struct JoinedEvents {
-    receiver: broadcast::Receiver<EventEnvelope>,
-    /// An event taken off the queue while joining, and a gap met there: both
-    /// come before the next wait.
-    held: Option<EventEnvelope>,
-    gap: Option<u64>,
-}
-
-impl JoinedEvents {
+impl PendingEvents {
     #[must_use]
-    pub fn new(receiver: broadcast::Receiver<EventEnvelope>) -> Self {
+    pub fn new(limit: usize) -> Self {
         Self {
-            receiver,
-            held: None,
-            gap: None,
+            entries: VecDeque::new(),
+            size: 0,
+            limit,
         }
     }
 
-    /// The next event or gap. Cancel-safe: it only ever waits with nothing
-    /// taken off the queue.
-    pub async fn next(&mut self) -> LiveEvent {
-        self.next_kept(|_| Some(true)).await
-    }
-
-    /// [`Self::next`] for a stream that passes on only some events: `keep`
-    /// says whether one reaches the client, or `None` when that takes a
-    /// lookup the caller makes. A waiting event `keep` turns down is dropped
-    /// while joining, so the events of chats a client never sees do not break
-    /// a run; one it cannot judge ends the run and comes next.
-    pub async fn next_kept(
-        &mut self,
-        mut keep: impl FnMut(&EventEnvelope) -> Option<bool>,
-    ) -> LiveEvent {
-        use broadcast::error::{RecvError, TryRecvError};
-        if let Some(skipped) = self.gap.take() {
-            return LiveEvent::Behind(skipped);
-        }
-        let mut event = match self.held.take() {
-            Some(event) => event,
-            None => match self.receiver.recv().await {
-                Ok(event) => event,
-                Err(RecvError::Lagged(skipped)) => return LiveEvent::Behind(skipped),
-                Err(RecvError::Closed) => return LiveEvent::Closed,
-            },
-        };
-        loop {
-            match self.receiver.try_recv() {
-                Ok(next) => match keep(&next) {
-                    Some(false) => {}
-                    Some(true) if join_delta(&mut event, &next) => {}
-                    _ => {
-                        self.held = Some(next);
-                        break;
-                    }
-                },
-                Err(TryRecvError::Lagged(skipped)) => {
-                    self.gap = Some(skipped);
-                    break;
-                }
-                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+    /// Queue `event`, or join it onto the last one waiting. Past the limit
+    /// the queue empties and says how many events it let go.
+    pub fn push(&mut self, event: EventEnvelope) -> Result<(), usize> {
+        if let Some((last, size)) = self.entries.back_mut() {
+            let added = delta_text(&event.payload).map_or(0, str::len);
+            if join_delta(last, &event) {
+                *size += added;
+                self.size += added;
+                return self.within_limit();
             }
         }
-        LiveEvent::Event(event)
+        let size = event_size(&event);
+        self.size += size;
+        self.entries.push_back((event, size));
+        self.within_limit()
     }
+
+    fn within_limit(&mut self) -> Result<(), usize> {
+        if self.size <= self.limit {
+            return Ok(());
+        }
+        let dropped = self.entries.len();
+        self.entries.clear();
+        self.size = 0;
+        Err(dropped)
+    }
+
+    /// The oldest waiting event.
+    pub fn pop(&mut self) -> Option<EventEnvelope> {
+        let (event, size) = self.entries.pop_front()?;
+        self.size -= size;
+        Some(event)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// About how much text `event` takes on the wire: its payload, plus the
+/// envelope's ids and names.
+fn event_size(event: &EventEnvelope) -> usize {
+    const ENVELOPE: usize = 320;
+    ENVELOPE
+        + delta_text(&event.payload).map_or_else(
+            || serde_json::to_vec(&event.payload).map_or(0, |text| text.len()),
+            str::len,
+        )
 }
 
 #[cfg(test)]
@@ -366,7 +353,11 @@ mod tests {
             delta("turn.text_delta", thread, later, "next turn"),
         ];
         let last_id = events[1].event_id;
-        let joined = join_deltas(events);
+        let mut pending = PendingEvents::new(PENDING_EVENTS_LIMIT);
+        for event in events {
+            pending.push(event).unwrap();
+        }
+        let joined: Vec<_> = std::iter::from_fn(|| pending.pop()).collect();
         let shown: Vec<_> = joined
             .iter()
             .map(|event| {
@@ -431,110 +422,84 @@ mod tests {
         assert!(!join_delta(&mut extra, &small));
     }
 
-    #[tokio::test]
-    async fn a_reader_slower_than_the_model_keeps_its_place_and_every_word() {
-        // Bursts smaller than the queue, one read each: read one event at a
-        // time, the reader would fall out of the queue by the third burst.
+    #[test]
+    fn a_connection_that_reads_slowly_keeps_every_word_in_few_events() {
         let bus = EventBus::new(16);
         let (thread, turn) = (ThreadId::new(), TurnId::new());
-        let mut live = JoinedEvents::new(bus.subscribe(None).receiver);
-        let mut text = String::new();
+        let mut pending = PendingEvents::new(PENDING_EVENTS_LIMIT);
         let mut written = String::new();
-        for burst in 0..20 {
-            for word in 0..12 {
-                let word = format!("{burst}.{word} ");
-                written.push_str(&word);
-                bus.publish(
+        // Far more than the bus keeps, while the client reads nothing.
+        for index in 0..10_000 {
+            let word = format!("w{index} ");
+            written.push_str(&word);
+            pending
+                .push(bus.publish(
                     "turn.text_delta",
                     Some(thread),
                     Some(turn),
                     None,
                     json!({"delta": word}),
-                );
-            }
-            match live.next().await {
-                LiveEvent::Event(event) => {
-                    assert_eq!(event.event_type, "turn.text_delta");
-                    text.push_str(event.payload["delta"].as_str().unwrap());
-                    assert_eq!(event.event_id, bus.cursor(), "a whole burst at once");
-                }
-                other => panic!("burst {burst}: {other:?}"),
-            }
+                ))
+                .unwrap();
         }
-        assert_eq!(text, written);
-        // Another kind of event ends a run and keeps its place in the order.
-        bus.publish(
-            "turn.text_delta",
-            Some(thread),
-            Some(turn),
-            None,
-            json!({"delta": "a"}),
-        );
-        bus.publish("item.created", Some(thread), Some(turn), None, json!({}));
-        bus.publish(
-            "turn.text_delta",
-            Some(thread),
-            Some(turn),
-            None,
-            json!({"delta": "b"}),
-        );
-        let kinds: Vec<_> = [live.next().await, live.next().await, live.next().await]
-            .into_iter()
-            .map(|received| match received {
-                LiveEvent::Event(event) => event.event_type,
-                other => panic!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            kinds,
-            ["turn.text_delta", "item.created", "turn.text_delta"]
-        );
-        // A reader that stopped reading altogether still learns it fell out.
-        for _ in 0..40 {
-            bus.publish("item.created", Some(thread), Some(turn), None, json!({}));
-        }
-        assert!(matches!(live.next().await, LiveEvent::Behind(_)));
-    }
-
-    #[tokio::test]
-    async fn events_a_client_never_sees_do_not_break_a_run() {
-        let bus = EventBus::new(64);
-        let (shared, other, unknown) = (ThreadId::new(), ThreadId::new(), ThreadId::new());
-        let turn = TurnId::new();
-        let mut live = JoinedEvents::new(bus.subscribe(None).receiver);
-        let delta = |thread: ThreadId, text: &str| {
-            bus.publish(
+        pending
+            .push(bus.publish("item.created", Some(thread), Some(turn), None, json!({})))
+            .unwrap();
+        pending
+            .push(bus.publish(
                 "turn.text_delta",
                 Some(thread),
                 Some(turn),
                 None,
-                json!({"delta": text}),
-            )
-        };
-        delta(shared, "Hel");
-        delta(other, "elsewhere");
-        bus.publish("item.created", Some(other), None, None, json!({}));
-        let last = delta(shared, "lo").event_id;
-        delta(unknown, "ask first");
-        delta(shared, " again");
-        let keep = |event: &EventEnvelope| match event.thread_id {
-            Some(thread) if thread == shared => Some(true),
-            Some(thread) if thread == other => Some(false),
-            _ => None,
-        };
-        let LiveEvent::Event(first) = live.next_kept(keep).await else {
-            panic!("an event")
-        };
-        assert_eq!(first.payload["delta"], "Hello");
-        assert_eq!(first.event_id, last);
-        // One it cannot judge comes next, unjoined, and the run starts again.
-        let LiveEvent::Event(second) = live.next_kept(keep).await else {
-            panic!("an event")
-        };
-        assert_eq!(second.thread_id, Some(unknown));
-        let LiveEvent::Event(third) = live.next_kept(keep).await else {
-            panic!("an event")
-        };
-        assert_eq!(third.payload["delta"], " again");
+                json!({"delta": "after"}),
+            ))
+            .unwrap();
+        let mut text = String::new();
+        let mut kinds = Vec::new();
+        while let Some(event) = pending.pop() {
+            if event.event_type == "turn.text_delta" && kinds.last() != Some(&"item.created") {
+                text.push_str(event.payload["delta"].as_str().unwrap());
+            }
+            kinds.push(if event.event_type == "item.created" {
+                "item.created"
+            } else {
+                "delta"
+            });
+        }
+        assert_eq!(text, written);
+        // Joined at 64 KiB, the run takes a few events; another kind ends it.
+        assert!(kinds.len() < 10, "{}", kinds.len());
+        assert_eq!(&kinds[kinds.len() - 2..], ["item.created", "delta"]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_connection_that_stops_reading_gives_up_past_its_limit() {
+        let bus = EventBus::new(16);
+        let thread = ThreadId::new();
+        let mut pending = PendingEvents::new(64 * 1024);
+        let big = "x".repeat(10_000);
+        let mut overflowed = None;
+        for index in 0..20 {
+            let event = bus.publish(
+                "item.created",
+                Some(thread),
+                None,
+                None,
+                json!({"text": big}),
+            );
+            if let Err(dropped) = pending.push(event) {
+                overflowed = Some((index, dropped));
+                break;
+            }
+        }
+        let (index, dropped) = overflowed.expect("the queue gives up");
+        assert!(index < 10 && dropped == index + 1, "{index} {dropped}");
+        assert!(pending.is_empty());
+        // It takes events again afterwards.
+        pending
+            .push(bus.publish("item.created", Some(thread), None, None, json!({})))
+            .unwrap();
+        assert_eq!(pending.len(), 1);
     }
 }
