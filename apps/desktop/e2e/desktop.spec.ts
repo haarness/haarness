@@ -4643,6 +4643,43 @@ test("a question answers from the keyboard, and only a deliberate key sends it",
   expect(errors).toEqual([]);
 });
 
+test("Haarness's own tools read as what they did, in every language", async () => {
+  const thread = await client.createThread({ title: "Own tool rows", provider: "echo", model: "echo-1" });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title!);
+  await page.getByRole("option").filter({ hasText: thread.title! }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title!);
+  for (const text of [
+    '!tool session_manage {"action":"list"}',
+    '!tool load_tool {"queries":["browser"]}',
+    '!tool memory_search {"query":"release"}',
+    "!tool memory_list {}",
+  ]) {
+    const turn = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text });
+    await client.waitTurn(turn.id);
+  }
+  // A management tool names its action, not the delegation or command its name once suggested.
+  const rows = page.locator(".message.step > .tool-call > summary");
+  await expect(rows).toHaveText([
+    /^Managed chats\s*list$/,
+    // No tools wait to be loaded in this chat, so the call failed.
+    /^Tried to load tools\s*browser$/,
+    /^Looked through memories\s*release$/,
+    /^Looked through memories$/,
+  ]);
+  await page.screenshot({ path: test.info().outputPath("own-tools-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.screenshot({ path: test.info().outputPath("own-tools-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light", language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(rows.last()).toHaveText("تصفّح الذاكرة");
+  await page.screenshot({ path: test.info().outputPath("own-tools-rtl.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+  expect(errors).toEqual([]);
+});
+
 test("SSE cross-client updates and durable recovery after window reload and server restart", async () => {
   const external = await client.createThread({
     title: "External session",
