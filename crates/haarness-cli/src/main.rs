@@ -1808,9 +1808,13 @@ fn quiet_closed_stdout() {
             message.chars().take(500).collect::<String>()
         );
         // A server's stderr log goes through its queue, which the line above
-        // reached, as the log file did: writing past it would wait for a
-        // reader that stopped, holding the panicking thread.
-        if !logs::STDERR_QUEUED.load(std::sync::atomic::Ordering::Relaxed) {
+        // reached, as the log file did. The message itself (with its
+        // backtrace note) follows once the queue is read; while a reader that
+        // stopped leaves it waiting, writing past it would hold the panicking
+        // thread, and the log line has to do.
+        if !logs::STDERR_QUEUED.load(std::sync::atomic::Ordering::Relaxed)
+            || logs::stderr_drained(Duration::from_millis(100))
+        {
             default_hook(info);
         }
     }));
@@ -11178,63 +11182,80 @@ fn random_token() -> String {
 mod tests {
     /// Run in a process of its own (it installs the process's panic hook):
     /// a server's stderr whose reader stopped held a panicking thread in the
-    /// message the default hook writes there; through the queue it goes on.
+    /// message the default hook writes there, and so it goes on without it;
+    /// with a reader there, the message still reaches stderr.
     #[cfg(unix)]
     #[test]
-    fn a_panic_on_a_server_whose_stderr_nobody_reads_does_not_wait_for_the_reader() {
+    fn a_panic_on_a_server_with_a_queued_stderr_neither_waits_for_nor_loses_its_reader() {
         use std::io::Write as _;
-        if std::env::var_os("HAARNESS_PANIC_STDERR_PROBE").is_some() {
+        if let Some(mode) = std::env::var_os("HAARNESS_PANIC_STDERR_PROBE") {
+            let (queue, _guard) = super::logs::stderr_queue(
+                std::io::stderr(),
+                super::logs::STDERR_QUEUE_LIMIT,
+                std::path::Path::new("/logs"),
+            )
+            .unwrap();
             super::logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
             super::quiet_closed_stdout();
-            // Fills the pipe nobody reads, as a queue's thread does.
-            std::thread::spawn(|| {
-                let filler = vec![b'x'; 64 * 1024];
-                loop {
-                    let _ = std::io::stderr().write_all(&filler);
+            if mode == "stalled" {
+                // More than the pipe holds, through the queue, while nobody reads.
+                let line = vec![b'x'; 1024];
+                for _ in 0..512 {
+                    let _ = (&queue).write_all(&line);
                 }
-            });
-            std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
             let _ = std::thread::spawn(|| panic!("a request handler failed")).join();
             println!("the panicking thread ended");
             let _ = std::io::stdout().flush();
             std::process::exit(0);
         }
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::a_panic_on_a_server_whose_stderr_nobody_reads_does_not_wait_for_the_reader",
-                "--nocapture",
-            ])
-            .env("HAARNESS_PANIC_STDERR_PROBE", "1")
-            .stdout(std::process::Stdio::piped())
-            // Held open and never read.
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (sender, lines) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            use std::io::BufRead as _;
-            for line in std::io::BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok)
+        let probe = |mode: &str| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::a_panic_on_a_server_with_a_queued_stderr_neither_waits_for_nor_loses_its_reader",
+                    "--nocapture",
+                ])
+                .env("HAARNESS_PANIC_STDERR_PROBE", mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (sender, lines) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                use std::io::BufRead as _;
+                for line in std::io::BufReader::new(stdout)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    let _ = sender.send(line);
+                }
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut ended = false;
+            while let Ok(line) =
+                lines.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             {
-                let _ = sender.send(line);
+                if line.contains("the panicking thread ended") {
+                    ended = true;
+                    break;
+                }
             }
-        });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut ended = false;
-        while let Ok(line) =
-            lines.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-        {
-            if line.contains("the panicking thread ended") {
-                ended = true;
-                break;
-            }
-        }
+            (child, ended)
+        };
+        // Nobody reads stderr: the thread goes on.
+        let (mut child, ended) = probe("stalled");
         let _ = child.kill();
         let _ = child.wait();
         assert!(ended, "the panicking thread waited for stderr's reader");
+        // A reader is there: the message reaches it.
+        let (child, ended) = probe("read");
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(ended);
+        assert!(stderr.contains("a request handler failed"), "{stderr}");
     }
 
     #[cfg(unix)]
