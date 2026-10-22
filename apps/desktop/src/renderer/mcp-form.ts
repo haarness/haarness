@@ -148,9 +148,14 @@ export function secretLooking(row: McpPair) {
   return /^(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9_\-.~+/=]{24,}$/.test(value);
 }
 
-/** The keychain entry a server's row is kept as: `<server>-<name>`, in the characters an entry name may use. */
+/** The keychain entry a server's row is kept as: `<server>-<name>`, in the
+ * characters an entry name may use, starting with a letter or digit. */
 export function keychainEntry(server: string, key: string) {
-  return `${server.trim()}-${key.trim()}`.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 128);
+  const name = `${server.trim()}-${key.trim()}`
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .slice(0, 120);
+  return name || "mcp-secret";
 }
 
 /**
@@ -175,4 +180,15 @@ export function keychainInput(draft: McpDraft) {
     values[key] = scheme ? `${scheme[1]} \${keychain:${name}}` : `\${keychain:${name}}`;
   }
   return { input, secrets };
+}
+
+/** Points the reference to keychain entry `from` in `input`'s environment or
+ * headers at entry `to`, which the keychain gave when `from` was taken. */
+export function renameKeychainReference(input: Record<string, unknown>, from: string, to: string) {
+  for (const kind of ["environment", "headers"]) {
+    const values = input[kind] as Record<string, string> | undefined;
+    if (!values) continue;
+    for (const [key, value] of Object.entries(values))
+      values[key] = value.split(`\${keychain:${from}}`).join(`\${keychain:${to}}`);
+  }
 }

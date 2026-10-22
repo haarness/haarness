@@ -101,6 +101,9 @@ tower = "0.5"
 htmd = "0.5"
 jsonc-parser = { version = "0.33", features = ["serde", "cst"] }
 jsonschema = { version = "0.51", default-features = false }
+# The macOS Keychain and the Windows Credential Manager, for the secrets MCP
+# settings name; Linux reaches its Secret Service through secret-tool.
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-opentelemetry = { version = "0.33", default-features = false }
