@@ -17505,6 +17505,14 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
         )),
         "This folder isn’t a Git repository · /diff last shows the last turn’s changes"
     );
+    assert_eq!(
+        crate::commands::diff_error(&server(
+            422,
+            "tool_error",
+            "tool error: Git diff failed: this clone has not downloaded the files the review needs, and the review does not download them while project configuration is not trusted; run git backfill (Git 2.49 or later), then try again"
+        )),
+        "Review needs files this clone hasn’t downloaded yet · project configuration isn’t trusted; run git backfill (Git 2.49+), then /diff again"
+    );
     assert!(
         !crate::commands::diff_error(&server(422, "tool_error", "tool error: boom"))
             .contains("HTTP")

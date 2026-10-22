@@ -38,8 +38,9 @@ pub use goal::{MAX_GOAL_CHARS, apply_goal_action, goal_line, legacy_goal_state, 
 pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only;
 pub use permissions::{
     CONFIG_EDIT_RULE, EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule,
-    explicit_decision, explicit_granted, global_config_dir_from, is_config_path,
-    is_global_config_path, is_secret_path, resolve_permission_path, set_global_config_dir,
+    explicit_decision, explicit_granted, forget_rule_links, global_config_dir_from, is_config_path,
+    is_global_config_path, is_secret_path, resolve_permission_entry, resolve_permission_path,
+    set_global_config_dir,
 };
 pub use ports::*;
 pub use runtime::{
@@ -70,15 +71,64 @@ pub fn private_env_names() -> Vec<std::ffi::OsString> {
     std::env::vars_os()
         .map(|(name, _)| name)
         .filter(|name| {
-            name.to_str().is_some_and(|name| {
-                name.starts_with("OTEL_")
-                    || matches!(
-                        name,
-                        "HAARNESS_SERVER_TOKEN"
-                            | "HAARNESS_SERVER_PASSWORD"
-                            | "HAARNESS_SERVER_USERNAME"
-                    )
-            })
+            name.to_str()
+                .is_some_and(|name| is_private_env_name(name, cfg!(windows)))
         })
         .collect()
+}
+
+/// Whether `name` is one of [`private_env_names`]. Windows finds a variable
+/// whatever the case of its name, so the server reads `haarness_server_token`
+/// as its token there, and that spelling is private too (`any_case`).
+fn is_private_env_name(name: &str, any_case: bool) -> bool {
+    let same = |left: &str, right: &str| {
+        if any_case {
+            left.eq_ignore_ascii_case(right)
+        } else {
+            left == right
+        }
+    };
+    name.get(..5).is_some_and(|start| same(start, "OTEL_"))
+        || [
+            "HAARNESS_SERVER_TOKEN",
+            "HAARNESS_SERVER_PASSWORD",
+            "HAARNESS_SERVER_USERNAME",
+        ]
+        .iter()
+        .any(|private| same(name, private))
+}
+
+#[cfg(test)]
+mod private_env_tests {
+    use super::is_private_env_name;
+
+    #[test]
+    fn the_server_s_credentials_are_private_in_any_case_where_names_ignore_case() {
+        for name in [
+            "HAARNESS_SERVER_TOKEN",
+            "HAARNESS_SERVER_PASSWORD",
+            "HAARNESS_SERVER_USERNAME",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+        ] {
+            assert!(is_private_env_name(name, false), "{name}");
+            assert!(is_private_env_name(name, true), "{name}");
+        }
+        for name in [
+            "haarness_server_token",
+            "Haarness_Server_Password",
+            "otel_exporter_otlp_headers",
+        ] {
+            assert!(is_private_env_name(name, true), "{name}");
+            assert!(!is_private_env_name(name, false), "{name}");
+        }
+        for name in [
+            "PATH",
+            "OTEL",
+            "HAARNESS_SERVER",
+            "HAARNESS_SERVER_TOKENS",
+            "é",
+        ] {
+            assert!(!is_private_env_name(name, true), "{name}");
+        }
+    }
 }
