@@ -2631,5 +2631,13 @@
   "Tried to return a result": "嘗試傳回結果",
   "Using a skill": "正在使用 Skill",
   "Asking a question": "正在提問",
-  "Add another answer…": "新增其他答案…"
+  "Add another answer…": "新增其他答案…",
+  "Listed MCP resources": "已列出 MCP 資源",
+  "Listing MCP resources": "正在列出 MCP 資源",
+  "Tried to list MCP resources": "嘗試列出 MCP 資源",
+  "Read an MCP resource": "已讀取 MCP 資源",
+  "Reading an MCP resource": "正在讀取 MCP 資源",
+  "Tried to read an MCP resource": "嘗試讀取 MCP 資源",
+  "List an MCP server's resources": "列出 MCP 伺服器的資源",
+  "Read a resource from an MCP server": "讀取 MCP 伺服器的資源"
 }

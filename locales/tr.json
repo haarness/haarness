@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Sonuç döndürülemedi",
   "Using a skill": "Yetenek kullanılıyor",
   "Asking a question": "Soru soruluyor",
-  "Add another answer…": "Başka bir yanıt ekle…"
+  "Add another answer…": "Başka bir yanıt ekle…",
+  "Listed MCP resources": "MCP kaynakları listelendi",
+  "Listing MCP resources": "MCP kaynakları listeleniyor",
+  "Tried to list MCP resources": "MCP kaynakları listelenemedi",
+  "Read an MCP resource": "MCP kaynağı okundu",
+  "Reading an MCP resource": "MCP kaynağı okunuyor",
+  "Tried to read an MCP resource": "MCP kaynağı okunamadı",
+  "List an MCP server's resources": "Bir MCP sunucusunun kaynaklarını listele",
+  "Read a resource from an MCP server": "Bir MCP sunucusundan kaynak oku"
 }

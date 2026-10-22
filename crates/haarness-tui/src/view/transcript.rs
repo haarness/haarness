@@ -57,6 +57,13 @@ fn primary_argument(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
     };
+    // A resource row names the resource it read, or the server it listed.
+    if same_tool(name, "mcp_resource_read") {
+        return text("uri").map(str::to_owned);
+    }
+    if same_tool(name, "mcp_resource_list") {
+        return text("server").map(str::to_owned);
+    }
     if (same_tool(name, "grep") || same_tool(name, "glob"))
         && let Some(pattern) = text("pattern")
     {

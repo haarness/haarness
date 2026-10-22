@@ -2631,5 +2631,13 @@
   "Tried to return a result": "พยายามส่งผลลัพธ์กลับ",
   "Using a skill": "กำลังใช้ทักษะ",
   "Asking a question": "กำลังถามคำถาม",
-  "Add another answer…": "เพิ่มคำตอบอื่น…"
+  "Add another answer…": "เพิ่มคำตอบอื่น…",
+  "Listed MCP resources": "แสดงรายการทรัพยากร MCP",
+  "Listing MCP resources": "กำลังแสดงรายการทรัพยากร MCP",
+  "Tried to list MCP resources": "พยายามแสดงรายการทรัพยากร MCP",
+  "Read an MCP resource": "อ่านทรัพยากร MCP",
+  "Reading an MCP resource": "กำลังอ่านทรัพยากร MCP",
+  "Tried to read an MCP resource": "พยายามอ่านทรัพยากร MCP",
+  "List an MCP server's resources": "แสดงรายการทรัพยากรของเซิร์ฟเวอร์ MCP",
+  "Read a resource from an MCP server": "อ่านทรัพยากรจากเซิร์ฟเวอร์ MCP"
 }

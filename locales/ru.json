@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Не удалось вернуть результат",
   "Using a skill": "Использование навыка",
   "Asking a question": "Задаётся вопрос",
-  "Add another answer…": "Добавить другой ответ…"
+  "Add another answer…": "Добавить другой ответ…",
+  "Listed MCP resources": "Получен список ресурсов MCP",
+  "Listing MCP resources": "Получение списка ресурсов MCP",
+  "Tried to list MCP resources": "Не удалось получить список ресурсов MCP",
+  "Read an MCP resource": "Прочитан ресурс MCP",
+  "Reading an MCP resource": "Чтение ресурса MCP",
+  "Tried to read an MCP resource": "Не удалось прочитать ресурс MCP",
+  "List an MCP server's resources": "Получить список ресурсов MCP-сервера",
+  "Read a resource from an MCP server": "Прочитать ресурс MCP-сервера"
 }

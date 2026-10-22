@@ -68,6 +68,8 @@ fn headline(pending: &PendingPermissionInfo) -> &str {
         "multiple" => "Allow browser and file access",
         "webfetch" | "fetch" => "Fetch a URL",
         "workflow" => "Run a workflow",
+        "mcp_resource_list" => "List an MCP server's resources",
+        "mcp_resource_read" => "Read a resource from an MCP server",
         "agent_switch" => "Switch the active agent",
         "doom_loop" => "Keep repeating the same action",
         // A malformed request must still produce a card that reads as a
