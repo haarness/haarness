@@ -3,6 +3,7 @@ import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
 import { DiagnosticsSetting } from "./Diagnostics";
+import { Markdown } from "./Markdown";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
@@ -1869,6 +1870,19 @@ function Profiles(props: { cli: Cli }) {
     </>
   );
 }
+/** An update's release notes, rendered and sanitized, in a scroll area of their own. */
+function ReleaseNotes(props: { version?: string; notes: string }) {
+  return (
+    <section class="release-notes" aria-label={t("Release notes")}>
+      <small>
+        {props.version ? t("What’s new in {version}", { version: props.version }) : t("What’s new")}
+      </small>
+      <div class="release-notes-body" tabindex="0">
+        <Markdown text={props.notes} document />
+      </div>
+    </section>
+  );
+}
 function About() {
   const app = useApp();
   const [update, setUpdate] = createSignal<{
@@ -1876,10 +1890,18 @@ function About() {
     percent?: number;
     version?: string;
     message?: string;
+    /** The feed's release notes for the update, as Markdown; "" without any. */
+    notes?: string;
   }>({});
   const off = window.haarness.onEvent((event) => {
-    if (event.kind === "update")
-      setUpdate(event.data as ReturnType<typeof update>);
+    if (event.kind !== "update") return;
+    const next = event.data as ReturnType<typeof update>;
+    // Progress events carry no version or notes; the ones the check found stay.
+    setUpdate((current) => ({
+      ...next,
+      version: next.version ?? current.version,
+      notes: next.notes || current.notes,
+    }));
   });
   onCleanup(off);
   return (
@@ -1894,10 +1916,12 @@ function About() {
               const result = (await window.haarness.update("check")) as {
                 available: boolean;
                 info?: { version: string };
+                notes?: string;
               };
               setUpdate({
                 status: result.available ? "available" : "current",
                 version: result.info?.version,
+                notes: result.notes,
               });
             })
           }
@@ -1916,11 +1940,18 @@ function About() {
             class="primary"
             onClick={() =>
               app.run(async () => {
+                const { version, notes } = update();
                 if (
                   await confirm(
                     t("Install update?"),
                     t("Haarness will restart. Save your file edits before continuing."),
-                    { submit: t("Restart & install") },
+                    {
+                      submit: t("Restart & install"),
+                      // What the update brings, when the feed says.
+                      content: notes
+                        ? () => <ReleaseNotes version={version} notes={notes} />
+                        : undefined,
+                    },
                   )
                 )
                   await window.haarness.update("install");
