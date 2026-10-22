@@ -83,24 +83,50 @@ install_product() (
     case "$product" in cli) label='Haarness CLI';; *) label='Haarness Desktop';; esac
     printf 'Downloading %s for %s %s...\n' "$label" "$os" "$arch" >&2
   fi
-  # Three tries. A try after an interruption asks for only the rest (-C -); If-Range with the file's ETag has the
-  # service send its current file whole instead if that changed meanwhile, which curl refuses (33), so the try
-  # after that starts over. A response with no ETag cannot be continued, so its partial file is dropped.
-  etag='' try=1
-  while :; do
-    if status=$(curl "$progress" --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' -C - -H "If-Range: $etag" "$url" -D "$stage/headers" -o "$stage/payload" -w '%{http_code}'); then
-      case "$status" in 5??) rm -f "$stage/payload" "$stage/headers"; etag='';; *) break;; esac
-    elif [ $? -eq 33 ]; then
-      rm -f "$stage/payload" "$stage/headers"; etag=''
-    else
-      etag=$(awk 'tolower($1)=="etag:" {gsub("\r", "", $2); print $2}' "$stage/headers" 2>/dev/null) || etag=''
-      [ -n "$etag" ] || rm -f "$stage/payload"
-    fi
-    [ "$try" -lt 3 ] || { echo 'Could not reach the Haarness release service; installation left unchanged.' >&2; exit 1; }
-    try=$((try + 1))
-    echo "The download was interrupted; trying again ($try of 3)..." >&2
-    sleep 2
-  done
+  # Downloads $1 to $stage/payload (headers in $stage/headers, HTTP status in $status) in up to three tries; false
+  # when all three were interrupted. A try after an interruption asks for only the rest (-C -); If-Range with the
+  # file's ETag has the server send its current file whole instead if that changed meanwhile, which curl refuses
+  # (33), so the try after that starts over. A response with no ETag cannot be continued: its partial file is dropped.
+  download() {
+    etag='' try=1
+    while :; do
+      if status=$(curl "$progress" --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' -C - -H "If-Range: $etag" "$1" -D "$stage/headers" -o "$stage/payload" -w '%{http_code}'); then
+        case "$status" in 5??) rm -f "$stage/payload" "$stage/headers"; etag='';; *) return 0;; esac
+      elif [ $? -eq 33 ]; then
+        rm -f "$stage/payload" "$stage/headers"; etag=''
+      else
+        etag=$(awk 'tolower($1)=="etag:" {gsub("\r", "", $2); print $2}' "$stage/headers" 2>/dev/null) || etag=''
+        [ -n "$etag" ] || rm -f "$stage/payload"
+      fi
+      [ "$try" -lt 3 ] || return 1
+      try=$((try + 1))
+      echo "The download was interrupted; trying again ($try of 3)..." >&2
+      sleep 2
+    done
+  }
+  # Asked with HEAD, the service names the file's checksum, version and, in Content-Location, its address on the
+  # release domain, which serves it from Cloudflare's edge. Without that address (an older service, one that
+  # refuses HEAD) or when the edge does not deliver, the file comes from the service itself.
+  edge=''
+  if curl --silent --fail --head --connect-timeout 20 --max-time 60 --proto '=https,http' "$url" -D "$stage/resolved" -o /dev/null; then
+    edge=$(awk 'tolower($1)=="content-location:" {gsub("\r", "", $2); print $2}' "$stage/resolved")
+    case "$edge" in
+      https://*) ;;
+      # Plain HTTP only from a loopback service, which is all the check at the top lets through (tests).
+      http://127.0.0.1:*|http://localhost:*) case "$base" in http://*) ;; *) edge='';; esac;;
+      *) edge='';;
+    esac
+  fi
+  headers="$stage/resolved" status=''
+  [ -z "$edge" ] || download "$edge" || status=''
+  case "$status" in
+    200|206|416) ;;
+    *)
+      [ -z "$edge" ] || echo 'The release download site did not deliver; downloading from the release service instead.' >&2
+      rm -f "$stage/payload" "$stage/headers"
+      headers="$stage/headers"
+      download "$url" || { echo 'Could not reach the Haarness release service; installation left unchanged.' >&2; exit 1; };;
+  esac
   case "$status" in
     # 206 and 416 answer a try that continued; the checksum below covers the whole file.
     200|206|416) ;;
@@ -110,8 +136,9 @@ install_product() (
       exit 1;;
     *) echo "The Haarness release service answered HTTP $status; installation left unchanged." >&2; exit 1;;
   esac
-  expected=$(awk 'tolower($1)=="x-content-sha256:" {gsub("\r", "", $2); print $2}' "$stage/headers")
-  released=$(awk 'tolower($1)=="x-haarness-version:" {gsub("\r", "", $2); print $2}' "$stage/headers")
+  # The checksum and version come from the service, whichever server sent the bytes.
+  expected=$(awk 'tolower($1)=="x-content-sha256:" {gsub("\r", "", $2); print $2}' "$headers")
+  released=$(awk 'tolower($1)=="x-haarness-version:" {gsub("\r", "", $2); print $2}' "$headers")
   case "$expected" in *[!a-f0-9]*|'') echo 'Missing or invalid SHA-256' >&2; exit 1;; esac
   [ ${#expected} -eq 64 ] || { echo 'Invalid SHA-256 length' >&2; exit 1; }
   if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$stage/payload" | cut -d ' ' -f 1); else actual=$(shasum -a 256 "$stage/payload" | cut -d ' ' -f 1); fi
