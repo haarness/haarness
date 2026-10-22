@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   lastAlternative,
+  matcherKind,
   matcherMatches,
   neverRuns,
   permissionNames,
@@ -18,6 +19,13 @@ test("a matcher matches as the runtime does", () => {
   assert.equal(matcherMatches("^(manual|auto)", "automatic"), true);
   assert.equal(matcherMatches("auto", "automatic"), false);
   assert.equal(matcherMatches("[", "bash"), false);
+  assert.equal(matcherMatches("AskUserQuestion", "question"), true);
+});
+
+test("an older server's catalog without matchers gets the generic field", () => {
+  assert.equal(matcherKind(undefined), "unknown");
+  assert.equal(matcherKind({ compares: "tool" }), "tool");
+  assert.equal(neverRuns(undefined, "anything"), false);
 });
 
 test("only a matcher that can match nothing its event sends never runs", () => {
@@ -33,6 +41,11 @@ test("only a matcher that can match nothing its event sends never runs", () => {
   assert.equal(neverRuns({ compares: "tool" }, "mcp__github__create_issue"), false);
   assert.equal(neverRuns({ compares: "nothing" }, "bash"), false);
   assert.equal(neverRuns(undefined, "bash"), false);
+  // Names a server accepts without suggesting them are matches too.
+  const failure = { compares: "value" as const, values: ["rate_limit", "provider"], aliases: ["billing_error", "unknown"] };
+  assert.equal(neverRuns(failure, "billing_error"), false);
+  assert.equal(neverRuns(failure, "unknown"), false);
+  assert.equal(neverRuns(failure, "network_error"), true);
 });
 
 test("suggestions complete the alternative being typed", () => {

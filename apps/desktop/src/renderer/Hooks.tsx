@@ -9,6 +9,7 @@ import { Combobox, type ComboboxOption } from "./Combobox";
 import { Icon } from "./icons";
 import {
   lastAlternative,
+  matcherKind,
   neverRuns,
   permissionNames,
   valueLabel,
@@ -308,8 +309,8 @@ function HookForm(props: {
     shell: item?.handler.shell ?? "",
     async: item?.handler.async ?? false,
   });
-  const target = () => props.matchers[form.event];
-  const compares = () => target()?.compares ?? "tool";
+  const target = (): MatcherTarget | undefined => props.matchers[form.event];
+  const compares = () => matcherKind(target());
   const matcherSet = () => !["", "*"].includes(form.matcher.trim());
   // An event with nothing to match asks for no matcher; one already written
   // stays visible, so it can be seen to be ignored and cleared.
@@ -333,13 +334,6 @@ function HookForm(props: {
         return [];
     }
   });
-  // A matcher written for another event rarely fits a new one: one that
-  // could no longer match, or that the new event ignores, starts over.
-  const changeEvent = (event: string) => {
-    setForm("event", event);
-    if (target()?.compares === "nothing" || neverRuns(target(), form.matcher))
-      setForm("matcher", "*");
-  };
   return (
     <FormDialog
       title={readonly ? t("View hook") : item ? t("Edit hook") : t("Add hook")}
@@ -373,7 +367,7 @@ function HookForm(props: {
                     label: value,
                   }))}
                   value={form.event}
-                  onChange={changeEvent}
+                  onChange={(value) => setForm("event", value)}
                   disabled={readonly || busy()}
                 />
               </label>
@@ -420,7 +414,9 @@ function HookForm(props: {
                           ? t("Permission names such as bash or edit, or a pattern.")
                           : compares() === "value"
                             ? t("Pick from the list, or type a pattern.")
-                            : t("This event has nothing to match, so the matcher is ignored.")}
+                            : compares() === "nothing"
+                              ? t("This event has nothing to match, so the matcher is ignored.")
+                              : t("Use * for every tool, or tool names such as Bash|Edit. Events without a tool ignore this field.")}
                     </small>
                   }
                 >

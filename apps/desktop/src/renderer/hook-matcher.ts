@@ -8,11 +8,20 @@
  */
 
 /** What an event's matcher is compared with: a tool name, a permission
- * name, one of `values` (the only ones Haarness sends), or nothing at all
- * (the matcher is ignored and the hook always runs). */
+ * name, one of `values` (the only ones Haarness sends, suggested) or
+ * `aliases` (other names it accepts, such as Claude Code's), or nothing at
+ * all (the matcher is ignored and the hook always runs). */
 export interface MatcherTarget {
   compares: "tool" | "permission" | "value" | "nothing";
   values?: string[];
+  aliases?: string[];
+}
+
+/** What the matcher field is for: an event's target, or `unknown` for a
+ * server from before the catalog said what each event matches, which gets
+ * the generic field it always had (no suggestions, no verdict). */
+export function matcherKind(target: MatcherTarget | undefined) {
+  return target?.compares ?? "unknown";
 }
 
 /** A suggestion: the text it puts in the matcher, and a few words on it. */
@@ -60,6 +69,7 @@ const claudeAliases: Record<string, string> = {
   LS: "list",
   Task: "task",
   TodoWrite: "todowrite",
+  AskUserQuestion: "question",
 };
 
 /** Whether `matcher` matches `value`, as the runtime decides: `a|b`
@@ -90,7 +100,7 @@ export function matcherMatches(matcher: string, value: string) {
 export function neverRuns(target: MatcherTarget | undefined, matcher: string) {
   const text = matcher.trim();
   if (!text || text === "*" || target?.compares !== "value") return false;
-  return !(target.values ?? []).some((value) => matcherMatches(text, value));
+  return ![...(target.values ?? []), ...(target.aliases ?? [])].some((value) => matcherMatches(text, value));
 }
 
 /** The permission a tool asks for: file writes ask `edit`, browser steps

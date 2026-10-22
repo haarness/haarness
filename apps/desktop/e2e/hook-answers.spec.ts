@@ -125,11 +125,13 @@ test("the hook editor's matcher suggests what its event can match and says when 
   await matcher.pressSequentially("|ed");
   await page.getByRole("option", { name: /^edit\b/ }).click();
   await expect(matcher).toHaveValue("read|edit");
-  // Another event: a matcher that could no longer match starts over, and the
-  // field suggests the only values that event sends, each explained.
+  // Another event: what was typed stays, and the hint says it would never
+  // run; the field suggests the only values that event sends, each explained.
   await selectValue(event, "PostCompact");
-  await expect(matcher).toHaveValue("*");
+  await expect(matcher).toHaveValue("read|edit");
+  await expect(form.getByRole("status")).toHaveText("Never runs: this event only matches manual or automatic.");
   await expect(form.locator(".field > span").filter({ hasText: /^Matcher$/ })).toBeVisible();
+  await matcher.fill("");
   await matcher.press("ArrowDown");
   await expect(page.getByRole("option", { name: "manual Compacted with /compact" })).toBeVisible();
   await expect(page.getByRole("option", { name: "automatic Compacted near the context limit" })).toBeVisible();
@@ -172,8 +174,16 @@ test("the hook editor's matcher suggests what its event can match and says when 
   await expect(page.getByRole("option", { name: /^read\b/ })).toBeVisible();
   await shot("hook-matcher-tools-dark");
   await matcher.press("Escape");
-  // An event with nothing to match asks for no matcher.
+  // An event with nothing to match keeps what was typed and says it is
+  // ignored; with `*` it asks for no matcher at all.
   await selectValue(event, "Stop");
+  await expect(matcher).toHaveValue("rea");
+  await expect(form).toContainText("This event has nothing to match, so the matcher is ignored.");
+  // Nothing to suggest, so no caret.
+  await expect(form.locator(".combobox-toggle")).toBeDisabled();
+  await expect(form.locator(".combobox-toggle")).toHaveCSS("opacity", "0");
+  await shot("hook-matcher-ignored-dark");
+  await matcher.fill("*");
   await expect(matcher).toHaveCount(0);
   await form.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(form).not.toBeVisible();
