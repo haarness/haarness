@@ -6154,7 +6154,7 @@ fn compose_runtime_sources(
     runtime_config
         .commands
         .retain(|command| !disabled_skills.contains(&command.name));
-    memory_settings::load(&management::memory_root_for(paths, workspace))?
+    memory_settings::load(&management::memory_root_for(paths, workspace))
         .apply(&mut runtime_config);
     runtime_config.custom_agents.clone_from(&json_layers.agents);
     Ok(ComposedRuntimeSources {
@@ -11129,6 +11129,39 @@ mod tests {
             "{written}"
         );
         assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
+    /// The runtime is built from the memory settings: a key a newer version
+    /// wrote, or a file that is not JSON, no longer stops the server.
+    #[test]
+    fn a_memory_settings_file_haarness_cannot_fully_read_never_stops_the_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-memory-runtime-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let memory = super::management::memory_root_for(&paths, &workspace);
+        std::fs::create_dir_all(&memory).unwrap();
+        let compose = || {
+            super::compose_runtime_sources(&paths, &workspace, false, false, Vec::new(), false)
+                .map(|sources| {
+                    sources
+                        .runtime_config
+                        .tool_availability
+                        .get("memory_save")
+                        .copied()
+                })
+                .map_err(|error| error.to_string())
+        };
+        std::fs::write(
+            memory.join("settings.json"),
+            r#"{"enabled": false, "summaryModel": "from a newer Haarness"}"#,
+        )
+        .unwrap();
+        assert_eq!(compose(), Ok(Some(false)));
+        std::fs::write(memory.join("settings.json"), "{not json").unwrap();
+        assert_eq!(compose(), Ok(None));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

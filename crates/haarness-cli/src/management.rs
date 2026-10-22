@@ -1007,7 +1007,7 @@ impl ManagementService {
                     )?;
                 }
                 Ok(
-                    json!({"config": super::memory_settings::load(&root)?, "directory": root,
+                    json!({"config": super::memory_settings::load(&root), "directory": root,
                     "revision": revision(&settings_path)?, "memories": self.memory_entries(&json!({}))?}),
                 )
             }
@@ -1569,7 +1569,7 @@ impl ManagementService {
     }
 
     pub(super) fn memory_index(&self) -> Result<String> {
-        let settings = super::memory_settings::load(&self.memory_root())?;
+        let settings = super::memory_settings::load(&self.memory_root());
         if !settings.enabled {
             return Ok(String::new());
         }
@@ -1756,9 +1756,7 @@ impl ManagementRegistry for ManagementService {
             return Err(CoreError::Cancelled);
         }
         if resource.starts_with("memory_")
-            && !super::memory_settings::load(&self.memory_root())
-                .map_err(|error| CoreError::Tool(error.to_string()))?
-                .enabled
+            && !super::memory_settings::load(&self.memory_root()).enabled
         {
             return Err(CoreError::Tool("Project memory is disabled".into()));
         }
@@ -2847,9 +2845,7 @@ mod tests {
             2
         );
         let mut runtime = haarness_core::RuntimeConfig::default();
-        super::super::memory_settings::load(&service.memory_root())
-            .unwrap()
-            .apply(&mut runtime);
+        super::super::memory_settings::load(&service.memory_root()).apply(&mut runtime);
         assert_eq!(runtime.tool_availability.get("memory_save"), Some(&false));
         let other = root.join("other");
         fs::create_dir_all(&other).unwrap();
