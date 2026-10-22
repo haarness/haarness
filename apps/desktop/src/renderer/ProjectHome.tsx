@@ -193,7 +193,7 @@ export function ProjectHome() {
             }
           >
             <div class="project-home-recent" aria-busy={hostProjects()?.status === "loading"}>
-              <Show when={hostProjects()?.status === "loading"}>
+              <Show when={hostProjects()?.status === "loading" && !state.projectFailure}>
                 <p class="project-home-status" role="status">
                   {t("Looking for projects on {computer}…", { computer: computer() })}
                 </p>
