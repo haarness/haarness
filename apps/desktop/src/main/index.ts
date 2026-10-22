@@ -1450,7 +1450,7 @@ function installHandlers() {
     // End-to-end tests stand in for the feed with `haarnessUpdater`.
     const fake = (globalThis as { haarnessUpdater?: typeof import("electron-updater").autoUpdater }).haarnessUpdater;
     const { autoUpdater } =
-      process.env.HAARNESS_DESKTOP_TEST === "1" && fake
+      process.env.HAARNESS_DESKTOP_TEST === "1" && !app.isPackaged && fake
         ? { autoUpdater: fake }
         : await import("electron-updater");
     if (action === "install") {

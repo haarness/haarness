@@ -1870,6 +1870,21 @@ function Profiles(props: { cli: Cli }) {
     </>
   );
 }
+/**
+ * A link in release notes opens in the system browser when it is a web
+ * address; anything else (a relative link, a file, an app link) does nothing:
+ * the notes come from the update feed, not from a project.
+ */
+function openReleaseLink(href: string) {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return;
+  }
+  if (url.protocol === "https:" || url.protocol === "http:")
+    void window.haarness.openExternal(url.href).catch(() => {});
+}
 /** An update's release notes, rendered and sanitized, in a scroll area of their own. */
 function ReleaseNotes(props: { version?: string; notes: string }) {
   return (
@@ -1878,7 +1893,7 @@ function ReleaseNotes(props: { version?: string; notes: string }) {
         {props.version ? t("What’s new in {version}", { version: props.version }) : t("What’s new")}
       </small>
       <div class="release-notes-body" tabindex="0">
-        <Markdown text={props.notes} document />
+        <Markdown text={props.notes} document onLink={openReleaseLink} />
       </div>
     </section>
   );
