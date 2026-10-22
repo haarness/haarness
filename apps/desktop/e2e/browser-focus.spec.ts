@@ -233,6 +233,54 @@ test("a page put away while it has the keyboard gives it back to the message box
   expect(errors).toEqual([]);
 });
 
+test("a page the person loads themself takes the keyboard, and the agent's loads after it still do not", async () => {
+  const box = page.getByRole("textbox", { name: "Message" });
+  const browser = page.getByRole("region", { name: "Web browser" });
+  const address = browser.getByRole("textbox", { name: "Browser address" });
+  await tool("tabs_open", { url: siteURL + "/focus?start" });
+  await expect(browser).toBeVisible();
+  const tab = async (search: string) =>
+    (await tool("tabs_list")).tabs.find((item: { url: string }) => item.url.endsWith("/focus" + search))!.id as string;
+  /** Types into whatever has the keyboard, as the person's keys would reach it. */
+  const typeKeys = (text: string) =>
+    app.evaluate(({ webContents }, text) => {
+      const focused = webContents.getFocusedWebContents();
+      for (const character of text) focused?.sendInputEvent({ type: "char", keyCode: character });
+    }, text);
+  const field = async (search: string) =>
+    (await tool("evaluate", { tabID: await tab(search), script: "document.activeElement.id + ':' + field.value" })).value;
+  await activate();
+
+  // Enter in the address bar loads the page, whose field then gets the keys.
+  await address.fill(siteURL + "/focus?typed");
+  await address.press("Enter");
+  expect(await settled()).toMatchObject({ app: false, pages: ["?typed"] });
+  await typeKeys("mine");
+  await expect.poll(() => field("?typed")).toBe("field:mine");
+  const typed = await tab("?typed");
+
+  // Back, from the window's own toolbar, hands the keyboard to the page it loads.
+  await box.focus();
+  expect(await settled()).toMatchObject(inMessageBox);
+  await browser.getByRole("button", { name: "Browser back", exact: true }).click();
+  const back = await settled();
+  expect(back).toMatchObject({ app: false });
+  expect(back.pages).toHaveLength(1);
+
+  // The agent's load right after the person's own still leaves the message box alone.
+  await box.focus();
+  expect(await settled()).toMatchObject(inMessageBox);
+  await tool("navigate", { tabID: typed, url: siteURL + "/focus?agent" });
+  expect(await settled()).toMatchObject(inMessageBox);
+  await tool("tabs_open", { url: siteURL + "/focus?agent-tab" });
+  expect(await settled()).toMatchObject(inMessageBox);
+
+  // A new tab with no address leaves the keyboard in the address bar.
+  await browser.getByRole("button", { name: "New browser tab", exact: true }).click();
+  expect(await settled()).toMatchObject({ app: true, pages: [] });
+  expect(errors).toEqual([]);
+});
+
 test("a file chooser a page opens during or just after the agent's click never appears, and the agent is told to upload instead", async () => {
   // While a native chooser is open the page hears nothing; a held one is
   // cancelled for the page at once. (The window's own focus is no witness
