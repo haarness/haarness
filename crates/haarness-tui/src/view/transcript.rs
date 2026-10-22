@@ -967,31 +967,57 @@ fn mark_reply(lines: &mut [Line], theme: &Theme) {
 /// activity is the only thing that indents.
 ///
 /// Files and agents attached with `@` show as the chips they were typed as;
-/// the snapshot or delegation they expand to is for the model.
-fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
+/// the snapshot or delegation they expand to is for the model. A paste
+/// Desktop folded reads as one `▸ Pasted text · N lines` row until the
+/// message is opened (`open`), then as the text pasted.
+fn user_block(
+    text: &str,
+    width: usize,
+    theme: &Theme,
+    language: crate::locale::Language,
+    open: bool,
+) -> Vec<Line> {
     use crate::width::DisplayWidth as _;
     let inner = width.saturating_sub(4).max(10);
     let mut paragraphs: Vec<Vec<Span>> = vec![Vec::new()];
+    let typed_text = |paragraphs: &mut Vec<Vec<Span>>, typed: &str, color| {
+        for (index, piece) in typed.split('\n').enumerate() {
+            if index > 0 {
+                paragraphs.push(Vec::new());
+            }
+            let piece = piece.trim_end_matches('\r');
+            if !piece.is_empty() {
+                paragraphs
+                    .last_mut()
+                    .expect("one paragraph")
+                    .push(Span::new(piece, color));
+            }
+        }
+    };
     for part in crate::prompt_context::parts(text) {
         match part {
             crate::prompt_context::Part::Text(typed) => {
-                for (index, piece) in typed.split('\n').enumerate() {
-                    if index > 0 {
-                        paragraphs.push(Vec::new());
-                    }
-                    let piece = piece.trim_end_matches('\r');
-                    if !piece.is_empty() {
-                        paragraphs
-                            .last_mut()
-                            .expect("one paragraph")
-                            .push(Span::new(piece, theme.text));
-                    }
-                }
+                typed_text(&mut paragraphs, typed, theme.text);
             }
             crate::prompt_context::Part::Reference { label, .. } => paragraphs
                 .last_mut()
                 .expect("one paragraph")
                 .push(Span::new(label, theme.primary).with_attributes(attr::BOLD)),
+            crate::prompt_context::Part::Paste { content, .. } => {
+                let paragraph = paragraphs.last_mut().expect("one paragraph");
+                paragraph.push(Span::new(if open { "▾ " } else { "▸ " }, theme.muted));
+                paragraph.push(
+                    Span::new(
+                        crate::prompt_context::paste_label(language, content),
+                        theme.primary,
+                    )
+                    .with_attributes(attr::BOLD),
+                );
+                if open {
+                    paragraphs.push(Vec::new());
+                    typed_text(&mut paragraphs, content.trim_end_matches('\n'), theme.text);
+                }
+            }
         }
     }
     if paragraphs.last().is_some_and(Vec::is_empty) && text.ends_with('\n') {
@@ -1027,6 +1053,57 @@ fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
         lines.push(Line::empty());
     }
     lines
+}
+
+/// `Thought for 12s`: how long the model thought, or `Thought` for a record
+/// made before that was measured.
+pub(crate) fn thought_label(language: crate::locale::Language, duration_ms: Option<u64>) -> String {
+    let Some(ms) = duration_ms else {
+        return language.text("Thought").to_owned();
+    };
+    let seconds = (ms.saturating_add(500) / 1000).max(1);
+    let duration = match (seconds / 60, seconds % 60) {
+        (0, seconds) => language.format("{seconds}s", &[("seconds", &seconds.to_string())]),
+        (minutes, 0) => language.format("{minutes}m", &[("minutes", &minutes.to_string())]),
+        (minutes, seconds) => language.format(
+            "{minutes}m {seconds}s",
+            &[
+                ("minutes", &minutes.to_string()),
+                ("seconds", &seconds.to_string()),
+            ],
+        ),
+    };
+    language.format("Thought for {duration}", &[("duration", &duration)])
+}
+
+/// The newest line of a thought, without the Markdown marks around it.
+fn latest_thought(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let line = line.trim_start_matches(['#', '>', '-', '*', ' ']);
+    line.replace("**", "").replace('`', "")
+}
+
+/// The end of `value` within `width` cells, so the newest words show.
+fn tail_line(value: &str, width: usize) -> String {
+    use crate::width::DisplayWidth as _;
+    use unicode_segmentation::UnicodeSegmentation as _;
+    if value.width() <= width {
+        return value.to_owned();
+    }
+    let mut used = 1;
+    let mut kept = Vec::new();
+    for grapheme in value.graphemes(true).rev() {
+        used += grapheme.width();
+        if used > width {
+            break;
+        }
+        kept.push(grapheme);
+    }
+    std::iter::once("…").chain(kept.into_iter().rev()).collect()
 }
 
 /// Muted gutter row inside a tool output block.
@@ -1293,16 +1370,34 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         let mut block = TaggedLines::default();
         match &item.data {
             ItemData::UserMessage {
-                text, attachments, ..
+                text,
+                attachments,
+                command_line,
+                ..
             } => {
                 if waiting.contains(&item.id) {
                     continue;
                 }
+                let expanded = app.expanded.contains(&item.id);
+                // Muted rows inside the prompt's block: the fold toggles and
+                // the prompt a command expanded to.
+                let quiet = |value: &str| {
+                    let mut rows = user_block(value, width, theme, app.language, false);
+                    for span in rows.iter_mut().flat_map(|row| row.spans.iter_mut().skip(1)) {
+                        span.fg = theme.muted;
+                    }
+                    rows
+                };
+                // A slash command reads as the line typed; the prompt it
+                // expanded to is what the model got, folded below it.
+                let shown = command_line.as_deref().unwrap_or(text);
+                let prompt = command_line
+                    .as_deref()
+                    .and_then(|line| crate::prompt_context::command_prompt(line, text));
                 // A long paste reads as its opening lines until asked for;
                 // the whole of it is still what was sent.
-                let rows = user_block(text, width, theme);
+                let rows = user_block(shown, width, theme, app.language, expanded);
                 if rows.len() > USER_BLOCK_ROWS {
-                    let expanded = app.expanded.contains(&item.id);
                     let shown = if expanded {
                         rows.len()
                     } else {
@@ -1317,18 +1412,33 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } else {
                         format!("… +{hidden} more lines · click to expand")
                     };
-                    let mut toggle_row = user_block(&toggle, width, theme);
-                    for span in toggle_row
-                        .iter_mut()
-                        .flat_map(|row| row.spans.iter_mut().skip(1))
-                    {
-                        span.fg = theme.muted;
+                    for row in quiet(&toggle) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
-                    for row in toggle_row {
+                } else if prompt.is_some() || crate::prompt_context::has_paste(shown) {
+                    for row in rows {
                         block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
                 } else {
                     block.extend(rows);
+                }
+                if let Some(prompt) = prompt {
+                    let toggle = if expanded {
+                        format!("▾ {}", app.language.text("Hide prompt"))
+                    } else {
+                        format!(
+                            "▸ {}",
+                            crate::prompt_context::show_prompt(app.language, prompt)
+                        )
+                    };
+                    for row in quiet(&toggle) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                    }
+                    if expanded {
+                        for row in quiet(prompt) {
+                            block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                        }
+                    }
                 }
                 if !attachments.is_empty() {
                     let mut spans = vec![Span::new("  ", theme.muted)];
@@ -1349,7 +1459,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     lines
                 }));
             }
-            ItemData::Reasoning { text } if app.reasoning => {
+            ItemData::Reasoning { text, duration_ms }
+                if app.thinking != crate::state::ThinkingMode::Hide =>
+            {
                 let mut rows = app.cached_render(item.id, width, || {
                     render_markdown(text, width, theme, REASONING_INDENT)
                 });
@@ -1358,7 +1470,26 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         span.fg = theme.muted;
                     }
                 }
-                block.extend(rows);
+                if app.thinking == crate::state::ThinkingMode::Compact {
+                    // One row that a click opens: the transcript keeps its
+                    // shape whatever the model thought.
+                    let open = app.expanded.contains(&item.id);
+                    block.push_tagged(
+                        Line::new(vec![
+                            Span::new(REASONING_INDENT, theme.muted),
+                            Span::new(if open { "▾ " } else { "▸ " }, theme.muted),
+                            Span::new(thought_label(app.language, *duration_ms), theme.muted),
+                        ]),
+                        HitTarget::ToolToggle(item.id),
+                    );
+                    if open {
+                        for row in rows {
+                            block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                        }
+                    }
+                } else {
+                    block.extend(rows);
+                }
             }
             ItemData::ToolCall {
                 call_id,
@@ -1939,15 +2070,35 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             &mut previous_group,
         );
     }
-    if app.reasoning && !app.reasoning_preview.is_empty() {
+    if app.thinking != crate::state::ThinkingMode::Hide && !app.reasoning_preview.is_empty() {
         let mut block = TaggedLines::default();
-        let mut live = render_markdown(&app.reasoning_preview, width, theme, REASONING_INDENT);
-        for row in &mut live {
-            for span in &mut row.spans {
-                span.fg = theme.muted;
+        if app.thinking == crate::state::ThinkingMode::Compact {
+            use crate::width::DisplayWidth as _;
+            // A single row ticking with the newest line of thought; it
+            // becomes the `Thought for …` row in the same place.
+            let label = format!(
+                "{}{} {} · ",
+                REASONING_INDENT,
+                spinner(app.tick),
+                app.language.text("Thinking")
+            );
+            let latest = tail_line(
+                &latest_thought(&app.reasoning_preview),
+                width.saturating_sub(label.width()),
+            );
+            block.push(Line::new(vec![
+                Span::new(label, theme.muted),
+                Span::new(latest, theme.muted),
+            ]));
+        } else {
+            let mut live = render_markdown(&app.reasoning_preview, width, theme, REASONING_INDENT);
+            for row in &mut live {
+                for span in &mut row.spans {
+                    span.fg = theme.muted;
+                }
             }
+            block.extend(live);
         }
-        block.extend(live);
         append_block(
             &mut transcript,
             block,

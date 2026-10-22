@@ -2302,7 +2302,9 @@ fn item_visible_text(data: &ItemData) -> Option<String> {
         ItemData::UserMessage {
             text, synthetic, ..
         } if !synthetic => Some(text.clone()),
-        ItemData::AssistantMessage { text } | ItemData::Reasoning { text } => Some(text.clone()),
+        ItemData::AssistantMessage { text } | ItemData::Reasoning { text, .. } => {
+            Some(text.clone())
+        }
         ItemData::ToolCall {
             name, arguments, ..
         } => Some(format!("{name} {arguments}")),

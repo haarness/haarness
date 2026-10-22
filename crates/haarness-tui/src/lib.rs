@@ -474,6 +474,7 @@ async fn run_with_client(
     }
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
+    app.thinking = config::load_thinking();
     // A waiting prompt takes the keyboard unless a restored draft is being
     // written, as one arriving live does; ctrl+g reaches it either way.
     if !app.pending_permissions.is_empty() {

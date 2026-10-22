@@ -511,11 +511,6 @@ function General() {
               "Keep commands and tool output folded until you open them.",
             ],
             [
-              "showReasoning",
-              "Show reasoning",
-              "Display the reasoning supplied by your selected model.",
-            ],
-            [
               "editorWrap",
               "Wrap editor lines",
               "Keep long lines within the editor width.",
@@ -539,6 +534,25 @@ function General() {
           </Row>
         )}
       </For>
+      <Row
+        title="Thinking display"
+        description="Compact keeps the model's thinking to one line that opens on click, Show writes it out in full, and Hide leaves it out."
+      >
+        <Select
+          aria-label={t("Thinking display")}
+          value={app.state.preferences.thinking}
+          onChange={(value) =>
+            app.run(() =>
+              app.settings({ thinking: value as Preferences["thinking"] }),
+            )
+          }
+          options={[
+            { value: "compact", label: t("Compact") },
+            { value: "show", label: t("Show") },
+            { value: "hide", label: t("Hide") },
+          ]}
+        />
+      </Row>
       <Row title="Turn completion notifications" description="Choose when completed or failed tasks notify you.">
         <Select aria-label={t("Turn completion notifications")} value={app.state.preferences.completionNotifications}
           options={[{ value: "background", label: t("Only when unfocused") }, { value: "always", label: t("Always") }, { value: "never", label: t("Never") }]}

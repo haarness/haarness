@@ -10,6 +10,7 @@ import {
   defaultShortcuts,
   migrateAgentKeys,
   migrateTabKeys,
+  savedThinking,
   shortcutAccepted,
   shortcutsClash,
   type Preferences,
@@ -46,10 +47,11 @@ export async function load() {
   try {
     const raw = JSON.parse(await readFile(path(), "utf8"));
     saved = raw.preferences?.shortcuts;
+    const { showReasoning: _legacy, ...preferences } = raw.preferences ?? {};
     state = {
       ...state,
       ...raw,
-      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaultShortcuts(process.platform), ...raw.preferences?.shortcuts }, globalShortcut: { ...defaults.globalShortcut, ...raw.preferences?.globalShortcut }, language: displayLanguage(raw.preferences?.language) },
+      preferences: { ...defaults, ...preferences, shortcuts: { ...defaultShortcuts(process.platform), ...raw.preferences?.shortcuts }, globalShortcut: { ...defaults.globalShortcut, ...raw.preferences?.globalShortcut }, language: displayLanguage(raw.preferences?.language), thinking: savedThinking(raw.preferences) },
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
@@ -161,7 +163,7 @@ export async function preferences(input: Partial<Preferences>) {
       browserAgentCursor: z.boolean(),
       sound: z.boolean(),
       compactTools: z.boolean(),
-      showReasoning: z.boolean(),
+      thinking: z.enum(["compact", "show", "hide"]),
       sendKey: z.enum(["enter", "mod-enter"]),
       editorWrap: z.boolean(),
       diffLayout: z.enum(["split", "unified"]),

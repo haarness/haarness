@@ -21,6 +21,7 @@ import {
   addContext,
   contextKey,
   promptWithContext,
+  keptContext,
   readContext,
   type PromptContext,
 } from "./prompt-context";
@@ -1336,9 +1337,15 @@ function createApp(saved?: Preferences) {
     const key = draftKey();
     if (state.ready) void run(() => loadPromptContext(key));
   });
+  /** Pastes already said to be too large to keep, so it is said once. */
+  const unkept = new Set<string>();
   async function setPromptContext(key: string, items: PromptContext[]) {
     setContexts((values) => ({ ...values, [key]: items }));
-    await window.haarness.storage("prompt-context:v1:" + key, items);
+    const { kept, dropped } = keptContext(items);
+    if (dropped.some((id) => !unkept.has(id)))
+      notify(t("This paste is sent with your message, but it is too large to keep if Haarness reloads."));
+    for (const id of dropped) unkept.add(id);
+    await window.haarness.storage("prompt-context:v1:" + key, kept);
   }
   async function addPromptContext(item: PromptContext, key = draftKey()) {
     await loadPromptContext(key);

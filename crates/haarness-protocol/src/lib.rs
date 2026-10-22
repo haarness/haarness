@@ -233,6 +233,12 @@ pub enum ItemData {
         /// provider still receives its text as normal context.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         synthetic: bool,
+        /// The line typed to run a slash command (`/review src/foo.rs`).
+        /// `text` becomes the prompt the command expands to, which is what
+        /// the model receives; clients show this line instead. Absent for
+        /// ordinary messages and for messages saved before it was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_line: Option<String>,
     },
     /// Durable boundary recording that a queued user message was included in
     /// a provider-round snapshot. The original message keeps `queued=true` as
@@ -245,6 +251,12 @@ pub enum ItemData {
     },
     Reasoning {
         text: String,
+        /// How long the model thought before this text was complete: from
+        /// the request (or the text or tool call before it) to the end of the
+        /// reasoning, read off a monotonic clock. Absent in records made
+        /// before it was measured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     ToolCall {
         call_id: String,

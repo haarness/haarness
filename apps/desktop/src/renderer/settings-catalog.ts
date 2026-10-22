@@ -89,7 +89,7 @@ export const settingsControls = [
   ["general", "Option as Meta key", "terminal option alt meta escape keyboard mac"],
   ["general", "Task notifications", "alerts notify background"],
   ["general", "Compact tool activity", "collapse expand tool output arguments"],
-  ["general", "Show reasoning", "thinking thought reasoning visibility"],
+  ["general", "Thinking display", "thinking thought reasoning visibility compact show hide"],
   ["general", "Wrap editor lines", "word wrap long code lines"],
   ["general", "Messages sent while working", "steer queue input delivery project global inherited"],
   ["general", "Send message with", "enter return command control send key"],

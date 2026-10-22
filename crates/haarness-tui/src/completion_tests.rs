@@ -182,6 +182,7 @@ fn prompt(thread: ThreadId, synthetic: bool) -> haarness_protocol::EventEnvelope
             attachments: Vec::new(),
             queued: false,
             synthetic,
+            command_line: None,
         },
         created_at: chrono::Utc::now(),
     };
