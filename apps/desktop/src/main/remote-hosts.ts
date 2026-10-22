@@ -54,12 +54,23 @@ export function createRelay(signIn: (rejected?: string) => Promise<RelaySignIn>)
       headers.set("Authorization", `Bearer ${token}`);
       return fetch(input, { ...init, headers });
     };
-    const response = await send(first.token);
+    let response = await send(first.token);
     const body = init?.body;
     const replayable = body == null || typeof body === "string" || body instanceof Uint8Array || body instanceof ArrayBuffer || body instanceof URLSearchParams || body instanceof Blob;
-    if (response.status !== 401 || !replayable || input instanceof Request) return response;
-    await response.body?.cancel().catch(() => {});
-    return send((await credential(first.token)).token);
+    if (input instanceof Request || !replayable) return response;
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => {});
+      response = await send((await credential(first.token)).token);
+    }
+    // The other computer's connector renews its sign-in about every ten
+    // minutes and is away for a moment meanwhile: a read waits it out.
+    const method = (init?.method ?? "GET").toUpperCase();
+    for (let attempt = 0; attempt < 3 && (method === "GET" || method === "HEAD") && (await away(response)); attempt++) {
+      await response.body?.cancel().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      response = await send((await credential()).token);
+    }
+    return response;
   };
   return {
     credential,
@@ -74,6 +85,13 @@ export function createRelay(signIn: (rejected?: string) => Promise<RelaySignIn>)
   };
 }
 export type Relay = ReturnType<typeof createRelay>;
+
+/** Cloud's answer while the computer's connector is away. */
+async function away(response: Response) {
+  if (response.status !== 409) return false;
+  const body = await response.clone().json().catch(() => null) as { error?: { message?: string } } | null;
+  return /offline|connection changed/i.test(body?.error?.message ?? "");
+}
 
 /** Cloud's address, without a trailing slash. HTTPS, or HTTP on this computer
  * for a local Cloud. */
