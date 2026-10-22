@@ -4,7 +4,8 @@ import type { EventEnvelope, InputQueue as Queue, InputQueueAction, PendingInput
 import { useApp } from "./state";
 import { Button, Icon } from "./ui";
 import { attachmentName, type Attachment } from "./media";
-import type { PromptContext } from "./prompt-context";
+import { sentParts, type PromptContext } from "./prompt-context";
+import { pasteLabel } from "./PromptContext";
 import "./input-queue.css";
 
 /** What the composer held before it started editing a queued message. */
@@ -96,12 +97,18 @@ export function createInputQueue(composer: {
     setEdits((value) => ({ ...value, [key]: { id: item.id, stash, original: item } }));
     void window.haarness.storage(stashKey(key), stash);
     setError("");
-    // Queued messages carry text and attachments only, so the composer's
-    // context chips are set aside with the rest of the draft.
+    // Queued messages carry text and attachments, so the composer's context
+    // chips are set aside with the rest of the draft; a paste the message
+    // holds comes back as its chip and goes back in place when saved.
+    const parts = sentParts(item.text);
+    const pastes = parts.flatMap((part) =>
+      part.kind === "paste" ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }] : [],
+    );
+    const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("");
     composer.write({
-      text: item.text,
+      text: pastes.length ? typed.trimEnd() : typed,
       attachments: (item.attachments ?? []).map((data) => ({ data, name: attachmentName(data) })),
-      context: [],
+      context: pastes,
     });
   }
   /** Leave the edit and give the composer back its earlier draft. */
@@ -162,6 +169,16 @@ export function createInputQueue(composer: {
 
 export type InputQueueState = ReturnType<typeof createInputQueue>;
 
+/** A queued message as its row reads: what was typed, then each paste by its
+ * label rather than its text. */
+function queuedLabel(text: string) {
+  const parts = sentParts(text);
+  const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("").trim();
+  return [typed, ...parts.flatMap((part) => (part.kind === "paste" ? [pasteLabel(part.text)] : []))]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 /** The tray above the composer, shown only while messages wait. */
 export function InputQueue(props: { queue: InputQueueState; working: boolean }) {
   const q = props.queue;
@@ -202,8 +219,8 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
           const attached = () => item.attachments?.length ?? 0;
           return <li class="input-queue-row" data-input-id={item.id} data-editing={active() ? "" : undefined}>
             <span class="input-queue-index" aria-hidden="true">{index() + 1}</span>
-            <span class="input-queue-text" title={item.text}>
-              {item.text.trim() || t("{count} attachment(s)", { count: attached() })}
+            <span class="input-queue-text" title={queuedLabel(item.text)}>
+              {queuedLabel(item.text) || t("{count} attachment(s)", { count: attached() })}
             </span>
             <Show when={attached() && item.text.trim()}>
               <span class="input-queue-attached" title={t("{count} attachment(s)", { count: attached() })}>

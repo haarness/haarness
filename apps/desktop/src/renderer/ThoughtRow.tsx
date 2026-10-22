@@ -1,5 +1,5 @@
 import { language, t } from "./i18n";
-import { Show } from "solid-js";
+import { createEffect, on, onCleanup, onMount, Show } from "solid-js";
 import { Markdown } from "./Markdown";
 import { Icon } from "./icons";
 import { isOpen, setOpen } from "./disclosure";
@@ -11,8 +11,17 @@ import { thoughtDuration } from "./thinking";
  * thinks, the activity line ticks through its newest line instead, so the
  * transcript never grows or jumps with a thought.
  */
-export function ThoughtRow(props: { id: string; text: string; durationMs?: number | null }) {
+export function ThoughtRow(props: {
+  id: string;
+  text: string;
+  durationMs?: number | null;
+  /** The thought is the current Find match: it opens to show it. */
+  matched?: boolean;
+}) {
   const key = () => props.id + ":thought";
+  createEffect(() => {
+    if (props.matched) setOpen(key(), true);
+  });
   const label = () =>
     props.durationMs == null
       ? t("Thought")
@@ -39,5 +48,44 @@ export function ThoughtRow(props: { id: string; text: string; durationMs?: numbe
         </div>
       </Show>
     </details>
+  );
+}
+
+/**
+ * Compact's ticker: the newest line of thought after "Thinking", on the
+ * activity row. When the line is longer than the row, its start gives way
+ * to "…" so the words just thought stay in view, whichever way the
+ * interface or the thought runs (the TUI's `tail_line`).
+ */
+export function ThoughtTicker(props: { text: string }) {
+  let box!: HTMLSpanElement;
+  let line!: HTMLSpanElement;
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  const fit = () => {
+    const text = props.text;
+    line.textContent = text;
+    if (line.scrollWidth <= box.clientWidth) return;
+    const graphemes = Array.from(segmenter.segment(text), (part) => part.segment);
+    // The most graphemes from the end that fit after the ellipsis.
+    let low = 0;
+    let high = graphemes.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      line.textContent = "…" + graphemes.slice(graphemes.length - middle).join("");
+      if (line.scrollWidth <= box.clientWidth) low = middle;
+      else high = middle - 1;
+    }
+    line.textContent = "…" + graphemes.slice(graphemes.length - low).join("");
+  };
+  createEffect(on(() => props.text, () => fit()));
+  onMount(() => {
+    const observer = new ResizeObserver(() => fit());
+    observer.observe(box);
+    onCleanup(() => observer.disconnect());
+  });
+  return (
+    <span ref={box} class="activity-thought" aria-hidden="true">
+      <span ref={line} dir="auto" />
+    </span>
   );
 }

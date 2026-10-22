@@ -18,16 +18,19 @@ import {
   historyCommands,
 } from "./conversation-controls";
 import { retainedItems } from "./conversation-history";
-import { PromptContextControls } from "./PromptContext";
+import { PromptContextControls, pasteLabel } from "./PromptContext";
 import {
+  commandPrompt,
+  countLines,
   mentionAgents,
   pasteFolds,
   pastedText,
   plainMessage,
+  promptWithContext,
   sentParts,
 } from "./prompt-context";
 import { UserMessageBody } from "./UserMessage";
-import { ThoughtRow } from "./ThoughtRow";
+import { ThoughtRow, ThoughtTicker } from "./ThoughtRow";
 import { latestThought } from "./thinking";
 import { sessionKey } from "../projects";
 import {
@@ -989,13 +992,21 @@ export function Session() {
   // The outline lists every prompt the user wrote and marks the one being
   // read. It is measured from the virtualizer's own row offsets, at most once
   // a frame, so streaming and scrolling never read every row's layout.
+  /** A prompt's first written line, or for one that is only a paste, the
+   * paste's label. */
+  const outlineTitle = (text: string, attachments: readonly string[]) => {
+    const parts = sentParts(text);
+    const paste = parts.find((part) => part.kind === "paste");
+    const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("");
+    return promptTitle(typed, attachments, attachmentName, paste ? pasteLabel(paste.text) : t("Attachment"));
+  };
   const outline = createMemo(() =>
     rows().flatMap((item, index) =>
       item.data.type === "user_message"
         ? [{
             id: item.id,
             index,
-            title: promptTitle(item.data.command_line || item.data.text, item.data.attachments ?? [], attachmentName, t("Attachment")),
+            title: outlineTitle(item.data.command_line || item.data.text, item.data.attachments ?? []),
           }]
         : [],
     ),
@@ -1325,12 +1336,11 @@ export function Session() {
   }
   /**
    * A long paste becomes one chip beside the message box, at the size the
-   * TUI folds one, and is sent whole. A queued message being edited keeps
-   * only text, so there the paste goes in as text. Says whether it folded.
+   * TUI folds one, and is sent whole. Says whether it folded.
    */
   function foldPaste(raw: string) {
     const text = pastedText(raw);
-    if (!text || !pasteFolds(text) || queue.editing() || !project() || !editable())
+    if (!text || !pasteFolds(text) || !project() || !editable())
       return false;
     const key = app.draftKey();
     void app.run(() =>
@@ -1355,7 +1365,11 @@ export function Session() {
   const waitingForModels = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
-      await queue.save({ text: draft(), attachments: attachments() });
+      // A queued message keeps only its pastes among the chips.
+      await queue.save({
+        text: promptWithContext(draft(), app.promptContext().filter((item) => item.kind === "paste")),
+        attachments: attachments(),
+      });
       return;
     }
     const remote = remoteCommand.exec(draft().trim());
@@ -1934,9 +1948,7 @@ export function Session() {
                   row already holding the activity, so nothing moves; screen
                   readers hear only the activity. */}
               <Show when={thought()}>
-                <span class="activity-thought" aria-hidden="true">
-                  <span>{thought()}</span>
-                </span>
+                <ThoughtTicker text={thought()} />
               </Show>
             </div>
           </Show>
@@ -2499,6 +2511,22 @@ function Message(props: {
           ? "step"
           : "assistant";
   };
+  /**
+   * A slash command whose turn is still starting has not expanded yet: its
+   * "Show prompt" row is held at the size of the command's template, so it
+   * does not appear under the reader a moment later. Undefined once it has
+   * expanded, after its turn, or for a template that is only its arguments.
+   */
+  const pendingPromptLines = () => {
+    const data = content();
+    if (data.type !== "user_message" || !data.command_line) return undefined;
+    if (commandPrompt(data.command_line, data.text) !== undefined) return undefined;
+    if (!app.state.turns.some((turn) => turn.id === props.item.turnId)) return undefined;
+    const name = /^\/(\S+)/.exec(data.command_line)?.[1]?.toLowerCase();
+    const template = app.state.commands.find((command) => command.name.toLowerCase() === name)?.template ?? "";
+    if (!template.replace(/\$(?:ARGUMENTS|\d+)/g, "").trim()) return undefined;
+    return Math.max(1, countLines(template.trim()));
+  };
   const [copied, setCopied] = createSignal(false);
   let copiedTimer: ReturnType<typeof setTimeout>;
   const [forking, setForking] = createSignal(false);
@@ -2573,6 +2601,7 @@ function Message(props: {
                     .command_line
                 }
                 revealed={props.matched}
+                pendingPromptLines={pendingPromptLines()}
               >
                 <For
                   each={
@@ -2619,6 +2648,7 @@ function Message(props: {
           >
             <ThoughtRow
               id={props.item.id}
+              matched={props.matched}
               text={(content() as { text: string }).text}
               durationMs={
                 (content() as Extract<T.ItemData, { type: "reasoning" }>)

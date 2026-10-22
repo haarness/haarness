@@ -33,6 +33,12 @@
   background: none;
   color: var(--text);
 }
+/* The prompt row held while a command expands looks as it will once it can
+   open, so nothing changes under the reader when it does. */
+.command-prompt-toggle:disabled {
+  opacity: 1;
+  cursor: default;
+}
 .bubble-more {
   display: flex;
   margin-top: var(--s1);

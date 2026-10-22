@@ -1048,9 +1048,15 @@ pub(crate) fn thought_label(language: crate::locale::Language, duration_ms: Opti
     };
     let seconds = (ms.saturating_add(500) / 1000).max(1);
     let duration = match (seconds / 60, seconds % 60) {
-        (0, seconds) => format!("{seconds}s"),
-        (minutes, 0) => format!("{minutes}m"),
-        (minutes, seconds) => format!("{minutes}m {seconds}s"),
+        (0, seconds) => language.format("{seconds}s", &[("seconds", &seconds.to_string())]),
+        (minutes, 0) => language.format("{minutes}m", &[("minutes", &minutes.to_string())]),
+        (minutes, seconds) => language.format(
+            "{minutes}m {seconds}s",
+            &[
+                ("minutes", &minutes.to_string()),
+                ("seconds", &seconds.to_string()),
+            ],
+        ),
     };
     language.format("Thought for {duration}", &[("duration", &duration)])
 }
@@ -1406,9 +1412,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("▾ {}", app.language.text("Hide prompt"))
                     } else {
                         format!(
-                            "▸ {} · {}",
-                            app.language.text("Show prompt"),
-                            crate::prompt_context::line_count(app.language, prompt)
+                            "▸ {}",
+                            crate::prompt_context::show_prompt(app.language, prompt)
                         )
                     };
                     for row in quiet(&toggle) {

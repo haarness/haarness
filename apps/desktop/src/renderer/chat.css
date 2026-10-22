@@ -1023,21 +1023,17 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui);
   color: var(--muted);
 }
-/* Compact thinking: the newest line of thought after "Thinking". The box
-   is only as wide as its line until the row runs out, then keeps the end
-   of the line in view, so the words just thought are the ones shown. */
+/* Compact thinking: the newest line of thought after "Thinking", cut at
+   its start to fit (ThoughtTicker), so the words just thought show. */
 .activity-thought {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  justify-content: flex-end;
   overflow: hidden;
   color: var(--muted);
 }
 .activity-thought > span {
-  flex: none;
   white-space: nowrap;
-  unicode-bidi: plaintext;
 }
 .activity-shimmer {
   --shimmer-width: 240px;

@@ -58,6 +58,12 @@ async function launch(
 const ready = (page: Page) =>
   expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
 
+/** Make the project a Git checkout, which Undo's checkpoints need. */
+function gitCheckout(workspace: string) {
+  for (const args of [["init", "-b", "main"], ["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Fixture"]])
+    execFileSync("git", args, { cwd: workspace, stdio: "ignore" });
+}
+
 /** A Cmd+V as the focused element receives it. Nothing is inserted natively,
  * so text the app does not take is inserted the way a paste would. */
 async function paste(page: Page, text: string) {
@@ -111,7 +117,7 @@ const lines = (count: number, mark: string) =>
   Array.from({ length: count }, (_, index) => `${mark} line ${index + 1}`).join("\n");
 
 test("a long paste is a chip that survives a reload, previews, goes back to text, and is sent whole as a folded block", async ({}, info) => {
-  const { app, page, errors, close } = await launch(info);
+  const { app, page, errors, close } = await launch(info, async (workspace) => gitCheckout(workspace));
   try {
     const input = page.getByRole("textbox", { name: "Message", exact: true });
     const context = page.getByLabel("Attached context", { exact: true });
@@ -153,6 +159,14 @@ test("a long paste is a chip that survives a reload, previews, goes back to text
     await expect(input).toHaveValue(log);
     await expect(context).toHaveCount(0);
     await expect(input).toBeFocused();
+    // Undo takes the text out and the chip comes back; Redo swaps them again.
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect(input).toHaveValue("");
+    await expect(chips).toHaveCount(1);
+    await expect(chips).toContainText("Pasted text · 30 lines");
+    await page.keyboard.press("ControlOrMeta+Shift+z");
+    await expect(input).toHaveValue(log);
+    await expect(context).toHaveCount(0);
 
     // Several pastes make several chips; × removes one.
     await input.fill("Why does this fail?");
@@ -198,6 +212,86 @@ test("a long paste is a chip that survives a reload, previews, goes back to text
     await message.hover();
     expect(await copied(app, page, message.getByRole("button", { name: "Copy message", exact: true })))
       .toBe("Why does this fail?\n\n" + log);
+    // Undo brings the prompt back as it was written: its text, and its paste
+    // as a chip.
+    await expect(page.locator(".composer")).not.toHaveClass(/running/);
+    await input.fill("/undo");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect(input).toHaveValue("Why does this fail?");
+    await expect(chips).toHaveCount(1);
+    await expect(chips).toContainText("Pasted text · 30 lines");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("a paste-only prompt is named by its paste, a big paste says its size, and queued pastes stay chips", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const chips = page.getByLabel("Attached context", { exact: true }).locator(".prompt-context-item");
+    await input.fill("First prompt");
+    await input.press("Enter");
+    await expect(page.locator(".message.assistant").last()).toContainText("Echo: First prompt");
+    // A message that is only a paste: the outline names it by the paste.
+    await paste(page, lines(9, "ONLY_PASTE"));
+    await expect(chips).toHaveCount(1);
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect(page.locator(".message.assistant").last()).toContainText("ONLY_PASTE line 9");
+    await expect(page.locator(".outline-dash")).toHaveCount(2);
+    await expect
+      .poll(async () => {
+        const box = (await page.locator(".outline-dash").first().boundingBox())!;
+        await page.mouse.move(box.x + 4, box.y + 3);
+        await page.mouse.move(box.x + 4, box.y + 1);
+        return page.locator(".outline").getAttribute("data-state");
+      })
+      .toBe("open");
+    await expect(page.locator(".outline-row")).toHaveText(["First prompt", "Pasted text · 9 lines"]);
+    await page.mouse.move(5, 5);
+
+    // A paste too large to keep across a reload says so, once, and its chip
+    // says its size; it is still sent.
+    const big = Array.from({ length: 30_000 }, (_, index) => `big paste line ${index} ${"x".repeat(80)}`).join("\n");
+    await paste(page, big);
+    await expect(chips).toHaveCount(1);
+    await expect(chips).toContainText(/Pasted text · 30,000 lines · \d(\.\d)? MB/);
+    await expect(page.locator(".toast")).toHaveText("This paste is sent with your message, but it is too large to keep if Haarness reloads.");
+    await expect(page.locator(".error-banner")).toHaveCount(0);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await page.locator(".composer").screenshot({ path: info.outputPath(`paste-big-${value}.png`) });
+    }
+    await theme(page, "light");
+    await page.getByRole("button", { name: /Remove context Pasted text · 30,000 lines/ }).click();
+    await expect(chips).toHaveCount(0);
+
+    // Queued while work runs, a message with a paste reads by its label and
+    // comes back to edit as text and a chip.
+    await input.fill("!linger 15000 slow work");
+    await input.press("Enter");
+    await expect(page.locator(".composer")).toHaveClass(/running/);
+    await input.fill("Queued note");
+    await paste(page, lines(12, "QUEUED_PASTE"));
+    await expect(chips).toHaveCount(1);
+    await input.press("Alt+Enter");
+    const row = page.locator(".input-queue-row").first();
+    await expect(row.locator(".input-queue-text")).toHaveText("Queued note · Pasted text · 12 lines");
+    await expect(chips).toHaveCount(0);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await page.locator(".composer-area").screenshot({ path: info.outputPath(`queued-paste-${value}.png`) });
+    }
+    await theme(page, "light");
+    await row.getByRole("button", { name: "Edit queued message" }).click();
+    await expect(input).toHaveValue("Queued note");
+    await expect(chips).toHaveCount(1);
+    await expect(chips).toContainText("Pasted text · 12 lines");
+    await input.fill("Queued note, edited");
+    await page.getByRole("button", { name: "Save queued message", exact: true }).click();
+    await expect(row.locator(".input-queue-text")).toHaveText("Queued note, edited · Pasted text · 12 lines");
+    await page.getByRole("button", { name: "Stop response", exact: true }).click().catch(() => {});
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -249,18 +343,30 @@ test("a slash command shows the line typed, folds the prompt it expanded to, and
   const { app, page, errors, close } = await launch(info, async (workspace) => {
     await mkdir(join(workspace, ".haarness/commands"), { recursive: true });
     await writeFile(join(workspace, ".haarness/commands/review-file.md"), `---\ndescription: Review one file\n---\n${template}\n`);
+    // A prompt hook that takes a while holds the command's expansion back,
+    // as a slow hook or a busy machine would.
+    await writeFile(join(workspace, ".haarness/haarness.json"), JSON.stringify({
+      hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: "sleep 2" }] }] },
+    }));
     // Undo walks the project's checkpoints, which a Git checkout has.
-    for (const args of [["init", "-b", "main"], ["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Fixture"]])
-      execFileSync("git", args, { cwd: workspace, stdio: "ignore" });
+    gitCheckout(workspace);
   });
   try {
     const input = page.getByRole("textbox", { name: "Message", exact: true });
     await input.fill("/review-file src/foo.rs");
     await expect(page.getByRole("listbox", { name: "Slash commands" })).toBeHidden();
     await input.press("Enter");
-    await expect(page.locator(".message.assistant").last()).toContainText("REVIEW_TEMPLATE_END");
     const message = page.locator(".message.user").last();
     const bubble = message.locator(".bubble");
+    // Until the command has expanded, its prompt row is already there at the
+    // template's size, so the bubble does not grow when the prompt arrives.
+    const held = bubble.locator(".command-prompt-toggle");
+    await expect(held).toBeDisabled();
+    await expect(held).toHaveText("Show prompt · 4 lines");
+    const before = (await bubble.boundingBox())!.height;
+    await expect(held).toBeEnabled({ timeout: 20000 });
+    expect((await bubble.boundingBox())!.height).toBe(before);
+    await expect(page.locator(".message.assistant").last()).toContainText("REVIEW_TEMPLATE_END");
     await expect(bubble.locator(".bubble-body")).toHaveText("/review-file src/foo.rs");
     const toggle = bubble.getByRole("button", { name: /Show prompt/ });
     await expect(toggle).toContainText("4 lines");
@@ -363,6 +469,12 @@ test("thinking is Compact by default: one ticking activity line, then a Thought 
     await theme(page, "light");
     await page.keyboard.press("Enter");
     await expect(thought.locator(".thought-body")).toHaveCount(0);
+    // Find looks through a closed thought too, and opens it on a match.
+    await page.keyboard.press("ControlOrMeta+f");
+    await page.locator(".conversation-find input").fill("public API stable");
+    await expect(page.locator(".conversation-find [role=status]")).toHaveText("1 of 1 messages");
+    await expect(thought.locator(".thought-body")).toContainText("The second keeps the public API stable.");
+    await page.keyboard.press("Escape");
 
     // Show writes the thought out in full; Hide leaves it out.
     await chooseThinking(page, "Show");
