@@ -188,7 +188,18 @@ export function createBrowserHost(
   }
   function offerKeyboard(e: Entry) {
     const page = e.shown && !e.disposed ? e.pages.get(e.shown) : undefined;
-    e.keyboard.offer(e.shown, page?.contents);
+    void e.keyboard.offer(e.shown, page?.contents);
+  }
+  /** Windows whose own key and pointer presses are watched for the browsers in them. */
+  const watched = new WeakSet<BrowserWindow>();
+  /** A press in the window's own page means the person has moved on from a load they asked for. */
+  function watchInput(win: BrowserWindow) {
+    if (watched.has(win)) return;
+    watched.add(win);
+    win.webContents.on("input-event", (_event, input) => {
+      if (!["mouseDown", "rawKeyDown", "keyDown", "touchStart"].includes(input.type)) return;
+      for (const e of entries.values()) if (e.win === win) e.keyboard.input();
+    });
   }
   function focus(e: Entry, id: Browser.TabID, agent = false) {
     e.focusedTabID = id;
@@ -677,23 +688,23 @@ export function createBrowserHost(
           await execute(e, { action, files: [] }, new AbortController().signal)
         ).value;
       }
+      // A page the person loads takes the keyboard, as in a browser; a new
+      // tab with no address leaves it in the address bar. Its time runs from
+      // now, though the command may wait behind the agent's.
+      const load =
+        action.type === "navigate" || action.type === "back" || action.type === "forward" || action.type === "reload";
+      const opens = action.type === "tabs.open" && !!action.url;
+      if (load || opens) {
+        watchInput(win);
+        e.keyboard.want(load ? action.tabID : undefined);
+      }
       const result = e.queue
         .catch(() => {})
         .then(() => {
           const run = execute(e, { action, files: [] }, new AbortController().signal);
-          // A page the person loads takes the keyboard, as in a browser; a
-          // new tab with no address leaves it in the address bar. A new
-          // tab is the one focused once its command has started.
-          const tab =
-            action.type === "navigate" || action.type === "back" || action.type === "forward" || action.type === "reload"
-              ? action.tabID
-              : action.type === "tabs.open" && action.url
-                ? e.focusedTabID
-                : undefined;
-          if (tab) {
-            e.keyboard.want(tab);
-            offerKeyboard(e);
-          }
+          // A new tab is the one focused once its command has started.
+          if (opens && e.focusedTabID) e.keyboard.bind(e.focusedTabID);
+          if (load || opens) offerKeyboard(e);
           return run;
         });
       e.queue = result;
