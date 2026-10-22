@@ -18,6 +18,7 @@ mod ports;
 mod prefix_warmup;
 pub mod redact;
 mod runtime;
+pub mod shell_text;
 mod side_question;
 mod stream_clock;
 mod stream_limits;

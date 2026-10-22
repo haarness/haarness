@@ -609,7 +609,9 @@ enabled = true
 
 `${NAME}` and `${NAME:-fallback}` in an MCP entry come from the server's environment.
 Environment values and headers (and the headers helper's environment) are resolved once,
-when Haarness connects; in a JSON file the other fields are resolved when the
+when Haarness connects; the headers helper is shell text and keeps its references for its
+shell, which reads them from that environment (see
+[Hooks](CONFIGURATION-SCOPES.md)); in a JSON file the other fields are resolved when the
 configuration loads. A variable's value is used as it is, so a `${OTHER}` inside it
 reaches the MCP server as that text, and what a headers helper prints is never resolved.
 The references stay in the file: `haarness mcp enable`/`disable`, `mcp_manage` and Desktop
