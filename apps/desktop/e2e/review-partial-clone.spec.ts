@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
-// Review never downloads what a partial clone left out (the server sets
-// GIT_NO_LAZY_FETCH), so a branch review whose base was never downloaded says
-// how to get it, quietly, in the empty state Review already uses.
+// For a project whose configuration is not trusted, Review never downloads
+// what a partial clone left out (the server sets GIT_NO_LAZY_FETCH), so a
+// branch review whose base was never downloaded says how to get it, quietly,
+// in the empty state Review already uses. A trusted project's Review fetches
+// it, as `git diff` would.
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 let app: ElectronApplication;
 let page: Page;
@@ -53,6 +55,7 @@ test.beforeAll(async () => {
     HAARNESS_DESKTOP_DATA: join(temporary, "desktop"),
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
+    HAARNESS_DISABLE_PROJECT_CONFIG: "1",
   });
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({ args: ["."], env, timeout: 240000 });
@@ -75,7 +78,7 @@ test.afterAll(async () => {
   if (temporary) await rm(temporary, { recursive: true, force: true });
 });
 
-test("a branch review of a partial clone says how to download what it needs", async () => {
+test("an untrusted project's branch review of a partial clone says how to download what it needs", async () => {
   const show = page.getByRole("button", { name: "Show side panel", exact: true });
   if (await show.isVisible()) await show.click();
   await page.getByRole("button", { name: "Open panel", exact: true }).click();
@@ -86,7 +89,7 @@ test("a branch review of a partial clone says how to download what it needs", as
   await select(page.getByRole("combobox", { name: "Diff source", exact: true }), "branch");
   const review = page.locator(".review");
   await expect(review).toContainText("Review needs files this clone hasn’t downloaded yet.", { timeout: 60000 });
-  await expect(review).toContainText("Run git backfill in this folder to download them, then check again.");
+  await expect(review).toContainText("Project configuration isn’t trusted, so Review doesn’t download them. Run git backfill (Git 2.49 or later), then check again.");
   await expect(review).not.toContainText("promisor");
   // The source picker stays, so the working tree is one choice away.
   await expect(page.getByRole("combobox", { name: "Diff source", exact: true })).toBeVisible();

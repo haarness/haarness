@@ -69,26 +69,51 @@ before.
 
 ### What a review runs
 
-A review only reads, so it runs none of the programs a repository's own
-configuration can name, and a folder someone else prepared (a copied checkout,
-an unpacked archive) cannot run code when Review or `/diff` opens
-(`crates/haarness-server/src/vcs.rs`). Every Git call turns off the file system
-monitor (`core.fsmonitor`), hooks (a diff that refreshes the index runs
-`post-index-change`), external diffs and text conversion, signature checks, and
-in a partial clone the fetch of a missing object (Git 2.45 and later), which
-would run the remote's commands. The repository's own clean, smudge and process
-filters are emptied before the diffs that read changed files; the standard
-git-lfs commands and filters from the user's global and system configuration
-still run, unless the repository defines a git-lfs extension, which empties
-them all. Submodules are listed when they point at another commit, without
-looking inside them for uncommitted changes, since that runs a second Git with
-the submodule's own configuration. When the settings cannot be read, Git is not
-run and the review says so. A partial clone's review that needs files the clone
-never downloaded fetches nothing and fails with `this clone has not downloaded
-the files the review needs; run git backfill, then try again`; Desktop's Review
-shows "Review needs files this clone hasn’t downloaded yet." with **Check
-again**, and the TUI's `/diff` says the same in one line. `git fetch` does not
-download them; `git backfill` (Git 2.49 and later) does.
+A review only reads, but Git runs programs a repository's own configuration
+names (`crates/haarness-server/src/vcs.rs`). What Review lets run depends on
+whether the project's configuration is trusted, as for project hooks and
+extensions ([project trust](CONFIGURATION-SCOPES.md); `--disable-project-config`
+or `HAARNESS_DISABLE_PROJECT_CONFIG=1` turns it off, and Desktop opens a folder
+from a link untrusted).
+
+- **Always, trusted or not:** no hooks (`core.hooksPath` is the null device; a
+  diff that refreshes the index would run `post-index-change`), no file system
+  monitor (`core.fsmonitor`), no signature checks (`log.showSignature`), and
+  no external diffs or text conversion (`--no-ext-diff --no-textconv`). Git's
+  own messages reach the review in English whatever the locale
+  (`GIT_TEXTDOMAINDIR` names no folder), while the programs Git runs keep the
+  person's locale, so the review recognises a message in any language and the
+  diff output and file names are unchanged.
+- **Trusted (the default):** everything else reads as the person's own
+  `git diff`: the repository's clean, smudge and process filters run (an
+  `nbstripout` or `git-crypt` user sees the same Review), a changed submodule
+  is looked inside for uncommitted changes, and a partial clone fetches the
+  objects a review needs from its remote.
+- **Not trusted:** a folder someone else may have prepared (a copied checkout,
+  an unpacked archive) runs none of those. The repository's own filters are
+  emptied before the diffs that read changed files (the empty-named
+  `[filter ""]` included); the standard git-lfs commands and filters from the
+  user's global and system configuration still run, unless the repository
+  defines a git-lfs extension, which empties them all. Submodules are listed
+  when they point at another commit, without looking inside them (that runs a
+  second Git with the submodule's own configuration). A partial clone fetches
+  nothing: a review that needs files the clone never downloaded fails with
+  `this clone has not downloaded the files the review needs, and the review
+  does not download them while project configuration is not trusted; run git
+  backfill (Git 2.49 or later), then try again`. Desktop's Review shows
+  "Review needs files this clone hasn’t downloaded yet." with **Check again**,
+  and the TUI's `/diff` says the same in one line. `git fetch` does not
+  download them; `git backfill` does, as does trusting the project's
+  configuration. When the filters cannot be read, a filter's name is not
+  UTF-8, or this Git cannot turn one off, Git is not run and the review says
+  so.
+
+The untrusted protections need Git 2.45 or later in full. On older Git:
+before 2.45 a partial clone still fetches missing objects (`GIT_NO_LAZY_FETCH`
+is new in 2.45); before 2.31 the filters are emptied with `-c` arguments
+instead of `GIT_CONFIG_COUNT`, and a repository whose filter name holds `=`
+cannot be reviewed untrusted; before 2.26 (no `--show-scope`) the filters from
+the user's own configuration are emptied too.
 
 Creating, resetting and removing a worktree are started by the person and keep
 the repository's own filters and hooks, as Git does for any checkout.
