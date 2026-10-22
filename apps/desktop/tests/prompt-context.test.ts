@@ -3,10 +3,16 @@ import assert from "node:assert/strict";
 import {
   activeMention,
   addContext,
+  commandPrompt,
+  countLines,
   fileContext,
   mentionAgents,
+  pastedText,
+  pasteFolds,
+  plainMessage,
   promptWithContext,
   readContext,
+  sentParts,
 } from "../src/renderer/prompt-context";
 
 test("mentions track the caret, leave email addresses alone and permit relative paths", () => {
@@ -77,4 +83,50 @@ test("agent mentions expose visible delegation agents, independent of the primar
     mentionAgents(agents).map((item) => item.id),
     ["helper", "both", "legacy"],
   );
+});
+test("a long paste folds at the TUI's size, travels whole in a fence and reads back as pasted", () => {
+  const lines = (count: number) =>
+    Array.from({ length: count }, (_, index) => `line ${index + 1}`).join("\n");
+  // More than 8 lines or 1000 bytes, as the TUI's composer folds a paste.
+  assert.equal(pasteFolds(lines(8)), false);
+  assert.equal(pasteFolds(lines(8) + "\n"), false);
+  assert.equal(pasteFolds(lines(9)), true);
+  assert.equal(pasteFolds("x".repeat(1000)), false);
+  assert.equal(pasteFolds("é".repeat(501)), true);
+  assert.equal(countLines(""), 0);
+  assert.equal(countLines("a\nb\n"), 2);
+  assert.equal(pastedText("a\r\nb\rc"), "a\nb\nc");
+
+  const text = lines(20) + "\n```js\nfence inside\n```\n";
+  const paste = { kind: "paste" as const, id: "p1", text };
+  // A paste is not file context: it counts toward neither bound.
+  const items = addContext(addContext([], paste), { kind: "paste", id: "p2", text: "x".repeat(200000) });
+  assert.equal(items.length, 2);
+  assert.deepEqual(readContext(JSON.parse(JSON.stringify(items))), items);
+  assert.deepEqual(readContext([{ kind: "paste", id: "", text: "x" }, { kind: "paste", id: "a", text: "" }]), []);
+
+  const sent = promptWithContext("Why does this fail?", [paste]);
+  assert.equal(
+    sent,
+    "Why does this fail?\n\n<details>\n<summary>Pasted text · 23 lines</summary>\n\n````\n" +
+      text +
+      "\n````\n\n</details>",
+  );
+  assert.deepEqual(sentParts(sent), [
+    { kind: "text", text: "Why does this fail?\n\n" },
+    { kind: "paste", text },
+  ]);
+  assert.equal(plainMessage(sent), "Why does this fail?\n\n" + text);
+  // Text that only looks like a paste, and file context, stay as typed.
+  for (const typed of [
+    "<details>\n<summary>Pasted text</summary>\n\nmine\n\n</details>",
+    promptWithContext("Inspect", [fileContext("a.ts", "x")]),
+  ])
+    assert.deepEqual(sentParts(typed), [{ kind: "text", text: typed }]);
+});
+test("a slash command's prompt shows only once it says more than the line typed", () => {
+  assert.equal(commandPrompt("/review src/foo.rs", "src/foo.rs"), undefined);
+  assert.equal(commandPrompt("/compact", ""), undefined);
+  assert.equal(commandPrompt("/review src/foo.rs", "Review src/foo.rs\nCarefully"), "Review src/foo.rs\nCarefully");
+  assert.equal(commandPrompt("/greet", "Hello"), "Hello");
 });

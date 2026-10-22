@@ -1,0 +1,115 @@
+/* -- the words of the user's bubble ----------------------------------------- */
+.bubble-body {
+  font-size: var(--font-size);
+  line-height: var(--lh-read);
+}
+/* A long prompt shows its first eight lines and fades into Show more; the
+   whole of it is still what was sent. */
+.bubble-body.folded {
+  max-height: 8lh;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+}
+.bubble-content > * + * {
+  margin-top: var(--s2);
+}
+/* The quiet controls inside a bubble share one shape: small muted text that
+   reads as part of the message, not as a button bar. */
+.bubble-more,
+.sent-paste-toggle,
+.command-prompt-toggle {
+  min-height: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  gap: var(--s1);
+  border-radius: var(--r-sm);
+}
+.bubble-more:hover:not(:disabled),
+.sent-paste-toggle:hover:not(:disabled),
+.command-prompt-toggle:hover:not(:disabled) {
+  background: none;
+  color: var(--text);
+}
+.bubble-more {
+  display: flex;
+  margin-top: var(--s1);
+}
+
+/* A paste sent as a chip: one row under its label until opened in place. */
+.sent-paste {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--s1) var(--s2);
+  background: var(--raised);
+}
+.sent-paste-toggle {
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 22px;
+}
+.sent-paste-toggle > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sent-paste-chevron,
+.command-prompt-chevron {
+  flex: none;
+  color: var(--faint);
+  transition: transform var(--fast) var(--ease);
+}
+.sent-paste.open .sent-paste-chevron,
+.command-prompt.open .command-prompt-chevron {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .sent-paste:not(.open) .sent-paste-chevron,
+:root[dir="rtl"] .command-prompt:not(.open) .command-prompt-chevron {
+  transform: rotate(180deg);
+}
+.sent-paste-text {
+  margin: var(--s1) 0 var(--s1);
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+  line-height: 1.55;
+  color: var(--text);
+  unicode-bidi: plaintext;
+}
+
+/* A slash command's expanded prompt, folded under the line typed. */
+.command-prompt {
+  margin-top: var(--s1);
+}
+.command-prompt-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: 22px;
+}
+.command-prompt-bar .icon-button {
+  --icon-button: 22px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+}
+.command-prompt-text {
+  margin-top: var(--s1);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--hairline);
+  color: var(--muted);
+}
+.command-prompt-text .markdown {
+  font-size: var(--ui);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sent-paste-chevron,
+  .command-prompt-chevron {
+    transition: none;
+  }
+}

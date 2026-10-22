@@ -41,6 +41,7 @@ import CircleCheck from "lucide-solid/icons/circle-check";
 import CircleDashed from "lucide-solid/icons/circle-dashed";
 import CircleMinus from "lucide-solid/icons/circle-minus";
 import CircleHelp from "lucide-solid/icons/circle-help";
+import ClipboardPaste from "lucide-solid/icons/clipboard-paste";
 import Cloud from "lucide-solid/icons/cloud";
 import Code from "lucide-solid/icons/code";
 import Copy from "lucide-solid/icons/copy";
@@ -159,6 +160,7 @@ const catalog = {
   copy: Copy,
   attach: Paperclip,
   image: ImageIcon,
+  paste: ClipboardPaste,
 
   // Engine capabilities
   agents: Bot,

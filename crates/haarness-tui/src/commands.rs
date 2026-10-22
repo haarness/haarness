@@ -716,8 +716,10 @@ impl App {
                             )
                     })
                     .and_then(|item| match &item.data {
-                        haarness_protocol::ItemData::UserMessage { text, .. } => Some(
-                            crate::prompt_context::display(text)
+                        haarness_protocol::ItemData::UserMessage {
+                            text, command_line, ..
+                        } => Some(
+                            crate::prompt_context::display(command_line.as_deref().unwrap_or(text))
                                 .lines()
                                 .find(|line| !line.trim().is_empty())
                                 .unwrap_or_default()
@@ -902,12 +904,18 @@ impl App {
             .iter()
             .filter(|item| item.sequence > boundary)
             .find_map(|item| match &item.data {
+                // A slash command comes back as the line typed, so sending
+                // it again runs the command rather than its old expansion.
                 haarness_protocol::ItemData::UserMessage {
                     text,
                     attachments,
+                    command_line,
                     synthetic: false,
                     ..
-                } => Some((text.clone(), attachments.clone())),
+                } => Some((
+                    command_line.as_ref().unwrap_or(text).clone(),
+                    attachments.clone(),
+                )),
                 _ => None,
             })
     }
@@ -3945,9 +3953,11 @@ impl App {
             match &item.data {
                 haarness_protocol::ItemData::UserMessage {
                     text,
+                    command_line,
                     synthetic: false,
                     ..
                 } => {
+                    let text = command_line.as_ref().unwrap_or(text);
                     let _ = write!(out, "## User\n\n{text}\n\n");
                 }
                 haarness_protocol::ItemData::AssistantMessage { text } => {

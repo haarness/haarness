@@ -952,31 +952,57 @@ fn mark_reply(lines: &mut [Line], theme: &Theme) {
 /// activity is the only thing that indents.
 ///
 /// Files and agents attached with `@` show as the chips they were typed as;
-/// the snapshot or delegation they expand to is for the model.
-fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
+/// the snapshot or delegation they expand to is for the model. A paste
+/// Desktop folded reads as one `▸ Pasted text · N lines` row until the
+/// message is opened (`open`), then as the text pasted.
+fn user_block(
+    text: &str,
+    width: usize,
+    theme: &Theme,
+    language: crate::locale::Language,
+    open: bool,
+) -> Vec<Line> {
     use crate::width::DisplayWidth as _;
     let inner = width.saturating_sub(4).max(10);
     let mut paragraphs: Vec<Vec<Span>> = vec![Vec::new()];
+    let typed_text = |paragraphs: &mut Vec<Vec<Span>>, typed: &str, color| {
+        for (index, piece) in typed.split('\n').enumerate() {
+            if index > 0 {
+                paragraphs.push(Vec::new());
+            }
+            let piece = piece.trim_end_matches('\r');
+            if !piece.is_empty() {
+                paragraphs
+                    .last_mut()
+                    .expect("one paragraph")
+                    .push(Span::new(piece, color));
+            }
+        }
+    };
     for part in crate::prompt_context::parts(text) {
         match part {
             crate::prompt_context::Part::Text(typed) => {
-                for (index, piece) in typed.split('\n').enumerate() {
-                    if index > 0 {
-                        paragraphs.push(Vec::new());
-                    }
-                    let piece = piece.trim_end_matches('\r');
-                    if !piece.is_empty() {
-                        paragraphs
-                            .last_mut()
-                            .expect("one paragraph")
-                            .push(Span::new(piece, theme.text));
-                    }
-                }
+                typed_text(&mut paragraphs, typed, theme.text);
             }
             crate::prompt_context::Part::Reference { label, .. } => paragraphs
                 .last_mut()
                 .expect("one paragraph")
                 .push(Span::new(label, theme.primary).with_attributes(attr::BOLD)),
+            crate::prompt_context::Part::Paste { content, .. } => {
+                let paragraph = paragraphs.last_mut().expect("one paragraph");
+                paragraph.push(Span::new(if open { "▾ " } else { "▸ " }, theme.muted));
+                paragraph.push(
+                    Span::new(
+                        crate::prompt_context::paste_label(language, content),
+                        theme.primary,
+                    )
+                    .with_attributes(attr::BOLD),
+                );
+                if open {
+                    paragraphs.push(Vec::new());
+                    typed_text(&mut paragraphs, content.trim_end_matches('\n'), theme.text);
+                }
+            }
         }
     }
     if paragraphs.last().is_some_and(Vec::is_empty) && text.ends_with('\n') {
@@ -1278,16 +1304,34 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         let mut block = TaggedLines::default();
         match &item.data {
             ItemData::UserMessage {
-                text, attachments, ..
+                text,
+                attachments,
+                command_line,
+                ..
             } => {
                 if waiting.contains(&item.id) {
                     continue;
                 }
+                let expanded = app.expanded.contains(&item.id);
+                // Muted rows inside the prompt's block: the fold toggles and
+                // the prompt a command expanded to.
+                let quiet = |value: &str| {
+                    let mut rows = user_block(value, width, theme, app.language, false);
+                    for span in rows.iter_mut().flat_map(|row| row.spans.iter_mut().skip(1)) {
+                        span.fg = theme.muted;
+                    }
+                    rows
+                };
+                // A slash command reads as the line typed; the prompt it
+                // expanded to is what the model got, folded below it.
+                let shown = command_line.as_deref().unwrap_or(text);
+                let prompt = command_line
+                    .as_deref()
+                    .and_then(|line| crate::prompt_context::command_prompt(line, text));
                 // A long paste reads as its opening lines until asked for;
                 // the whole of it is still what was sent.
-                let rows = user_block(text, width, theme);
+                let rows = user_block(shown, width, theme, app.language, expanded);
                 if rows.len() > USER_BLOCK_ROWS {
-                    let expanded = app.expanded.contains(&item.id);
                     let shown = if expanded {
                         rows.len()
                     } else {
@@ -1302,18 +1346,34 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } else {
                         format!("… +{hidden} more lines · click to expand")
                     };
-                    let mut toggle_row = user_block(&toggle, width, theme);
-                    for span in toggle_row
-                        .iter_mut()
-                        .flat_map(|row| row.spans.iter_mut().skip(1))
-                    {
-                        span.fg = theme.muted;
+                    for row in quiet(&toggle) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
-                    for row in toggle_row {
+                } else if prompt.is_some() || crate::prompt_context::has_paste(shown) {
+                    for row in rows {
                         block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
                 } else {
                     block.extend(rows);
+                }
+                if let Some(prompt) = prompt {
+                    let toggle = if expanded {
+                        format!("▾ {}", app.language.text("Hide prompt"))
+                    } else {
+                        format!(
+                            "▸ {} · {}",
+                            app.language.text("Show prompt"),
+                            crate::prompt_context::line_count(app.language, prompt)
+                        )
+                    };
+                    for row in quiet(&toggle) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                    }
+                    if expanded {
+                        for row in quiet(prompt) {
+                            block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                        }
+                    }
                 }
                 if !attachments.is_empty() {
                     let mut spans = vec![Span::new("  ", theme.muted)];
