@@ -548,6 +548,12 @@ pub async fn prepare(
     // Snippets are found in the definition as written: a placeholder's value
     // (a folder name holding !`…`) can never introduce one.
     let workspace = invoker.workspace().unwrap_or_default();
+    let context = SubstitutionContext {
+        input,
+        execution,
+        session,
+        workspace: &workspace,
+    };
     let snippets = regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex");
     let mut prepared = String::new();
     let mut last = 0;
@@ -555,11 +561,7 @@ pub async fn prepare(
         let whole = capture.get(0).expect("whole match");
         prepared.push_str(&substitutions(
             &template[last..whole.start()],
-            input,
-            execution,
-            session,
-            &workspace,
-            false,
+            &context,
             false,
             false,
         ));
@@ -567,26 +569,8 @@ pub async fn prepare(
         // Permissions judge the snippet with its folders filled in (what
         // the person reads on the card and what rules name); it runs with
         // its references kept for the shell to read from its environment.
-        let shown = substitutions(
-            &capture[1],
-            input,
-            execution,
-            session,
-            &workspace,
-            true,
-            false,
-            false,
-        );
-        let run = substitutions(
-            &capture[1],
-            input,
-            execution,
-            session,
-            &workspace,
-            true,
-            cfg!(not(windows)),
-            false,
-        );
+        let shown = substitutions(&capture[1], &context, true, false);
+        let run = substitutions(&capture[1], &context, true, cfg!(not(windows)));
         let result = invoker
             .definition_shell(
                 shown,
@@ -615,16 +599,7 @@ pub async fn prepare(
         );
         last = whole.end();
     }
-    prepared.push_str(&substitutions(
-        &template[last..],
-        input,
-        execution,
-        session,
-        &workspace,
-        false,
-        false,
-        false,
-    ));
+    prepared.push_str(&substitutions(&template[last..], &context, false, false));
     // Append implicit arguments once, not once per text segment.
     if !template.contains("$ARGUMENTS")
         && !regex::Regex::new(r"\$\d+").unwrap().is_match(template)
@@ -811,16 +786,27 @@ fn snippet_environment(
         .collect()
 }
 
+/// What one definition's text is filled in from: the person's input and the
+/// definition, session and project folder it runs for.
+struct SubstitutionContext<'a> {
+    input: &'a str,
+    execution: &'a DefinitionExecution,
+    session: &'a str,
+    workspace: &'a str,
+}
+
 fn substitutions(
     template: &str,
-    input: &str,
-    execution: &DefinitionExecution,
-    session: &str,
-    workspace: &str,
+    context: &SubstitutionContext<'_>,
     shell: bool,
     keep_references: bool,
-    _append: bool,
 ) -> String {
+    let SubstitutionContext {
+        input,
+        execution,
+        session,
+        workspace,
+    } = *context;
     // Do not let supplied arguments be reinterpreted as template substitutions.
     let values = placeholder_values(execution, session, workspace);
     let find = |rest: &str| {

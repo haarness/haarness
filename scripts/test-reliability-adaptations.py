@@ -128,7 +128,9 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
         sessions.append(name)
         command = shlex.join(['env', *[f'{key}={value}' for key, value in env.items()], *args, '--thread', thread])
         run(['tmux', 'new-session', '-d', '-x', str(width), '-y', '45', '-s', name, command])
-        until(lambda: 'review' in capture(name).lower(), 'TUI did not open')
+        # The logo every new chat opens on, at any width; the band's
+        # "approvals: review" only takes spare room, none at 60 columns.
+        until(lambda: 'h a a r n e s s' in capture(name), 'TUI did not open')
         return name
 
     def capture(name):

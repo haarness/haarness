@@ -518,12 +518,16 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
           return disposed;
         }
         if (disposed) return true;
+        // The shell has this view's size before a key reaches it: a new one
+        // starts at 100 columns, and a line typed first would be drawn for
+        // those, wrapping and clearing in the wrong places here.
+        await sizes.now({ cols: terminal.cols, rows: terminal.rows });
+        if (disposed) return true;
         if (!focused) terminal.focus();
         focused = true;
         live = true;
         watch.connected();
         for (const bytes of waiting.take()) send(bytes);
-        sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
         return true;
       },
     });

@@ -41,3 +41,34 @@ test("a size push that fails is sent again instead of being skipped as already p
   t.mock.timers.tick(100);
   assert.deepEqual(sent, ["90x24", "90x24"]);
 });
+
+test("the size a view connects with is pushed at once, in place of one still settling", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sent: string[] = [];
+  let settle = () => {};
+  const sizes = sizePusher(
+    (size) =>
+      new Promise<void>((resolve) => {
+        sent.push(size.cols + "x" + size.rows);
+        settle = resolve;
+      }),
+  );
+  // The size a view mounts with waits to settle; connecting pushes it now,
+  // and the connect waits until the PTY has it.
+  sizes.schedule({ cols: 146, rows: 15 });
+  let pushed = false;
+  const now = sizes.now({ cols: 146, rows: 15 }).then(() => (pushed = true));
+  assert.deepEqual(sent, ["146x15"]);
+  await Promise.resolve();
+  assert.equal(pushed, false);
+  settle();
+  await now;
+  assert.equal(pushed, true);
+  // The push it replaced does not follow, and the size is not sent again.
+  t.mock.timers.tick(100);
+  await sizes.now({ cols: 146, rows: 15 });
+  assert.deepEqual(sent, ["146x15"]);
+  sizes.dispose();
+  await sizes.now({ cols: 80, rows: 24 });
+  assert.deepEqual(sent, ["146x15"]);
+});
