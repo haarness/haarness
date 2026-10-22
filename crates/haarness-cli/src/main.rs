@@ -9527,7 +9527,9 @@ struct RedactedUrls<W>(W);
 impl<W: Write> Write for RedactedUrls<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
-            Ok(text) if text.contains("://") => {
+            // `Url {` is a URL as `{:?}` writes it (rmcp logs its discovery
+            // addresses that way), with the user name and password as fields.
+            Ok(text) if text.contains("://") || text.contains("Url {") => {
                 self.0.write_all(urls_between_escapes(text).as_bytes())?;
             }
             _ => self.0.write_all(buf)?,
@@ -10939,6 +10941,8 @@ mod tests {
         let writer = super::RedactUrls(sink);
         let line = "ERROR rmcp::transport::worker: Client(reqwest::Error { url: \"http://u:PRIVATE_SUFFIX@127.0.0.1:9/mcp?api_key=PRIVATE_SUFFIX&region=eu\" })\n";
         writer.make_writer().write_all(line.as_bytes()).unwrap();
+        let debug = "DEBUG rmcp::transport::auth: discovery url: Url { scheme: \"http\", cannot_be_a_base: false, username: \"u\", password: Some(\"PRIVATE_SUFFIX\"), host: Some(Ipv4(127.0.0.1)), port: Some(9), path: \"/.well-known/oauth-authorization-server\", query: None, fragment: None }\n";
+        writer.make_writer().write_all(debug.as_bytes()).unwrap();
         writer
             .make_writer()
             .write_all(b"plain line, no address\n")
@@ -10947,6 +10951,10 @@ mod tests {
         assert!(!written.contains("PRIVATE_SUFFIX"), "{written}");
         assert!(
             written.contains("\"http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu\""),
+            "{written}"
+        );
+        assert!(
+            written.contains("username: \"<redacted>\", password: Some(\"<redacted>\"), host: Some(Ipv4(127.0.0.1))"),
             "{written}"
         );
         assert!(written.ends_with("plain line, no address\n"), "{written}");
