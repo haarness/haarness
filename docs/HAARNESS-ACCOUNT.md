@@ -145,7 +145,7 @@ Create/start/stop return once the operation is accepted. Use `list` to check its
 
 ## Session storage and development
 
-CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
+CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Cloud spends a refresh token when it answers and ends the whole sign-in when a spent one comes back, so a renewal runs on its own task: a Stop or timeout returns at once, and the renewal still saves the new pair for the next request. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
 
 Release builds sign in to `https://haarness.ai`. **Development builds** (`cargo build`, the `target/debug/haarness` that Desktop's `npm run dev` and the TUI use) sign in to the local Cloud stack at `http://127.0.0.1:18080`, the address `haarness-cloud/scripts/dev-up.sh` starts, so trying a change never touches production accounts or billing. Desktop needs nothing extra: its account dialog, billing and Cloud sessions all go through that binary.
 
