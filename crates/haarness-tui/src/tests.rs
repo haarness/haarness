@@ -451,6 +451,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -468,6 +469,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
                 attachments: vec!["/tmp/input.png".into()],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -2457,6 +2459,7 @@ fn transcript_spacing_separates_semantic_groups_without_splitting_activity_block
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -3461,6 +3464,7 @@ fn user_prompts_render_as_surface_blocks() {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -3774,6 +3778,7 @@ fn a_pinned_goal_keeps_a_quiet_row_before_the_masthead() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -6483,6 +6488,7 @@ fn agent_roster_is_one_row_per_child_and_scoped_to_the_latest_turn() {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     ));
     later_items.push(message_item_for_turn(
@@ -6541,6 +6547,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
                 attachments: vec![],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item_for_turn(
@@ -6586,6 +6593,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
                 attachments: vec![],
                 queued: false,
                 synthetic: true,
+                command_line: None,
             },
         ),
     ];
@@ -6606,6 +6614,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     ));
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -9126,6 +9135,7 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let queued_id = queued.id;
@@ -9510,6 +9520,7 @@ fn queued_messages_use_transient_running_status_instead_of_a_transcript_badge() 
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let queued_id = queued.id;
@@ -9549,6 +9560,7 @@ fn synthetic_workflow_delivery_stays_out_of_transcript_export_and_queue_status()
             attachments: Vec::new(),
             queued: true,
             synthetic: true,
+            command_line: None,
         },
     );
     let mut app = App::new(
@@ -9613,6 +9625,7 @@ fn queued_status_yields_before_the_interrupt_shortcut_at_narrow_widths() {
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let mut app = App::new(thread.clone(), vec![thread], vec![queued], vec![], vec![]);
@@ -10080,6 +10093,7 @@ async fn a_narrow_terminal_keeps_the_plan_in_one_row_and_ctrl_b_opens_the_sideba
                 attachments: vec![],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -14948,6 +14962,7 @@ async fn the_timeline_lists_undoable_checkpoints_by_the_request_that_made_them()
                 text: prompt.into(),
                 attachments: Vec::new(),
                 synthetic: false,
+                command_line: None,
                 queued: false,
             },
             &mut sequence,
@@ -15496,6 +15511,7 @@ fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -15564,6 +15580,7 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
             attachments: vec![],
             queued: false,
             synthetic: false,
+            command_line: None,
         },
     )];
     let id = items[0].id;
@@ -15820,6 +15837,7 @@ fn queue_strip_numbers_three_messages_and_counts_the_rest() {
             attachments: vec![],
             queued: true,
             synthetic: false,
+            command_line: None,
         },
     );
     let mut app = queue_fixture(&["one\nstill one", "two", "three", "four", "five"]);
@@ -17700,6 +17718,7 @@ fn undo_fixture() -> (App, Thread) {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(
@@ -17717,6 +17736,7 @@ fn undo_fixture() -> (App, Thread) {
                 attachments: Vec::new(),
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         ),
         message_item(

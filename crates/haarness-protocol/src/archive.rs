@@ -348,9 +348,15 @@ fn sanitize_checkpoint(checkpoint: &mut Option<TodoCheckpoint>, id: ItemId) {
 fn sanitize_item(item: &mut Item) {
     match &mut item.data {
         ItemData::UserMessage {
-            text, attachments, ..
+            text,
+            attachments,
+            command_line,
+            ..
         } => {
             *text = redact(text, "user-message", item.id);
+            if let Some(line) = command_line {
+                *line = redact(line, "command-line", item.id);
+            }
             for (index, attachment) in attachments.iter_mut().enumerate() {
                 *attachment = redact(attachment, "attachment", format!("{}-{index}", item.id));
             }

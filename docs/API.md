@@ -336,6 +336,11 @@ Names resolve case-insensitively and collisions use one explicit precedence:
 the reserved `workflow` and `goal` managers, then configured prompt commands,
 then direct discovered workflow invocations. Collision losers are omitted, so
 every advertised entry is executable by `POST /v1/threads/{id}/commands`.
+A prompt command's `user_message` item keeps the line it was typed as in
+`command_line` (`/review src/foo.rs`), while its `text` becomes the prompt the
+command expands to once it runs (`item.updated`), which is what the model
+receives. Clients show `command_line` when it is present; messages saved
+before it was kept, and ordinary messages, have none.
 
 MCP configuration accepts stdio, Streamable HTTP, and legacy SSE transports.
 Remote entries may set `oauth`, `oauthClientId`, and `oauthScopes`; bearer and
