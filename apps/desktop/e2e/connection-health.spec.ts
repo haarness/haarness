@@ -396,3 +396,46 @@ test("a project whose model list is slow opens at once, and a message sent meanw
     await models.close();
   }
 });
+
+test("a message waiting for a slow model list is given up when another chat is shown meanwhile, and nothing is sent from that chat", async () => {
+  test.setTimeout(150000);
+  const models = await lateModels();
+  let client: Haarness | undefined;
+  try {
+    await launch();
+    const remote = await endpoint(
+      "slow-models-switch",
+      '[defaults]\nprovider="slowlist"\nmodel="late-model-1"\n' +
+        `[providers.slowlist]\nprotocol="anthropic-messages"\nname="Slow list"\nbase_url="${models.url}"\napi_key_env="SLOWLIST_KEY"\n`,
+      { SLOWLIST_KEY: "fixture-key" },
+    );
+    client = new Haarness({ baseUrl: remote.url, token: remote.token });
+    const existing = await chat(client, "Existing chat");
+    await addServer("Slow models", remote.url, remote.secret);
+    const pill = page.locator(".composer-model");
+    await expect(pill).toHaveText("Loading models…");
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    await composer.fill("sent from the new chat");
+    await composer.press("Enter");
+    // Another chat, with a draft of its own, while the list still loads.
+    await page.locator(".project-list").getByRole("button", { name: existing.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Existing chat start");
+    await composer.fill("not sent");
+    expect(models.listed()).toBe(0);
+    await expect.poll(() => models.listed(), { timeout: 30000 }).toBeGreaterThan(0);
+    await expect(pill).not.toHaveText("Loading models…");
+    await page.waitForTimeout(1500);
+    await expect(page.locator(".transcript")).not.toContainText("not sent");
+    await expect(composer).toHaveValue("not sent");
+    const items = await client.listItems(existing.id);
+    expect(JSON.stringify(items)).not.toContain("not sent");
+    expect((await client.listThreads()).map((thread) => thread.id)).toEqual([existing.id]);
+    // The message Enter was pressed on stays in its draft, unsent.
+    await page.getByRole("button", { name: "New chat", exact: true }).click();
+    await expect(composer).toHaveValue("sent from the new chat");
+  } finally {
+    client?.close();
+    await app?.close().catch(() => {});
+    await models.close();
+  }
+});
