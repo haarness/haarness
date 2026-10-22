@@ -664,7 +664,7 @@ impl NativeMcpRegistry {
         // start an app instead, so it stops here, before any client sees it.
         let authorization_url = haarness_core::links::http_url(&authorization_url)
             .ok_or_else(|| {
-                CoreError::Invalid(match haarness_core::links::scheme(&authorization_url) {
+                CoreError::Tool(match haarness_core::links::scheme(&authorization_url) {
                     Some(scheme) => format!(
                         "MCP server \"{name}\" sent a {scheme} sign-in link; only http and https links open"
                     ),
@@ -2277,9 +2277,7 @@ mod tests {
                 .expect("the link is refused");
             assert_eq!(
                 error.to_string(),
-                format!(
-                    "invalid request: MCP server \"secure\" {said}; only http and https links open"
-                )
+                format!("tool error: MCP server \"secure\" {said}; only http and https links open")
             );
             server.abort();
             let _ = std::fs::remove_dir_all(auth_dir);

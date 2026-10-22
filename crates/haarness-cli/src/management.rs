@@ -2686,8 +2686,17 @@ fn is_plugin_path(path: &Path) -> bool {
         .any(|component| component.as_os_str() == "plugins")
 }
 
+/// A runtime error as a management answer: a tool's failure reads as its
+/// own sentence, without the `tool error:` category.
+pub(super) fn plain_error(error: CoreError) -> anyhow::Error {
+    core_error(error)
+}
+
 fn core_error(error: CoreError) -> anyhow::Error {
-    anyhow::anyhow!(error.to_string())
+    match error {
+        CoreError::Tool(message) => anyhow::anyhow!(message),
+        other => anyhow::anyhow!(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -3653,6 +3662,21 @@ mod tests {
         assert_eq!(written["mcp"]["remote"]["enabled"], true);
         assert_eq!(written["mcp"]["remote"]["oauth"], false);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_sign_in_reads_as_its_own_sentence() {
+        let refused = CoreError::Tool(
+            "MCP server \"x\" sent a file: sign-in link; only http and https links open".into(),
+        );
+        assert_eq!(
+            plain_error(refused).to_string(),
+            "MCP server \"x\" sent a file: sign-in link; only http and https links open"
+        );
+        assert_eq!(
+            plain_error(CoreError::NotFound("MCP server x".into())).to_string(),
+            "not found: MCP server x"
+        );
     }
 
     pub(super) fn isolated_service(name: &str) -> (PathBuf, PathBuf, Paths, ManagementService) {
