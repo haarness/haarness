@@ -1141,21 +1141,27 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             timeout_ms,
+            // opencode writes `oauth` as `false` or an object with its
+            // `clientId` and space-separated `scope`; an object auto-detects.
             oauth: entry.get("oauth").and_then(Value::as_bool),
             oauth_client_id: entry
                 .pointer("/auth/clientId")
+                .or_else(|| entry.pointer("/oauth/clientId"))
                 .or_else(|| entry.get("oauthClientId"))
                 .and_then(Value::as_str)
                 .map(&expand),
-            oauth_scopes: entry
-                .pointer("/auth/scopes")
-                .or_else(|| entry.get("oauthScopes"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(&expand)
-                .collect(),
+            oauth_scopes: match entry.pointer("/oauth/scope").and_then(Value::as_str) {
+                Some(scope) => scope.split_whitespace().map(&expand).collect(),
+                None => entry
+                    .pointer("/auth/scopes")
+                    .or_else(|| entry.get("oauthScopes"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(&expand)
+                    .collect(),
+            },
             enabled,
         });
     }
@@ -3504,5 +3510,20 @@ mod tests {
                 "{entry}"
             );
         }
+    }
+
+    #[test]
+    fn an_opencode_entry_gives_its_oauth_client_and_scopes() {
+        let entry = mcp_entry(
+            &serde_json::json!({"type": "remote", "url": "https://example.test/mcp",
+            "oauth": {"clientId": "team-client", "scope": "read write"}}),
+        )
+        .unwrap();
+        assert_eq!(entry.oauth, None);
+        assert_eq!(entry.oauth_client_id.as_deref(), Some("team-client"));
+        assert_eq!(entry.oauth_scopes, ["read", "write"]);
+        let entry = mcp_entry(&serde_json::json!({"type": "remote", "url": "https://example.test/mcp", "oauth": false}))
+            .unwrap();
+        assert_eq!(entry.oauth, Some(false));
     }
 }

@@ -3699,7 +3699,9 @@ mod tests {
   "mcp": {
     "files": {"type": "local", "command": ["npx", "-y", "@fixture/files"],
               "environment": {"ROOT": "{env:FIXTURE_ROOT}"}, "timeout": 5000},
-    "claude": {"command": "server", "args": ["--x"], "disabled": true, "x-team-note": "keep"}
+    "claude": {"command": "server", "args": ["--x"], "disabled": true, "x-team-note": "keep"},
+    "remote": {"type": "remote", "url": "https://mcp.fixture.test/mcp", "oauth": {"clientId": "old"}},
+    "gated": {"type": "remote", "url": "https://gated.fixture.test/mcp"}
   }
 }
 "#,
@@ -3710,6 +3712,9 @@ mod tests {
             json!({"action": "edit", "name": "files", "scope": "local",
                 "args": ["-y", "@fixture/files", "--root", "."]}),
             json!({"action": "enable", "name": "claude", "scope": "local"}),
+            json!({"action": "edit", "name": "remote", "scope": "local", "oauth": true,
+                "oauthClientId": "team-client", "oauthScopes": ["read", "write"]}),
+            json!({"action": "edit", "name": "gated", "scope": "local", "oauth": false}),
         ] {
             service.mcp(&request).await.unwrap();
         }
@@ -3729,6 +3734,16 @@ mod tests {
         assert_eq!(
             written["mcp"]["claude"],
             json!({"command": "server", "args": ["--x"], "disabled": false, "x-team-note": "keep"})
+        );
+        // opencode's own OAuth shape: an object, or `false`.
+        assert_eq!(
+            written["mcp"]["remote"],
+            json!({"type": "remote", "url": "https://mcp.fixture.test/mcp",
+                "oauth": {"clientId": "team-client", "scope": "read write"}})
+        );
+        assert_eq!(
+            written["mcp"]["gated"],
+            json!({"type": "remote", "url": "https://gated.fixture.test/mcp", "oauth": false})
         );
         // A key written twice is refused instead of edited where it is not read.
         fs::write(
