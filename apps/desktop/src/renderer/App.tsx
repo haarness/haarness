@@ -30,6 +30,7 @@ import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
+import { toastAnchor } from "./toast-anchors";
 import { ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
 import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
@@ -1380,7 +1381,7 @@ export function App() {
               }
               onReset={() => setTerminalHeight(260)}
             />
-            <div class="terminal-dock">
+            <div class="terminal-dock" ref={toastAnchor("terminal")}>
               <Suspense fallback={<PanelLoading label={t("Opening terminal…")} />}>
                 <TerminalPanel />
               </Suspense>

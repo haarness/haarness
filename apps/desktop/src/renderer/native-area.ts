@@ -5,23 +5,30 @@
  * when something still has to cover it.
  */
 let area: { left: number; right: number } | undefined;
-/** How far the browser reaches in from the window's inline end, where toasts sit. */
-let nativeEnd = 0;
 const listeners = new Set<() => void>();
+
+/** How far the browser reaches in from the window's inline end, where toasts sit. */
+export function nativeEnd() {
+  if (!area) return 0;
+  const end = document.documentElement.dir === "rtl" ? area.right : window.innerWidth - area.left;
+  return Math.max(0, Math.round(end));
+}
+
+/** Writes `--native-inline-end` for the current area and direction. */
+export function applyNativeEnd() {
+  const root = document.documentElement;
+  if (!area) root.style.removeProperty("--native-inline-end");
+  // Toasts anchor to the inline end, which is where the browser panel sits.
+  else root.style.setProperty("--native-inline-end", nativeEnd() + "px");
+}
 
 /** BrowserPanel reports where its live page is drawn, or nothing when hidden. */
 export function setNativeArea(rect?: DOMRect) {
-  const root = document.documentElement;
   const previous = JSON.stringify(area);
   area = rect && rect.width > 0 && rect.height > 0
     ? { left: rect.left, right: rect.right }
     : undefined;
-  // Toasts anchor to the inline end, which is where the browser panel sits.
-  nativeEnd = area
-    ? Math.max(0, Math.round(root.dir === "rtl" ? area.right : window.innerWidth - area.left))
-    : 0;
-  if (!area) root.style.removeProperty("--native-inline-end");
-  else root.style.setProperty("--native-inline-end", nativeEnd + "px");
+  applyNativeEnd();
   if (JSON.stringify(area) !== previous) listeners.forEach((listener) => listener());
 }
 
@@ -35,23 +42,40 @@ export function onNativeArea(listener: () => void) {
     16px (--s4) in from the inline end, beside the browser when it is drawn. */
 const TOAST_WIDTH = 400;
 const TOAST_GAP = 16;
+/** How far clear of the toast column the message box must move before raised
+    toasts drop back to their corner, so a divider dragged near it does not
+    make them bounce. Never the other way: a box reaching the column raises
+    them at once, so they never cover its Send button. */
+export const TOAST_SETTLE = 32;
+
+type Box = Pick<DOMRect, "left" | "right" | "top" | "width" | "height">;
+export type ToastPlace = { clearance?: number; composer: boolean; terminal: boolean };
 
 /**
- * How far above the window's bottom toasts sit: over the composer's dock
- * (Send, Stop, a waiting approval) when the dock runs under the toast column,
- * and nothing otherwise, so toasts keep their corner beside a side panel and
- * while the chat is hidden. `dock` is the dock's content box.
+ * How far above the window's bottom toasts sit, and whether the message box
+ * raises them. Toasts clear what keeps controls under their corner: the
+ * message box's content (Send, Stop, a waiting approval) while it runs under
+ * the toast column, and the terminal, which spans the window's width. With
+ * neither there (a side panel beside the chat, the chat hidden by an
+ * expanded panel) they keep their corner. `raised` is whether the message
+ * box raised them last time.
  */
-export function toastClearance(dock: Pick<DOMRect, "left" | "right" | "top" | "width" | "height">) {
-  if (!(dock.width > 0) || !(dock.height > 0)) return undefined;
+export function toastPlace(anchors: { composer?: Box; terminal?: Box }, raised = false): ToastPlace {
   const width = window.innerWidth;
-  const offset = TOAST_GAP + nativeEnd;
-  const column = Math.max(0, Math.min(TOAST_WIDTH, width - TOAST_GAP * 2 - nativeEnd));
-  const [start, end] = document.documentElement.dir === "rtl"
-    ? [offset, offset + column]
-    : [width - offset - column, width - offset];
-  if (dock.right <= start || dock.left >= end) return undefined;
-  return Math.max(0, Math.round(window.innerHeight - dock.top));
+  const offset = TOAST_GAP + nativeEnd();
+  const column = Math.max(0, Math.min(TOAST_WIDTH, width - TOAST_GAP * 2 - nativeEnd()));
+  const rtl = document.documentElement.dir === "rtl";
+  const [start, end] = rtl ? [offset, offset + column] : [width - offset - column, width - offset];
+  const shown = (box?: Box): box is Box => !!box && box.width > 0 && box.height > 0;
+  // How far a box reaches into the column from the chat's side (negative: clear of it).
+  const reach = (box: Box) =>
+    rtl ? (box.right <= start ? -Infinity : end - box.left) : box.left >= end ? -Infinity : box.right - start;
+  const above = (box: Box) => Math.max(0, Math.round(window.innerHeight - box.top));
+  const { composer, terminal } = anchors;
+  const lift = shown(composer) && (reach(composer) > 0 || (raised && reach(composer) > -TOAST_SETTLE));
+  const under = shown(terminal) && terminal.left < end && terminal.right > start;
+  const heights = [...(lift ? [above(composer!)] : []), ...(under ? [above(terminal!)] : [])];
+  return { clearance: heights.length ? Math.max(...heights) : undefined, composer: lift, terminal: under };
 }
 
 /** The horizontal span beside the browser on `anchor`'s side, or the window. */

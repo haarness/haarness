@@ -614,12 +614,10 @@
   position: fixed;
   /* The embedded browser is native and would hide toasts; sit beside it. */
   inset-inline-end: calc(var(--s4) + var(--native-inline-end, 0px));
-  /* Above the composer's Send and Stop buttons and a waiting approval, but
-     never past the middle: a tall question would lift it off the window. */
-  bottom: min(calc(var(--s4) + var(--composer-clearance, 0px)), 50vh);
-  /* A panel opening or the message box growing glides a toast to its new
-     place instead of making it jump. */
-  transition: bottom var(--slow) var(--ease);
+  /* Above the composer's Send and Stop buttons, a waiting approval and the
+     terminal (toast-anchors.ts), but always with room for a toast below the
+     window's top: a tall question would lift it off the window. */
+  bottom: min(calc(var(--s4) + var(--toast-clearance, 0px)), calc(100vh - 160px));
   z-index: 70;
   display: flex;
   flex-direction: column;
@@ -630,6 +628,11 @@
 }
 .notifications > * {
   pointer-events: auto;
+}
+/* What a toast clears changed (a panel, the terminal or the message box came
+   or went): it glides to its new place instead of jumping. */
+:root[data-toast-glide] .notifications {
+  transition: bottom var(--slow) var(--ease);
 }
 /* Settings covers the composer, so its toasts keep to the corner. */
 dialog .notifications {
