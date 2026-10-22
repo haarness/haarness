@@ -2654,5 +2654,6 @@
   "Open side chat": "サイドチャットを開く",
   "Ask about this chat without adding to it": "このチャットに追加せずに質問する",
   "Hide side chat": "サイドチャットを隠す",
-  "Resize side chat": "サイドチャットのサイズを変更"
+  "Resize side chat": "サイドチャットのサイズを変更",
+  "This server answers each question on its own": "このサーバーは質問を一つずつ個別に答えます"
 }

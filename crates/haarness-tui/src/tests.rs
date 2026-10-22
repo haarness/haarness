@@ -519,6 +519,13 @@ async fn the_side_chat_keeps_its_thread_and_draft_and_ctrl_c_clears_then_stops()
     app.execute_command("/btw", &client).await.unwrap();
     assert_eq!(app.side.composer.text(), "and?");
     assert_eq!(app.side.shown().unwrap().turns.len(), 1);
+    // A /btw question from the chat meanwhile joins what the box holds.
+    app.handle_side_key(side_key(KeyCode::Esc), &client);
+    app.execute_command("/btw and also this", &client)
+        .await
+        .unwrap();
+    assert_eq!(app.side.composer.text(), "and?\nand also this");
+    app.side.composer.set_text("and?".into());
 
     // Ctrl+C clears the box, then stops the answer, which ends the request.
     app.side_interrupt();
@@ -570,6 +577,7 @@ async fn a_server_without_streamed_side_questions_answers_in_one_piece() {
         app.side.shown().unwrap().turns[0].answer,
         "The worker verified the release."
     );
+    assert!(side_frame(&app).contains("This server answers each question on its own"));
     let requests = server.await.unwrap();
     assert!(requests[0].starts_with(&format!("POST /v1/threads/{}/btw ", thread.id)));
 }

@@ -2654,5 +2654,6 @@
   "Open side chat": "Otvori usputni razgovor",
   "Ask about this chat without adding to it": "Pitajte o ovom razgovoru bez dodavanja u njega",
   "Hide side chat": "Sakrij usputni razgovor",
-  "Resize side chat": "Promijeni veličinu usputnog razgovora"
+  "Resize side chat": "Promijeni veličinu usputnog razgovora",
+  "This server answers each question on its own": "Ovaj server odgovara na svako pitanje zasebno"
 }

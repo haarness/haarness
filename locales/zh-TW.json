@@ -2654,5 +2654,6 @@
   "Open side chat": "開啟側邊對話",
   "Ask about this chat without adding to it": "詢問此對話，但不加入任何內容",
   "Hide side chat": "隱藏側邊對話",
-  "Resize side chat": "調整側邊對話大小"
+  "Resize side chat": "調整側邊對話大小",
+  "This server answers each question on its own": "此伺服器會個別回答每個問題"
 }

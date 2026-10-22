@@ -2654,5 +2654,6 @@
   "Open side chat": "เปิดแชทข้างเคียง",
   "Ask about this chat without adding to it": "ถามเกี่ยวกับแชทนี้โดยไม่เพิ่มอะไรลงไป",
   "Hide side chat": "ซ่อนแชทข้างเคียง",
-  "Resize side chat": "ปรับขนาดแชทข้างเคียง"
+  "Resize side chat": "ปรับขนาดแชทข้างเคียง",
+  "This server answers each question on its own": "เซิร์ฟเวอร์นี้ตอบแต่ละคำถามแยกกัน"
 }
