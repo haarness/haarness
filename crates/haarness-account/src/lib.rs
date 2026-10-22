@@ -369,6 +369,23 @@ impl Client {
                 Ok(key.into())
             };
         }
+        // Cloud spends a refresh token the moment it answers, and revokes the
+        // whole sign-in when a spent one comes back. A caller that gives up
+        // mid-refresh (a Stop, a timeout) must not drop the new pair before it
+        // is saved, so the renewal runs on its own task: the caller returns at
+        // once, and the task still saves what Cloud sent.
+        let client = self.clone();
+        let rejected = rejected.map(str::to_owned);
+        tokio::spawn(async move { client.current_bearer(rejected.as_deref()).await })
+            .await
+            .map_err(|_| {
+                Error::Other("Renewing the Haarness Cloud sign-in stopped unexpectedly".into())
+            })?
+    }
+
+    /// [`Self::bearer`]'s work under the credential lock: the saved access
+    /// token, renewed first when it expired or `rejected` names it.
+    async fn current_bearer(&self, rejected: Option<&str>) -> Result<String> {
         let _lock = self.config.lock().await?;
         let mut c = credentials::load(&self.config.path())?.ok_or(Error::NotLoggedIn)?;
         self.validate(&c)?;

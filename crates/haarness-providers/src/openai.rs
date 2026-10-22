@@ -26,7 +26,8 @@ pub struct OpenAiProvider {
     api_key: Option<SecretString>,
     auth_store: Option<Arc<CredentialStore>>,
     oauth: OpenAiOAuthClient,
-    refresh_lock: Mutex<()>,
+    /// Held by the renewal task, not its caller (see [`Self::request_auth`]).
+    refresh_lock: Arc<Mutex<()>>,
     models: Vec<ModelInfo>,
     /// Public API catalog for an API key.
     live_models: crate::live_models::LiveModels,
@@ -54,7 +55,7 @@ impl OpenAiProvider {
             api_key: std::env::var("OPENAI_API_KEY").ok().map(SecretString::from),
             auth_store: None,
             oauth: OpenAiOAuthClient::default(),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Arc::default(),
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
@@ -202,7 +203,7 @@ impl OpenAiProvider {
             api_key: Some(SecretString::from(key.to_owned())),
             auth_store: None,
             oauth: OpenAiOAuthClient::default(),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Arc::default(),
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
@@ -225,7 +226,7 @@ impl OpenAiProvider {
             api_key: None,
             auth_store: Some(store),
             oauth,
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Arc::default(),
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
@@ -252,7 +253,7 @@ impl OpenAiProvider {
         {
             // Re-read after acquiring the lock: concurrent requests share one
             // refresh and use the credential persisted by its winner.
-            let _guard = self.refresh_lock.lock().await;
+            let guard = self.refresh_lock.clone().lock_owned().await;
             credential = store
                 .get("openai")
                 .map_err(provider_error)?
@@ -265,19 +266,33 @@ impl OpenAiProvider {
                         "OpenAI login has no refresh token; run haarness auth login openai".into(),
                     ));
                 }
-                let expected_refresh = current.refresh.to_owned();
-                let next = self.oauth.refresh(current).await.map_err(provider_error)?;
-                if store
-                    .replace_oauth_if_current("openai", &expected_refresh, &next)
-                    .map_err(provider_error)?
-                {
-                    credential = next;
-                } else {
-                    credential = store
-                        .get("openai")
+                // OpenAI spends a refresh token the moment it answers. A
+                // request that gives up mid-refresh (a Stop) must not drop the
+                // new one before it is saved, or the next request sends the
+                // spent one and the sign-in ends: the renewal runs on its own
+                // task, which keeps the lock until it has saved.
+                let (oauth, store, stale) = (self.oauth.clone(), store.clone(), credential.clone());
+                credential = tokio::spawn(async move {
+                    let _guard = guard;
+                    let current = stale.oauth_parts().expect("an OAuth credential");
+                    let expected_refresh = current.refresh.to_owned();
+                    let next = oauth.refresh(current).await.map_err(provider_error)?;
+                    if store
+                        .replace_oauth_if_current("openai", &expected_refresh, &next)
                         .map_err(provider_error)?
-                        .ok_or_else(|| CoreError::Provider("OpenAI was logged out".into()))?;
-                }
+                    {
+                        Ok(next)
+                    } else {
+                        store
+                            .get("openai")
+                            .map_err(provider_error)?
+                            .ok_or_else(|| CoreError::Provider("OpenAI was logged out".into()))
+                    }
+                })
+                .await
+                .map_err(|_| {
+                    CoreError::Provider("Renewing the ChatGPT sign-in stopped unexpectedly".into())
+                })??;
             }
         }
         request_auth_from_credential(&credential, &self.oauth)
@@ -1396,6 +1411,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn a_refresh_the_request_gave_up_on_is_still_saved() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/responses", post(responses))
+            .route("/oauth/token", post(refresh_token))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-openai-cancelled-refresh-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(crate::auth::CredentialStore::new(root.join("auth.json")));
+        store
+            .set(
+                "openai",
+                &crate::auth::Credential::oauth(
+                    "expired".into(),
+                    "refresh-1".into(),
+                    1,
+                    Some("account-1".into()),
+                ),
+            )
+            .unwrap();
+        let provider = OpenAiProvider::for_oauth_test(
+            format!("http://{address}/responses"),
+            format!("http://{address}"),
+            store.clone(),
+        );
+        let request = || ProviderRequest {
+            model: "gpt-test".into(),
+            system: "test".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        // A Stop while OpenAI is answering the refresh (it takes 200 ms),
+        // which returns at once.
+        let started = std::time::Instant::now();
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(20),
+            provider.stream(request(), CancellationToken::new()),
+        )
+        .await;
+        assert!(stopped.is_err());
+        assert!(started.elapsed() < Duration::from_millis(150));
+        // The next request uses the token the refresh saved.
+        let stream = provider
+            .stream(request(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(stream.collect::<Vec<_>>().await.iter().all(Result::is_ok));
+        assert_eq!(state.refreshes.load(Ordering::SeqCst), 1);
+        let persisted = store.get("openai").unwrap().unwrap();
+        assert_eq!(persisted.oauth_parts().unwrap().refresh, "refresh-2");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     async fn responses(
         State(state): State<FixtureState>,
         headers: HeaderMap,
@@ -1437,7 +1518,7 @@ mod tests {
     async fn refresh_token(State(state): State<FixtureState>, body: String) -> Json<Value> {
         assert!(body.contains("grant_type=refresh_token"));
         state.refreshes.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&json!({
                 "chatgpt_account_id": "account-2",
