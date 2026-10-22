@@ -12362,14 +12362,29 @@ test("incremental Markdown retains live selection and completed blocks", async (
     range.selectNodeContents(element);
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
-    (window as any).__markdownSelected = element;
+    // Read as the next block lands, in the page: the turn ends half a second
+    // later and its saved reply replaces the live one, which a check made
+    // from the test afterwards could see on a loaded machine.
+    const reply = element.closest('[data-testid="streaming-reply"]')!;
+    const read = () => ({
+      landedAfterSelection: true,
+      sameNode: reply.querySelector("strong") === element,
+      selected: window.getSelection()?.toString(),
+    });
+    (window as any).__markdownEvidence = new Promise((resolve) => {
+      if (reply.querySelector("li")) return resolve({ ...read(), landedAfterSelection: false });
+      const observer = new MutationObserver(() => {
+        if (reply.querySelector("li")?.textContent !== "streams while working") return;
+        observer.disconnect();
+        resolve(read());
+      });
+      observer.observe(reply, { subtree: true, childList: true, characterData: true });
+    });
   });
   await expect(live.locator("li")).toHaveText("streams while working");
-  const evidence = await live.evaluate((element) => ({
-    sameNode: element.querySelector("strong") === (window as any).__markdownSelected,
-    selected: window.getSelection()?.toString(),
-  }));
+  const evidence = await page.evaluate(() => (window as any).__markdownEvidence);
   await test.info().attach("live-selection", { body: JSON.stringify(evidence), contentType: "application/json" });
+  expect(evidence.landedAfterSelection).toBe(true);
   if (process.env.HAARNESS_MARKDOWN_BASELINE !== "1") {
     expect(evidence.sameNode).toBe(true);
     expect(evidence.selected).toBe("Live markdown");
