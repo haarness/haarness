@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { keychainEntry, keychainInput, mcpInput, newMcpDraft, secretLooking } from "../src/renderer/mcp-form";
+import { keychainEntry, keychainInput, mcpInput, newMcpDraft, renameKeychainReference, secretLooking } from "../src/renderer/mcp-form";
 
 test("local MCP form preserves ordered argv and environment values without shell parsing", () => {
   const draft = newMcpDraft();
@@ -139,6 +139,14 @@ test("a secret-looking value offers the keychain, and a kept one is written as a
     { name: "git-hub-X-Api-Key", secret: "k-1" },
   ]);
   assert.equal(keychainEntry("a/b", "TOKEN"), "a-b-TOKEN");
+  // An entry name starts with a letter or digit, whatever the server is called.
+  assert.equal(keychainEntry("_hidden", "TOKEN"), "hidden-TOKEN");
+  assert.equal(keychainEntry("日本", "TOKEN"), "TOKEN");
+  assert.equal(keychainEntry("日本", "_"), "mcp-secret");
+  // When the keychain gives another name (the first was taken), the reference follows it.
+  renameKeychainReference(input, "git-hub-Authorization", "git-hub-Authorization-2");
+  assert.equal((input.headers as Record<string, string>).Authorization, "Bearer ${keychain:git-hub-Authorization-2}");
+  assert.equal((input.headers as Record<string, string>)["X-Api-Key"], "${keychain:git-hub-X-Api-Key}");
   // A local server keeps its environment the same way.
   const local = newMcpDraft();
   Object.assign(local, { name: "files", command: "server" });

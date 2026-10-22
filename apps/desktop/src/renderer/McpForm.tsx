@@ -3,7 +3,7 @@ import { For, Show, createSignal, onMount } from "solid-js";
 import { createStore } from "solid-js/store";
 import { Select } from "./Select";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
-import { keychainInput, newMcpDraft, secretLooking, type McpPair } from "./mcp-form";
+import { keychainInput, newMcpDraft, renameKeychainReference, secretLooking, type McpPair } from "./mcp-form";
 
 /** What this computer calls the store a secret is kept in. */
 function keepLabel(platform: string) {
@@ -16,8 +16,11 @@ function keepLabel(platform: string) {
 
 export function McpForm(props: {
   save: (input: Record<string, unknown>) => Promise<unknown>;
-  /** Keeps a secret in the system's keychain, for the settings to name. */
-  storeSecret: (name: string, secret: string) => Promise<unknown>;
+  /** Keeps a secret in the system's keychain as a new entry, never replacing
+   * one, and returns the entry's name (`name`, or `name-2` when that is taken). */
+  storeSecret: (name: string, secret: string) => Promise<string>;
+  /** Takes entries this form just stored out again. */
+  removeSecrets: (names: string[]) => Promise<unknown>;
   /** The platform the server runs on, which names the keychain. */
   platform: string;
   close: () => void;
@@ -37,15 +40,22 @@ export function McpForm(props: {
     event.preventDefault();
     if (saving()) return;
     setError("");
+    // Entries stored for this server, taken out again if it is not added.
+    const stored: string[] = [];
     try {
       const { input, secrets } = keychainInput(draft);
       setSaving(true);
       // The secrets first: settings that name a missing entry would fail.
-      for (const { name, secret } of secrets) await props.storeSecret(name, secret);
+      for (const { name, secret } of secrets) {
+        const entry = await props.storeSecret(name, secret);
+        stored.push(entry);
+        if (entry !== name) renameKeychainReference(input, name, entry);
+      }
       await props.save(input);
       setSaving(false);
       close();
     } catch (error) {
+      if (stored.length) await props.removeSecrets(stored).catch(() => undefined);
       setSaving(false);
       setError(error instanceof Error ? error.message : String(error));
       failure?.focus();

@@ -765,7 +765,7 @@ enum McpSecretCommand {
     /// Store a secret, replacing one of that name. It is read from a hidden
     /// prompt, or from standard input when that is piped, and never shown.
     Set {
-        /// Entry name: letters, digits, '.', '_' and '-'.
+        /// Entry name: a letter or digit, then letters, digits, '.', '_' and '-'.
         name: String,
     },
     /// Remove a stored secret.
@@ -7886,7 +7886,7 @@ async fn mcp_secret_command(command: McpSecretCommand) -> Result<()> {
         McpSecretCommand::Set { name } => {
             if !keychain::valid_name(&name) {
                 anyhow::bail!(
-                    "\"{name}\" is not a usable name: use letters, digits, '.', '_' and '-'"
+                    "\"{name}\" is not a usable name: start with a letter or digit, then use letters, digits, '.', '_' and '-'"
                 );
             }
             let secret = read_mcp_secret(&name)?;

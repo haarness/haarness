@@ -48,11 +48,17 @@ enum Request {
     RemoveCredential {
         provider: String,
     },
-    /// Keep an MCP server's secret in the system's keychain; its settings
-    /// then name it as `${keychain:NAME}`.
+    /// Keep an MCP server's secret in the system's keychain as a new entry,
+    /// never replacing one: the reply names the entry its settings then name
+    /// as `${keychain:NAME}`.
     StoreMcpSecret {
         name: String,
         secret: String,
+    },
+    /// Take entries `StoreMcpSecret` just made out again, when the server
+    /// they were for could not be added.
+    RemoveMcpSecrets {
+        names: Vec<String>,
     },
     Extensions {
         #[serde(default)]
@@ -244,13 +250,13 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
             use haarness_mcp::keychain;
             ensure!(
                 keychain::valid_name(&name),
-                "\"{name}\" is not a usable name: use letters, digits, '.', '_' and '-'"
+                "\"{name}\" is not a usable name: start with a letter or digit, then use letters, digits, '.', '_' and '-'"
             );
             ensure!(
                 !secret.is_empty() && secret.len() <= 65536,
                 "Enter the secret to store"
             );
-            keychain::set(&name, &secret)
+            let name = keychain::add(&name, &secret)
                 .await
                 .map_err(|error| match error {
                     keychain::Error::Missing => anyhow::anyhow!("The secret was not stored"),
@@ -260,6 +266,15 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
                     ),
                 })?;
             Ok(json!({"name":name,"reference":format!("${{keychain:{name}}}")}))
+        }
+        Request::RemoveMcpSecrets { names } => {
+            let mut removed = 0;
+            for name in &names {
+                if haarness_mcp::keychain::delete(name).await.unwrap_or(false) {
+                    removed += 1;
+                }
+            }
+            Ok(json!({"removed":removed}))
         }
         Request::Extensions { project } => Ok(serde_json::to_value(
             super::extensions::scoped_config(paths, workspace, project)?,

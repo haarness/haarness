@@ -2168,14 +2168,16 @@ async fn resolve_references_with(
     for (entry, required) in wanted {
         if !keychain::valid_name(&entry) {
             return Err(CoreError::Tool(format!(
-                "${{keychain:{entry}}} does not name a {store} entry: use letters, digits, '.', '_' and '-'"
+                "${{keychain:{entry}}} does not name a {store} entry: start with a letter or digit, then use letters, digits, '.', '_' and '-'"
             )));
         }
         match lookup(entry.clone()).await {
             Ok(secret) => {
                 secrets.insert(entry, secret);
             }
-            Err(keychain::Error::Missing) if !required => {}
+            // A fallback stands in for an entry the store cannot give,
+            // missing or unreachable alike.
+            Err(keychain::Error::Missing | keychain::Error::Unavailable(_)) if !required => {}
             Err(keychain::Error::Missing) => {
                 return Err(CoreError::Tool(format!(
                     "${{keychain:{entry}}} is not in the {store}; store it with `haarness mcp secret set {entry}`"
@@ -3075,6 +3077,7 @@ mod tests {
             ("X-Team", "${keychain:team.key}/${keychain:github-token}"),
             ("X-Home", "${HOME}"),
             ("X-Optional", "${keychain:absent:-none}"),
+            ("X-Unreachable", "${keychain:locked:-offline}"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -3088,10 +3091,12 @@ mod tests {
             std::env::var("HOME").unwrap_or_default()
         );
         assert_eq!(resolved["X-Optional"], "none");
+        // A fallback also stands in for a store that cannot be reached.
+        assert_eq!(resolved["X-Unreachable"], "offline");
         // Each entry is looked up once, however often it is named.
         let mut asked = lookups.lock().unwrap().clone();
         asked.sort();
-        assert_eq!(asked, ["absent", "github-token", "team.key"]);
+        assert_eq!(asked, ["absent", "github-token", "locked", "team.key"]);
         let missing = |value: &str| {
             let values = BTreeMap::from([("TOKEN".to_owned(), value.to_owned())]);
             let store = fake_store(Arc::default());
