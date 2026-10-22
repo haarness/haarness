@@ -955,25 +955,25 @@ async fn git_version(workspace: &Path) -> Option<(u32, u32)> {
 /// `post-index-change`) and no signature check (the repository's gpg
 /// program); a person's own `git diff` runs none of them either.
 fn read_only_args() -> Vec<OsString> {
-    let hooks = if cfg!(windows) {
-        "core.hooksPath=NUL"
-    } else {
-        "core.hooksPath=/dev/null"
-    };
+    let hooks = format!("core.hooksPath={}", null_device(cfg!(windows)));
     os_args(&[
         "-c",
         "core.fsmonitor=false",
         "-c",
-        hooks,
+        &hooks,
         "-c",
         "log.showSignature=false",
     ])
 }
 
-/// A folder that is not one: Git then finds no translations and speaks
-/// English, so its messages can be recognised in any locale, while the
-/// programs it runs keep the person's locale.
-const NO_TRANSLATIONS: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+/// An absolute path that is no folder, where Git finds no hooks and no
+/// translations. On Windows a bare `NUL` would be relative to the working
+/// tree (Git looks for `<top>\NUL\post-index-change`); `//./NUL` is the
+/// device itself, absolute to Git as it starts with a slash. Not verified
+/// live on Windows.
+fn null_device(windows: bool) -> &'static str {
+    if windows { "//./NUL" } else { "/dev/null" }
+}
 
 async fn run_git(workspace: &Path, args: &[OsString], stdout_limit: usize) -> Result<GitOutput> {
     run_git_with(workspace, args, stdout_limit, &Guard::default()).await
@@ -992,7 +992,10 @@ async fn run_git_with(
         .args(args)
         .current_dir(workspace)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TEXTDOMAINDIR", NO_TRANSLATIONS)
+        // Git then finds no translations and speaks English, so its messages
+        // can be recognised in any locale, while the programs it runs keep
+        // the person's locale.
+        .env("GIT_TEXTDOMAINDIR", null_device(cfg!(windows)))
         .envs(guard.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1921,6 +1924,22 @@ mod tests {
         let trusted = by_file(trusted.expect("trusted review"));
         assert!(trusted.contains_key("file.txt"));
         assert_eq!(marks.left(), ["fetch"]);
+    }
+
+    #[test]
+    fn hooks_and_translations_point_at_an_absolute_path_that_is_no_folder() {
+        assert_eq!(null_device(false), "/dev/null");
+        // A relative `NUL` would make Git look for `<top>\NUL\<hook>`.
+        let windows = null_device(true);
+        assert!(
+            windows.starts_with('/') && windows.ends_with("NUL"),
+            "{windows}"
+        );
+        let args = read_only_args();
+        assert!(args.contains(&OsString::from(format!(
+            "core.hooksPath={}",
+            null_device(cfg!(windows))
+        ))));
     }
 
     #[tokio::test]
