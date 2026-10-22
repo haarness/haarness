@@ -12440,6 +12440,36 @@ test("display languages default to English and switch persistently across all sh
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
 });
 
+test("the window opens in its saved theme, palette, text size and language, never the defaults first", async () => {
+  const before = await page.evaluate(() => window.haarness.boot().then((value) => value.preferences));
+  await page.evaluate(() => window.haarness.preferences({ theme: "light", palette: "ocean", fontSize: 18, language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  // From the page's first script on, every look the document has once the app has drawn anything.
+  await app.context().addInitScript(() => {
+    const seen: string[] = [];
+    (window as unknown as { appearance: string[] }).appearance = seen;
+    // The document has no root element yet when this runs.
+    const observer = new MutationObserver(() => {
+      const root = document.documentElement;
+      if (!document.getElementById("root")?.childElementCount) return;
+      const look = [root.lang, root.dir, root.dataset.theme, root.dataset.palette, root.style.getPropertyValue("--font-size")].join(" ");
+      if (seen.at(-1) !== look) seen.push(look);
+    });
+    observer.observe(document, { attributes: true, childList: true, subtree: true });
+    setTimeout(() => observer.disconnect(), 5000);
+  });
+  await page.reload();
+  await expect(page.locator(".application")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { appearance: string[] }).appearance.length)).toBeGreaterThan(0);
+  await page.waitForTimeout(1000);
+  expect(await page.evaluate(() => (window as unknown as { appearance: string[] }).appearance)).toEqual(["ar rtl light ocean 18px"]);
+  await page.evaluate(
+    (value) => window.haarness.preferences({ theme: value.theme, palette: value.palette, fontSize: value.fontSize, language: value.language }),
+    before,
+  );
+  await expect(page.locator("html")).toHaveAttribute("lang", before.language);
+});
+
 test("incremental Markdown retains live selection and completed blocks", async () => {
   await newSession();
   await send("::mdslow");

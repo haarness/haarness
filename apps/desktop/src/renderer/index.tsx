@@ -8,6 +8,14 @@ import "./shell.css";
 import "./chat.css";
 import "./panels.css";
 import "./overlay.css";
+// The saved settings are read before the first render, so the window opens
+// in its own theme, palette, text size and language rather than flashing the
+// defaults until the rest of the app's state has loaded. One read, from the
+// main process's memory.
+const preferences = await window.haarness.boot().then(
+  (value) => value.preferences,
+  () => undefined,
+);
 render(
   () => (
     <ErrorBoundary
@@ -24,7 +32,7 @@ render(
         );
       }}
     >
-      <AppProvider>
+      <AppProvider preferences={preferences}>
         <App />
       </AppProvider>
     </ErrorBoundary>
