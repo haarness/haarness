@@ -15,7 +15,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use haarness_core::{AgentRuntime, CoreError, McpRegistry, SkillRegistry};
 use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
@@ -43,7 +43,6 @@ use opentelemetry::global;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -2327,16 +2326,22 @@ fn event_stream(
         yield Ok(Event::default().comment("connected"));
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
         let mut scope = crate::remote_scope::EventScope::new(root);
-        for event in subscription.replay { if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); } }
-        let mut live=BroadcastStream::new(subscription.receiver);
+        for event in haarness_core::join_deltas(subscription.replay) {
+            if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); }
+        }
+        let mut live = haarness_core::JoinedEvents::new(subscription.receiver);
         loop {
-            tokio::select! {
+            let received = tokio::select! {
                 () = shutdown.cancelled() => break,
-                event = live.next() => match event {
-                    Some(Ok(event)) => if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); },
-                    Some(Err(_)) => yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}")),
-                    None => break,
+                received = live.next() => received,
+            };
+            match received {
+                haarness_core::LiveEvent::Event(event) => if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); },
+                haarness_core::LiveEvent::Behind(skipped) => {
+                    tracing::info!(skipped, "event stream fell behind; its client resyncs");
+                    yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}"));
                 }
+                haarness_core::LiveEvent::Closed => break,
             }
         }
     };
