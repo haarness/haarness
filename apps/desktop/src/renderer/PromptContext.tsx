@@ -1,4 +1,4 @@
-import { formatNumber, t } from "./i18n";
+import { formatNumber, language, t } from "./i18n";
 import {
   createEffect,
   createSignal,
@@ -19,17 +19,22 @@ import {
   countLines,
   fileContext,
   mentionAgents,
+  pasteSize,
   type PromptContext,
 } from "./prompt-context";
 import "./prompt-context.css";
 
 type Option = { kind: "file" | "agent"; name: string; description?: string };
-/** How a paste chip reads: `Pasted text · 214 lines`. */
+/** How a paste reads, in its chip and in the transcript: `Pasted text · 214
+ * lines`, and its size once that matters, `· 2.4 MB`. */
 export function pasteLabel(text: string) {
   const lines = Math.max(1, countLines(text));
-  return lines === 1
-    ? t("Pasted text · 1 line")
-    : t("Pasted text · {count} lines", { count: formatNumber(lines) });
+  const label =
+    lines === 1
+      ? t("Pasted text · 1 line")
+      : t("Pasted text · {count} lines", { count: formatNumber(lines) });
+  const size = pasteSize(text, language());
+  return size ? `${label} · ${size}` : label;
 }
 const chipLabel = (item: PromptContext) =>
   item.kind === "paste" ? pasteLabel(item.text) : contextLabel(item);
@@ -151,12 +156,39 @@ export function PromptContextControls(props: {
     document.addEventListener("pointerdown", away);
     onCleanup(() => document.removeEventListener("pointerdown", away));
   });
+  /**
+   * The last paste put back as text. The message box's own Undo takes the
+   * text out, and then the chip comes back; Redo puts the text in again and
+   * takes the chip away, so the paste is never lost between the two.
+   */
+  let unpasted:
+    | { item: Extract<PromptContext, { kind: "paste" }>; key: string; before: string; after: string }
+    | undefined;
   /** A paste back in the message box as text, where the caret was. */
   function editAsText(item: Extract<PromptContext, { kind: "paste" }>) {
     if (props.disabled) return;
+    const input = props.textarea();
+    const before = input.value;
     props.insert(item.text);
+    unpasted = { item, key: app.draftKey(), before, after: input.value };
     void app.run(() => app.removePromptContext(item));
   }
+  onMount(() => {
+    const input = props.textarea();
+    const history = (event: Event) => {
+      const kind = (event as InputEvent).inputType;
+      if (!unpasted || (kind !== "historyUndo" && kind !== "historyRedo")) return;
+      const { item, key, before, after } = unpasted;
+      if (key !== app.draftKey()) return void (unpasted = undefined);
+      const chip = app.promptContext().some((value) => contextKey(value) === contextKey(item));
+      if (kind === "historyUndo" && input.value === before && !chip)
+        void app.run(() => app.addPromptContext(item, key));
+      else if (kind === "historyRedo" && input.value === after && chip)
+        void app.run(() => app.removePromptContext(item));
+    };
+    input.addEventListener("input", history);
+    onCleanup(() => input.removeEventListener("input", history));
+  });
   onMount(() => {
     const input = props.textarea();
     const update = () => queueMicrotask(syncCaret);

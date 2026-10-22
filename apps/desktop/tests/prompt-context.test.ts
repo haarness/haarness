@@ -6,7 +6,9 @@ import {
   commandPrompt,
   countLines,
   fileContext,
+  keptContext,
   mentionAgents,
+  pasteSize,
   pastedText,
   pasteFolds,
   plainMessage,
@@ -161,4 +163,15 @@ test("only a paste sent at the top of a message reads as one, not one inside a f
     { kind: "text", text: "hi\n\n" },
     { kind: "paste", text: tricky },
   ]);
+});
+test("a draft keeps what fits in one stored value, and a big paste says its size", () => {
+  const file = fileContext("a.ts", "x");
+  const small = { kind: "paste" as const, id: "small", text: "small\npaste" };
+  const big = { kind: "paste" as const, id: "big", text: "y".repeat(2_200_000) };
+  assert.deepEqual(keptContext([file, small]), { kept: [file, small], dropped: [] });
+  // The paste that does not fit stays out of storage; everything else is kept.
+  assert.deepEqual(keptContext([file, big, small]), { kept: [file, small], dropped: ["big"] });
+  assert.equal(pasteSize("z".repeat(99_000), "en"), "");
+  assert.equal(pasteSize("z".repeat(240_000), "en"), "240 kB");
+  assert.equal(pasteSize("z".repeat(2_400_000), "en"), "2.4 MB");
 });

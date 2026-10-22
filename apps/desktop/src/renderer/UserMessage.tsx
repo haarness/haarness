@@ -34,6 +34,8 @@ export function UserMessageBody(props: {
   commandLine?: string | null;
   /** The message is the current Find match: everything in it opens. */
   revealed?: boolean;
+  /** Lines of the prompt a command sent just now will expand to. */
+  pendingPromptLines?: number;
   children?: JSX.Element;
 }) {
   const shown = () => props.commandLine || props.text;
@@ -41,6 +43,13 @@ export function UserMessageBody(props: {
   const prompt = createMemo(() =>
     props.commandLine ? commandPrompt(props.commandLine, props.text) : undefined,
   );
+  /** The "Show prompt" row: the prompt once the command has expanded, or,
+   * while it runs, the size its template promises. */
+  const promptRow = createMemo(() => {
+    const text = prompt();
+    if (text !== undefined) return { text, lines: Math.max(1, countLines(text)) };
+    return props.pendingPromptLines ? { text: undefined, lines: props.pendingPromptLines } : undefined;
+  });
   const foldKey = () => props.id + ":fold";
   const pasteKey = (index: number) => `${props.id}:paste:${index}`;
   const promptKey = () => props.id + ":prompt";
@@ -133,40 +142,45 @@ export function UserMessageBody(props: {
         </button>
       </Show>
       {props.children}
-      <Show when={prompt()}>
-        {(text) => (
-          <div class="command-prompt" classList={{ open: isOpen(promptKey()) }}>
+      <Show when={promptRow()}>
+        {(row) => (
+          <div class="command-prompt" classList={{ open: isOpen(promptKey()) && !!row().text }}>
             <div class="command-prompt-bar">
+              {/* Held from the moment the command is sent, so the row is
+                  there before the prompt it opens arrives. */}
               <button
                 type="button"
                 class="command-prompt-toggle"
-                aria-expanded={isOpen(promptKey())}
+                aria-expanded={isOpen(promptKey()) && !!row().text}
+                disabled={row().text === undefined}
                 onClick={() => setOpen(promptKey(), !isOpen(promptKey()))}
               >
                 <Icon name="chevron" size="xs" class="command-prompt-chevron" />
                 <span>
-                  {isOpen(promptKey())
+                  {isOpen(promptKey()) && row().text
                     ? t("Hide prompt")
-                    : `${t("Show prompt")} · ${
-                        Math.max(1, countLines(text())) === 1
-                          ? t("1 line")
-                          : t("{count} lines", { count: formatNumber(countLines(text())) })
-                      }`}
+                    : row().lines === 1
+                      ? t("Show prompt · 1 line")
+                      : t("Show prompt · {count} lines", { count: formatNumber(row().lines) })}
                 </span>
               </button>
-              <Show when={isOpen(promptKey())}>
-                <Button
-                  icon={copied() ? "check" : "copy"}
-                  size="sm"
-                  label={copied() ? t("Copied") : t("Copy prompt")}
-                  onClick={() => void copyPrompt(text())}
-                />
+              <Show when={isOpen(promptKey()) && row().text}>
+                {(text) => (
+                  <Button
+                    icon={copied() ? "check" : "copy"}
+                    size="sm"
+                    label={copied() ? t("Copied") : t("Copy prompt")}
+                    onClick={() => void copyPrompt(text())}
+                  />
+                )}
               </Show>
             </div>
-            <Show when={isOpen(promptKey())}>
-              <div class="command-prompt-text">
-                <Markdown text={text()} />
-              </div>
+            <Show when={isOpen(promptKey()) && row().text}>
+              {(text) => (
+                <div class="command-prompt-text">
+                  <Markdown text={text()} />
+                </div>
+              )}
             </Show>
           </div>
         )}

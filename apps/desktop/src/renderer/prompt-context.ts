@@ -50,6 +50,39 @@ const pasteSummary = (text: string) => {
   const lines = Math.max(1, countLines(text));
   return `Pasted text · ${lines} ${lines === 1 ? "line" : "lines"}`;
 };
+/** What the desktop keeps in one stored value (`bounded` in the main
+ * process), counted as it counts it. */
+const STORED_LIMIT = 2 * 1024 * 1024;
+/**
+ * The draft's context as it can be kept across a reload: everything, unless
+ * pastes push it past what Desktop stores in one value; then the pastes that
+ * do not fit are left out (they stay in the open draft and are sent), and
+ * `dropped` names them.
+ */
+export function keptContext(items: PromptContext[]) {
+  if (JSON.stringify(items).length <= STORED_LIMIT) return { kept: items, dropped: [] as string[] };
+  const dropped: string[] = [];
+  let kept: PromptContext[] = items.filter((item) => item.kind !== "paste");
+  for (const item of items) {
+    if (item.kind !== "paste") continue;
+    const next = items.filter((value) => kept.includes(value) || value === item);
+    if (JSON.stringify(next).length <= STORED_LIMIT) kept = next;
+    else dropped.push(item.id);
+  }
+  return { kept, dropped };
+}
+/** How big a paste is, said only once it is big enough to matter: "2.4 MB". */
+export function pasteSize(text: string, locale: string) {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes < 100 * 1000) return "";
+  const [unit, value] = bytes < 1000 * 1000 ? (["kilobyte", bytes / 1000] as const) : (["megabyte", bytes / 1000 / 1000] as const);
+  return new Intl.NumberFormat(locale, {
+    style: "unit",
+    unit,
+    unitDisplay: "short",
+    maximumFractionDigits: unit === "megabyte" ? 1 : 0,
+  }).format(value);
+}
 /** File snapshots and delegations are bounded; a paste stands for text the
  * message box would have taken whole, so it counts toward neither limit. */
 function checkContext(items: PromptContext[]) {

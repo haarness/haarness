@@ -260,11 +260,14 @@ pub(crate) fn paste_label(language: crate::locale::Language, content: &str) -> S
     }
 }
 
-/// `1 line`, `24 lines`.
-pub(crate) fn line_count(language: crate::locale::Language, text: &str) -> String {
-    match text.lines().count() {
-        0 | 1 => language.text("1 line").to_owned(),
-        lines => language.format("{count} lines", &[("count", &lines.to_string())]),
+/// The folded prompt of a slash command: `Show prompt · 24 lines`.
+pub(crate) fn show_prompt(language: crate::locale::Language, prompt: &str) -> String {
+    match prompt.lines().count() {
+        0 | 1 => language.text("Show prompt · 1 line").to_owned(),
+        lines => language.format(
+            "Show prompt · {count} lines",
+            &[("count", &lines.to_string())],
+        ),
     }
 }
 
