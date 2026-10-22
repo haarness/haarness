@@ -2342,27 +2342,39 @@ fn event_stream(
         // from a cursor with nothing to replay would wait for the keepalive.
         yield Ok(Event::default().comment("connected"));
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
-        // A published chat's stream leaves out other chats' events before
-        // joining, so they never break its runs of deltas.
-        let mut scope = crate::remote_scope::EventScope::new(root);
-        let mut replay = Vec::with_capacity(subscription.replay.len());
-        for event in subscription.replay {
-            if scope.allows(&event, &state.runtime).await { replay.push(event); }
-        }
-        for event in haarness_core::join_deltas(replay) { yield Ok(to_sse(&event)); }
-        let mut live = haarness_core::JoinedEvents::new(subscription.receiver);
+        // The connection takes every event as it is published, apart from
+        // writing to its client: a client that reads slowly keeps its place
+        // (see PendingEvents) instead of falling out of the bus's queue.
+        let pending = Arc::new(parking_lot::Mutex::new(Pending::default()));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let _pump = AbortOnDrop(tokio::spawn(pump_events(
+            subscription,
+            crate::remote_scope::EventScope::new(root),
+            Arc::clone(&state.runtime),
+            Arc::clone(&pending),
+            Arc::clone(&wake),
+        )));
         loop {
-            let received = tokio::select! {
-                () = shutdown.cancelled() => break,
-                received = live.next_kept(|event| scope.decided(event)) => received,
-            };
-            match received {
-                haarness_core::LiveEvent::Event(event) => if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); },
-                haarness_core::LiveEvent::Behind(skipped) => {
-                    tracing::info!(skipped, "event stream fell behind; its client resyncs");
-                    yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}"));
+            let next = {
+                let mut waiting = pending.lock();
+                if waiting.behind {
+                    waiting.behind = false;
+                    Some(None)
+                } else if let Some(event) = waiting.events.pop() {
+                    Some(Some(event))
+                } else if waiting.closed {
+                    break;
+                } else {
+                    None
                 }
-                haarness_core::LiveEvent::Closed => break,
+            };
+            match next {
+                Some(Some(event)) => yield Ok(to_sse(&event)),
+                Some(None) => yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}")),
+                None => tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    () = wake.notified() => {}
+                },
             }
         }
     };
@@ -2371,6 +2383,79 @@ fn event_stream(
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     )
+}
+/// What waits for one event-stream connection.
+struct Pending {
+    events: haarness_core::PendingEvents,
+    /// The connection lost events and its client must resync.
+    behind: bool,
+    /// The bus is gone.
+    closed: bool,
+}
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            events: haarness_core::PendingEvents::new(haarness_core::PENDING_EVENTS_LIMIT),
+            behind: false,
+            closed: false,
+        }
+    }
+}
+
+/// Aborts its task when dropped: a connection's pump ends with it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Moves one connection's events from the bus into its queue as they are
+/// published, the replay first: those its client may see (a published
+/// chat's stream leaves out other chats' before they could break its runs
+/// of deltas), joined while they wait.
+async fn pump_events(
+    subscription: haarness_core::EventSubscription,
+    mut scope: crate::remote_scope::EventScope,
+    runtime: Arc<AgentRuntime>,
+    pending: Arc<parking_lot::Mutex<Pending>>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    let queue = |event: EventEnvelope| {
+        let mut waiting = pending.lock();
+        if let Err(dropped) = waiting.events.push(event) {
+            tracing::info!(
+                skipped = dropped,
+                "event stream fell behind; its client resyncs"
+            );
+            waiting.behind = true;
+        }
+        drop(waiting);
+        wake.notify_one();
+    };
+    for event in subscription.replay {
+        if scope.allows(&event, &runtime).await {
+            queue(event);
+        }
+    }
+    let mut receiver = subscription.receiver;
+    loop {
+        match receiver.recv().await {
+            Ok(event) => {
+                if scope.allows(&event, &runtime).await {
+                    queue(event);
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::info!(skipped, "event stream fell behind; its client resyncs");
+                pending.lock().behind = true;
+                wake.notify_one();
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    pending.lock().closed = true;
+    wake.notify_one();
 }
 fn to_sse(event: &EventEnvelope) -> Event {
     Event::default()

@@ -7318,6 +7318,119 @@ async fn a_reconnecting_event_stream_gets_waiting_deltas_joined_and_unbuffered()
     handle.shutdown().await.unwrap();
 }
 
+/// An HTTP/1.1 chunked body's bytes, as far as whole chunks go.
+fn dechunked(raw: &[u8]) -> Vec<u8> {
+    let Some(start) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Vec::new();
+    };
+    let (mut rest, mut body) = (&raw[start + 4..], Vec::new());
+    while let Some(end) = rest.windows(2).position(|window| window == b"\r\n") {
+        let Ok(size) = usize::from_str_radix(&String::from_utf8_lossy(&rest[..end]), 16) else {
+            break;
+        };
+        let chunk = &rest[end + 2..];
+        if size == 0 || chunk.len() < size + 2 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..size]);
+        rest = &chunk[size + 2..];
+    }
+    body
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_reads_nothing_for_a_while_keeps_its_place_and_every_word() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let (thread, turn) = (
+        haarness_protocol::ThreadId::new(),
+        haarness_protocol::TurnId::new(),
+    );
+    // A small receive buffer, so the socket fills soon.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let mut connection = socket.connect(handle.address).await.unwrap();
+    connection
+        .write_all(
+            format!(
+                "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer activity-token\r\nLast-Event-ID: {}\r\n\r\n",
+                handle.address,
+                runtime.events().cursor()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The client reads nothing: a large event fills its socket, and while it
+    // waits there far more deltas than the bus keeps are published.
+    runtime.events().publish(
+        "item.created",
+        Some(thread),
+        Some(turn),
+        None,
+        serde_json::json!({"text": "x".repeat(8 * 1024 * 1024)}),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut written = String::new();
+    for word in 0..5000 {
+        let word = format!("w{word} ");
+        written.push_str(&word);
+        runtime.events().publish(
+            "turn.text_delta",
+            Some(thread),
+            Some(turn),
+            None,
+            serde_json::json!({"delta": word}),
+        );
+    }
+    runtime.events().publish(
+        "turn.finished",
+        Some(thread),
+        Some(turn),
+        None,
+        serde_json::json!({}),
+    );
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let marker = b"event: turn.finished";
+        loop {
+            let read = connection.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "the stream ended");
+            raw.extend_from_slice(&buffer[..read]);
+            let tail = &raw[raw.len().saturating_sub(read + marker.len())..];
+            if tail.windows(marker.len()).any(|window| window == marker) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the stream reaches the end");
+    let text = String::from_utf8(dechunked(&raw)).unwrap();
+    assert!(
+        !text.contains("resync_required"),
+        "the client lost its place"
+    );
+    let read: String = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: turn.text_delta"))
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            let event: Value = serde_json::from_str(data).unwrap();
+            event["payload"]["delta"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(read, written);
+    handle.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_published_chats_stream_joins_its_deltas_across_other_chats_events() {
     let workspace = std::env::temp_dir();
