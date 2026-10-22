@@ -1669,6 +1669,9 @@ async fn cli_main() -> Result<()> {
             "command failed"
         );
     }
+    // A sign-in renewal its server already answered must be saved, or the
+    // next one sends a spent token and the sign-in ends.
+    haarness_account::renewals::settle(Duration::from_secs(5)).await;
     drop(telemetry_guard);
     outcome
 }
@@ -5586,6 +5589,7 @@ async fn stop_on_signal<T>(
         },
         _ = run_stop_signal() => {}
     }
+    haarness_account::renewals::settle(Duration::from_secs(5)).await;
     std::process::exit(status)
 }
 

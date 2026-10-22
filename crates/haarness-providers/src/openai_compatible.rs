@@ -30,6 +30,8 @@ pub struct OpenAiCompatibleProvider {
     auth_store: Option<Arc<CredentialStore>>,
     auth_aliases: Vec<String>,
     xai_oauth: Option<XaiOAuthClient>,
+    /// How long a sign-in renewal may wait for its server.
+    renewal_limit: std::time::Duration,
     /// Held by the renewal task, not its caller (see [`Self::bearer_token`]).
     refresh_lock: Arc<Mutex<()>>,
     models: Vec<ModelInfo>,
@@ -98,6 +100,7 @@ impl OpenAiCompatibleProvider {
             auth_aliases: Vec::new(),
             xai_oauth: (provider_id == "xai").then(XaiOAuthClient::default),
             refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             models: instance
                 .models
@@ -250,6 +253,7 @@ impl OpenAiCompatibleProvider {
             auth_aliases: Vec::new(),
             xai_oauth: None,
             refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             models: vec![model_info("openai-compatible", "compat-test", defaults)],
             reasoning_effort_models: HashSet::from(["compat-test".into()]),
@@ -315,17 +319,26 @@ impl OpenAiCompatibleProvider {
                 // that gives up mid-refresh (a Stop) must not drop the new one
                 // before it is saved, or the next request sends the spent one
                 // and the sign-in ends: the renewal runs on its own task,
-                // which keeps the lock until it has saved.
+                // which keeps the lock until it has saved, or until xAI has
+                // not answered for `renewal_limit`.
                 let (client, store, stale, credential_id) = (
                     client.clone(),
                     store.clone(),
                     current.clone(),
                     credential_id.to_owned(),
                 );
-                let renewed = tokio::spawn(async move {
+                let (limit, name) = (self.renewal_limit, self.name.clone());
+                let renewed = haarness_account::renewals::spawn(async move {
                     let _guard = guard;
                     let oauth = stale.oauth_parts().expect("an OAuth credential");
-                    let next = client.refresh(oauth).await.map_err(provider_error)?;
+                    let next = tokio::time::timeout(limit, client.refresh(oauth))
+                        .await
+                        .map_err(|_| {
+                            CoreError::Provider(format!(
+                                "{name} did not answer the sign-in renewal in time; try again"
+                            ))
+                        })?
+                        .map_err(provider_error)?;
                     let saved = store
                         .replace_oauth_if_current(&credential_id, &expected_refresh, &next)
                         .map_err(provider_error)?;
@@ -1753,6 +1766,83 @@ mod tests {
         assert_eq!(presented.lock().len(), 1);
         let stored = store.get("xai").unwrap().unwrap();
         assert_eq!(stored.oauth_parts().unwrap().refresh, "refresh-new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_xai_renewal_the_server_never_answers_frees_the_next_request() {
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gate = stalled.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route(
+                "/token",
+                post(move |state: State<Arc<AtomicUsize>>| {
+                    let gate = gate.clone();
+                    async move {
+                        if gate.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                        }
+                        xai_refresh(state).await
+                    }
+                }),
+            )
+            .with_state(calls.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-xai-stalled-refresh-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(CredentialStore::new(root.join("auth.json")));
+        store
+            .set(
+                "xai",
+                &Credential::oauth("access-old".into(), "refresh-old".into(), 1, None),
+            )
+            .unwrap();
+        let mut provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "xai".into(),
+            name: "xAI".into(),
+            base_url: "http://unused.invalid/v1".into(),
+            api_key: None,
+            models: vec!["grok-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .with_auth_store(Some(store.clone()));
+        provider.renewal_limit = std::time::Duration::from_millis(300);
+        provider.xai_oauth = Some(XaiOAuthClient::new(XaiOAuthConfig {
+            token_url: format!("http://{address}/token"),
+            device_url: format!("http://{address}/device"),
+            client_id: "test-client".into(),
+            scope: "test".into(),
+            user_agent: "haarness-test".into(),
+        }));
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(10), provider.bearer_token())
+                .await
+                .expect("the renewal gave up within its limit")
+                .expect_err("the stalled renewal failed")
+                .to_string();
+        assert!(
+            error.contains("xAI did not answer the sign-in renewal in time"),
+            "{error}"
+        );
+        stalled.store(false, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), provider.bearer_token())
+                .await
+                .expect("the next request was not held by the lock")
+                .unwrap()
+                .as_deref(),
+            Some("access-new")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -5,6 +5,7 @@ pub mod cloud;
 pub mod credentials;
 pub mod loopback;
 pub mod pkce;
+pub mod renewals;
 pub mod routers;
 pub mod websocket;
 
@@ -372,11 +373,12 @@ impl Client {
         // Cloud spends a refresh token the moment it answers, and revokes the
         // whole sign-in when a spent one comes back. A caller that gives up
         // mid-refresh (a Stop, a timeout) must not drop the new pair before it
-        // is saved, so the renewal runs on its own task: the caller returns at
-        // once, and the task still saves what Cloud sent.
+        // is saved, so the renewal runs on its own task (see [`renewals`]):
+        // the caller returns at once, and the task still saves what Cloud
+        // sent. Its requests time out after 30 s, which bounds it.
         let client = self.clone();
         let rejected = rejected.map(str::to_owned);
-        tokio::spawn(async move { client.current_bearer(rejected.as_deref()).await })
+        renewals::spawn(async move { client.current_bearer(rejected.as_deref()).await })
             .await
             .map_err(|_| {
                 Error::Other("Renewing the Haarness Cloud sign-in stopped unexpectedly".into())

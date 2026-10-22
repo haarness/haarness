@@ -26,6 +26,8 @@ pub struct OpenAiProvider {
     api_key: Option<SecretString>,
     auth_store: Option<Arc<CredentialStore>>,
     oauth: OpenAiOAuthClient,
+    /// How long a sign-in renewal may wait for its server.
+    renewal_limit: std::time::Duration,
     /// Held by the renewal task, not its caller (see [`Self::request_auth`]).
     refresh_lock: Arc<Mutex<()>>,
     models: Vec<ModelInfo>,
@@ -56,6 +58,7 @@ impl OpenAiProvider {
             auth_store: None,
             oauth: OpenAiOAuthClient::default(),
             refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
@@ -204,6 +207,7 @@ impl OpenAiProvider {
             auth_store: None,
             oauth: OpenAiOAuthClient::default(),
             refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
@@ -227,6 +231,7 @@ impl OpenAiProvider {
             auth_store: Some(store),
             oauth,
             refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
@@ -270,13 +275,23 @@ impl OpenAiProvider {
                 // request that gives up mid-refresh (a Stop) must not drop the
                 // new one before it is saved, or the next request sends the
                 // spent one and the sign-in ends: the renewal runs on its own
-                // task, which keeps the lock until it has saved.
+                // task, which keeps the lock until it has saved, or until
+                // OpenAI has not answered for `renewal_limit`.
                 let (oauth, store, stale) = (self.oauth.clone(), store.clone(), credential.clone());
-                credential = tokio::spawn(async move {
+                let limit = self.renewal_limit;
+                credential = haarness_account::renewals::spawn(async move {
                     let _guard = guard;
                     let current = stale.oauth_parts().expect("an OAuth credential");
                     let expected_refresh = current.refresh.to_owned();
-                    let next = oauth.refresh(current).await.map_err(provider_error)?;
+                    let next = tokio::time::timeout(limit, oauth.refresh(current))
+                        .await
+                        .map_err(|_| {
+                            CoreError::Provider(
+                                "ChatGPT did not answer the sign-in renewal in time; try again"
+                                    .into(),
+                            )
+                        })?
+                        .map_err(provider_error)?;
                     if store
                         .replace_oauth_if_current("openai", &expected_refresh, &next)
                         .map_err(provider_error)?
@@ -1474,6 +1489,88 @@ mod tests {
         assert_eq!(state.refreshes.load(Ordering::SeqCst), 1);
         let persisted = store.get("openai").unwrap().unwrap();
         assert_eq!(persisted.oauth_parts().unwrap().refresh, "refresh-2");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A token endpoint that stops answering must not hold the refresh lock
+    /// until restart: the renewal gives up after its limit and the next
+    /// request renews again.
+    #[tokio::test]
+    async fn a_renewal_the_server_never_answers_frees_the_next_request() {
+        let state = FixtureState::default();
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gate = stalled.clone();
+        let router = Router::new()
+            .route("/responses", post(responses))
+            .route(
+                "/oauth/token",
+                post(move |state: State<FixtureState>, body: String| {
+                    let gate = gate.clone();
+                    async move {
+                        if gate.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_secs(300)).await;
+                        }
+                        refresh_token(state, body).await
+                    }
+                }),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-openai-stalled-refresh-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(crate::auth::CredentialStore::new(root.join("auth.json")));
+        store
+            .set(
+                "openai",
+                &crate::auth::Credential::oauth("expired".into(), "refresh-1".into(), 1, None),
+            )
+            .unwrap();
+        let mut provider = OpenAiProvider::for_oauth_test(
+            format!("http://{address}/responses"),
+            format!("http://{address}"),
+            store.clone(),
+        );
+        provider.renewal_limit = Duration::from_millis(300);
+        let request = || ProviderRequest {
+            model: "gpt-test".into(),
+            system: "test".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let stalled_request = tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.stream(request(), CancellationToken::new()),
+        )
+        .await
+        .expect("the renewal gave up within its limit");
+        let error = stalled_request
+            .err()
+            .expect("the stalled renewal failed")
+            .to_string();
+        assert!(
+            error.contains("did not answer the sign-in renewal in time"),
+            "{error}"
+        );
+        stalled.store(false, Ordering::SeqCst);
+        let stream = tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.stream(request(), CancellationToken::new()),
+        )
+        .await
+        .expect("the next request was not held by the lock")
+        .unwrap();
+        assert!(stream.collect::<Vec<_>>().await.iter().all(Result::is_ok));
         let _ = std::fs::remove_dir_all(root);
     }
 
