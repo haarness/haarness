@@ -631,9 +631,8 @@ fn parse_goal_criteria_selection(proposed: &[String], answer: &str) -> CoreResul
 
 /// The `StopFailure` category of a turn's terminal error. A provider error
 /// is named for what its message says happened (as Claude Code names them);
-/// one that says nothing Haarness recognises stays `provider`,
-/// the name every provider error had before, which a hook matcher still
-/// uses for all of them.
+/// one that says nothing Haarness recognises stays `provider`, the name every
+/// provider error had before, which a hook matcher still uses for all of them.
 fn stop_failure_category(error: &CoreError) -> &'static str {
     let CoreError::Provider(message) = error else {
         return match error {
@@ -6026,7 +6025,7 @@ impl PendingQuestion {
     }
 }
 
-/// See [`Runtime::publish_permission_resolved`].
+/// See [`AgentRuntime::publish_permission_resolved`].
 fn publish_permission_resolved(
     events: &EventBus,
     id: &str,
