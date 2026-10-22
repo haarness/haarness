@@ -63,8 +63,8 @@ with LocalServer.start("/path/to/project", executable="/path/to/haarness") as se
 # async with await AsyncLocalServer.start(...) as server:
 ```
 
-Local server helpers own and clean up only their child, fail on an existing
-workspace lease, and load project configuration by default without automatically approving tools.
+Local server helpers own and clean up only their child (in a folder whose server
+already runs, a front for it at its own address, never a replacement), and load project configuration by default without automatically approving tools.
 
 The repository's `sdks/OPERATIONS.md` lists every method; `sdks/README.md`
 describes generation and `scripts/test-sdks.sh` runs the real-server E2E gate.
