@@ -49,8 +49,13 @@ impl EventScope {
             reads: 0,
         }
     }
-    pub async fn allows(&mut self, event: &EventEnvelope, runtime: &AgentRuntime) -> bool {
-        let Some(root) = self.root else { return true };
+    /// Whether `event` reaches this stream's client, when that is known
+    /// without reading the chat tree again (`None` when it is not).
+    #[must_use]
+    pub fn decided(&self, event: &EventEnvelope) -> Option<bool> {
+        let Some(root) = self.root else {
+            return Some(true);
+        };
         // Published chats explicitly share project files and readable capability catalogs.
         // Their invalidations carry no unrelated conversation content.
         if event.thread_id.is_none()
@@ -59,24 +64,29 @@ impl EventScope {
                 "files.updated" | "assets.updated"
             )
         {
-            return true;
+            return Some(true);
         }
         if event.root_thread_id == Some(root) || event.thread_id == Some(root) {
-            return true;
+            return Some(true);
         }
         let Some(thread) = event.thread_id else {
-            return false;
+            return Some(false);
         };
         if self.outside.contains(&thread) {
-            return false;
+            return Some(false);
         }
-        if self
-            .tree
+        self.tree
             .as_ref()
             .is_some_and(|tree| tree.contains(&thread))
-        {
-            return true;
+            .then_some(true)
+    }
+    pub async fn allows(&mut self, event: &EventEnvelope, runtime: &AgentRuntime) -> bool {
+        if let Some(decided) = self.decided(event) {
+            return decided;
         }
+        let (Some(root), Some(thread)) = (self.root, event.thread_id) else {
+            return false;
+        };
         // A chat never changes its parent, so one that is outside the tree
         // now stays outside; a new subagent joins at its first event.
         self.reads += 1;
