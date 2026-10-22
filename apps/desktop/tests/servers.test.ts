@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cloudServers, migrateServers, serverKey, serverProjects } from "../src/servers";
+import {
+  cloudServers,
+  localServer,
+  migrateServers,
+  serverAfterRemoval,
+  serverKey,
+  serverProjects,
+} from "../src/servers";
 import { groupProjects } from "../src/projects";
 import type { Recent } from "../src/shared";
 
@@ -105,4 +112,14 @@ test("Cloud sessions of one account form one Haarness Cloud server, never a save
   assert.deepEqual(migrateServers(recent, [stale]), [
     { id: remote.id, label: "Build server", url: "https://one.example" },
   ]);
+});
+
+test("a window leaving a removed project stays on its server while it is listed, else goes to this computer", () => {
+  const remote = { id: "remote:https://host", label: "Host", url: "https://host" };
+  assert.equal(serverAfterRemoval([localServer, remote], remote.id), remote.id);
+  // The last project of a Cloud account takes the account's entry with it.
+  assert.equal(
+    serverAfterRemoval([localServer, remote, ...cloudServers([])], "cloud::account"),
+    "local",
+  );
 });
