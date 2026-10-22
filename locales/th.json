@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "บันทึกไว้ที่ {path} แล้ว · คัดลอกพาธแล้ว",
   "{count} older files left out past 200 MB": "ข้ามไฟล์เก่า {count} ไฟล์ที่เกิน 200 MB",
   "Could not export logs: {error}": "ส่งออกบันทึกไม่ได้: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} ไม่ใช่ไฟล์ zip ของบันทึก โปรดเลือกชื่ออื่น",
   "Could not change detailed logging: {error}": "เปลี่ยนการบันทึกแบบละเอียดไม่ได้: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "ปิดการบันทึกแบบละเอียด · /logs detail on · /logs export [พาธ]",
   "Detailed logging on until {time} · /logs detail off stops it": "เปิดการบันทึกแบบละเอียดถึง {time} · /logs detail off เพื่อหยุด",

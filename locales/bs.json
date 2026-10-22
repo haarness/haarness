@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Zapisnici sačuvani u {path} · putanja kopirana",
   "{count} older files left out past 200 MB": "{count} starijih datoteka izostavljeno preko 200 MB",
   "Could not export logs: {error}": "Izvoz zapisnika nije uspio: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} nije zip sa zapisnicima; odaberi drugo ime",
   "Could not change detailed logging: {error}": "Detaljno bilježenje nije moguće promijeniti: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Detaljno bilježenje isključeno · /logs detail on · /logs export [putanja]",
   "Detailed logging on until {time} · /logs detail off stops it": "Detaljno bilježenje uključeno do {time} · /logs detail off ga zaustavlja",

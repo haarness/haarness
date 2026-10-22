@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Logs saved to {path} · path copied",
   "{count} older files left out past 200 MB": "{count} older files left out past 200 MB",
   "Could not export logs: {error}": "Could not export logs: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} is not a zip of logs; choose another name",
   "Could not change detailed logging: {error}": "Could not change detailed logging: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Detailed logging off · /logs detail on · /logs export [path]",
   "Detailed logging on until {time} · /logs detail off stops it": "Detailed logging on until {time} · /logs detail off stops it",

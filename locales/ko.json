@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "로그를 {path}에 저장했습니다 · 경로 복사됨",
   "{count} older files left out past 200 MB": "200MB를 넘어 오래된 파일 {count}개는 제외했습니다",
   "Could not export logs: {error}": "로그를 내보내지 못했습니다: {error}",
+  "{path} is not a zip of logs; choose another name": "{path}은(는) 로그 zip 파일이 아닙니다. 다른 이름을 선택하세요",
   "Could not change detailed logging: {error}": "자세한 로깅을 바꾸지 못했습니다: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "자세한 로깅 꺼짐 · /logs detail on · /logs export [경로]",
   "Detailed logging on until {time} · /logs detail off stops it": "자세한 로깅 켜짐({time}까지) · /logs detail off로 중지",

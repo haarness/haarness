@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "ログを {path} に保存しました · パスをコピー済み",
   "{count} older files left out past 200 MB": "200 MB を超えたため古いファイル {count} 件を除きました",
   "Could not export logs: {error}": "ログを書き出せませんでした: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} はログの zip ではありません。別の名前を選んでください",
   "Could not change detailed logging: {error}": "詳細なログを切り替えられませんでした: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "詳細なログ: オフ · /logs detail on · /logs export [パス]",
   "Detailed logging on until {time} · /logs detail off stops it": "詳細なログ: {time} までオン · /logs detail off で停止",

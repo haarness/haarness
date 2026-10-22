@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "حُفظت السجلات في {path} · نُسخ المسار",
   "{count} older files left out past 200 MB": "استُبعد {count} من الملفات الأقدم بعد تجاوز 200 ميغابايت",
   "Could not export logs: {error}": "تعذّر تصدير السجلات: {error}",
+  "{path} is not a zip of logs; choose another name": "‏{path} ليس ملف zip للسجلات؛ اختر اسمًا آخر",
   "Could not change detailed logging: {error}": "تعذّر تغيير التسجيل المفصّل: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "التسجيل المفصّل متوقف · ‎/logs detail on · ‎/logs export [المسار]",
   "Detailed logging on until {time} · /logs detail off stops it": "التسجيل المفصّل مفعّل حتى {time} · ‎/logs detail off يوقفه",

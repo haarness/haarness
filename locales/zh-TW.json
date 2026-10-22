@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "記錄已儲存到 {path} · 已複製路徑",
   "{count} older files left out past 200 MB": "超過 200 MB，已略過 {count} 個較舊的檔案",
   "Could not export logs: {error}": "無法匯出記錄：{error}",
+  "{path} is not a zip of logs; choose another name": "{path} 不是記錄 zip 檔，請換一個名稱",
   "Could not change detailed logging: {error}": "無法變更詳細記錄：{error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "詳細記錄已關閉 · /logs detail on · /logs export [路徑]",
   "Detailed logging on until {time} · /logs detail off stops it": "詳細記錄已開啟，直到 {time} · /logs detail off 可停止",

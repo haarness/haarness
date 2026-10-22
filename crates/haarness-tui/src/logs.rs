@@ -104,30 +104,77 @@ fn downloads() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Where `/logs export [path]` writes: a typed file, a typed folder (or one
-/// ending in `/`) with the default name inside, or the Downloads folder.
-/// `~` is the home folder; a relative path starts where the TUI started.
+/// A path as typed in a shell: surrounding quotes go, and off Windows a
+/// backslash keeps the character after it (`bug\ report`). Windows paths keep
+/// their backslashes, which are separators there.
+fn unquote(typed: &str) -> String {
+    let typed = typed.trim();
+    let quoted = typed.len() >= 2
+        && ((typed.starts_with('"') && typed.ends_with('"'))
+            || (typed.starts_with('\'') && typed.ends_with('\'')));
+    let typed = if quoted {
+        &typed[1..typed.len() - 1]
+    } else {
+        typed
+    };
+    if cfg!(windows) || quoted {
+        return typed.to_owned();
+    }
+    let mut plain = String::with_capacity(typed.len());
+    let mut characters = typed.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => plain.extend(characters.next()),
+            character => plain.push(character),
+        }
+    }
+    plain
+}
+
+/// Where `/logs export [path]` writes: a typed file (`.zip` added when it
+/// has no extension), a typed folder (or one ending in a separator) with the
+/// default name inside, or the Downloads folder. `~` is the home folder; a
+/// relative path starts where the TUI started.
 pub(crate) fn export_path(
     typed: Option<&str>,
     now: DateTime<Local>,
     home: Option<&Path>,
 ) -> PathBuf {
     let name = format!("haarness-logs-{}.zip", now.format("%Y-%m-%d-%H%M%S"));
-    let Some(typed) = typed.map(str::trim).filter(|typed| !typed.is_empty()) else {
+    let typed = typed.map(unquote).filter(|typed| !typed.is_empty());
+    let Some(typed) = typed else {
         return downloads().join(name);
     };
-    let expanded = match (typed.strip_prefix("~"), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            home.join(rest.trim_start_matches('/'))
+    let expanded = match (typed.strip_prefix('~'), home) {
+        (Some(rest), Some(home))
+            if rest.is_empty() || rest.starts_with(std::path::is_separator) =>
+        {
+            home.join(rest.trim_start_matches(std::path::is_separator))
         }
-        _ => PathBuf::from(typed),
+        _ => PathBuf::from(&typed),
     };
-    let path = std::path::absolute(&expanded).unwrap_or(expanded);
-    if typed.ends_with('/') || path.is_dir() {
-        path.join(name)
-    } else {
-        path
+    let mut path = std::path::absolute(&expanded).unwrap_or(expanded);
+    if typed.ends_with(std::path::is_separator) || path.is_dir() {
+        return path.join(name);
     }
+    if path.extension().is_none() {
+        path.set_extension("zip");
+    }
+    path
+}
+
+/// Whether writing the zip at `path` would replace a file that is not one:
+/// an export never overwrites someone's notes or a log they typed by mistake.
+pub(crate) fn replaces_other_file(path: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if !path.is_file() {
+        return true;
+    }
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic).is_err() || magic != *b"PK\x03\x04"
 }
 
 /// Runs `haarness logs <args> --json` and returns what it printed.
@@ -245,6 +292,13 @@ impl App {
             Request::Export(typed) => {
                 let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
                 let path = export_path(typed.as_deref(), Local::now(), home.as_deref());
+                if replaces_other_file(&path) {
+                    self.notice = self.language.format(
+                        "{path} is not a zip of logs; choose another name",
+                        &[("path", &path.display().to_string())],
+                    );
+                    return;
+                }
                 self.notice = self.language.text("Exporting this computer's logs…").into();
                 tokio::spawn(async move {
                     let _ = sender.send(export(program, path).await);
@@ -375,6 +429,30 @@ mod tests {
             default.is_absolute() && default.ends_with(&name),
             "{default:?}"
         );
+        // As a shell takes it: quotes, an escaped space, no extension.
+        assert_eq!(
+            export_path(Some("\"~/bug report/\""), now, Some(&home)),
+            home.join("bug report").join(&name)
+        );
+        assert_eq!(
+            export_path(Some("'~/My Logs'"), now, Some(&home)),
+            home.join("My Logs.zip")
+        );
+        if !cfg!(windows) {
+            assert_eq!(
+                export_path(Some(r"~/bug\ report/run"), now, Some(&home)),
+                home.join("bug report").join("run.zip")
+            );
+        }
+        // A zip it wrote before may be replaced; someone's notes may not.
+        let notes = home.join("notes.txt");
+        std::fs::write(&notes, "keep me").unwrap();
+        assert!(replaces_other_file(&notes));
+        assert!(replaces_other_file(&home.join("Desktop")));
+        let earlier = home.join("earlier.zip");
+        std::fs::write(&earlier, b"PK\x03\x04rest").unwrap();
+        assert!(!replaces_other_file(&earlier));
+        assert!(!replaces_other_file(&home.join("new.zip")));
         std::fs::remove_dir_all(home).unwrap();
     }
 

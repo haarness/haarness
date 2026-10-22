@@ -8,7 +8,9 @@ Drives an attached TUI in tmux, with the echo provider and an isolated data fold
   through the same control file `haarness logs level` writes, and the running
   workspace server follows it; `/logs detail` turns it off again.
 - `/logs export` writes a scrubbed zip to Downloads, says where, and copies the
-  path; a typed folder (made when missing), `~` and a relative path work too.
+  path; a typed folder (made when missing), `~`, a relative path and a quoted
+  path without an extension work too, and a file that is not a zip is never
+  replaced.
 - An unknown argument says how to use it.
 
 Evidence (pane captures) goes to `$HAARNESS_LOGS_EVIDENCE` when set.
@@ -151,10 +153,23 @@ try:
     send("/logs export picked.zip")
     until(lambda: (started_in / "picked.zip").exists(), "a relative path did not start where the TUI started")
 
+    until(lambda: "Logs saved to " in pane() and "picked.zip" in pane(), "the relative export did not finish")
+    # As a shell takes it: quotes around a path with a space, no extension.
+    send('/logs export "~/My Logs/run two"')
+    until(lambda: (server.home / "My Logs" / "run two.zip").exists(), "a quoted path without an extension was not written as .zip")
+    until(lambda: "Logs saved to ~/My Logs/run two.zip" in pane(), "the quoted export did not finish")
+    # A file that is not a zip is never replaced.
+    notes = server.home / "notes.txt"
+    notes.write_text("keep me\n")
+    send("/logs export ~/notes.txt")
+    until(lambda: "notes.txt is not a zip of logs; choose another name" in pane(), "a non-zip file was not refused")
+    assert notes.read_text() == "keep me\n"
+    keep("logs-refused")
+
     send("/logs loud")
     until(lambda: "Use /logs export [path] or /logs detail [on|off]" in pane(), "an unknown argument did not say how to use /logs")
     keep("logs-usage")
-    print("PASS: /logs status, detail on (the server follows) and off, export to Downloads (scrubbed, path copied), a typed folder, a relative path, and usage")
+    print("PASS: /logs status, detail on (the server follows) and off, export to Downloads (scrubbed, path copied), a typed folder, a relative path, a quoted path without extension, refusing a non-zip file, and usage")
 finally:
     subprocess.run(["tmux", "-L", SOCKET, "kill-server"], capture_output=True)
     server.close()

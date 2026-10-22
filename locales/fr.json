@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Journaux enregistrés dans {path} · chemin copié",
   "{count} older files left out past 200 MB": "{count} fichiers plus anciens omis au-delà de 200 Mo",
   "Could not export logs: {error}": "Impossible d’exporter les journaux : {error}",
+  "{path} is not a zip of logs; choose another name": "{path} n’est pas un zip de journaux ; choisissez un autre nom",
   "Could not change detailed logging: {error}": "Impossible de modifier la journalisation détaillée : {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Journalisation détaillée désactivée · /logs detail on · /logs export [chemin]",
   "Detailed logging on until {time} · /logs detail off stops it": "Journalisation détaillée activée jusqu’à {time} · /logs detail off l’arrête",

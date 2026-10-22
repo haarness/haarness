@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Protokolle gespeichert unter {path} · Pfad kopiert",
   "{count} older files left out past 200 MB": "{count} ältere Dateien über 200 MB weggelassen",
   "Could not export logs: {error}": "Protokolle konnten nicht exportiert werden: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} ist kein ZIP mit Protokollen; wähle einen anderen Namen",
   "Could not change detailed logging: {error}": "Ausführliche Protokollierung konnte nicht geändert werden: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Ausführliche Protokollierung aus · /logs detail on · /logs export [Pfad]",
   "Detailed logging on until {time} · /logs detail off stops it": "Ausführliche Protokollierung an bis {time} · /logs detail off beendet sie",

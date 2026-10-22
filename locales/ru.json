@@ -1710,6 +1710,7 @@
   "Logs saved to {path} · path copied": "Журналы сохранены в {path} · путь скопирован",
   "{count} older files left out past 200 MB": "{count} старых файлов не вошли сверх 200 МБ",
   "Could not export logs: {error}": "Не удалось экспортировать журналы: {error}",
+  "{path} is not a zip of logs; choose another name": "{path} — не zip-архив журналов; выберите другое имя",
   "Could not change detailed logging: {error}": "Не удалось переключить подробные журналы: {error}",
   "Detailed logging off · /logs detail on · /logs export [path]": "Подробные журналы выключены · /logs detail on · /logs export [путь]",
   "Detailed logging on until {time} · /logs detail off stops it": "Подробные журналы включены до {time} · /logs detail off — остановить",
