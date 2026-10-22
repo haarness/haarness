@@ -12,11 +12,34 @@ from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = os.environ.get('HAARNESS_POWERSHELL') or shutil.which('pwsh') or shutil.which('powershell')
-state = {'mode': 'corrupt', 'payload': b'', 'version': '0.1.0', 'queries': []}
+# edge: the Content-Location the service names when asked with HEAD ({port} filled in); None has it refuse HEAD,
+# as a service from before the release domain did. The edge, under /edge/, sends the file as R2 does (no checksum
+# headers), edge_status instead, or other bytes when edge_corrupt.
+state = {'mode': 'corrupt', 'payload': b'', 'version': '0.1.0', 'queries': [], 'paths': [],
+         'edge': None, 'edge_status': 200, 'edge_corrupt': False}
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
+    def do_HEAD(self):
+        if state['edge'] is None or state['mode'] != 'ok':
+            self.send_error(501)
+            return
+        self.send_response(200)
+        self.send_header('x-content-sha256', hashlib.sha256(state['payload']).hexdigest())
+        self.send_header('x-haarness-version', state['version'])
+        self.send_header('content-location', state['edge'].format(port=self.server.server_port))
+        self.send_header('content-length', str(len(state['payload'])))
+        self.end_headers()
     def do_GET(self):
+        state['paths'].append(urlsplit(self.path).path)
+        if self.path.startswith('/edge/'):
+            content = b'MZ other bytes' if state['edge_corrupt'] else state['payload']
+            self.send_response(state['edge_status'])
+            self.send_header('etag', '"0f3e-3"')
+            self.send_header('content-length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
         state['queries'].append(parse_qs(urlsplit(self.path).query))
         if state['mode'] == 'absent' or (state.get('no_desktop_release') and '/desktop/' in self.path):
             body = b'{"code":"not_found","message":"release not found"}'
@@ -75,6 +98,23 @@ def main():
             assert result.returncode != 0 and 'does not run on this computer' in result.stdout + result.stderr, result.stdout + result.stderr
             assert installed.read_bytes() == b'existing binary'
             print('PASS: a download that cannot run is refused with a plain message')
+            # A service that names the file's address on its release domain: the bytes come from there and are checked
+            # against the service's checksum ("does not run" comes after the checksum); an edge that does not deliver,
+            # or a plain-HTTP address, leaves the service to send the file.
+            service = '/api/v1/releases/preview/cli/download'
+            for edge, status, corrupt, paths, message in (
+                    ('http://127.0.0.1:{port}/edge/cli', 200, False, ['/edge/cli'], 'does not run on this computer'),
+                    ('http://127.0.0.1:{port}/edge/cli', 200, True, ['/edge/cli'], 'Checksum mismatch'),
+                    ('http://127.0.0.1:{port}/edge/cli', 404, False, ['/edge/cli', service], 'did not deliver'),
+                    ('http://example.com/edge/cli', 200, False, [service], 'does not run on this computer')):
+                state.update(edge=edge, edge_status=status, edge_corrupt=corrupt, paths=[])
+                result = install(env)
+                output = result.stdout + result.stderr
+                assert result.returncode != 0 and message in output, (edge, status, output)
+                assert state['paths'] == paths, (edge, status, state['paths'])
+                assert installed.read_bytes() == b'existing binary'
+            state.update(edge=None, edge_status=200, edge_corrupt=False)
+            print('PASS: files come from the release domain the service names and match its checksum, or from the service')
             # The default installs the CLI, then Desktop; a CLI that fails stops before Desktop is downloaded.
             default = {k: v for k, v in env.items() if k != 'HAARNESS_PRODUCT'}
             state['mode'], state['queries'] = 'corrupt', []
