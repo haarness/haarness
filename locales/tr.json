@@ -914,6 +914,7 @@
   "Memory for {project}. Stored outside the repository.": "{project} için bellek. Depo dışında saklanır.",
   "Loading memory…": "Bellek yükleniyor…",
   "Memory could not be loaded.": "Bellek yüklenemedi.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Ayar dosyası okunamadığı için bellek kapalı. Kaydetmek dosyayı değiştirir.",
   "Include the memory index in prompts and make memory tools available.": "Bellek dizinini komutlara dahil eder ve bellek araçlarını kullanılabilir yapar.",
   "Index limit must be between 1 and 1000.": "Dizin sınırı 1 ile 1000 arasında olmalıdır.",
   "Memory settings saved. Runtime changes apply when idle.": "Bellek ayarları kaydedildi. Çalışma zamanı değişiklikleri boştayken uygulanır.",

@@ -5555,6 +5555,14 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
+/// A definition's `!` snippet on its way to the shell tool: the text its
+/// permissions are judged on, the text that runs, and that text's values.
+pub(crate) struct DefinitionShell<'a> {
+    shown: &'a str,
+    run: &'a str,
+    env: &'a std::collections::BTreeMap<String, String>,
+}
+
 #[async_trait::async_trait]
 impl crate::ToolInvoker for TurnToolInvoker {
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
@@ -5564,34 +5572,8 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .is_some_and(|tool| tool.parallel_safe(arguments))
     }
     fn activate_skill_permissions(&self, execution: &haarness_protocol::DefinitionExecution) {
-        let expand = |s: &String| {
-            let mut value = s.replace(
-                "${CLAUDE_PROJECT_DIR}",
-                &self.runner.workspace.to_string_lossy(),
-            );
-            if let Some(dir) = &execution.directory {
-                value = value.replace("${CLAUDE_SKILL_DIR}", dir);
-            }
-            if let Some(dir) = &execution.plugin_root {
-                value = value.replace("${CLAUDE_PLUGIN_ROOT}", dir);
-            }
-            value
-        };
-        let mut rules = crate::definitions::approval_rules(
-            &execution
-                .allowed_tools
-                .iter()
-                .map(expand)
-                .collect::<Vec<_>>(),
-        );
-        rules.extend(
-            crate::definitions::approval_rules(&execution.disallowed_tools)
-                .into_iter()
-                .map(|mut rule| {
-                    rule.decision = PermissionDecision::Deny;
-                    rule
-                }),
-        );
+        let rules =
+            crate::definitions::skill_rules(execution, &self.runner.workspace.to_string_lossy());
         self.runner.skill_rules.lock().extend(rules);
     }
     fn workspace(&self) -> Option<String> {
@@ -5611,16 +5593,25 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .map(|agent| agent.id.clone())
             .collect()
     }
-    async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {
+    async fn definition_shell(
+        &self,
+        shown: String,
+        run: String,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> CoreResult<ToolOutput> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         self.runner
             .execute_call_inner(
                 &self.agent,
                 &format!("{}:{sequence}", self.parent_call_id),
                 "bash",
-                json!({"command":command}),
+                json!({"command":shown}),
                 false,
-                true,
+                Some(&DefinitionShell {
+                    shown: &shown,
+                    run: &run,
+                    env: &env,
+                }),
             )
             .await
     }
@@ -5647,7 +5638,7 @@ impl crate::ToolInvoker for TurnToolInvoker {
             + 1;
         let call_id = format!("{}:{sequence}", self.parent_call_id);
         self.runner
-            .execute_call_inner(&self.agent, &call_id, name, arguments, false, false)
+            .execute_call_inner(&self.agent, &call_id, name, arguments, false, None)
             .await
     }
 
@@ -6729,7 +6720,7 @@ impl RunnerTask {
                     })
                     .await?;
                     let output = self
-                        .execute_call_inner(agent, &call_id, "task", arguments, false, false)
+                        .execute_call_inner(agent, &call_id, "task", arguments, false, None)
                         .await?;
                     self.publish_item(ItemData::ToolResult {
                         call_id: call_id.clone(),
@@ -8533,7 +8524,7 @@ impl RunnerTask {
         arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
         let result = self
-            .execute_call_inner(agent, call_id, name, arguments, true, false)
+            .execute_call_inner(agent, call_id, name, arguments, true, None)
             .await;
         if let Err(error) = &result {
             record_span_error(&tracing::Span::current(), error);
@@ -8548,7 +8539,9 @@ impl RunnerTask {
         name: &str,
         mut arguments: serde_json::Value,
         require_advertised: bool,
-        _definition_shell: bool,
+        // A definition's `!` snippet: what runs in place of the text that
+        // was judged, and what its shell reads the placeholders from.
+        definition_shell: Option<&DefinitionShell<'_>>,
     ) -> CoreResult<ToolOutput> {
         let resolved = self.resolve_tool_name(name);
         let name = resolved.as_str();
@@ -8808,6 +8801,23 @@ impl RunnerTask {
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
         }
+        // A snippet was judged with its folders filled in; unless a hook
+        // rewrote it, the shell runs it with its references, reading the
+        // values from its environment, so a folder name is never shell text.
+        let mut executed = arguments.clone();
+        if name == "bash"
+            && let Some(snippet) = definition_shell
+        {
+            execution.shell_env.extend(
+                snippet
+                    .env
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
+                executed["command"] = json!(snippet.run);
+            }
+        }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
         } else if name == "todoread" {
@@ -8820,7 +8830,7 @@ impl RunnerTask {
         } else {
             tool.expect("non-internal tool resolved above")
                 .execute(
-                    arguments.clone(),
+                    executed,
                     ToolContext {
                         execution,
                         thread_id: self.thread.id,

@@ -5,6 +5,7 @@ pub mod cloud;
 pub mod credentials;
 pub mod loopback;
 pub mod pkce;
+pub mod renewals;
 pub mod routers;
 pub mod websocket;
 
@@ -369,6 +370,24 @@ impl Client {
                 Ok(key.into())
             };
         }
+        // Cloud spends a refresh token the moment it answers, and revokes the
+        // whole sign-in when a spent one comes back. A caller that gives up
+        // mid-refresh (a Stop, a timeout) must not drop the new pair before it
+        // is saved, so the renewal runs on its own task (see [`renewals`]):
+        // the caller returns at once, and the task still saves what Cloud
+        // sent. Its requests time out after 30 s, which bounds it.
+        let client = self.clone();
+        let rejected = rejected.map(str::to_owned);
+        renewals::spawn(async move { client.current_bearer(rejected.as_deref()).await })
+            .await
+            .map_err(|_| {
+                Error::Other("Renewing the Haarness Cloud sign-in stopped unexpectedly".into())
+            })?
+    }
+
+    /// [`Self::bearer`]'s work under the credential lock: the saved access
+    /// token, renewed first when it expired or `rejected` names it.
+    async fn current_bearer(&self, rejected: Option<&str>) -> Result<String> {
         let _lock = self.config.lock().await?;
         let mut c = credentials::load(&self.config.path())?.ok_or(Error::NotLoggedIn)?;
         self.validate(&c)?;
@@ -535,8 +554,27 @@ impl Client {
                 .await?
                 .error_for_status()?;
             let value: Device = response.json().await?;
+            // The link is printed and opened in a browser: one that is not
+            // http or https (a local file, an app's own scheme) stops here,
+            // and the parsed address is used, so no control character in it
+            // or in the code reaches a terminal.
+            let url = Url::parse(&value.verification_uri_complete)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+                .ok_or_else(|| {
+                    Error::Other(
+                        "The sign-in server sent a link that is not http or https, so sign-in stopped."
+                            .into(),
+                    )
+                })?;
+            if value.user_code.contains(char::is_control) {
+                return Err(Error::Other(
+                    "The sign-in server sent a code with control characters, so sign-in stopped."
+                        .into(),
+                ));
+            }
             return Ok(Login {
-                url: value.verification_uri_complete.clone(),
+                url: url.to_string(),
                 code: Some(value.user_code.clone()),
                 generation,
                 device_label,

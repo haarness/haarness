@@ -1079,10 +1079,12 @@ fn loaded_mcp_entry(entry: &Value, plugin_root: Option<&Path>) -> Option<McpConf
 }
 
 /// Resolves `${VAR}` references in the strings the MCP client uses as given
-/// (command, arguments, folder, URL, headers helper, OAuth client and scopes).
-/// Environment values and headers keep theirs: the client resolves them once
-/// when it connects, so a variable whose value holds `${OTHER}` is not read
-/// again, and the server receives that text as it is.
+/// (command, arguments, folder, URL, OAuth client and scopes). Environment
+/// values and headers keep theirs: the client resolves them once when it
+/// connects, so a variable whose value holds `${OTHER}` is not read again,
+/// and the server receives that text as it is. So does the headers helper,
+/// a shell command: its shell reads each reference from its environment, so
+/// a value is never read as shell syntax.
 pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureRequest {
     for value in entry
         .command
@@ -1090,7 +1092,6 @@ pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureR
         .chain(&mut entry.args)
         .chain(&mut entry.cwd)
         .chain(&mut entry.url)
-        .chain(&mut entry.headers_helper)
         .chain(&mut entry.oauth_client_id)
         .chain(&mut entry.oauth_scopes)
     {
@@ -1111,10 +1112,22 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
         })
         .unwrap_or(true);
     let expand = |value: &str| plugin_placeholders(value, plugin_root);
+    // opencode writes `timeout` in milliseconds (its entries say `type:
+    // "local"` or `"remote"`); a Claude Code or plugin entry writes seconds.
+    let opencode = matches!(
+        entry.get("type").and_then(Value::as_str),
+        Some("local" | "remote")
+    );
     let timeout_ms = entry
         .get("timeout")
         .and_then(Value::as_u64)
-        .map(|seconds| seconds.saturating_mul(1_000))
+        .map(|timeout| {
+            if opencode {
+                timeout
+            } else {
+                timeout.saturating_mul(1_000)
+            }
+        })
         .or_else(|| entry.get("timeoutMs").and_then(Value::as_u64));
     if let Some(url) = entry.get("url").and_then(Value::as_str) {
         let kind = entry
@@ -1141,26 +1154,34 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
             cwd: entry.get("cwd").and_then(Value::as_str).map(&expand),
             url: Some(expand(url)),
             headers: mcp_string_map_with(entry.get("headers"), &expand),
+            // A shell command: the plugin root stays `${CLAUDE_PLUGIN_ROOT}`
+            // for the shell to read from `env` below, never pasted in.
             headers_helper: entry
                 .get("headersHelper")
                 .and_then(Value::as_str)
-                .map(&expand),
+                .map(str::to_owned),
             timeout_ms,
+            // opencode writes `oauth` as `false` or an object with its
+            // `clientId` and space-separated `scope`; an object auto-detects.
             oauth: entry.get("oauth").and_then(Value::as_bool),
             oauth_client_id: entry
                 .pointer("/auth/clientId")
+                .or_else(|| entry.pointer("/oauth/clientId"))
                 .or_else(|| entry.get("oauthClientId"))
                 .and_then(Value::as_str)
                 .map(&expand),
-            oauth_scopes: entry
-                .pointer("/auth/scopes")
-                .or_else(|| entry.get("oauthScopes"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(&expand)
-                .collect(),
+            oauth_scopes: match entry.pointer("/oauth/scope").and_then(Value::as_str) {
+                Some(scope) => scope.split_whitespace().map(&expand).collect(),
+                None => entry
+                    .pointer("/auth/scopes")
+                    .or_else(|| entry.get("oauthScopes"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(&expand)
+                    .collect(),
+            },
             enabled,
         });
     }
@@ -1855,21 +1876,112 @@ pub(super) fn write_entries(
     updates: Vec<(String, Option<Value>)>,
 ) -> Result<()> {
     use anyhow::Context as _;
-    use jsonc_parser::cst::{CstInputValue, CstRootNode};
-    fn input(value: Value) -> CstInputValue {
-        match value {
-            Value::Null => CstInputValue::Null,
-            Value::Bool(v) => CstInputValue::Bool(v),
-            Value::Number(v) => CstInputValue::Number(v.to_string()),
-            Value::String(v) => CstInputValue::String(v),
-            Value::Array(v) => CstInputValue::Array(v.into_iter().map(input).collect()),
-            Value::Object(v) => CstInputValue::Object(
-                v.into_iter()
-                    .map(|(key, value)| (key, input(value)))
-                    .collect(),
-            ),
+    edit_json_file(path, |object| {
+        let entries = object
+            .object_value_or_create(section)
+            .context("configuration section must be an object")?;
+        for (name, value) in updates {
+            match (entries.get(&name), value) {
+                (Some(entry), Some(value)) => entry.set_value(cst_input(value)),
+                (None, Some(value)) => {
+                    entries.append(&name, cst_input(value));
+                }
+                (Some(entry), None) => entry.remove(),
+                (None, None) => {
+                    anyhow::bail!("no {section} entry named '{name}' in {}", path.display())
+                }
+            }
         }
+        Ok(())
+    })
+}
+
+/// Sets only `fields` of the `name` entry of `section` (`None` removes a
+/// key), leaving every other key of that entry, and the file's comments and
+/// formatting, as written. A key written twice on the way is refused: the
+/// edit would land on the first copy while the last one is in force.
+pub(super) fn write_entry_fields(
+    path: &Path,
+    section: &str,
+    name: &str,
+    fields: Vec<(String, Option<Value>)>,
+) -> Result<()> {
+    use anyhow::Context as _;
+    let repeated = |object: &jsonc_parser::cst::CstObject, key: &str| {
+        object
+            .properties()
+            .iter()
+            .filter(|property| {
+                property
+                    .name()
+                    .and_then(|name| name.decoded_value().ok())
+                    .as_deref()
+                    == Some(key)
+            })
+            .count()
+            > 1
+    };
+    edit_json_file(path, |object| {
+        anyhow::ensure!(
+            !repeated(object, section),
+            "\"{section}\" is written more than once in {}; remove the extra copy first",
+            path.display()
+        );
+        let entries = object
+            .object_value(section)
+            .with_context(|| format!("no {section} section in {}", path.display()))?;
+        anyhow::ensure!(
+            !repeated(&entries, name),
+            "\"{section}.{name}\" is written more than once in {}; remove the extra copy first",
+            path.display()
+        );
+        let entry = entries
+            .object_value(name)
+            .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
+        for (key, value) in fields {
+            anyhow::ensure!(
+                !repeated(&entry, &key),
+                "\"{section}.{name}.{key}\" is written more than once in {}; remove the extra copy first",
+                path.display()
+            );
+            match (entry.get(&key), value) {
+                (Some(property), Some(value)) => property.set_value(cst_input(value)),
+                (None, Some(value)) => {
+                    entry.append(&key, cst_input(value));
+                }
+                (Some(property), None) => property.remove(),
+                (None, None) => {}
+            }
+        }
+        Ok(())
+    })
+}
+
+fn cst_input(value: Value) -> jsonc_parser::cst::CstInputValue {
+    use jsonc_parser::cst::CstInputValue;
+    match value {
+        Value::Null => CstInputValue::Null,
+        Value::Bool(v) => CstInputValue::Bool(v),
+        Value::Number(v) => CstInputValue::Number(v.to_string()),
+        Value::String(v) => CstInputValue::String(v),
+        Value::Array(v) => CstInputValue::Array(v.into_iter().map(cst_input).collect()),
+        Value::Object(v) => CstInputValue::Object(
+            v.into_iter()
+                .map(|(key, value)| (key, cst_input(value)))
+                .collect(),
+        ),
     }
+}
+
+/// Edits a JSON or JSONC configuration file in place under the folder's
+/// writer lock, keeping its comments and formatting, and replaces it
+/// atomically with owner-only permissions.
+fn edit_json_file(
+    path: &Path,
+    edit: impl FnOnce(&jsonc_parser::cst::CstObject) -> Result<()>,
+) -> Result<()> {
+    use anyhow::Context as _;
+    use jsonc_parser::cst::CstRootNode;
     let parent = path.parent().context("configuration parent")?;
     fs::create_dir_all(parent)?;
     // Writers lock the folder itself: a lock file beside a project's
@@ -1893,21 +2005,7 @@ pub(super) fn write_entries(
     let object = root
         .object_value_or_create()
         .context("configuration must be an object")?;
-    let entries = object
-        .object_value_or_create(section)
-        .context("configuration section must be an object")?;
-    for (name, value) in updates {
-        match (entries.get(&name), value) {
-            (Some(entry), Some(value)) => entry.set_value(input(value)),
-            (None, Some(value)) => {
-                entries.append(&name, input(value));
-            }
-            (Some(entry), None) => entry.remove(),
-            (None, None) => {
-                anyhow::bail!("no {section} entry named '{name}' in {}", path.display())
-            }
-        }
-    }
+    edit(&object)?;
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
     let result = (|| -> Result<()> {
         use std::io::Write as _;
@@ -3370,9 +3468,90 @@ mod tests {
         let remote = layers.mcp.get("remote").unwrap();
         assert_eq!(remote.transport, "streamable_http");
         assert_eq!(remote.headers.get("X-Plugin"), Some(&rendered));
-        let helper = format!("sh {rendered}/scripts/headers.sh");
-        assert_eq!(remote.headers_helper.as_deref(), Some(helper.as_str()));
+        // The helper's shell reads the plugin root from its environment.
+        assert_eq!(
+            remote.headers_helper.as_deref(),
+            Some("sh ${CLAUDE_PLUGIN_ROOT}/scripts/headers.sh")
+        );
+        assert_eq!(remote.env.get("CLAUDE_PLUGIN_ROOT"), Some(&rendered));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A headers helper is shell text, so a configuration load leaves its
+    /// `${VAR}` references for the helper's shell: pasted in, a value holding
+    /// `$(…)` ran as a command.
+    #[test]
+    fn a_headers_helper_keeps_its_references_as_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-helper-text-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(
+            root.join("config/haarness.json"),
+            r#"{"mcp": {"remote": {"type": "http", "url": "https://example.test/mcp",
+                "headersHelper": "get-token --home \"${HOME}\" --scope ${HAARNESS_FIXTURE_SCOPE:-all}"}}}"#,
+        )
+        .unwrap();
+        let layers = load_layers(
+            &root.join("config"),
+            None,
+            &root.join("workspace"),
+            true,
+            &[],
+        );
+        assert_eq!(
+            layers.mcp["remote"].headers_helper.as_deref(),
+            Some(r#"get-token --home "${HOME}" --scope ${HAARNESS_FIXTURE_SCOPE:-all}"#)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// opencode's `timeout` is milliseconds, a Claude Code or plugin entry's
+    /// seconds, and Haarness's own `timeoutMs` milliseconds.
+    #[test]
+    fn an_mcp_timeout_is_read_in_the_unit_its_entry_writes() {
+        for (entry, expected) in [
+            (
+                serde_json::json!({"type": "local", "command": ["server"], "timeout": 9000}),
+                9_000,
+            ),
+            (
+                serde_json::json!({"type": "remote", "url": "https://example.test/mcp", "timeout": 5000}),
+                5_000,
+            ),
+            (
+                serde_json::json!({"type": "stdio", "command": "server", "timeout": 12}),
+                12_000,
+            ),
+            (
+                serde_json::json!({"type": "http", "url": "https://example.test/mcp", "timeout": 12}),
+                12_000,
+            ),
+            (
+                serde_json::json!({"transport": "stdio", "command": "server", "timeoutMs": 7000}),
+                7_000,
+            ),
+        ] {
+            assert_eq!(
+                mcp_entry(&entry).unwrap().timeout_ms,
+                Some(expected),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_opencode_entry_gives_its_oauth_client_and_scopes() {
+        let entry = mcp_entry(
+            &serde_json::json!({"type": "remote", "url": "https://example.test/mcp",
+            "oauth": {"clientId": "team-client", "scope": "read write"}}),
+        )
+        .unwrap();
+        assert_eq!(entry.oauth, None);
+        assert_eq!(entry.oauth_client_id.as_deref(), Some("team-client"));
+        assert_eq!(entry.oauth_scopes, ["read", "write"]);
+        let entry = mcp_entry(&serde_json::json!({"type": "remote", "url": "https://example.test/mcp", "oauth": false}))
+            .unwrap();
+        assert_eq!(entry.oauth, Some(false));
     }
 }
