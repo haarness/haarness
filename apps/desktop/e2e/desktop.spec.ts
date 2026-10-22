@@ -4555,6 +4555,94 @@ test("an open-ended question opens in its answer field unless a draft is being t
   expect(errors).toEqual([]);
 });
 
+test("a question answers from the keyboard, and only a deliberate key sends it", async () => {
+  const thread = await client.createThread({
+    title: "Keyboard question",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title!);
+  await page.getByRole("option").filter({ hasText: thread.title! }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title!);
+  const question = page.locator(".question");
+  const choice = (name: string) => question.getByRole("button", { name, exact: true });
+  const answer = question.getByRole("textbox", { name: "Answer", exact: true });
+  const ask = (input: Record<string, unknown>) =>
+    client.startTurn(thread.id, {
+      text: "!tool question " + JSON.stringify(input),
+      requestId: crypto.randomUUID(),
+    });
+  const settled = async () => {
+    await expect.poll(() => client.listQuestions().then((v) => v.length)).toBe(0);
+    await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  };
+  // What the question's tool call returned: the answer it was given.
+  const replied = async () => {
+    const results = (await client.listItems(thread.id)).filter((item) => item.data.type === "tool_result");
+    const last = results.at(-1)?.data;
+    return last?.type === "tool_result" ? last.output : "";
+  };
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
+
+  // Enter on a choice of a single-answer question picks it and replies.
+  await ask({ prompt: "Which color ships?", choices: ["Green", "Blue"] });
+  await expect(question).toContainText("Which color ships?");
+  await choice("Green").focus();
+  await page.keyboard.press("Tab");
+  await expect(choice("Blue")).toBeFocused();
+  await page.screenshot({ path: test.info().outputPath("question-keyboard-light.png") });
+  await page.keyboard.press("Enter");
+  await settled();
+  expect(await replied()).toContain("Blue");
+
+  // A click marks a choice and Enter on it then replies with it; Space only marks.
+  await ask({ prompt: "Which size?", choices: ["Small", "Large"] });
+  await choice("Large").press(" ");
+  await expect(choice("Large")).toHaveAttribute("aria-pressed", "true");
+  expect(await client.listQuestions()).toHaveLength(1);
+  await choice("Small").click();
+  await expect(choice("Small")).toHaveAttribute("aria-pressed", "true");
+  await expect(choice("Large")).toHaveAttribute("aria-pressed", "false");
+  await choice("Small").press("Enter");
+  await settled();
+  expect(await replied()).toContain("Small");
+
+  // On a question that takes several answers, Enter marks and unmarks and never
+  // sends; Cmd/Ctrl+Enter replies with what is marked, from a choice or the field.
+  await ask({ prompt: "Which platforms?", choices: ["macOS", "Linux", "Windows"], multiple: true });
+  await choice("macOS").press("Enter");
+  await choice("Linux").press("Enter");
+  await choice("Windows").press("Enter");
+  await choice("Windows").press("Enter");
+  await expect(choice("macOS")).toHaveAttribute("aria-pressed", "true");
+  await expect(choice("Windows")).toHaveAttribute("aria-pressed", "false");
+  await answer.press("Enter");
+  await page.waitForTimeout(300);
+  expect(await client.listQuestions()).toHaveLength(1);
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.screenshot({ path: test.info().outputPath("question-keyboard-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  await choice("Linux").press(modifier + "+Enter");
+  await settled();
+  expect(await replied()).toMatch(/macOS.*Linux/);
+
+  // Text an input method is still composing does not send, even with Cmd/Ctrl.
+  await ask({ prompt: "A name, please", choices: ["Keep"] });
+  await answer.fill("候補");
+  await answer.evaluate((field, key) => {
+    for (const options of [{}, { [key === "Meta" ? "metaKey" : "ctrlKey"]: true }])
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true, ...options }));
+  }, modifier);
+  await page.waitForTimeout(300);
+  expect(await client.listQuestions()).toHaveLength(1);
+  await answer.press(modifier + "+Enter");
+  await settled();
+  expect(await replied()).toContain("候補");
+  expect(errors).toEqual([]);
+});
+
 test("SSE cross-client updates and durable recovery after window reload and server restart", async () => {
   const external = await client.createThread({
     title: "External session",

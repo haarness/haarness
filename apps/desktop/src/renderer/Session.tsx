@@ -2958,6 +2958,9 @@ function chromeRequestText(category: ChromeField) {
       return t("Run scripts on {origin} in Chrome");
   }
 }
+/** Enter that confirms an input method's composition belongs to the input method. */
+const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
+
 function Question(props: { question: T.PendingQuestionInfo }) {
   const app = useApp();
   const [answer, setAnswer] = createSignal(""),
@@ -3001,6 +3004,21 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       ref={dock}
       class="prompt-dock question"
       aria-label={t("A question for you")}
+      onKeyDown={(event) => {
+        // Cmd/Ctrl+Enter replies from anywhere in the card, with what is
+        // typed or chosen; a plain Enter keeps its own meaning there.
+        if (
+          event.defaultPrevented ||
+          event.key !== "Enter" ||
+          !(event.metaKey || event.ctrlKey) ||
+          event.altKey ||
+          event.shiftKey ||
+          composing(event)
+        )
+          return;
+        event.preventDefault();
+        if (!event.repeat) submit();
+      }}
     >
       <header class="prompt-head">
         <Icon name="chat" size="sm" />
@@ -3012,6 +3030,7 @@ function Question(props: { question: T.PendingQuestionInfo }) {
           {(choice) => (
             <button
               classList={{ active: choices().includes(choice) }}
+              aria-pressed={choices().includes(choice)}
               onClick={() => {
                 setChoices((old) =>
                   props.question.multiple
@@ -3021,6 +3040,26 @@ function Question(props: { question: T.PendingQuestionInfo }) {
                     : [choice],
                 );
                 setAnswer("");
+              }}
+              onKeyDown={(event) => {
+                // Enter on a choice of a single-answer question picks it and
+                // replies, as in the TUI. On a question that takes several,
+                // Enter only marks or unmarks it, as a click does.
+                if (
+                  props.question.multiple ||
+                  event.key !== "Enter" ||
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.altKey ||
+                  event.shiftKey ||
+                  composing(event)
+                )
+                  return;
+                event.preventDefault();
+                if (event.repeat) return;
+                setChoices([choice]);
+                setAnswer("");
+                submit();
               }}
             >
               {choice}
@@ -3040,7 +3079,7 @@ function Question(props: { question: T.PendingQuestionInfo }) {
               if (
                 event.key !== "Enter" ||
                 event.shiftKey ||
-                event.isComposing ||
+                composing(event) ||
                 !answer()
               )
                 return;
