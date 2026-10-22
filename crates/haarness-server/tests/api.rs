@@ -7319,6 +7319,78 @@ async fn a_reconnecting_event_stream_gets_waiting_deltas_joined_and_unbuffered()
 }
 
 #[tokio::test]
+async fn a_published_chats_stream_joins_its_deltas_across_other_chats_events() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let shared = echo_thread(&runtime).await.id;
+    let other = echo_thread(&runtime).await.id;
+    let turn = haarness_protocol::TurnId::new();
+    let events = runtime.events();
+    let before = events.cursor();
+    for (thread, word) in [
+        (shared, "Hel"),
+        (other, "not yours"),
+        (shared, "lo"),
+        (other, "still not"),
+        (shared, " world"),
+    ] {
+        events.publish(
+            "turn.text_delta",
+            Some(thread),
+            Some(turn),
+            None,
+            serde_json::json!({"delta": word}),
+        );
+    }
+    events.publish(
+        "turn.finished",
+        Some(shared),
+        Some(turn),
+        None,
+        serde_json::json!({}),
+    );
+    let response = reqwest::Client::new()
+        .get(format!("{base}/v1/events"))
+        .bearer_auth("activity-token")
+        .header("x-haarness-remote-thread", shared.to_string())
+        .header("last-event-id", before.to_string())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !text.contains("event: turn.finished") {
+            text.push_str(&String::from_utf8_lossy(
+                &stream.next().await.unwrap().unwrap(),
+            ));
+        }
+    })
+    .await
+    .expect("the replay arrives");
+    assert!(!text.contains("not yours"), "{text}");
+    let deltas: Vec<Value> = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: turn.text_delta"))
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            serde_json::from_str(data).unwrap()
+        })
+        .collect();
+    assert_eq!(deltas.len(), 1, "{text}");
+    assert_eq!(deltas[0]["payload"]["delta"], "Hello world");
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_turn_sent_to_a_chat_busy_elsewhere_is_refused_in_a_sentence() {
     let workspace = std::env::temp_dir();
     let (runtime, _) = p0_runtime(&workspace, true);

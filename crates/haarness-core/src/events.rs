@@ -224,6 +224,18 @@ impl JoinedEvents {
     /// The next event or gap. Cancel-safe: it only ever waits with nothing
     /// taken off the queue.
     pub async fn next(&mut self) -> LiveEvent {
+        self.next_kept(|_| Some(true)).await
+    }
+
+    /// [`Self::next`] for a stream that passes on only some events: `keep`
+    /// says whether one reaches the client, or `None` when that takes a
+    /// lookup the caller makes. A waiting event `keep` turns down is dropped
+    /// while joining, so the events of chats a client never sees do not break
+    /// a run; one it cannot judge ends the run and comes next.
+    pub async fn next_kept(
+        &mut self,
+        mut keep: impl FnMut(&EventEnvelope) -> Option<bool>,
+    ) -> LiveEvent {
         use broadcast::error::{RecvError, TryRecvError};
         if let Some(skipped) = self.gap.take() {
             return LiveEvent::Behind(skipped);
@@ -238,12 +250,14 @@ impl JoinedEvents {
         };
         loop {
             match self.receiver.try_recv() {
-                Ok(next) => {
-                    if !join_delta(&mut event, &next) {
+                Ok(next) => match keep(&next) {
+                    Some(false) => {}
+                    Some(true) if join_delta(&mut event, &next) => {}
+                    _ => {
                         self.held = Some(next);
                         break;
                     }
-                }
+                },
                 Err(TryRecvError::Lagged(skipped)) => {
                     self.gap = Some(skipped);
                     break;
@@ -480,5 +494,47 @@ mod tests {
             bus.publish("item.created", Some(thread), Some(turn), None, json!({}));
         }
         assert!(matches!(live.next().await, LiveEvent::Behind(_)));
+    }
+
+    #[tokio::test]
+    async fn events_a_client_never_sees_do_not_break_a_run() {
+        let bus = EventBus::new(64);
+        let (shared, other, unknown) = (ThreadId::new(), ThreadId::new(), ThreadId::new());
+        let turn = TurnId::new();
+        let mut live = JoinedEvents::new(bus.subscribe(None).receiver);
+        let delta = |thread: ThreadId, text: &str| {
+            bus.publish(
+                "turn.text_delta",
+                Some(thread),
+                Some(turn),
+                None,
+                json!({"delta": text}),
+            )
+        };
+        delta(shared, "Hel");
+        delta(other, "elsewhere");
+        bus.publish("item.created", Some(other), None, None, json!({}));
+        let last = delta(shared, "lo").event_id;
+        delta(unknown, "ask first");
+        delta(shared, " again");
+        let keep = |event: &EventEnvelope| match event.thread_id {
+            Some(thread) if thread == shared => Some(true),
+            Some(thread) if thread == other => Some(false),
+            _ => None,
+        };
+        let LiveEvent::Event(first) = live.next_kept(keep).await else {
+            panic!("an event")
+        };
+        assert_eq!(first.payload["delta"], "Hello");
+        assert_eq!(first.event_id, last);
+        // One it cannot judge comes next, unjoined, and the run starts again.
+        let LiveEvent::Event(second) = live.next_kept(keep).await else {
+            panic!("an event")
+        };
+        assert_eq!(second.thread_id, Some(unknown));
+        let LiveEvent::Event(third) = live.next_kept(keep).await else {
+            panic!("an event")
+        };
+        assert_eq!(third.payload["delta"], " again");
     }
 }

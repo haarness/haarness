@@ -2342,15 +2342,19 @@ fn event_stream(
         // from a cursor with nothing to replay would wait for the keepalive.
         yield Ok(Event::default().comment("connected"));
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
+        // A published chat's stream leaves out other chats' events before
+        // joining, so they never break its runs of deltas.
         let mut scope = crate::remote_scope::EventScope::new(root);
-        for event in haarness_core::join_deltas(subscription.replay) {
-            if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); }
+        let mut replay = Vec::with_capacity(subscription.replay.len());
+        for event in subscription.replay {
+            if scope.allows(&event, &state.runtime).await { replay.push(event); }
         }
+        for event in haarness_core::join_deltas(replay) { yield Ok(to_sse(&event)); }
         let mut live = haarness_core::JoinedEvents::new(subscription.receiver);
         loop {
             let received = tokio::select! {
                 () = shutdown.cancelled() => break,
-                received = live.next() => received,
+                received = live.next_kept(|event| scope.decided(event)) => received,
             };
             match received {
                 haarness_core::LiveEvent::Event(event) => if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); },
