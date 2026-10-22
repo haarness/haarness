@@ -204,28 +204,48 @@ test("a signal never pushes a retry due sooner later", async () => {
   assert.deepEqual(project.delays, [500]);
 });
 
-test("a signal supersedes an attempt still in flight, whose late answer is dropped", async () => {
+test("a signal supersedes an attempt after a drop still in flight, whose late answer is dropped", async () => {
   let release!: (value: Connection) => void;
+  const connection = {
+    info: { serverInstanceId: "first", eventCursor: 5, capabilities: [] },
+  } as unknown as Connection;
   const project = harness((call) =>
-    call === 1
+    call === 2
       ? new Promise<Connection>((resolve) => (release = resolve))
-      : Promise.resolve({
-          info: { serverInstanceId: "first", eventCursor: 5, capabilities: [] },
-        } as unknown as Connection),
+      : Promise.resolve(connection),
+  );
+  project.link.start();
+  await project.settle();
+  project.drop("s1");
+  await project.advance(500);
+  assert.equal(project.connects, 2);
+  project.link.hint(false);
+  assert.deepEqual(project.delays, [500, 750]);
+  await project.advance(750);
+  assert.equal(project.connects, 3);
+  assert.deepEqual(project.subscribed.at(-1), { key: "s2", cursor: 5 });
+  release(connection);
+  await project.settle();
+  assert.equal(project.subscribed.length, 2);
+  assert.equal(project.snapshots, 2);
+});
+
+test("a signal leaves a sidebar project's first load to finish", async () => {
+  let release!: (value: Connection) => void;
+  const project = harness(
+    () => new Promise<Connection>((resolve) => (release = resolve)),
   );
   project.link.start();
   await project.settle();
   project.link.hint(false);
-  assert.deepEqual(project.delays, [750]);
-  await project.advance(750);
-  assert.equal(project.connects, 2);
-  assert.deepEqual(project.subscribed, [{ key: "s1", cursor: 5 }]);
+  project.wake();
+  assert.deepEqual(project.delays, []);
   release({
     info: { serverInstanceId: "first", eventCursor: 5, capabilities: [] },
   } as unknown as Connection);
   await project.settle();
-  assert.equal(project.subscribed.length, 1);
-  assert.equal(project.snapshots, 1);
+  assert.equal(project.connects, 1);
+  assert.deepEqual(project.subscribed, [{ key: "s1", cursor: 5 }]);
 });
 
 test("a connected sidebar project is left alone by the network and the window, and a wake subscribes it again quietly", async () => {

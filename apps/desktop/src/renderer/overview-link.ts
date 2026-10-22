@@ -17,7 +17,8 @@ import {
  *
  * A wake, the network coming back or the window showing again (`hint`) brings
  * a waiting project's attempt forward to its slot behind the open project
- * (`wakeSlots`), or supersedes an attempt still in flight; signals that arrive
+ * (`wakeSlots`), or supersedes an attempt after a drop still in flight (never
+ * the project's first load); signals that arrive
  * together count once, and a retry already due sooner is kept. A connected
  * project is left alone, except that a wake subscribes it again from its last
  * event, quietly: its stream may have died while the computer slept, and the
@@ -60,6 +61,9 @@ export function createOverviewLink(input: {
   let early: DesktopEvent[] | undefined;
   /** A quiet subscription is being asked for. */
   let renewing = false;
+  /** The project lost its connection (or failed to load) and is loading
+   * again; not its first load. */
+  let recovering = false;
   const api = <T>(method: string) => input.bridge.api<T>(input.id, method, []);
   const stop = async () => {
     const previous = subscription;
@@ -74,6 +78,7 @@ export function createOverviewLink(input: {
    * the end of a stream and the server's resync ask for the same retry. */
   const retry = (delay?: number) => {
     if (disposed || (pending && delay === undefined)) return;
+    recovering = true;
     cancel();
     const ms = delay ?? wait.next();
     const entry = {
@@ -121,6 +126,7 @@ export function createOverviewLink(input: {
       }
       // Connected: a retry a signal asked for meanwhile is not needed.
       cancel();
+      recovering = false;
       input.loaded();
       settle(key, buffered);
     } catch (error) {
@@ -206,6 +212,8 @@ export function createOverviewLink(input: {
       if (wake) void renew();
       return;
     }
+    // A first load in flight is left to finish, as the open project's is.
+    if (!recovering) return;
     const at = now();
     if (at - hinted < SIGNAL_MERGE_MS) return;
     hinted = at;
