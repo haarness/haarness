@@ -9,6 +9,13 @@ import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-fold
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
+import {
+  eventIdleMs,
+  onlineAgain,
+  retryWaits,
+  TERMINAL_PING_EVERY_MS,
+  terminalPingTimeoutMs,
+} from "./connection-health";
 import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
@@ -30,6 +37,7 @@ import {
   nativeTheme,
   nativeImage,
   globalShortcut,
+  net,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -140,6 +148,27 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
+/** Connections waiting to try again; a wake ends their wait. */
+const retries = retryWaits();
+/** A terminal socket that no longer reaches its server closes, and its view
+ * connects again from its cursor; a healthy one answers and is left alone. */
+function checkTerminals() {
+  for (const socket of terminals.all()) void socket.ping(terminalPingTimeoutMs());
+}
+/** The machine woke or its network came back: what waits to reconnect tries
+ * now, and terminals say whether they still reach their server. */
+function wakeConnections() {
+  retries.wake();
+  checkTerminals();
+}
+/** The computer woke: a stream that looks open may have died meanwhile, so
+ * the one behind each project's notifications follows again from its last
+ * event at once (a healthy one is only asked again), and terminals say
+ * whether they still reach their server. */
+function wakeFromSleep() {
+  for (const watch of notificationWatches.values()) watch.restart();
+  wakeConnections();
+}
 /** One window answers each terminal's programs (see terminalAnswers). */
 const answerers = terminalAnswers();
 // End-to-end tests end terminal sockets as a server or network outage does,
@@ -224,6 +253,9 @@ const notificationWatches = new Map<
     auth: string;
     owner: number;
     stop: () => void;
+    /** Follows again from the last event, at once and with the backoff from
+     * the start: after a wake, an open stream may be one that died. */
+    restart: () => void;
   }
 >();
 function watchNotifications(id: string, owner: number) {
@@ -237,7 +269,10 @@ function watchNotifications(id: string, owner: number) {
   previous?.stop();
   const client = new Haarness({ baseUrl: item.url, auth: item.auth });
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let waiting: (() => void) | undefined;
+  // Each listen is an attempt of its own; a newer one ends the older.
+  let attempt = new AbortController();
+  let attempts = 0;
   const watch = {
     client,
     endpoint: item.url,
@@ -245,8 +280,16 @@ function watchNotifications(id: string, owner: number) {
     owner,
     stop() {
       stopped = true;
-      clearTimeout(timer);
+      waiting?.();
+      attempt.abort();
       client.close();
+    },
+    restart() {
+      if (stopped) return;
+      waiting?.();
+      waiting = undefined;
+      retry = 0;
+      void listen();
     },
   };
   notificationWatches.set(id, watch);
@@ -254,8 +297,13 @@ function watchNotifications(id: string, owner: number) {
   let instance = item.view.info.serverInstanceId;
   let retry = 0;
   async function listen() {
+    const mine = ++attempts;
+    attempt.abort();
+    attempt = new AbortController();
+    const signal = attempt.signal;
+    const current = () => !stopped && mine === attempts;
     try {
-      const info = await client.info();
+      const info = await client.info({ signal });
       if (info.serverInstanceId !== instance) {
         instance = info.serverInstanceId;
         cursor = info.eventCursor ?? 0;
@@ -263,10 +311,12 @@ function watchNotifications(id: string, owner: number) {
       for await (const event of client.events({
         after: cursor,
         reconnect: true,
+        idleTimeoutMs: eventIdleMs(),
+        signal,
       })) {
-        if (stopped) return;
+        if (!current()) return;
         if (!("eventId" in event)) {
-          const info = await client.info();
+          const info = await client.info({ signal });
           instance = info.serverInstanceId;
           cursor = info.eventCursor ?? 0;
           break;
@@ -286,8 +336,10 @@ function watchNotifications(id: string, owner: number) {
     } catch {
       /* Retry without disturbing the user's foreground connection. */
     }
-    if (!stopped)
-      timer = setTimeout(
+    // The network coming back ends this wait, and a wake starts over (see
+    // wakeConnections).
+    if (current())
+      waiting = retries.wait(
         () => void listen(),
         Math.min(30000, 1000 * 2 ** Math.min(retry++, 5)),
       );
@@ -1036,6 +1088,7 @@ function installHandlers() {
         for await (const event of client.events({
           after: cursor,
           reconnect: false,
+          idleTimeoutMs: eventIdleMs(),
         })) {
           send(win, { kind: "server", connection: id, id: key, data: event });
         }
@@ -1778,9 +1831,12 @@ else {
       void refreshProjects().catch(() => {});
       setupChromeOnLaunch();
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
-      powerMonitor.on("resume", () =>
-        broadcast({ kind: "connection", data: "resume" }),
-      );
+      powerMonitor.on("resume", () => {
+        broadcast({ kind: "connection", data: "resume" });
+        wakeFromSleep();
+      });
+      onlineAgain(() => net.isOnline(), wakeConnections);
+      setInterval(checkTerminals, TERMINAL_PING_EVERY_MS).unref();
       nativeTheme.on("updated", () => {
         repaintWindows();
         broadcast({ kind: "menu", data: "theme" });

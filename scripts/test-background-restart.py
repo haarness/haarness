@@ -12,7 +12,10 @@ chat:
 - graceful: `serve --stop`. Same report; the task is not marked cancelled.
 - busy: the chat's own turn was running too. Same report, no turn.
 
-The person's next message then runs as usual.
+The person's next message then runs as usual. In the crash phase a shell
+command is also running (`sleep`, which writes nothing and so outlived the
+killed daemon under launchd): the next daemon for the folder stops it, and
+leaves a process the killed one never started alone.
 
 Before this change none of the chats heard anything: the subagent stayed
 "interrupted" (or "cancelled") in the task list and the model never knew.
@@ -37,7 +40,8 @@ root = Path(tempfile.mkdtemp(prefix="haarness-background-restart-")).resolve()
 home, workspace = root / "home", root / "workspace"
 home.mkdir()
 (workspace / ".haarness").mkdir(parents=True)
-(workspace / ".haarness/config.toml").write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[lsp]\nenabled=false\n')
+(workspace / ".haarness/config.toml").write_text(
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="allow"\n[lsp]\nenabled=false\n')
 env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
        "HAARNESS_DATA_DIR": str(root / "data"), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
        "HAARNESS_TEST_PROVIDER": "1"}
@@ -137,17 +141,36 @@ def reported(thread, child, description):
     assert not any(text.startswith('Echo: <task id="') for text in replies(thread)), replies(thread)
 
 
+def running(marker):
+    return [line for line in run(["ps", "-axo", "pid=,command="]).splitlines() if marker in line]
+
+
 try:
     connect()
     # crash
     crash, crash_turn, crash_child = launch(task("Crash audit"))
     until(lambda: api(f"/turns/{crash_turn}")["status"] == "completed", "the launching turn did not finish")
+    # A shell command that writes nothing, running when the daemon dies; and a
+    # process of the same kind the daemon never started.
+    marker = "left-running-" + uuid.uuid4().hex[:8]
+    shell = api("/threads", {"provider": "echo", "model": "echo-1"})["id"]
+    api(f"/threads/{shell}/turns", {"requestId": str(uuid.uuid4()),
+                                    "text": "!tool bash " + json.dumps({"command": f"sleep 600; echo {marker}"})})
+    until(lambda: running(marker), "the shell command did not start")
+    unrelated = subprocess.Popen(["/bin/sh", "-c", f"sleep 600; echo unrelated-{marker}"], start_new_session=True)
     pids = daemon_pids()
     assert pids, "the fixture daemon is not running"
     for pid in pids:
         os.kill(pid, signal.SIGKILL)
     until(lambda: not daemon_pids(), "the killed daemon is still listed")
+    assert running(marker), "the shell command died with the daemon"
     connect()
+    until(lambda: not [line for line in running(marker) if "unrelated-" not in line],
+          "the next daemon left the killed one's command running")
+    assert running("unrelated-" + marker), "a process the daemon never started was stopped"
+    os.killpg(unrelated.pid, signal.SIGKILL)
+    unrelated.wait()
+    print("PASS the next daemon stops a command a crash left running, and nothing else", flush=True)
     until(lambda: notices(crash), "the crashed task was never reported")
     reported(crash, crash_child, "Crash audit")
     assert states(crash) == ["background", "interrupted"], states(crash)

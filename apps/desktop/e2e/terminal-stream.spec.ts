@@ -362,6 +362,35 @@ test("Option types what the layout composes until Settings makes it a Meta key",
   expect(errors).toEqual([]);
 });
 
+test("a terminal whose connection went dead while the machine slept connects again on waking, its output kept", async () => {
+  await prompt();
+  await input().fill("printf 'before-%s\\n' sleep");
+  await input().press("Enter");
+  await expect(rows()).toContainText("before-sleep");
+  // Nothing comes in any more, as after a sleep on another network, while
+  // the socket still reads as open; what is typed still leaves.
+  await app.evaluate(() => {
+    // A socket that stopped answering is given up within a second, here only.
+    (globalThis as { haarnessTerminalPingTimeoutMs?: number }).haarnessTerminalPingTimeoutMs = 1000;
+    const sockets = (globalThis as unknown as {
+      haarnessTerminalSockets: { all(): { socket: { _socket: { pause(): void } } }[] };
+    }).haarnessTerminalSockets;
+    for (const socket of sockets.all()) socket.socket._socket.pause();
+  });
+  await input().fill("printf 'after-%s\\n' wake");
+  await input().press("Enter");
+  await page.waitForTimeout(1500);
+  await expect(rows()).not.toContainText("after-wake");
+  await app.evaluate(({ powerMonitor }) => powerMonitor.emit("resume"));
+  await expect(rows()).toContainText("after-wake", { timeout: 10_000 });
+  await expect(rows()).toContainText("before-sleep");
+  await expect(page.getByText("Terminal disconnected")).toHaveCount(0);
+  await app.evaluate(() => {
+    delete (globalThis as { haarnessTerminalPingTimeoutMs?: number }).haarnessTerminalPingTimeoutMs;
+  });
+  expect(errors).toEqual([]);
+});
+
 // Last: it replaces the server the other tests use.
 test("after the server is replaced, the terminal it no longer has gives way to one new shell in every window", async () => {
   test.setTimeout(240_000);

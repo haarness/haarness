@@ -39,6 +39,9 @@ use haarness_opentui::{Color, ColorSupport, Renderer};
 use haarness_protocol::CreateThreadRequest;
 use std::{path::PathBuf, time::Duration};
 
+/// How long the first frame waits for the provider catalog.
+const PROVIDERS_FIRST_FRAME: Duration = Duration::from_secs(1);
+
 use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
 use crate::input::{AppAction, handle_key};
 /// The model a new chat starts on when none is configured; `haarness run`
@@ -97,6 +100,20 @@ pub(crate) async fn hydrate_goal_snapshot(app: &mut App, client: &ApiClient) -> 
             app.goal_refresh_needed = true;
             false
         }
+    }
+}
+
+/// The event task's restarts after it ended by itself: three within a minute.
+#[derive(Default)]
+struct Restarts(Vec<std::time::Instant>);
+
+impl Restarts {
+    /// Whether it may start again now.
+    fn again(&mut self) -> Option<()> {
+        let now = std::time::Instant::now();
+        self.0
+            .retain(|at| now.duration_since(*at) < Duration::from_secs(60));
+        (self.0.len() < 3).then(|| self.0.push(now))
     }
 }
 
@@ -293,7 +310,15 @@ async fn run_with_client(
     auto: bool,
 ) -> Result<Option<PathBuf>> {
     let initial_info = client.info().await.ok();
-    let providers = client.providers().await.unwrap_or_default();
+    // The server waits for a signed-in provider's list while it has no
+    // model to show (up to 10 s on a stalled network): the first frame does
+    // not, and the list comes in after it (see `App::catalog_arrived`).
+    let (mut providers, models_loading) =
+        match tokio::time::timeout(PROVIDERS_FIRST_FRAME, client.providers()).await {
+            Ok(listed) => (listed.unwrap_or_default(), false),
+            Err(_) => (Vec::new(), true),
+        };
+    let mut chose_model = false;
     let mut threads = client.threads().await?;
     let saved = config::load_state();
     let saved_thread = saved
@@ -341,6 +366,9 @@ async fn run_with_client(
         } else if let Some((provider, model)) = default_connected_model(&providers) {
             request.provider = Some(provider);
             request.model = Some(model);
+            chose_model = true;
+        } else {
+            chose_model = true;
         }
         let thread = client.create_thread(request).await?;
         threads.push(thread.clone());
@@ -349,6 +377,16 @@ async fn run_with_client(
     // Capture the event boundary before snapshot hydration. SSE then replays
     // exactly the deltas that raced these REST reads.
     let server_info = client.info().await.ok();
+    // The server answers with the model lists it has and announces the ones
+    // still loading when they come (`assets.updated`). One that came before
+    // this point did so before the events this client follows: ask again,
+    // without waiting for the rest.
+    if !models_loading
+        && let Ok(Ok(current)) =
+            tokio::time::timeout(Duration::from_millis(300), client.providers()).await
+    {
+        providers = current;
+    }
     let agents = client.agents().await.unwrap_or_default();
     let items = client.items(thread.id).await.unwrap_or_default();
     let restored_view = saved.thread_views.get(&thread.id.to_string());
@@ -361,7 +399,16 @@ async fn run_with_client(
         },
         |view| view.viewport_offset,
     );
+    // The chat this TUI opened on the model it chose takes the one it would
+    // have chosen with the lists still loading, once they come.
+    let auto_model = (models_loading && chose_model)
+        .then(|| (thread.id, thread.provider.clone(), thread.model.clone()));
     let mut app = App::new(thread, threads, items, providers, agents);
+    app.models_loading = models_loading;
+    app.auto_model = auto_model;
+    if models_loading {
+        app.notice = "Loading models…".into();
+    }
     app.yolo = client.auto_approves();
     app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
     app.original_client = Some(client.clone());
@@ -470,6 +517,11 @@ async fn run_with_client(
         .as_ref()
         .map(|info| (info.server_instance_id, info.event_cursor));
     let (mut event_rx, mut event_task) = client.subscribe(initial_cursor);
+    // How often the event task may be started again after it ended by
+    // itself; past that the indicator stays, rather than a panic looping.
+    let mut following = Some(Restarts::default());
+    // While it is stopped, when it is tried again.
+    let mut follow_again_at: Option<std::time::Instant> = None;
     // Open completion only after SSE owns the captured cursor. If a localized
     // completion event raced snapshot hydration, its replay can now replace
     // the fallback dialog without a visible stale-copy window.
@@ -516,6 +568,16 @@ async fn run_with_client(
     let (workspace_mutation_tx, mut workspace_mutation_rx) = tokio::sync::mpsc::channel(1);
     let (workspace_ref_tx, mut workspace_ref_rx) = tokio::sync::mpsc::channel(1);
     let mut pty_rx = client.subscribe_ptys();
+    // Provider catalogs read off the loop (the server may wait up to 10 s
+    // for a list), applied when they come.
+    let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
+    app.catalog_tx = Some(catalog_tx.clone());
+    if app.models_loading {
+        let client = client.clone();
+        tokio::spawn(async move {
+            let _ = catalog_tx.send(client.providers().await.ok()).await;
+        });
+    }
     let (statusline_context, mut statusline_rx, statusline_task) =
         statusline::spawn(statusline_config);
     let _ = statusline_context.send(statusline::Context::from_app(&app));
@@ -544,6 +606,11 @@ async fn run_with_client(
                         .map(|info| (info.server_instance_id, info.event_cursor));
                     (event_rx, event_task) = client.subscribe(initial);
                     pty_rx = client.subscribe_ptys();
+                    // A catalog still on its way from the server left is not
+                    // this one's.
+                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                    catalog_rx = receiver;
+                    app.catalog_tx = Some(sender);
                     force_redraw = true;
                 }
                 Err(error) => {
@@ -792,7 +859,22 @@ async fn run_with_client(
                     }
                 }
             },
-            Some(event) = event_rx.recv() => {
+            event = event_rx.recv(), if following.is_some() => {
+                let Some(event) = event else {
+                    // The task that follows the server's events ended by
+                    // itself (it panicked): say so, and follow them again,
+                    // from a fresh snapshot.
+                    if following.as_mut().and_then(Restarts::again).is_some() {
+                        app.connection_dropped(1);
+                        (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
+                    } else {
+                        // Ending over and over: stop for a minute, and say so.
+                        following = None;
+                        follow_again_at = Some(std::time::Instant::now() + Duration::from_secs(60));
+                        app.stopped_following();
+                    }
+                    continue;
+                };
                 match event {
                     crate::api::SubscriptionEvent::Event(event) => {
                         app.reduce(*event, &client).await?;
@@ -829,16 +911,7 @@ async fn run_with_client(
                         app.notice = "Reconnected — state refreshed".into();
                     }
                     crate::api::SubscriptionEvent::ConnectionLost { attempt } => {
-                        let first = app.connection_lost.is_none();
-                        app.connection_lost = Some(attempt);
-                        if first {
-                            app.show_toast(
-                                None,
-                                "Connection lost · retrying".into(),
-                                ToastVariant::Warning,
-                                Duration::from_secs(4),
-                            );
-                        }
+                        app.connection_dropped(attempt);
                     }
                     crate::api::SubscriptionEvent::ServerRestarting => {
                         app.server_restart = Some(state::ServerRestart::Starting);
@@ -854,17 +927,7 @@ async fn run_with_client(
                         }
                         app.server_restart = Some(state::ServerRestart::Failed);
                     }
-                    crate::api::SubscriptionEvent::Reconnected => {
-                        app.connection_lost = None;
-                        app.notice = if app.server_restart.take()
-                            == Some(state::ServerRestart::Starting)
-                        {
-                            "Server restarted · reconnected"
-                        } else {
-                            "Reconnected"
-                        }
-                        .into();
-                    }
+                    crate::api::SubscriptionEvent::Reconnected => app.reconnected(),
                 }
             },
             Ok(event) = pty_rx.recv() => {
@@ -888,6 +951,15 @@ async fn run_with_client(
                             app.notice = "Terminal closed · the shell exited".into();
                         }
                     }
+                }
+            },
+            Some(listed) = catalog_rx.recv() => {
+                match listed {
+                    Some(providers) => app.catalog_arrived(providers, &client).await,
+                    None if app.models_loading => {
+                        app.catalog_arrived(app.providers.clone(), &client).await;
+                    }
+                    None => {}
                 }
             },
             Some(completion) = workspace_mutation_rx.recv() => {
@@ -953,6 +1025,13 @@ async fn run_with_client(
             () = &mut shutdown => break,
             _ = tick.tick() => {
                 app.tick = app.tick.wrapping_add(1);
+                if follow_again_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                    follow_again_at = None;
+                    following = Some(Restarts::default());
+                    app.following_stopped = false;
+                    app.connection_dropped(1);
+                    (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
+                }
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
                 app.expire_notification();
                 app.expire_notice(std::time::Instant::now());

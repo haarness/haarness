@@ -1547,6 +1547,7 @@ dependencies = [
  "hex",
  "image",
  "jsonschema",
+ "nix 0.31.3",
  "parking_lot",
  "regex",
  "serde",
