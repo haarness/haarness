@@ -244,7 +244,7 @@ pub async fn login(args: &LoginArgs) -> Result<()> {
     }
     Ok(())
 }
-pub async fn account(args: &AccountArgs) -> Result<()> {
+pub async fn account(args: &AccountArgs, config_dir: &std::path::Path) -> Result<()> {
     let client = client()?;
     if args.watch_billing {
         let mut watcher = haarness_account::billing::watch(client);
@@ -264,7 +264,16 @@ pub async fn account(args: &AccountArgs) -> Result<()> {
             .take(64 * 1024)
             .read_to_string(&mut input)?;
         let input: Value = serde_json::from_str(&input)?;
-        println!("{}", rpc(&client, input).await?);
+        let value = match input["action"].as_str() {
+            // Signed out is an answer here, not a failure: Desktop shows no
+            // computers until there is an account to list them from.
+            Some("remote-hosts") if !client.config.signed_in() => {
+                json!({"loggedIn":false,"items":[]})
+            }
+            Some("remote-hosts") => super::remote_cloud::computers(&client, config_dir).await?,
+            _ => rpc(&client, input).await?,
+        };
+        println!("{value}");
         return Ok(());
     }
     if let Some(id) = &args.select {
@@ -377,6 +386,12 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
         "routers" => client.routers().await?,
         "select-router" => client.select_router(id(&input)?).await?,
         "billing-summary" => serde_json::to_value(client.billing_summary().await?)?,
+        // Desktop opens another computer through Cloud's relay with the
+        // current short-lived sign-in, and keeps it in memory only. A token
+        // Cloud refused comes back as `rejected` and is renewed first.
+        "remote-auth" => {
+            json!({"token":client.bearer(input["rejected"].as_str()).await?,"apiUrl":client.config.api_url})
+        }
         "logout" => {
             client.logout().await?;
             json!({"loggedIn":false})
@@ -824,6 +839,52 @@ mod tests {
             result.unwrap(),
             json!({"items":[{"id":"first"},{"id":"second"}],"nextCursor":null})
         );
+    }
+    #[tokio::test]
+    async fn desktop_relay_sign_in_is_the_current_token_and_renews_a_refused_one() {
+        use axum::{Json, Router, routing::post};
+        let renewals = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = renewals.clone();
+        let app = Router::new().route(
+            "/oauth/token",
+            post(move || {
+                let count = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                async move {
+                    Json(json!({"access_token":format!("renewed-{count}"),"refresh_token":format!("refresh-{count}"),"expires_in":600}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir =
+            std::env::temp_dir().join(format!("haarness-relay-auth-{}", uuid::Uuid::now_v7()));
+        let config = Config::new(&url, dir.clone(), "haarness-cli").unwrap();
+        haarness_account::credentials::save(
+            &config.path(),
+            &haarness_account::Credentials {
+                api_url: url.clone(),
+                access_token: "fixture-access".into(),
+                refresh_token: "fixture-refresh".into(),
+                access_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .unwrap();
+        let client = Client::new(config).unwrap();
+        let current = rpc(&client, json!({"action":"remote-auth"})).await.unwrap();
+        let renewed = rpc(
+            &client,
+            json!({"action":"remote-auth","rejected":"fixture-access"}),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(current, json!({"token":"fixture-access","apiUrl":url}));
+        assert_eq!(renewed["token"], "renewed-1");
+        assert_eq!(renewals.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     #[test]
     fn cloud_commands_keep_templates_sessions_and_legacy_workspaces_distinct() {
