@@ -5,7 +5,7 @@ October 22. A served workspace whose `.git/config` names a clean filter, a proce
 whose name holds `=`, a file system monitor and a `post-index-change` hook, with a changed submodule
 whose own config names a filter: `GET /v1/vcs/diff` lists the changes and no program leaves its mark.
 A partial clone whose remote names an upload-pack command: the branch review fetches nothing and says
-why it cannot show the base.
+to run `git backfill` instead of quoting Git.
 
 Usage: python3 scripts/test-repository-config.py   (HAARNESS_BIN picks the binary, HAARNESS_E2E_ROOT a
 folder to keep the fixture in). The echo provider is configured; no model is called.
@@ -173,8 +173,11 @@ def case_partial_clone():
     assert status == 200 and files == [], files
     status, failure = review(url, 'branch')
     assert left() == [], f'the review fetched with the remote\'s command: {left()} {failure}'
-    assert status >= 400 and 'promisor' in json.dumps(failure), (status, failure)
-    passed('a partial clone\'s branch review fetches nothing and gives Git\'s reason')
+    assert status >= 400, (status, failure)
+    assert failure['message'].endswith(
+        'this clone has not downloaded the files the review needs; run git backfill, then try again'), failure
+    assert 'promisor' not in failure['message'], failure
+    passed('a partial clone\'s branch review fetches nothing and says to run git backfill')
 
 
 try:

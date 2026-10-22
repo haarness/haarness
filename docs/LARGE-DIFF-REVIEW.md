@@ -83,8 +83,12 @@ still run, unless the repository defines a git-lfs extension, which empties
 them all. Submodules are listed when they point at another commit, without
 looking inside them for uncommitted changes, since that runs a second Git with
 the submodule's own configuration. When the settings cannot be read, Git is not
-run and the review says so. A partial clone's review of a branch whose base was
-never downloaded fails with Git's own message instead of fetching it.
+run and the review says so. A partial clone's review that needs files the clone
+never downloaded fetches nothing and fails with `this clone has not downloaded
+the files the review needs; run git backfill, then try again`; Desktop's Review
+shows "Review needs files this clone hasn’t downloaded yet." with **Check
+again**, and the TUI's `/diff` says the same in one line. `git fetch` does not
+download them; `git backfill` (Git 2.49 and later) does.
 
 Creating, resetting and removing a worktree are started by the person and keep
 the repository's own filters and hooks, as Git does for any checkout.
