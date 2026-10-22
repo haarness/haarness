@@ -1804,7 +1804,12 @@ fn quiet_closed_stdout() {
             "panic: {}",
             message.chars().take(500).collect::<String>()
         );
-        default_hook(info);
+        // A server's stderr log goes through its queue, which the line above
+        // reached, as the log file did: writing past it would wait for a
+        // reader that stopped, holding the panicking thread.
+        if !logs::STDERR_QUEUED.load(std::sync::atomic::Ordering::Relaxed) {
+            default_hook(info);
+        }
     }));
 }
 
@@ -9717,6 +9722,7 @@ fn init_logging(
             .flatten();
         if let Some((queue, guard)) = queue {
             stderr_queue_guard = Some(guard);
+            logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
             layers.push(Box::new(
                 tracing_subscriber::fmt::layer()
                     .with_writer(RedactUrls(queue))
@@ -10924,6 +10930,63 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Run in a process of its own (it installs the process's panic hook):
+    /// a server's stderr whose reader stopped held a panicking thread in the
+    /// message the default hook writes there; through the queue it goes on.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_on_a_server_whose_stderr_nobody_reads_does_not_wait_for_the_reader() {
+        use std::io::Write as _;
+        if std::env::var_os("HAARNESS_PANIC_STDERR_PROBE").is_some() {
+            super::logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::quiet_closed_stdout();
+            // Fills the pipe nobody reads, as a queue's thread does.
+            std::thread::spawn(|| {
+                loop {
+                    let _ = std::io::stderr().write_all(&[b'x'; 64 * 1024]);
+                }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = std::thread::spawn(|| panic!("a request handler failed")).join();
+            println!("the panicking thread ended");
+            let _ = std::io::stdout().flush();
+            std::process::exit(0);
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_panic_on_a_server_whose_stderr_nobody_reads_does_not_wait_for_the_reader",
+                "--nocapture",
+            ])
+            .env("HAARNESS_PANIC_STDERR_PROBE", "1")
+            .stdout(std::process::Stdio::piped())
+            // Held open and never read.
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = sender.send(line);
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut ended = false;
+        while let Ok(line) =
+            lines.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            if line.contains("the panicking thread ended") {
+                ended = true;
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ended, "the panicking thread waited for stderr's reader");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_permission_engine_protects_the_global_configuration_the_cli_reads() {
