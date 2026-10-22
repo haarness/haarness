@@ -648,6 +648,55 @@ test("a project connecting again starts a new attempt when the network comes bac
   }
 });
 
+test("the open project removed in another window while it reconnects is left, not reconnected forever", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("removed-elsewhere");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Elsewhere server", proxy.url, remote.token);
+    const id = "remote:" + new URL(proxy.url).origin;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    let infos = 0;
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/info") return false;
+      if (++infos === 1) {
+        req.resume();
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Server is busy" } }));
+        return true;
+      }
+      holding();
+      return gate;
+    });
+    proxy.cut();
+    await held;
+    // Another window removes it, through the same main process.
+    await page.evaluate((id) => window.haarness.forget(id), id);
+    proxy.intercept(undefined);
+    release();
+    await expect(page.getByRole("region", { name: "Project home" })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(
+      page.getByRole("textbox", { name: "Message", exact: true }),
+    ).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        async (id) =>
+          (await window.haarness.boot()).recent.some((item) => item.id === id),
+        id,
+      ),
+    ).toBe(false);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
 test.beforeEach(async () => {
   temporary = await realpath(
     await mkdtemp(join(tmpdir(), "haarness-servers-")),

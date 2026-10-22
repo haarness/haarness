@@ -46,7 +46,11 @@ import {
 import { z } from "zod";
 import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
 import { serverKey } from "../servers";
-import { mergeProjectCatalog, projectKey, saveConnected } from "../projects";
+import {
+  mergeProjectCatalog,
+  projectKey,
+  rememberConnected,
+} from "../projects";
 import {
   connectLocal,
   establish,
@@ -691,10 +695,17 @@ function installHandlers() {
     if (cloudSession || cloudWorkspace) {
       const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
       // Removed from the sidebar while it connected: it stays removed.
-      const next = saveConnected(data().recent, view, input.recent);
-      if (!next) return null;
-      data().recent = next;
-      await persist(); watchNotifications(view.id, win.id); return view;
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved: view,
+        requested: input.recent,
+        save: async (next) => {
+          data().recent = next;
+          await persist();
+        },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
     }
 
     let workspace = input.workspace ?? recent?.workspace;
@@ -826,38 +837,49 @@ function installHandlers() {
         ...(url ? { url } : {}),
       };
       // A saved project removed from the sidebar while it connected (a row
-      // retrying in the background, a notification opening its chat) stays
-      // removed, with nothing of it saved again.
-      const next = saveConnected(data().recent, saved, input.recent);
-      if (!next) return null;
-      if (url) {
-        saveServerAuth(serverId, auth);
-        const savedServer = {
-          id: serverId,
-          url: new URL(url).origin,
-          label: input.label?.trim() || server?.label || new URL(url).hostname,
-        };
-        const serverIndex = data().servers.findIndex(
-          (item) => item.id === serverId,
-        );
-        if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
-        else data().servers.push(savedServer);
-      }
-      data().recent = next;
-      await persist();
-      if (!view.remote) {
-        await refreshProjects();
-        if (!data().recent.find((item) => item.id === view.id)?.project)
-          await refreshProjects();
-        const annotated = data().recent.find((item) => item.id === view.id);
-        if (annotated)
-          Object.assign(view, {
-            project: annotated.project,
-            checkout: annotated.checkout,
-          });
-      }
-      watchNotifications(view.id, win.id);
-      return view;
+      // retrying in the background, a notification opening its chat), or
+      // while its folder was looked up afterwards, stays removed: nothing of
+      // it is saved or watched again.
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved,
+        requested: input.recent,
+        save: async (next) => {
+          if (url) {
+            saveServerAuth(serverId, auth);
+            const savedServer = {
+              id: serverId,
+              url: new URL(url).origin,
+              label:
+                input.label?.trim() || server?.label || new URL(url).hostname,
+            };
+            const serverIndex = data().servers.findIndex(
+              (item) => item.id === serverId,
+            );
+            if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
+            else data().servers.push(savedServer);
+          }
+          data().recent = next;
+          await persist();
+        },
+        after: view.remote
+          ? undefined
+          : async () => {
+              await refreshProjects();
+              if (!data().recent.find((item) => item.id === view.id)?.project)
+                await refreshProjects();
+              const annotated = data().recent.find(
+                (item) => item.id === view.id,
+              );
+              if (annotated)
+                Object.assign(view, {
+                  project: annotated.project,
+                  checkout: annotated.checkout,
+                });
+            },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
     });
   });
   handle("forget", async (_, id: string) => {
