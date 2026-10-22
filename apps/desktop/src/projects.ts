@@ -126,6 +126,48 @@ export function primaryLocation(project: DesktopProject) {
   );
 }
 
+/**
+ * The saved projects once `saved` has connected: it replaces the entry with
+ * its ID, or joins the list. A connection asked for by a saved project's ID
+ * (`requested`) saves nothing when that project was removed from the sidebar
+ * while it connected (`undefined`): a sidebar row retrying in the background,
+ * or a notification opening its chat, must not bring it back.
+ */
+export function saveConnected<T extends { id: string }>(
+  recent: T[],
+  saved: T,
+  requested?: string,
+): T[] | undefined {
+  if (requested && !recent.some((item) => item.id === requested)) return;
+  return recent.some((item) => item.id === saved.id)
+    ? recent.map((item) => (item.id === saved.id ? saved : item))
+    : [...recent, saved];
+}
+
+/**
+ * Saves a project that has just connected (`saveConnected`; `save` stores the
+ * list), runs what follows the save (`after`, such as looking up a local
+ * folder's project), and only then watches its notifications, if it is still
+ * saved: a project removed from the sidebar at any point meanwhile is not
+ * watched again. Answers whether the connection still has its project.
+ */
+export async function rememberConnected<T extends { id: string }>(input: {
+  recent: () => T[];
+  saved: T;
+  requested?: string;
+  save: (recent: T[]) => Promise<void>;
+  after?: () => Promise<void>;
+  watch: () => void;
+}) {
+  const next = saveConnected(input.recent(), input.saved, input.requested);
+  if (!next) return false;
+  await input.save(next);
+  await input.after?.();
+  if (!input.recent().some((item) => item.id === input.saved.id)) return false;
+  input.watch();
+  return true;
+}
+
 // Runtime project IDs are authoritative. Paths identify their concrete
 // endpoints, never the relationship between a chat and its project.
 export function mergeProjectCatalog(

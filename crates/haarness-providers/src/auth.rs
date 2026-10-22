@@ -11,6 +11,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use fs2::FileExt as _;
+use haarness_account::loopback::{AcceptFailures, next_connection};
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -411,10 +412,15 @@ impl OpenAiOAuthClient {
         let url = self.authorize_url(&redirect, &pkce, &state)?;
         let client = self.clone();
         let task = tokio::spawn(async move {
-            let callback =
-                tokio::time::timeout(CALLBACK_TIMEOUT, wait_for_callback(&listeners, &state))
-                    .await
-                    .map_err(|_| AuthError::OpenAi("browser authorization timed out".into()))??;
+            let failures = AcceptFailures::default();
+            let callback = tokio::time::timeout(
+                CALLBACK_TIMEOUT,
+                wait_for_callback(&listeners, &state, &failures),
+            )
+            .await
+            .map_err(|_| {
+                AuthError::OpenAi(failures.explain("browser authorization timed out"))
+            })??;
             let result = client
                 .exchange(&callback.code, &redirect, &pkce.verifier)
                 .await;
@@ -1015,18 +1021,39 @@ async fn bind_loopback(port: u16) -> std::io::Result<Vec<TcpListener>> {
 /// wait, with a code or the provider's refusal. Anything else is answered and
 /// the wait goes on (until [`CALLBACK_TIMEOUT`]), and its text never becomes
 /// the error.
-async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult<BrowserCallback> {
+async fn wait_for_callback(
+    listeners: &[TcpListener],
+    state: &str,
+    failures: &AcceptFailures,
+) -> AuthResult<BrowserCallback> {
+    answer_until_callback(
+        move || async move {
+            let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
+            futures::future::select_all(accepts).await.0
+        },
+        state,
+        failures,
+    )
+    .await
+}
+
+async fn answer_until_callback<F, A>(
+    mut accept: F,
+    state: &str,
+    failures: &AcceptFailures,
+) -> AuthResult<BrowserCallback>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>>,
+{
     // Each connection is read in a task of its own while the listeners keep
     // accepting, so idle ones (a page's `<link rel=preconnect>`, a browser's
-    // spare socket) never hold up the real return.
+    // spare socket) never hold up the real return. A connection that failed
+    // before it was accepted ends only itself.
     let mut connections = tokio::task::JoinSet::new();
     loop {
-        let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
         tokio::select! {
-            (accepted, _, _) = futures::future::select_all(accepts) => {
-                let (stream, _) = accepted.map_err(|error| {
-                    AuthError::OpenAi(format!("callback listener failed: {error}"))
-                })?;
+            (stream, _) = next_connection(&mut accept, failures) => {
                 connections.spawn(answer_callback(stream, state.to_owned()));
             }
             // Every finished connection is taken, so one that ended the sign-in is
@@ -1385,8 +1412,10 @@ mod tests {
 
     use super::{
         CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
-        OpenAiOAuthClient, OpenAiOAuthConfig, openai_residency, query, read_callback,
+        OpenAiOAuthClient, OpenAiOAuthConfig, answer_until_callback, openai_residency, query,
+        read_callback,
     };
+    use haarness_account::loopback::AcceptFailures;
 
     #[tokio::test]
     async fn browser_login_uses_the_haarness_pkce_contract() {
@@ -1621,6 +1650,71 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("access_denied"), "{error}");
+    }
+
+    /// A connection that failed before it was accepted (reset by its client,
+    /// or no file descriptor left for it) does not end the sign-in.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_browser_login() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let listener = &listener;
+        let mut failures = vec![
+            std::io::Error::other("Too many open files"),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ];
+        let accept = move || {
+            let failure = failures.pop();
+            async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => listener.accept().await,
+                }
+            }
+        };
+        let failures = AcceptFailures::default();
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(b"GET /auth/callback?state=st-1&code=real HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            stream
+        };
+        let (callback, _stream) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(answer_until_callback(accept, "st-1", &failures), browser)
+        })
+        .await
+        .expect("the browser's return is taken after the failed accepts");
+        assert_eq!(callback.unwrap().code, "real");
+    }
+
+    /// A callback port that cannot take connections keeps the sign-in
+    /// waiting, and the failure is what its timeout says.
+    #[tokio::test]
+    async fn a_browser_login_that_times_out_names_why_its_port_took_no_connection() {
+        let failures = AcceptFailures::default();
+        let accept = || async {
+            Err::<(tokio::net::TcpStream, std::net::SocketAddr), _>(std::io::Error::other(
+                "Too many open files",
+            ))
+        };
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                answer_until_callback(accept, "st-1", &failures),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            failures.explain("browser authorization timed out"),
+            "browser authorization timed out; the sign-in's port on this computer could not \
+             accept connections (Too many open files)"
+        );
     }
 
     #[tokio::test]
