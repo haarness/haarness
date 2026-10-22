@@ -49,7 +49,7 @@ class PublicationTest(unittest.TestCase):
                     value = {'id': 'artifact-id'}
                 else:
                     value = {'id': 'release-id', 'release': {'manifest': {'products': {'cli': {'artifacts': [{
-                        'file': 'haarness', 'url': owner.artifact_url,
+                        'id': 'artifact-id', 'file': 'haarness', 'url': owner.artifact_url,
                         'size': len(PAYLOAD), 'digest': {'sha256': hashlib.sha256(PAYLOAD).hexdigest()},
                     }]}}}}}
                 self.send_response(200)
