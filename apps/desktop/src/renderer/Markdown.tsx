@@ -1,6 +1,6 @@
 import { language, t } from "./i18n";
 import { useApp } from "./state";
-import { createEffect, on, onCleanup } from "solid-js";
+import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { createMarkdownClient } from "./markdown-client";
 import { createMarkdownDOM } from "./markdown-dom";
 import { linkTarget } from "./link-target";
@@ -148,6 +148,11 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
     host.dataset.markdownReady = "false";
     client.update(props.text, !!props.live, !props.document);
   });
+  // Asked when something waits on this text being drawn (a selection kept
+  // from the live reply it replaces).
+  const drawNow = () => client.flush();
+  onMount(() => host.addEventListener("markdown-draw-now", drawNow));
+  onCleanup(() => host?.removeEventListener("markdown-draw-now", drawNow));
   // Image placeholders already drawn follow a language change.
   createEffect(on(language, () => relabelImages(host, imageLabels()), { defer: true }));
   onCleanup(() => {
