@@ -1320,14 +1320,14 @@ impl ManagementService {
                 )?;
             }
             "edit" | "remove" => {
-                let (_, path, mut section) = self.provider_source(input)?;
+                let (_, path, section) = self.provider_source(input)?;
                 ensure!(
                     input["revision"].as_str() == Some(&revision(&path)?),
                     "Configuration changed; reopen the provider"
                 );
                 if text(input, "action") == "edit" {
                     let url = required_string(input, "url")?;
-                    section.base_url = Some(if section.integration.is_some() {
+                    let base_url = if section.integration.is_some() {
                         crate::router_connection::normalize_url(url)?
                     } else {
                         ensure!(
@@ -1335,15 +1335,29 @@ impl ManagementService {
                             "Use HTTPS, or HTTP on a loopback address"
                         );
                         url.into()
-                    });
-                    section.name = Some(required_string(input, "label")?.into());
-                    section.models = text(input, "models")
+                    };
+                    let name = required_string(input, "label")?.to_owned();
+                    let models: Vec<String> = text(input, "models")
                         .split(',')
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                         .collect();
-                    crate::write_provider_entry(&path, id, Some(&section))?;
+                    // Only what the form changed is written: the entry's
+                    // other settings (context window, tools, headers, keys
+                    // Haarness does not know) stay as written.
+                    let mut fields = Vec::new();
+                    if section.base_url.as_deref() != Some(base_url.as_str()) {
+                        fields.push(("base_url".to_owned(), Some(json!(base_url))));
+                    }
+                    // The form shows the id where the entry has no name.
+                    if section.name.as_deref().unwrap_or(id) != name {
+                        fields.push(("name".to_owned(), Some(json!(name))));
+                    }
+                    if section.models != models {
+                        fields.push(("models".to_owned(), Some(json!(models))));
+                    }
+                    crate::write_entry_fields(&path, "providers", id, fields)?;
                 } else {
                     crate::write_provider_entry(&path, id, None)?;
                 }
@@ -1554,7 +1568,13 @@ impl ManagementService {
         config["enabled"] = json!(!config["enabled"].as_bool().unwrap_or(true));
         let mut view = View {
             title: "Project memory".into(),
-            lines: vec![format!("Directory: {}", text(&status, "directory"))],
+            lines: [format!("Directory: {}", text(&status, "directory"))]
+                .into_iter()
+                .chain(status["settingsUnreadable"].as_bool().unwrap_or(false).then(|| {
+                    "Memory is off because its settings file could not be read. Saving replaces it."
+                        .to_owned()
+                }))
+                .collect(),
             entries: vec![
                 entry("Create memory", "", json!({"action":"form"})),
                 entry(
@@ -2237,6 +2257,107 @@ fn router_form(input: &Value, needs_key: bool) -> View {
 #[cfg(test)]
 mod tests {
     use super::replace_label;
+    use serde_json::{Value, json};
+    use std::fs;
+
+    /// Editing a provider in Settings writes its name, address and models, and
+    /// nothing else: a TOML entry keeps its context window and tool settings,
+    /// and a JSON one gains no loaded defaults and keeps its comments.
+    #[test]
+    fn a_provider_edit_writes_only_what_the_form_changed() {
+        let (root, workspace, paths, service) =
+            crate::management::tests::isolated_service("provider-edit");
+        fs::write(
+            &paths.config,
+            r#"[providers.gateway]
+protocol = "openai-chat-completions"
+name = "Gateway"
+base_url = "https://gateway.fixture.test/v1"
+models = ["a"]
+context_window = 200000
+max_output_tokens = 8000
+tools = false
+api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
+"#,
+        )
+        .unwrap();
+        let project = workspace.join("haarness.json");
+        let project_text = r#"{
+  "providers": {
+    // The team's proxy.
+    "proxy": {"protocol": "openai-chat-completions", "base_url": "https://proxy.fixture.test/v1",
+              "models": ["m"], "x-team-note": "keep"},
+    "plain": {"protocol": "openai-chat-completions", "base_url": "https://plain.fixture.test/v1",
+              "models": ["m"]}
+  }
+}
+"#;
+        fs::write(&project, project_text).unwrap();
+        for (id, scope, path, url, label, models) in [
+            (
+                "gateway",
+                "global",
+                paths.config.clone(),
+                "https://gateway.fixture.test/v1",
+                "Team gateway",
+                "a, b",
+            ),
+            (
+                "proxy",
+                "project",
+                project.clone(),
+                "https://proxy.fixture.test/v2",
+                "Proxy",
+                "m",
+            ),
+            // The form shows the id as the name of an entry without one.
+            (
+                "plain",
+                "project",
+                project.clone(),
+                "https://plain.fixture.test/v1",
+                "plain",
+                "m, n",
+            ),
+        ] {
+            service
+                .provider_mutation(&json!({"action": "edit", "name": id, "scope": scope,
+                    "source": path, "revision": super::revision(&path).unwrap(), "url": url,
+                    "label": label, "models": models}))
+                .unwrap();
+        }
+        let global: toml::Value =
+            toml::from_str(&fs::read_to_string(&paths.config).unwrap()).unwrap();
+        let gateway = &global["providers"]["gateway"];
+        assert_eq!(gateway["name"].as_str(), Some("Team gateway"));
+        assert_eq!(
+            gateway["models"],
+            toml::Value::try_from(["a", "b"]).unwrap()
+        );
+        assert_eq!(gateway["context_window"].as_integer(), Some(200_000));
+        assert_eq!(gateway["max_output_tokens"].as_integer(), Some(8000));
+        assert_eq!(gateway["tools"].as_bool(), Some(false));
+        assert_eq!(
+            gateway["api_key_envs"],
+            toml::Value::try_from(["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]).unwrap()
+        );
+        let text = fs::read_to_string(&project).unwrap();
+        assert!(text.contains("// The team's proxy."), "{text}");
+        let written: Value =
+            jsonc_parser::parse_to_serde_value(&text, &jsonc_parser::ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            written["providers"]["proxy"],
+            json!({"protocol": "openai-chat-completions", "base_url": "https://proxy.fixture.test/v2",
+                "models": ["m"], "x-team-note": "keep", "name": "Proxy"})
+        );
+        assert_eq!(
+            written["providers"]["plain"],
+            json!({"protocol": "openai-chat-completions", "base_url": "https://plain.fixture.test/v1",
+                "models": ["m", "n"]})
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn replacing_a_stored_key_reads_as_a_sentence() {

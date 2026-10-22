@@ -520,6 +520,7 @@ mod tests {
             pid: None,
             cols: 20,
             rows: 4,
+            created: false,
         };
         let mut terminal = TerminalWorkspace::new(vec![info]);
         let id = terminal.active_id().unwrap();
@@ -551,6 +552,7 @@ mod tests {
             pid: None,
             cols: 20,
             rows: 4,
+            created: false,
         }]);
         let id = terminal.active_id().unwrap();
         (terminal, id)

@@ -1,6 +1,8 @@
 import { createEffect, on, onCleanup, untrack } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { readProjectCache, writeProjectCache } from "./project-cache";
+import { createOverviewLink } from "./overview-link";
+import { onReconnectHint } from "./reconnect-wait";
 import type {
   Thread,
   Turn,
@@ -8,7 +10,7 @@ import type {
   PendingPermissionInfo,
   PendingQuestionInfo,
 } from "@haarness/sdk";
-import type { Bridge, Connection, DesktopEvent } from "../shared";
+import type { Bridge, Connection } from "../shared";
 
 interface Overview {
   threads: Thread[];
@@ -79,59 +81,10 @@ export function createProjectOverview(input: {
       () => [input.id(), input.expanded(), input.active()] as const,
       ([id, expanded, active]) => {
         if (!expanded || active) return;
-        let disposed = false,
-          attempt = 0,
-          subscription = "",
-          instance = "",
-          cursor = 0;
-        let timer: ReturnType<typeof setTimeout> | undefined;
         const delegated = new Set<string>();
-        let operation = 0;
-        let early: DesktopEvent[] | undefined;
         const api = <T>(method: string, args: unknown[] = []) =>
           input.bridge.api<T>(id, method, args);
-        const stop = async () => {
-          const previous = subscription;
-          subscription = "";
-          if (previous) await input.bridge.unsubscribe(previous);
-        };
-        const retry = () => {
-          if (disposed) return;
-          clearTimeout(timer);
-          timer = setTimeout(
-            () => void load(),
-            Math.min(30000, 500 * 2 ** Math.min(attempt++, 6)),
-          );
-        };
-        const receive = (event: DesktopEvent) => {
-          if (
-            disposed ||
-            event.connection !== id ||
-            !["server", "connection"].includes(event.kind)
-          )
-            return;
-          if (early) {
-            early.push(event);
-            return;
-          }
-          if (!subscription || event.id !== subscription) return;
-          if (event.kind === "connection") {
-            retry();
-            return;
-          }
-          const value = event.data as
-            | EventEnvelope
-            | { type: "resync_required" };
-          if (
-            value.type === "resync_required" ||
-            !("serverInstanceId" in value) ||
-            value.serverInstanceId !== instance
-          ) {
-            retry();
-            return;
-          }
-          if (value.eventId <= cursor) return;
-          cursor = value.eventId;
+        const apply = (value: EventEnvelope) => {
           if (
             value.type === "thread.created" ||
             value.type === "thread.updated"
@@ -201,63 +154,38 @@ export function createProjectOverview(input: {
             );
           }
         };
-        async function load() {
-          set("loading", true);
-          const current = ++operation;
-          const valid = () => !disposed && operation === current;
-          try {
-            await stop();
-            if (!valid()) return;
-            const connection = await input.connect(id);
-            if (!connection || !valid()) return;
-            const info = connection.info;
+        const link = createOverviewLink({
+          id,
+          bridge: input.bridge,
+          connect: input.connect,
+          async snapshot(info) {
             const [threads, turns, permissions, questions] = await Promise.all([
               api<Thread[]>("listThreads", [{ archived: true }]),
               api<Turn[]>("activeTurns"),
               api<PendingPermissionInfo[]>("listPermissions"),
               api<PendingQuestionInfo[]>("listQuestions"),
             ]);
-            if (!valid()) return;
-            set("threads", reconcile(threads, { key: "id" }));
-            set("turns", turns);
-            set("permissions", permissions);
-            set("questions", questions);
-            set("shared", info.capabilities.includes("approval-mode.v1"));
-            instance = info.serverInstanceId;
-            cursor = info.eventCursor ?? 0;
-            // Replay starts before the REST snapshot, closing the snapshot/SSE gap.
-            early = [];
-            const key = await input.bridge.subscribe(id, cursor);
-            if (!valid()) {
-              await input.bridge.unsubscribe(key);
-              return;
-            }
-            subscription = key;
-            const pending = early;
-            early = undefined;
-            set({ loaded: true, loading: false, error: "" });
-            attempt = 0;
-            for (const event of pending) receive(event);
-          } catch (error) {
-            early = undefined;
-            if (!valid()) return;
-            set("loading", false);
-            set(
-              "error",
-              error instanceof Error ? error.message : String(error),
-            );
-            retry();
-          }
-        }
-        const off = input.bridge.onEvent(receive);
+            return () => {
+              set("threads", reconcile(threads, { key: "id" }));
+              set("turns", turns);
+              set("permissions", permissions);
+              set("questions", questions);
+              set("shared", info.capabilities.includes("approval-mode.v1"));
+            };
+          },
+          apply,
+          loading: () => set("loading", true),
+          loaded: () => set({ loaded: true, loading: false, error: "" }),
+          failed: (message) => set({ loading: false, error: message }),
+        });
+        const off = input.bridge.onEvent(link.receive);
+        const offHint = onReconnectHint(() => link.hint(false));
         set("loading", true);
-        void untrack(load);
+        untrack(link.start);
         onCleanup(() => {
-          disposed = true;
-          operation++;
-          clearTimeout(timer);
+          link.dispose();
           off();
-          void stop().catch(() => {});
+          offHint();
         });
       },
     ),

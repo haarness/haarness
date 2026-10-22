@@ -1421,9 +1421,16 @@ async fn cli_main() -> Result<()> {
     // `serve --stop` and the `--daemon` launcher are control commands: they
     // print their result, not the server's log. A detached server's stderr
     // goes nowhere.
-    let stderr_logs = cli.print_logs
-        || matches!(&cli.command, Some(Command::Serve(args))
-            if !args.stop && !args.daemon && !args.background_child);
+    let stderr_logs = if matches!(&cli.command, Some(Command::Serve(args))
+            if !args.stop && !args.daemon && !args.background_child)
+    {
+        // Everyone the server answers would wait on a reader that stopped.
+        StderrLogs::Queued
+    } else if cli.print_logs {
+        StderrLogs::InPlace
+    } else {
+        StderrLogs::Off
+    };
     // Read-only commands stay out of the log files they inspect.
     let file_logs = !matches!(cli.command, Some(Command::Logs { .. } | Command::Doctor));
     // Processes that live as long as a window or a server get no command span:
@@ -1669,6 +1676,9 @@ async fn cli_main() -> Result<()> {
             "command failed"
         );
     }
+    // A sign-in renewal its server already answered must be saved, or the
+    // next one sends a spent token and the sign-in ends.
+    haarness_account::renewals::settle(Duration::from_secs(5)).await;
     drop(telemetry_guard);
     outcome
 }
@@ -1797,7 +1807,16 @@ fn quiet_closed_stdout() {
             "panic: {}",
             message.chars().take(500).collect::<String>()
         );
-        default_hook(info);
+        // A server's stderr log goes through its queue, which the line above
+        // reached, as the log file did. The message itself (with its
+        // backtrace note) follows once the queue is read; while a reader that
+        // stopped leaves it waiting, writing past it would hold the panicking
+        // thread, and the log line has to do.
+        if !logs::STDERR_QUEUED.load(std::sync::atomic::Ordering::Relaxed)
+            || logs::stderr_drained(Duration::from_millis(100))
+        {
+            default_hook(info);
+        }
     }));
 }
 
@@ -4025,6 +4044,18 @@ async fn serve_command(
         )
         .await;
     };
+    // The lease says the folder's previous server is gone. Commands it
+    // started and a crash or `kill -9` left running (a dev server holding its
+    // port, a `sleep`) stop now; this server then records its own.
+    // Dropped before the lease: a server that stops gives its record up
+    // before it lets go of the folder, so what it is still stopping is left
+    // to it.
+    let (stopped, _recording) = haarness_core::process_groups::take_over(
+        paths.server_lock.with_file_name("process-groups"),
+    );
+    if stopped > 0 {
+        tracing::info!(stopped, "stopped commands the previous server left running");
+    }
     let (listener, took_free_port) =
         bind_serve_listener(args.host, args.port, DEFAULT_SERVE_PORT).await?;
     if took_free_port && !args.background_child {
@@ -5553,11 +5584,13 @@ fn elapsed_words(elapsed: Duration) -> String {
     }
 }
 
-/// Wait for `work` unless Ctrl-C or SIGTERM (a cancelled CI job) comes
-/// first. Then the chat's turns, helpers and workflows stop on the server —
-/// a run that exits must not leave them working, and spending, unwatched —
-/// and the process exits as an interrupted one does. A second signal exits
-/// at once.
+/// Wait for `work` unless Ctrl-C, SIGTERM (a cancelled CI job) or the run's
+/// terminal closing comes first. Then the chat's turns, helpers and workflows
+/// stop on the server — a run that exits must not leave them working, and
+/// spending, unwatched — and the process exits as an interrupted one does. A
+/// second Ctrl-C or SIGTERM exits at once; another SIGHUP does not, since a
+/// closing terminal's shell sends its jobs a second one (zsh does) right after
+/// the terminal's own, before the stop could reach the server.
 async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
@@ -5566,9 +5599,13 @@ async fn stop_on_signal<T>(
 ) -> Result<T> {
     let status = tokio::select! {
         result = work => return result,
-        status = run_stop_signal() => status,
+        status = run_stop_signal(true) => status,
     };
-    eprintln!("Stopping…");
+    // A closed terminal fails every write; the stop must still be sent.
+    let say = |line: &str| {
+        let _ = writeln!(io::stderr(), "{line}");
+    };
+    say("Stopping…");
     let stop = async {
         if goal {
             // Otherwise the goal would start its next turn on its own.
@@ -5580,17 +5617,21 @@ async fn stop_on_signal<T>(
     };
     tokio::select! {
         stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
-            Ok(Ok(())) => eprintln!("Stopped. The chat keeps what was done so far."),
-            Ok(Err(error)) => eprintln!("Could not stop the chat on the server: {error:#}"),
-            Err(_) => eprintln!("The server did not confirm the stop in time."),
+            Ok(Ok(())) => say("Stopped. The chat keeps what was done so far."),
+            Ok(Err(error)) => say(&format!("Could not stop the chat on the server: {error:#}")),
+            Err(_) => say("The server did not confirm the stop in time."),
         },
-        _ = run_stop_signal() => {}
+        _ = run_stop_signal(false) => {}
     }
+    haarness_account::renewals::settle(Duration::from_secs(5)).await;
     std::process::exit(status)
 }
 
-/// The exit status once Ctrl-C (130) or SIGTERM (143) arrives.
-async fn run_stop_signal() -> i32 {
+/// The exit status once Ctrl-C (130), SIGTERM (143) or, with `hangup` for a
+/// run at a terminal, SIGHUP (129: the terminal window closed) arrives. A run
+/// without a terminal leaves SIGHUP alone, so one started with `nohup` (which
+/// never leaves stderr on a terminal) keeps ignoring it.
+async fn run_stop_signal(hangup: bool) -> i32 {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -5598,13 +5639,26 @@ async fn run_stop_signal() -> i32 {
             let _ = tokio::signal::ctrl_c().await;
             return 130;
         };
+        let mut hangup = if hangup && io::stderr().is_terminal() {
+            signal(SignalKind::hangup()).ok()
+        } else {
+            None
+        };
+        let hung_up = async {
+            match &mut hangup {
+                Some(hangup) => hangup.recv().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => 130,
             _ = terminate.recv() => 143,
+            _ = hung_up => 129,
         }
     }
     #[cfg(not(unix))]
     {
+        let _ = hangup;
         let _ = tokio::signal::ctrl_c().await;
         130
     }
@@ -6154,7 +6208,7 @@ fn compose_runtime_sources(
     runtime_config
         .commands
         .retain(|command| !disabled_skills.contains(&command.name));
-    memory_settings::load(&management::memory_root_for(paths, workspace))?
+    memory_settings::load(&management::memory_root_for(paths, workspace))
         .apply(&mut runtime_config);
     runtime_config.custom_agents.clone_from(&json_layers.agents);
     Ok(ComposedRuntimeSources {
@@ -6221,6 +6275,7 @@ fn load_output_style(
 struct HotReloadCandidate {
     disabled_skills: Vec<String>,
     providers: Arc<dyn ProviderRegistry>,
+    provider_definitions: HashMap<String, String>,
     tools: Arc<dyn ToolRegistry>,
     project_context: String,
     runtime_config: haarness_core::RuntimeConfig,
@@ -6294,6 +6349,9 @@ struct HotReloadController {
     management: Arc<management::ManagementService>,
     language: Arc<haarness_language::LanguageService>,
     scheduler: Scheduler,
+    /// The live generation's providers, by id, as [`provider_fingerprints`]
+    /// tells them apart.
+    provider_definitions: parking_lot::Mutex<HashMap<String, String>>,
 }
 
 impl HotReloadController {
@@ -6312,19 +6370,35 @@ impl HotReloadController {
             persisted_rules,
             true,
         )?;
-        let credentials = resolved_credentials(&read_auth(&self.paths)?);
+        let auth = read_auth(&self.paths)?;
+        let credentials = resolved_credentials(&auth);
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
             provider_instances(&sources.file_config, &credentials);
-        let providers: Arc<dyn ProviderRegistry> = Arc::new(
-            NativeProviderRegistry::discover_with_providers_and_store(
-                instances,
-                &disabled_providers,
-                Arc::new(CredentialStore::new(self.paths.auth.clone())),
-            )
-            .await
-            .with_stream_limits(&stream_limits(&sources.file_config)),
-        );
+        // Its model lists load once it is live, as at start (see below). A
+        // provider defined as before is the live one, lists and all: a
+        // reload (an instructions edit, a hook added) no longer forgets every
+        // list, which left Haarness Cloud with none until it was fetched again.
+        let mut registry = NativeProviderRegistry::with_providers_and_store(
+            instances,
+            &disabled_providers,
+            Arc::new(CredentialStore::new(self.paths.auth.clone())),
+        )
+        .await
+        .with_stream_limits(&stream_limits(&sources.file_config));
+        let provider_definitions = provider_fingerprints(&sources.file_config, &auth, &registry);
+        let live = self.runtime.providers();
+        {
+            let known = self.provider_definitions.lock();
+            for (id, definition) in &provider_definitions {
+                if known.get(id) == Some(definition)
+                    && let Some(provider) = live.get(id)
+                {
+                    registry.insert(provider);
+                }
+            }
+        }
+        let providers: Arc<dyn ProviderRegistry> = Arc::new(registry);
         let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills =
@@ -6376,6 +6450,7 @@ impl HotReloadController {
         Ok(HotReloadCandidate {
             disabled_skills,
             providers,
+            provider_definitions,
             tools,
             project_context: sources.project_context,
             runtime_config: sources.runtime_config,
@@ -6395,6 +6470,9 @@ impl HotReloadController {
         let applied = self.apply_components(candidate);
         if applied {
             *self.watch.write() = candidate.watch.clone();
+            self.provider_definitions
+                .lock()
+                .clone_from(&candidate.provider_definitions);
         }
         applied
     }
@@ -6541,6 +6619,17 @@ impl HotReloadController {
             let agents_only = observed.without_agents == applied.without_agents;
             if self.apply(candidate) {
                 applied = observed.clone();
+                // The new providers' lists start loading now; a read waits
+                // for one with nothing to show, and the rest announce
+                // themselves when they come.
+                let runtime = self.runtime.clone();
+                tokio::spawn(async move {
+                    haarness_server::models::catalog(
+                        &runtime,
+                        haarness_server::models::Wait::Start(Duration::ZERO),
+                    )
+                    .await;
+                });
                 for notice in &candidate.notices {
                     tracing::info!("config: {notice}");
                 }
@@ -7013,10 +7102,12 @@ async fn application_at(
     for notice in config_specs::startup_notices(paths, workspace, trust) {
         tracing::warn!("config: {notice}");
     }
-    let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
+    let auth = read_auth(paths).unwrap_or_default();
+    let credentials = resolved_credentials(&auth);
     let (instances, disabled_providers) = provider_instances(&file_config, &credentials);
+    // Their live model lists load below, once the runtime can announce them.
     let providers = Arc::new(
-        NativeProviderRegistry::discover_with_providers_and_store(
+        NativeProviderRegistry::with_providers_and_store(
             instances,
             &disabled_providers,
             Arc::new(CredentialStore::new(paths.auth.clone())),
@@ -7024,6 +7115,7 @@ async fn application_at(
         .await
         .with_stream_limits(&stream_limits(&file_config)),
     );
+    let provider_definitions = provider_fingerprints(&file_config, &auth, providers.as_ref());
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
@@ -7139,6 +7231,13 @@ async fn application_at(
         ))?;
     }
     let runtime = Arc::new(runtime);
+    // A list still loading after a few seconds keeps loading while the server
+    // starts answering; clients hear when it is in (`assets.updated`).
+    haarness_server::models::catalog(
+        &runtime,
+        haarness_server::models::Wait::Start(haarness_server::models::WAIT),
+    )
+    .await;
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
     // Chrome groups a conversation's tabs under its title and keeps
@@ -7182,6 +7281,7 @@ async fn application_at(
         management: management.clone(),
         language: language.clone(),
         scheduler,
+        provider_definitions: parking_lot::Mutex::new(provider_definitions),
     };
     Ok((
         listener,
@@ -7429,7 +7529,14 @@ fn read_api_key(provider: &str, key: Option<String>) -> Result<String> {
     Ok(key.to_owned())
 }
 
+/// Opens a link in the browser, but only an http or https one: a sign-in
+/// link comes from a server, and any other scheme would make the system open
+/// a local file or start an app. The parsed address is what opens.
 fn open_browser(url: &str) -> Result<()> {
+    let Some(url) = haarness_core::links::http_url(url) else {
+        anyhow::bail!("only http and https links open in the browser");
+    };
+    let url = url.as_str();
     #[cfg(target_os = "macos")]
     let status = ProcessCommand::new("open").arg(url).status()?;
     #[cfg(target_os = "linux")]
@@ -7568,7 +7675,12 @@ async fn mcp_command(
                 .context("cannot bind the MCP OAuth loopback callback")?;
             let address = listener.local_addr()?;
             let redirect_uri = format!("http://{address}/mcp/oauth/callback");
-            let session = registry.begin_oauth(&name, &redirect_uri).await?;
+            // The refusal and rmcp's own errors read as sentences, without
+            // the `tool error:` category.
+            let session = registry
+                .begin_oauth(&name, &redirect_uri)
+                .await
+                .map_err(management::plain_error)?;
             println!("Authorize MCP server '{name}' in your browser:");
             println!("{}", session.authorization_url);
             if !no_browser && let Err(error) = open_browser(&session.authorization_url) {
@@ -7577,7 +7689,10 @@ async fn mcp_command(
             let callback_url =
                 receive_oauth_callback(&listener, &redirect_uri, &session.authorization_url)
                     .await?;
-            session.complete(&callback_url).await?;
+            session
+                .complete(&callback_url)
+                .await
+                .map_err(management::plain_error)?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
@@ -7763,6 +7878,26 @@ async fn receive_oauth_callback(
     redirect_uri: &str,
     authorization_url: &str,
 ) -> Result<String> {
+    receive_oauth_callback_from(
+        move || listener.accept(),
+        redirect_uri,
+        authorization_url,
+        Duration::from_secs(300),
+    )
+    .await
+}
+
+async fn receive_oauth_callback_from<F, A>(
+    mut accept: F,
+    redirect_uri: &str,
+    authorization_url: &str,
+    patience: Duration,
+) -> Result<String>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<(tokio::net::TcpStream, SocketAddr)>>,
+{
+    use haarness_account::loopback::{AcceptFailures, next_connection};
     let state = reqwest::Url::parse(authorization_url)
         .ok()
         .and_then(|url| {
@@ -7772,13 +7907,14 @@ async fn receive_oauth_callback(
         .context("the MCP authorization URL carries no state")?;
     // Each connection is read in a task of its own while the listener keeps
     // accepting, so idle ones (a browser's spare socket, a page's preconnect)
-    // never hold up the real return.
+    // never hold up the real return. A connection that failed before it was
+    // accepted ends only itself.
     let mut connections = tokio::task::JoinSet::new();
-    let query = tokio::time::timeout(Duration::from_secs(300), async {
+    let failures = AcceptFailures::default();
+    let query = tokio::time::timeout(patience, async {
         loop {
             tokio::select! {
-                accepted = listener.accept() => {
-                    let (stream, peer) = accepted?;
+                (stream, peer) = next_connection(&mut accept, &failures) => {
                     if peer.ip().is_loopback() {
                         connections.spawn(answer_mcp_oauth_callback(stream, state.clone()));
                     }
@@ -7795,7 +7931,9 @@ async fn receive_oauth_callback(
         }
     })
     .await
-    .context("timed out waiting for the MCP OAuth callback")??;
+    .map_err(|_| {
+        anyhow::anyhow!(failures.explain("timed out waiting for the MCP OAuth callback"))
+    })??;
     Ok(format!("{redirect_uri}{query}"))
 }
 
@@ -7924,9 +8062,10 @@ fn set_mcp_enabled(
     enabled: bool,
 ) -> Result<McpConfigureRequest> {
     let target = mcp_entry_target(paths, workspace, project, name);
-    let mut entry = read_mcp_entry(&target, name)?;
+    let before = read_mcp_entry(&target, name)?;
+    let mut entry = before.clone();
     entry.enabled = enabled;
-    write_mcp_entry(&target, name, Some(&entry))?;
+    write_mcp_changes(&target, name, &before, &entry)?;
     println!(
         "{} MCP server '{name}' in {}.",
         if enabled { "Enabled" } else { "Disabled" },
@@ -8072,6 +8211,208 @@ fn mcp_entry_target(paths: &Paths, workspace: &Path, project: bool, name: &str) 
 
 fn mcp_config_target(paths: &Paths, workspace: &Path, project: bool) -> PathBuf {
     scoped_config_target(paths, workspace, project)
+}
+
+/// The `section.name` entry of a configuration file as written, as JSON.
+fn raw_config_entry(path: &Path, section: &str, name: &str) -> Result<serde_json::Value> {
+    let root = if path.extension().is_some_and(|value| value != "toml") {
+        jsonconfig::read_json(path)
+            .map_err(anyhow::Error::msg)?
+            .unwrap_or_default()
+    } else {
+        serde_json::to_value(toml::from_str::<toml::Value>(&fs::read_to_string(path)?)?)?
+    };
+    root.get(section)
+        .and_then(|entries| entries.get(name))
+        .filter(|entry| entry.is_object())
+        .cloned()
+        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))
+}
+
+/// Sets only `fields` of the `section.name` entry (`None` removes a key),
+/// leaving its other keys as written. JSON keeps the file's comments and
+/// formatting; TOML round-trips its values and loses its comments.
+fn write_entry_fields(
+    path: &Path,
+    section: &str,
+    name: &str,
+    fields: Vec<(String, Option<serde_json::Value>)>,
+) -> Result<()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    if path.extension().is_some_and(|value| value != "toml") {
+        return jsonconfig::write_entry_fields(path, section, name, fields);
+    }
+    let mut root: toml::Value = toml::from_str(&fs::read_to_string(path)?)?;
+    let entry = root
+        .get_mut(section)
+        .and_then(|entries| entries.get_mut(name))
+        .and_then(toml::Value::as_table_mut)
+        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
+    for (key, value) in fields {
+        match value {
+            Some(value) => {
+                entry.insert(key, toml::Value::try_from(value)?);
+            }
+            None => {
+                entry.remove(&key);
+            }
+        }
+    }
+    fs::write(path, toml::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+/// Saves `after`, an edit of the MCP entry `before` read from `path`: only
+/// what changed is written, under the entry's own keys and in its own
+/// shape, so an entry another tool reads (an `opencode.json` one with
+/// `type`, a `command` list and `environment`) stays one it can read, and
+/// keys Haarness does not know stay.
+fn write_mcp_changes(
+    path: &Path,
+    name: &str,
+    before: &McpConfigureRequest,
+    after: &McpConfigureRequest,
+) -> Result<()> {
+    let raw = raw_config_entry(path, "mcp", name)?;
+    write_entry_fields(path, "mcp", name, mcp_changes(&raw, before, after))
+}
+
+/// The keys to write into the entry `raw` (as written) for the edit from
+/// `before` to `after`.
+fn mcp_changes(
+    raw: &serde_json::Value,
+    before: &McpConfigureRequest,
+    after: &McpConfigureRequest,
+) -> Vec<(String, Option<serde_json::Value>)> {
+    use serde_json::{Value, json};
+    let has = |key: &str| raw.get(key).is_some();
+    let mut fields: Vec<(String, Option<Value>)> = Vec::new();
+    if before.command != after.command || before.args != after.args {
+        if raw.get("command").is_some_and(Value::is_array) {
+            // `command` names the program and its arguments together.
+            let parts: Vec<&str> = after
+                .command
+                .iter()
+                .chain(&after.args)
+                .map(String::as_str)
+                .collect();
+            fields.push(("command".into(), Some(json!(parts))));
+            if has("args") {
+                fields.push(("args".into(), None));
+            }
+        } else {
+            if before.command != after.command {
+                fields.push(("command".into(), after.command.clone().map(Value::String)));
+            }
+            if before.args != after.args {
+                fields.push(("args".into(), Some(json!(after.args))));
+            }
+        }
+    }
+    if before.env != after.env {
+        let opencode = matches!(
+            raw.get("type").and_then(Value::as_str),
+            Some("local" | "remote")
+        );
+        let key = if has("environment") || (opencode && !has("env")) {
+            "environment"
+        } else {
+            "env"
+        };
+        fields.push((key.into(), Some(json!(after.env))));
+    }
+    if before.url != after.url {
+        fields.push(("url".into(), after.url.clone().map(Value::String)));
+    }
+    if before.headers != after.headers {
+        fields.push(("headers".into(), Some(json!(after.headers))));
+    }
+    let opencode = matches!(
+        raw.get("type").and_then(Value::as_str),
+        Some("local" | "remote")
+    );
+    if opencode {
+        // opencode takes `oauth` as `false` or an object holding `clientId`
+        // and a space-separated `scope`, never `true` or the other keys.
+        if before.oauth != after.oauth
+            || before.oauth_client_id != after.oauth_client_id
+            || before.oauth_scopes != after.oauth_scopes
+        {
+            let value = if after.oauth == Some(false) {
+                Some(Value::Bool(false))
+            } else {
+                let had_object = raw.get("oauth").is_some_and(Value::is_object);
+                let mut object = raw
+                    .get("oauth")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                match &after.oauth_client_id {
+                    Some(client) => object.insert("clientId".into(), json!(client)),
+                    None => object.remove("clientId"),
+                };
+                if after.oauth_scopes.is_empty() {
+                    object.remove("scope");
+                } else {
+                    object.insert("scope".into(), json!(after.oauth_scopes.join(" ")));
+                }
+                (after.oauth == Some(true) || had_object || !object.is_empty())
+                    .then_some(Value::Object(object))
+            };
+            fields.push(("oauth".into(), value));
+        }
+        if before.enabled != after.enabled {
+            fields.push(("enabled".into(), Some(Value::Bool(after.enabled))));
+        }
+        return fields;
+    }
+    if before.oauth != after.oauth {
+        fields.push(("oauth".into(), after.oauth.map(Value::Bool)));
+    }
+    // A Claude-style entry keeps its client and scopes under `auth`.
+    let mut auth = raw.get("auth").filter(|auth| auth.is_object()).cloned();
+    let mut auth_changed = false;
+    for (key, nested, value) in [
+        (
+            "oauthClientId",
+            "clientId",
+            (before.oauth_client_id != after.oauth_client_id)
+                .then(|| after.oauth_client_id.clone().map(Value::String)),
+        ),
+        (
+            "oauthScopes",
+            "scopes",
+            (before.oauth_scopes != after.oauth_scopes)
+                .then(|| (!after.oauth_scopes.is_empty()).then(|| json!(after.oauth_scopes))),
+        ),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        match auth.as_mut().and_then(Value::as_object_mut) {
+            Some(auth) if auth.contains_key(nested) => {
+                match value {
+                    Some(value) => auth.insert(nested.into(), value),
+                    None => auth.remove(nested),
+                };
+                auth_changed = true;
+            }
+            _ => fields.push((key.into(), value)),
+        }
+    }
+    if auth_changed {
+        fields.push(("auth".into(), auth));
+    }
+    if before.enabled != after.enabled {
+        if has("disabled") && !has("enabled") {
+            fields.push(("disabled".into(), Some(Value::Bool(!after.enabled))));
+        } else {
+            fields.push(("enabled".into(), Some(Value::Bool(after.enabled))));
+        }
+    }
+    fields
 }
 
 /// Upsert or delete `[mcp.<name>]` in a TOML config file. TOML round-trips
@@ -8736,6 +9077,49 @@ fn provider_instances(
 
 /// The configured stream limits by provider id (`stream_idle_timeout`,
 /// `request_timeout`); providers without either keep the defaults.
+/// What makes each of `registry`'s providers the one it is: its section of
+/// the configuration (its definition, or the tuning of a built-in one), the
+/// stored API keys, and whether it is signed in by any credential (OAuth
+/// included), as a digest. A reload keeps a provider whose digest is the
+/// same, and its loaded model list with it.
+fn provider_fingerprints(
+    config: &FileConfig,
+    auth: &BTreeMap<String, serde_json::Value>,
+    registry: &NativeProviderRegistry,
+) -> HashMap<String, String> {
+    let credentials = resolved_credentials(auth);
+    let mut stored: Vec<_> = credentials.iter().collect();
+    stored.sort();
+    let stored = serde_json::to_vec(&stored).unwrap_or_default();
+    // Signed in with a credential of any kind, OAuth included, under its id
+    // or a preset alias: xAI decides when it is built whether to list its
+    // models. Whether, not which: a refreshed token changes nothing.
+    let signed_in: std::collections::HashSet<&str> = auth
+        .iter()
+        .filter(|(_, raw)| serde_json::from_value::<Credential>((*raw).clone()).is_ok())
+        .flat_map(|(id, _)| {
+            std::iter::once(id.as_str())
+                .chain(haarness_providers::compatible_preset(id).map(|preset| preset.id))
+        })
+        .collect();
+    haarness_core::ProviderRegistry::list(registry)
+        .into_iter()
+        .map(|info| {
+            let section = config
+                .providers
+                .get(&info.id)
+                .and_then(|section| serde_json::to_vec(section).ok())
+                .unwrap_or_default();
+            let mut digest = Sha256::new();
+            digest.update(&section);
+            digest.update([0]);
+            digest.update(&stored);
+            digest.update([u8::from(signed_in.contains(info.id.as_str()))]);
+            (info.id, format!("{:x}", digest.finalize()))
+        })
+        .collect()
+}
+
 fn stream_limits(config: &FileConfig) -> HashMap<String, haarness_core::StreamLimits> {
     config
         .providers
@@ -9346,9 +9730,21 @@ fn plugin_command(
     Ok(())
 }
 
+/// Where [`init_logging`] streams log lines besides the log file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StderrLogs {
+    Off,
+    /// Written as they come, in order with the command's own output.
+    InPlace,
+    /// A server's: through [`logs::StderrQueue`], so a reader that stops
+    /// reading never holds a request.
+    Queued,
+}
+
 /// Keeps asynchronous file logs alive and flushes an optional OTLP provider.
 struct TelemetryGuard {
     _file_writer: Option<tracing_appender::non_blocking::WorkerGuard>,
+    _stderr_queue: Option<logs::StderrQueueGuard>,
     tracer_provider: Option<SdkTracerProvider>,
     /// Telemetry problems are also printed on stderr (a CLI command on a terminal).
     interactive: bool,
@@ -9527,7 +9923,9 @@ struct RedactedUrls<W>(W);
 impl<W: Write> Write for RedactedUrls<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
-            Ok(text) if text.contains("://") => {
+            // `Url {` is a URL as `{:?}` writes it (rmcp logs its discovery
+            // addresses that way), with the user name and password as fields.
+            Ok(text) if text.contains("://") || text.contains("Url {") => {
                 self.0.write_all(urls_between_escapes(text).as_bytes())?;
             }
             _ => self.0.write_all(buf)?,
@@ -9577,7 +9975,7 @@ fn urls_between_escapes(text: &str) -> String {
 fn init_logging(
     paths: &Paths,
     level: Option<&str>,
-    stderr_logs: bool,
+    stderr_logs: StderrLogs,
     file_logs: bool,
     role: otel::ProcessRole,
     command: &'static str,
@@ -9626,17 +10024,40 @@ fn init_logging(
     } else {
         None
     };
-    if stderr_logs {
+    let mut stderr_queue_guard = None;
+    if stderr_logs != StderrLogs::Off {
         let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
         reloads.push(reload);
-        layers.push(Box::new(
-            tracing_subscriber::fmt::layer()
-                .with_writer(RedactUrls(io::stderr))
-                // Colour only for a terminal: not in files, pipes or journald.
-                .with_ansi(io::stderr().is_terminal())
-                .with_timer(stamp())
-                .with_filter(filter),
-        ));
+        // Colour only for a terminal: not in files, pipes or journald.
+        let ansi = io::stderr().is_terminal();
+        let queue = (stderr_logs == StderrLogs::Queued)
+            .then(|| {
+                logs::stderr_queue(
+                    io::stderr(),
+                    logs::STDERR_QUEUE_LIMIT,
+                    &paths.data.join("logs"),
+                )
+            })
+            .flatten();
+        if let Some((queue, guard)) = queue {
+            stderr_queue_guard = Some(guard);
+            logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
+            layers.push(Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(RedactUrls(queue))
+                    .with_ansi(ansi)
+                    .with_timer(stamp())
+                    .with_filter(filter),
+            ));
+        } else {
+            layers.push(Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(RedactUrls(io::stderr))
+                    .with_ansi(ansi)
+                    .with_timer(stamp())
+                    .with_filter(filter),
+            ));
+        }
     }
     let otel::Tracing {
         provider: tracer_provider,
@@ -9680,6 +10101,7 @@ fn init_logging(
     }
     Ok(TelemetryGuard {
         _file_writer: file_writer_guard,
+        _stderr_queue: stderr_queue_guard,
         tracer_provider,
         interactive,
     })
@@ -10827,6 +11249,84 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Run in a process of its own (it installs the process's panic hook):
+    /// a server's stderr whose reader stopped held a panicking thread in the
+    /// message the default hook writes there, and so it goes on without it;
+    /// with a reader there, the message still reaches stderr.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_on_a_server_with_a_queued_stderr_neither_waits_for_nor_loses_its_reader() {
+        use std::io::Write as _;
+        if let Some(mode) = std::env::var_os("HAARNESS_PANIC_STDERR_PROBE") {
+            let (queue, _guard) = super::logs::stderr_queue(
+                std::io::stderr(),
+                super::logs::STDERR_QUEUE_LIMIT,
+                std::path::Path::new("/logs"),
+            )
+            .unwrap();
+            super::logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::quiet_closed_stdout();
+            if mode == "stalled" {
+                // More than the pipe holds, through the queue, while nobody reads.
+                let line = vec![b'x'; 1024];
+                for _ in 0..512 {
+                    let _ = (&queue).write_all(&line);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            let _ = std::thread::spawn(|| panic!("a request handler failed")).join();
+            println!("the panicking thread ended");
+            let _ = std::io::stdout().flush();
+            std::process::exit(0);
+        }
+        let probe = |mode: &str| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::a_panic_on_a_server_with_a_queued_stderr_neither_waits_for_nor_loses_its_reader",
+                    "--nocapture",
+                ])
+                .env("HAARNESS_PANIC_STDERR_PROBE", mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (sender, lines) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                use std::io::BufRead as _;
+                for line in std::io::BufReader::new(stdout)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    let _ = sender.send(line);
+                }
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut ended = false;
+            while let Ok(line) =
+                lines.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                if line.contains("the panicking thread ended") {
+                    ended = true;
+                    break;
+                }
+            }
+            (child, ended)
+        };
+        // Nobody reads stderr: the thread goes on.
+        let (mut child, ended) = probe("stalled");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ended, "the panicking thread waited for stderr's reader");
+        // A reader is there: the message reaches it.
+        let (child, ended) = probe("read");
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(ended);
+        assert!(stderr.contains("a request handler failed"), "{stderr}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_permission_engine_protects_the_global_configuration_the_cli_reads() {
@@ -10939,6 +11439,8 @@ mod tests {
         let writer = super::RedactUrls(sink);
         let line = "ERROR rmcp::transport::worker: Client(reqwest::Error { url: \"http://u:PRIVATE_SUFFIX@127.0.0.1:9/mcp?api_key=PRIVATE_SUFFIX&region=eu\" })\n";
         writer.make_writer().write_all(line.as_bytes()).unwrap();
+        let debug = "DEBUG rmcp::transport::auth: discovery url: Url { scheme: \"http\", cannot_be_a_base: false, username: \"u\", password: Some(\"PRIVATE_SUFFIX\"), host: Some(Ipv4(127.0.0.1)), port: Some(9), path: \"/.well-known/oauth-authorization-server\", query: None, fragment: None }\n";
+        writer.make_writer().write_all(debug.as_bytes()).unwrap();
         writer
             .make_writer()
             .write_all(b"plain line, no address\n")
@@ -10949,7 +11451,62 @@ mod tests {
             written.contains("\"http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu\""),
             "{written}"
         );
+        assert!(
+            written.contains("username: \"<redacted>\", password: Some(\"<redacted>\"), host: Some(Ipv4(127.0.0.1))"),
+            "{written}"
+        );
         assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
+    /// The runtime is built from the memory settings: a key a newer version
+    /// wrote, or a file that is not JSON, no longer stops the server, and a
+    /// broken file keeps memory off.
+    #[test]
+    fn a_memory_settings_file_haarness_cannot_fully_read_never_stops_the_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-memory-runtime-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let memory = super::management::memory_root_for(&paths, &workspace);
+        std::fs::create_dir_all(&memory).unwrap();
+        let compose = || {
+            super::compose_runtime_sources(&paths, &workspace, false, false, Vec::new(), false)
+                .map(|sources| {
+                    sources
+                        .runtime_config
+                        .tool_availability
+                        .get("memory_save")
+                        .copied()
+                })
+                .map_err(|error| error.to_string())
+        };
+        std::fs::write(
+            memory.join("settings.json"),
+            r#"{"enabled": false, "summaryModel": "from a newer Haarness"}"#,
+        )
+        .unwrap();
+        assert_eq!(compose(), Ok(Some(false)));
+        // A file that cannot be read keeps memory off rather than on.
+        std::fs::write(memory.join("settings.json"), r#"{"enabled": false,}"#).unwrap();
+        assert_eq!(compose(), Ok(Some(false)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_web_link_reaches_the_system_opener() {
+        // Should the check ever go, none of these opens anything here.
+        for refused in [
+            "file:///nonexistent/haarness-fixture.app",
+            "x-haarness-unregistered-fixture://open",
+            "not a link",
+        ] {
+            assert_eq!(
+                super::open_browser(refused).unwrap_err().to_string(),
+                "only http and https links open in the browser",
+                "{refused}"
+            );
+        }
     }
 
     #[test]
@@ -11750,6 +12307,84 @@ mod tests {
         );
     }
 
+    /// A connection that failed before it was accepted (reset by its client,
+    /// or no file descriptor left for it) does not end the authorization.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_mcp_callback() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let listener = &listener;
+        let mut failures = vec![
+            std::io::Error::other("Too many open files"),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ];
+        let accept = move || {
+            let failure = failures.pop();
+            async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => listener.accept().await,
+                }
+            }
+        };
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?code=real&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stream
+        };
+        let (callback, _stream) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                super::receive_oauth_callback_from(
+                    accept,
+                    &redirect,
+                    "https://auth.example/authorize?state=st-1",
+                    Duration::from_secs(300),
+                ),
+                browser
+            )
+        })
+        .await
+        .expect("the callback is taken after the failed accepts");
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
+        );
+    }
+
+    /// A callback port that cannot take connections keeps the authorization
+    /// waiting, and the failure is what its timeout says.
+    #[tokio::test]
+    async fn an_mcp_callback_that_times_out_names_why_its_port_took_no_connection() {
+        let accept = || async {
+            Err::<(tokio::net::TcpStream, std::net::SocketAddr), _>(std::io::Error::other(
+                "Too many open files",
+            ))
+        };
+        let error = super::receive_oauth_callback_from(
+            accept,
+            "http://127.0.0.1:1/mcp/oauth/callback",
+            "https://auth.example/authorize?state=st-1",
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "timed out waiting for the MCP OAuth callback; the sign-in's port on this computer \
+             could not accept connections (Too many open files)"
+        );
+    }
+
     /// An idle connection (a browser's spare socket, a page's preconnect)
     /// does not hold up the real return for its read timeout.
     #[tokio::test]
@@ -12152,6 +12787,35 @@ mod tests {
         write_provider_entry(&path, "company-gateway", None).unwrap();
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.providers.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_by_oauth_changes_that_providers_definition_and_a_refreshed_token_does_not() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-fingerprints-{}", uuid::Uuid::now_v7()));
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            Vec::new(),
+            &std::collections::HashSet::new(),
+            std::sync::Arc::new(super::CredentialStore::new(root.join("auth.json"))),
+        )
+        .await;
+        let config = FileConfig::default();
+        let oauth = |access: &str| {
+            BTreeMap::from([(
+                "xai".to_owned(),
+                serde_json::to_value(Credential::oauth(access.into(), "refresh".into(), 1, None))
+                    .unwrap(),
+            )])
+        };
+        let before = super::provider_fingerprints(&config, &BTreeMap::new(), &registry);
+        let signed_in = super::provider_fingerprints(&config, &oauth("first"), &registry);
+        let refreshed = super::provider_fingerprints(&config, &oauth("second"), &registry);
+        // xAI decides when it is built whether to list its models: a reload
+        // after a sign-in by OAuth builds it again.
+        assert_ne!(before["xai"], signed_in["xai"]);
+        assert_eq!(signed_in["xai"], refreshed["xai"]);
+        assert_eq!(before["groq"], signed_in["groq"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -12667,6 +13331,7 @@ request_timeout = 0
             pid: Some(4243),
             cols: 80,
             rows: 24,
+            created: false,
         })
         .unwrap()
     }

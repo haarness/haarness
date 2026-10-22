@@ -7,6 +7,10 @@ type Client = {
   running?: Request;
   timer?: ReturnType<typeof setTimeout>;
   projection?: MarkdownProjection;
+  /** Drawn on this thread from now on (see `flush`). */
+  local?: boolean;
+  /** The revision last drawn. */
+  drawn?: number;
   buffered: string[];
   rendered: string[];
   receive: (patch: MarkdownPatch, live: boolean) => void;
@@ -23,6 +27,7 @@ function fallback(client: Client, request: Request) {
   // lives in the other realm. The DOM reconciler still retains identical nodes.
   client.receive(markdownPatch(client.projection, next), request.live);
   client.projection = next;
+  client.drawn = request.revision;
 }
 
 function fail() {
@@ -38,7 +43,7 @@ function fail() {
 
 function dispatch(client: Client) {
   if (!client.latest || client.running) return;
-  if (failed) return fallback(client, client.latest);
+  if (failed || client.local) return fallback(client, client.latest);
   try {
     if (!worker) {
       worker = new Worker(new URL("./markdown.worker.ts", import.meta.url), { type: "module" });
@@ -58,6 +63,7 @@ function dispatch(client: Client) {
           while (start < current.buffered.length && current.buffered[start] === current.rendered[start]) start++;
           current.receive({ start, html: current.buffered.slice(start), count: current.buffered.length }, current.latest.live);
           current.rendered = current.buffered.slice();
+          current.drawn = data.revision;
         }
         if (current.latest?.revision !== data.revision) dispatch(current);
       };
@@ -82,6 +88,16 @@ export function createMarkdownClient(receive: Client["receive"]) {
       if (disposed) return;
       client.latest = { key, revision: ++revision, text, live, breaks };
       dispatch(client);
+    },
+    /** Draws the latest text now, on this thread, instead of when the worker
+     * answers, and keeps drawing here: the worker's own state for this text
+     * no longer matches what is shown. */
+    flush() {
+      if (disposed || !client.latest || client.drawn === client.latest.revision) return;
+      clearTimeout(client.timer);
+      client.running = undefined;
+      client.local = true;
+      fallback(client, client.latest);
     },
     dispose() {
       disposed = true;

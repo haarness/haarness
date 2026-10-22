@@ -33,8 +33,13 @@ haarness_sdk.types. Omitted fields and explicit None resets remain distinct.
 `events(after=..., reconnect=True)` is a closeable iterator; async clients return
 an async iterator. Use contextlib.closing/aclosing for early exit. Capture
 info()["eventCursor"] before REST hydration. A resync_required marker ends the
-stream: rehydrate REST snapshots and reconnect with a fresh cursor. Cancel an
-async task to stop waiting. Client disconnect/cancellation never interrupts
+stream: rehydrate REST snapshots and reconnect with a fresh cursor. With
+`idle_timeout=45` (seconds; the server sends a keepalive every 15 s), a stream
+that sends nothing for that long counts as lost, a connection that died without
+closing: it connects again from its cursor with `reconnect=True`, and otherwise
+ends with TransportError. Time spent with an event does not count. Cancel an
+async task to stop waiting. PTY connections ping their server every 20 s by
+themselves and close when it stops answering; `ping(timeout)` asks at once. Client disconnect/cancellation never interrupts
 server work; use interrupt_turn/interrupt_thread_tree for that action.
 
 No mutations are retried automatically. Reuse requestId for an intentional
@@ -58,8 +63,8 @@ with LocalServer.start("/path/to/project", executable="/path/to/haarness") as se
 # async with await AsyncLocalServer.start(...) as server:
 ```
 
-Local server helpers own and clean up only their child, fail on an existing
-workspace lease, and load project configuration by default without automatically approving tools.
+Local server helpers own and clean up only their child (in a folder whose server
+already runs, a front for it at its own address, never a replacement), and load project configuration by default without automatically approving tools.
 
 The repository's `sdks/OPERATIONS.md` lists every method; `sdks/README.md`
 describes generation and `scripts/test-sdks.sh` runs the real-server E2E gate.

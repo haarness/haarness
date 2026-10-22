@@ -11,6 +11,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use fs2::FileExt as _;
+use haarness_account::loopback::{AcceptFailures, next_connection};
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -54,6 +55,13 @@ pub enum AuthError {
     #[error("GitHub Copilot sign-in failed: {0}")]
     Copilot(String),
 }
+
+/// A device sign-in's link is printed and opened in a browser, so one that
+/// is not http or https (a local file, an app's own scheme) stops it.
+const DEVICE_LINK_REFUSED: &str = "the sign-in server sent a link that is not http or https";
+/// The code is printed beside the link: a control character in it would
+/// reach the terminal.
+const DEVICE_CODE_REFUSED: &str = "the sign-in server sent a code with control characters";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
@@ -411,10 +419,15 @@ impl OpenAiOAuthClient {
         let url = self.authorize_url(&redirect, &pkce, &state)?;
         let client = self.clone();
         let task = tokio::spawn(async move {
-            let callback =
-                tokio::time::timeout(CALLBACK_TIMEOUT, wait_for_callback(&listeners, &state))
-                    .await
-                    .map_err(|_| AuthError::OpenAi("browser authorization timed out".into()))??;
+            let failures = AcceptFailures::default();
+            let callback = tokio::time::timeout(
+                CALLBACK_TIMEOUT,
+                wait_for_callback(&listeners, &state, &failures),
+            )
+            .await
+            .map_err(|_| {
+                AuthError::OpenAi(failures.explain("browser authorization timed out"))
+            })??;
             let result = client
                 .exchange(&callback.code, &redirect, &pkce.verifier)
                 .await;
@@ -445,6 +458,9 @@ impl OpenAiOAuthClient {
             .map_err(request_error)?;
         let device: DeviceCodeResponse =
             decode_response(response, "start device authorization").await?;
+        if device.user_code.contains(char::is_control) {
+            return Err(AuthError::OpenAi(DEVICE_CODE_REFUSED.into()));
+        }
         let interval = device.interval.parse::<u64>().unwrap_or(5).max(1);
         Ok(OpenAiDeviceLogin {
             client: self.clone(),
@@ -666,14 +682,26 @@ impl XaiOAuthClient {
                 "device response is missing its code or verification URL".into(),
             ));
         }
+        let (Some(verification_url), Some(instructions_url)) = (
+            haarness_core::links::http_url(
+                device
+                    .verification_uri_complete
+                    .as_deref()
+                    .unwrap_or(&device.verification_uri),
+            ),
+            haarness_core::links::http_url(&device.verification_uri),
+        ) else {
+            return Err(AuthError::Xai(DEVICE_LINK_REFUSED.into()));
+        };
+        if device.user_code.contains(char::is_control) {
+            return Err(AuthError::Xai(DEVICE_CODE_REFUSED.into()));
+        }
         let interval = device.interval.unwrap_or(5).max(1);
         let expires = device.expires_in.unwrap_or(5 * 60).max(1);
         Ok(XaiDeviceLogin {
             client: self.clone(),
-            verification_url: device
-                .verification_uri_complete
-                .unwrap_or_else(|| device.verification_uri.clone()),
-            instructions_url: device.verification_uri,
+            verification_url,
+            instructions_url,
             user_code: device.user_code,
             device_code: device.device_code,
             interval: Duration::from_secs(interval),
@@ -846,9 +874,16 @@ impl CopilotOAuthClient {
                 "device response is missing its code or verification URL".into(),
             ));
         }
+        let Some(verification_url) = haarness_core::links::http_url(&device.verification_uri)
+        else {
+            return Err(AuthError::Copilot(DEVICE_LINK_REFUSED.into()));
+        };
+        if device.user_code.contains(char::is_control) {
+            return Err(AuthError::Copilot(DEVICE_CODE_REFUSED.into()));
+        }
         Ok(CopilotDeviceLogin {
             client: self.clone(),
-            verification_url: device.verification_uri,
+            verification_url,
             user_code: device.user_code,
             device_code: device.device_code,
             interval: Duration::from_secs(device.interval.unwrap_or(5).max(1)),
@@ -1015,18 +1050,39 @@ async fn bind_loopback(port: u16) -> std::io::Result<Vec<TcpListener>> {
 /// wait, with a code or the provider's refusal. Anything else is answered and
 /// the wait goes on (until [`CALLBACK_TIMEOUT`]), and its text never becomes
 /// the error.
-async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult<BrowserCallback> {
+async fn wait_for_callback(
+    listeners: &[TcpListener],
+    state: &str,
+    failures: &AcceptFailures,
+) -> AuthResult<BrowserCallback> {
+    answer_until_callback(
+        move || async move {
+            let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
+            futures::future::select_all(accepts).await.0
+        },
+        state,
+        failures,
+    )
+    .await
+}
+
+async fn answer_until_callback<F, A>(
+    mut accept: F,
+    state: &str,
+    failures: &AcceptFailures,
+) -> AuthResult<BrowserCallback>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>>,
+{
     // Each connection is read in a task of its own while the listeners keep
     // accepting, so idle ones (a page's `<link rel=preconnect>`, a browser's
-    // spare socket) never hold up the real return.
+    // spare socket) never hold up the real return. A connection that failed
+    // before it was accepted ends only itself.
     let mut connections = tokio::task::JoinSet::new();
     loop {
-        let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
         tokio::select! {
-            (accepted, _, _) = futures::future::select_all(accepts) => {
-                let (stream, _) = accepted.map_err(|error| {
-                    AuthError::OpenAi(format!("callback listener failed: {error}"))
-                })?;
+            (stream, _) = next_connection(&mut accept, failures) => {
                 connections.spawn(answer_callback(stream, state.to_owned()));
             }
             // Every finished connection is taken, so one that ended the sign-in is
@@ -1385,8 +1441,10 @@ mod tests {
 
     use super::{
         CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
-        OpenAiOAuthClient, OpenAiOAuthConfig, openai_residency, query, read_callback,
+        OpenAiOAuthClient, OpenAiOAuthConfig, XaiOAuthClient, XaiOAuthConfig,
+        answer_until_callback, openai_residency, query, read_callback,
     };
+    use haarness_account::loopback::AcceptFailures;
 
     #[tokio::test]
     async fn browser_login_uses_the_haarness_pkce_contract() {
@@ -1623,6 +1681,71 @@ mod tests {
         assert!(error.contains("access_denied"), "{error}");
     }
 
+    /// A connection that failed before it was accepted (reset by its client,
+    /// or no file descriptor left for it) does not end the sign-in.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_browser_login() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let listener = &listener;
+        let mut failures = vec![
+            std::io::Error::other("Too many open files"),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ];
+        let accept = move || {
+            let failure = failures.pop();
+            async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => listener.accept().await,
+                }
+            }
+        };
+        let failures = AcceptFailures::default();
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(b"GET /auth/callback?state=st-1&code=real HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            stream
+        };
+        let (callback, _stream) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(answer_until_callback(accept, "st-1", &failures), browser)
+        })
+        .await
+        .expect("the browser's return is taken after the failed accepts");
+        assert_eq!(callback.unwrap().code, "real");
+    }
+
+    /// A callback port that cannot take connections keeps the sign-in
+    /// waiting, and the failure is what its timeout says.
+    #[tokio::test]
+    async fn a_browser_login_that_times_out_names_why_its_port_took_no_connection() {
+        let failures = AcceptFailures::default();
+        let accept = || async {
+            Err::<(tokio::net::TcpStream, std::net::SocketAddr), _>(std::io::Error::other(
+                "Too many open files",
+            ))
+        };
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                answer_until_callback(accept, "st-1", &failures),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            failures.explain("browser authorization timed out"),
+            "browser authorization timed out; the sign-in's port on this computer could not \
+             accept connections (Too many open files)"
+        );
+    }
+
     #[tokio::test]
     async fn a_cancelled_browser_login_releases_its_callback_port() {
         let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1702,6 +1825,103 @@ mod tests {
             login.finish().await.unwrap().api_key(),
             Some("github-token")
         );
+    }
+
+    #[tokio::test]
+    async fn a_device_sign_in_stops_at_a_link_that_is_not_http_or_https() {
+        async fn copilot(Json(_): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "device_code":"device-1",
+                "user_code":"ABCD-EFGH",
+                "verification_uri":"file:///Applications/Calculator.app",
+                "expires_in":60,
+                "interval":1
+            }))
+        }
+        async fn xai() -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "device_code":"device-1",
+                "user_code":"ABCD-EFGH",
+                "verification_uri":"https://accounts.fixture.test/device",
+                "verification_uri_complete":"x-fixture-app://open?code=ABCD-EFGH",
+                "expires_in":60,
+                "interval":1
+            }))
+        }
+        async fn escaped() -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "device_code":"device-1",
+                "user_code":"ABCD\u{1b}]52;c;eA==\u{7}",
+                "verification_uri":"https://accounts.fixture.test/device",
+                "expires_in":60,
+                "interval":1
+            }))
+        }
+        let router = Router::new()
+            .route("/login/device/code", post(copilot))
+            .route("/xai/device", post(xai))
+            .route("/escaped/device", post(escaped));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let copilot = CopilotOAuthClient::new(CopilotOAuthConfig {
+            base_url: format!("http://{address}"),
+            client_id: "fixture-client".into(),
+            user_agent: "haarness-test".into(),
+        })
+        .start_device_login()
+        .await
+        .err()
+        .expect("a file: link stops the sign-in")
+        .to_string();
+        assert_eq!(
+            copilot,
+            "GitHub Copilot sign-in failed: the sign-in server sent a link that is not http or https"
+        );
+        // ChatGPT's headless sign-in prints its code too.
+        let issuer = Router::new().route(
+            "/api/accounts/deviceauth/usercode",
+            post(|| async {
+                Json(serde_json::json!({"device_auth_id":"dev-1","user_code":"ABCD\u{1b}]0;x\u{7}","interval":"1"}))
+            }),
+        );
+        let issuer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer_address = issuer_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(issuer_listener, issuer).await.unwrap() });
+        let chatgpt = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            issuer: format!("http://{issuer_address}"),
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_device_login()
+        .await
+        .err()
+        .expect("the sign-in stops")
+        .to_string();
+        assert_eq!(
+            chatgpt,
+            "OpenAI sign-in failed: the sign-in server sent a code with control characters"
+        );
+        for (path, said) in [
+            (
+                "xai",
+                "the sign-in server sent a link that is not http or https",
+            ),
+            (
+                "escaped",
+                "the sign-in server sent a code with control characters",
+            ),
+        ] {
+            let xai = XaiOAuthClient::new(XaiOAuthConfig {
+                device_url: format!("http://{address}/{path}/device"),
+                ..XaiOAuthConfig::default()
+            })
+            .start_device_login()
+            .await
+            .err()
+            .expect("the sign-in stops")
+            .to_string();
+            assert_eq!(xai, format!("xAI sign-in failed: {said}"));
+        }
     }
 
     #[test]

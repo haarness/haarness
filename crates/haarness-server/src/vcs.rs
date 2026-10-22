@@ -1,4 +1,18 @@
 //! Bounded Git diff support for workspace review.
+//!
+//! A review only reads, but Git runs programs a repository's own
+//! configuration names. Every review read turns off the ones a person's own
+//! `git diff` would not run either: the file system monitor, hooks, an
+//! external diff or text conversion and signature checks (`run_git`). For a
+//! project whose configuration is not trusted, a folder someone else may
+//! have prepared, the reads also turn off what `git diff` would run: the
+//! repository's own filters ([`filters`]), a second Git in each changed
+//! submodule (with that submodule's own configuration), and in a partial
+//! clone a fetch of missing objects through the remote's commands
+//! ([`Guard`]). A trusted project's review reads as the person's own
+//! `git diff` does.
+
+mod filters;
 
 use std::{
     collections::BTreeMap,
@@ -138,6 +152,7 @@ pub async fn diff_selected(
     context_lines: u32,
     summary: bool,
     path: Option<&str>,
+    trusted: bool,
 ) -> Result<Vec<ReviewFile>> {
     if let Some(path) = path {
         if !safe_relative_path(path) {
@@ -145,6 +160,11 @@ pub async fn diff_selected(
         }
     }
     ensure_worktree(workspace).await?;
+    let guard = if trusted {
+        Guard::default()
+    } else {
+        Guard::untrusted(workspace).await?
+    };
 
     let Some(reference) = diff_reference(workspace, mode).await? else {
         return Ok(Vec::new());
@@ -160,20 +180,18 @@ pub async fn diff_selected(
     };
 
     let patch_args = selected_args(
-        tracked_diff_args(&reference, context_lines, DiffOutput::Patch),
+        tracked_diff_args(&reference, context_lines, DiffOutput::Patch, &guard),
         path,
     );
     let numstat_args = selected_args(
-        tracked_diff_args(&reference, context_lines, DiffOutput::Numstat),
+        tracked_diff_args(&reference, context_lines, DiffOutput::Numstat, &guard),
         path,
     );
     let status_args = selected_args(
-        tracked_diff_args(&reference, context_lines, DiffOutput::Status),
+        tracked_diff_args(&reference, context_lines, DiffOutput::Status, &guard),
         path,
     );
     let untracked_args = os_args(&[
-        "-c",
-        "core.fsmonitor=false",
         "-c",
         "core.quotepath=false",
         "ls-files",
@@ -190,21 +208,36 @@ pub async fn diff_selected(
             if summary {
                 Ok(None)
             } else {
-                run_git(workspace, &patch_args, MAX_TOTAL_PATCH_BYTES)
+                run_git_with(workspace, &patch_args, MAX_TOTAL_PATCH_BYTES, &guard)
                     .await
                     .map(Some)
             }
         },
-        run_git(workspace, &numstat_args, MAX_METADATA_BYTES),
-        run_git(workspace, &status_args, MAX_METADATA_BYTES),
+        run_git_with(workspace, &numstat_args, MAX_METADATA_BYTES, &guard),
+        run_git_with(workspace, &status_args, MAX_METADATA_BYTES, &guard),
         run_git(workspace, &untracked_args, MAX_METADATA_BYTES),
     )?;
 
+    // A partial clone whose files the review may not download says what to
+    // do instead of quoting Git.
+    let explained = |result: Result<()>| {
+        result.map_err(|error| {
+            let text = format!("{error:#}");
+            if !trusted
+                && (text.contains("lazy fetching disabled")
+                    || text.contains("from promisor remote"))
+            {
+                anyhow!("{MISSING_OBJECTS}")
+            } else {
+                error
+            }
+        })
+    };
     if let Some(output) = &patch_output {
-        require_regular_diff(output, "read Git patch")?;
+        explained(require_regular_diff(output, "read Git patch"))?;
     }
-    require_metadata(&numstat_output, "read Git numstat")?;
-    require_metadata(&status_output, "read Git file statuses")?;
+    explained(require_metadata(&numstat_output, "read Git numstat"))?;
+    explained(require_metadata(&status_output, "read Git file statuses"))?;
     require_metadata(&untracked_output, "list untracked files")?;
 
     let mut entries = BTreeMap::<String, DiffEntry>::new();
@@ -517,10 +550,13 @@ enum DiffOutput {
     Status,
 }
 
-fn tracked_diff_args(reference: &str, context_lines: u32, output: DiffOutput) -> Vec<OsString> {
+fn tracked_diff_args(
+    reference: &str,
+    context_lines: u32,
+    output: DiffOutput,
+    guard: &Guard,
+) -> Vec<OsString> {
     let mut args = os_args(&[
-        "-c",
-        "core.fsmonitor=false",
         "-c",
         "core.quotepath=false",
         "diff",
@@ -529,6 +565,12 @@ fn tracked_diff_args(reference: &str, context_lines: u32, output: DiffOutput) ->
         "--no-textconv",
         "--no-renames",
     ]);
+    // A submodule is not checked for uncommitted changes: that runs a second
+    // Git in it, with the submodule's own configuration. One moved to another
+    // commit is still listed.
+    if guard.untrusted {
+        args.push(OsString::from("--ignore-submodules=dirty"));
+    }
     match output {
         DiffOutput::Patch => args.push(OsString::from(format!("--unified={context_lines}"))),
         DiffOutput::Numstat => {
@@ -804,6 +846,12 @@ fn require_metadata(output: &GitOutput, operation: &str) -> Result<()> {
     Err(git_error(operation, output))
 }
 
+/// What the review of an untrusted project says when a partial clone lacks
+/// objects it needs: it does not fetch them (`GIT_NO_LAZY_FETCH`), and
+/// `git backfill` (Git 2.49 and later) does. The clients recognise "has not
+/// downloaded the files the review needs" and show it in their own words.
+pub const MISSING_OBJECTS: &str = "this clone has not downloaded the files the review needs, and the review does not download them while project configuration is not trusted; run git backfill (Git 2.49 or later), then try again";
+
 fn git_error(operation: &str, output: &GitOutput) -> anyhow::Error {
     let detail = output.stderr_text();
     if detail.is_empty() {
@@ -816,12 +864,139 @@ fn git_error(operation: &str, output: &GitOutput) -> anyhow::Error {
     }
 }
 
+/// What the diffs that read changed files add for a project whose
+/// configuration is not trusted. Empty (`Default`) for a trusted one.
+#[derive(Debug, Default)]
+struct Guard {
+    untrusted: bool,
+    /// `-c` settings: submodules as a commit line, and the emptied filters
+    /// on Git before 2.31.
+    args: Vec<OsString>,
+    /// `GIT_NO_LAZY_FETCH` (Git 2.45 and later), and the emptied filters as
+    /// `GIT_CONFIG_*` on Git 2.31 and later.
+    env: Vec<(String, String)>,
+}
+
+impl Guard {
+    /// Reads the repository's filters (see [`filters`]). When they cannot be
+    /// read, or not turned off with this Git, Git is not run.
+    async fn untrusted(workspace: &Path) -> Result<Self> {
+        let refused = |detail: &str| {
+            anyhow!(
+                "cannot read the repository's Git settings, so Git was not run{}{detail}",
+                if detail.is_empty() { "" } else { ": " }
+            )
+        };
+        let mut scoped = true;
+        let mut output = run_git(
+            workspace,
+            &os_args(&["config", "--show-scope", "-z", "--list"]),
+            MAX_METADATA_BYTES,
+        )
+        .await?;
+        // Git before 2.26 has no `--show-scope`: every filter then counts as
+        // the repository's own, the user's included.
+        if output.status.code() == Some(129) {
+            scoped = false;
+            output = run_git(
+                workspace,
+                &os_args(&["config", "--includes", "-z", "--list"]),
+                MAX_METADATA_BYTES,
+            )
+            .await?;
+        }
+        if !output.success() || output.stdout.truncated {
+            let detail = output.stderr_text();
+            return Err(refused(detail.lines().next().unwrap_or_default()));
+        }
+        let pairs = filters::overrides(&output.stdout.bytes, scoped)
+            .map_err(|_| refused("a filter's name is not UTF-8"))?;
+        let base = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|count| count.trim().parse().ok())
+            .unwrap_or(0);
+        let version = if pairs.is_empty() {
+            None
+        } else {
+            git_version(workspace).await
+        };
+        let (filter_args, filter_env) = filters::carry(&pairs, version, base).map_err(|_| {
+            anyhow!(
+                "the repository names a filter that Git before 2.31 cannot turn off (its name holds =), so Git was not run; update Git, or trust this project's configuration"
+            )
+        })?;
+        let mut args = os_args(&["-c", "diff.submodule=short"]);
+        args.extend(filter_args);
+        let mut env = vec![("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned())];
+        env.extend(filter_env);
+        Ok(Self {
+            untrusted: true,
+            args,
+            env,
+        })
+    }
+}
+
+/// The installed Git's version, read once.
+async fn git_version(workspace: &Path) -> Option<(u32, u32)> {
+    static VERSION: tokio::sync::OnceCell<Option<(u32, u32)>> = tokio::sync::OnceCell::const_new();
+    *VERSION
+        .get_or_init(|| async {
+            let output = run_git(workspace, &os_args(&["version"]), 1024)
+                .await
+                .ok()?;
+            filters::version(&output.stdout_text())
+        })
+        .await
+}
+
+/// What every review read passes to Git, trusted or not: no file system
+/// monitor, no hooks (a diff that refreshes the index runs
+/// `post-index-change`) and no signature check (the repository's gpg
+/// program); a person's own `git diff` runs none of them either.
+fn read_only_args() -> Vec<OsString> {
+    let hooks = format!("core.hooksPath={}", null_device(cfg!(windows)));
+    os_args(&[
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        &hooks,
+        "-c",
+        "log.showSignature=false",
+    ])
+}
+
+/// An absolute path that is no folder, where Git finds no hooks and no
+/// translations. On Windows a bare `NUL` would be relative to the working
+/// tree (Git looks for `<top>\NUL\post-index-change`); `//./NUL` is the
+/// device itself, absolute to Git as it starts with a slash. Not verified
+/// live on Windows.
+fn null_device(windows: bool) -> &'static str {
+    if windows { "//./NUL" } else { "/dev/null" }
+}
+
 async fn run_git(workspace: &Path, args: &[OsString], stdout_limit: usize) -> Result<GitOutput> {
+    run_git_with(workspace, args, stdout_limit, &Guard::default()).await
+}
+
+async fn run_git_with(
+    workspace: &Path,
+    args: &[OsString],
+    stdout_limit: usize,
+    guard: &Guard,
+) -> Result<GitOutput> {
     let mut command = Command::new("git");
     command
+        .args(read_only_args())
+        .args(&guard.args)
         .args(args)
         .current_dir(workspace)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // Git then finds no translations and speaks English, so its messages
+        // can be recognised in any locale, while the programs it runs keep
+        // the person's locale.
+        .env("GIT_TEXTDOMAINDIR", null_device(cfg!(windows)))
+        .envs(guard.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1115,26 +1290,17 @@ mod tests {
 
     use super::*;
 
+    /// The review of a trusted project, the default.
     async fn working_tree_diff(workspace: &Path) -> Result<Vec<ReviewFile>> {
-        diff_selected(
-            workspace,
-            DiffMode::WorkingTree,
-            DEFAULT_CONTEXT_LINES,
-            false,
-            None,
-        )
-        .await
+        review(workspace, DiffMode::WorkingTree, true).await
     }
 
     async fn branch_diff(workspace: &Path) -> Result<Vec<ReviewFile>> {
-        diff_selected(
-            workspace,
-            DiffMode::Branch,
-            DEFAULT_CONTEXT_LINES,
-            false,
-            None,
-        )
-        .await
+        review(workspace, DiffMode::Branch, true).await
+    }
+
+    async fn review(workspace: &Path, mode: DiffMode, trusted: bool) -> Result<Vec<ReviewFile>> {
+        diff_selected(workspace, mode, DEFAULT_CONTEXT_LINES, false, None, trusted).await
     }
 
     async fn detect_default_branch(workspace: &Path) -> Result<Option<DefaultBranch>> {
@@ -1191,6 +1357,12 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn sorted_names(diffs: &HashMap<String, ReviewFile>) -> Vec<&str> {
+        let mut names: Vec<_> = diffs.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 
     fn by_file(diffs: Vec<ReviewFile>) -> HashMap<String, ReviewFile> {
@@ -1333,10 +1505,10 @@ mod tests {
         repo.write("new *.txt", "untracked\n");
         repo.write("binary", [0, 1, 2]);
         for mode in [DiffMode::WorkingTree, DiffMode::Branch] {
-            let eager = diff_selected(&repo.path, mode, 4, false, None)
+            let eager = diff_selected(&repo.path, mode, 4, false, None, true)
                 .await
                 .unwrap();
-            let summary = diff_selected(&repo.path, mode, 4, true, None)
+            let summary = diff_selected(&repo.path, mode, 4, true, None, true)
                 .await
                 .unwrap();
             let stripped: Vec<_> = eager
@@ -1349,22 +1521,36 @@ mod tests {
                 .collect();
             assert_eq!(summary, stripped);
             for file in &eager {
-                let detail = diff_selected(&repo.path, mode, 4, false, Some(&file.diff.file))
+                let detail = diff_selected(&repo.path, mode, 4, false, Some(&file.diff.file), true)
                     .await
                     .unwrap();
                 assert_eq!(detail, vec![file.clone()]);
             }
         }
         for path in ["../outside", "/absolute", "", ":(glob)*"] {
-            let result =
-                diff_selected(&repo.path, DiffMode::WorkingTree, 4, false, Some(path)).await;
+            let result = diff_selected(
+                &repo.path,
+                DiffMode::WorkingTree,
+                4,
+                false,
+                Some(path),
+                true,
+            )
+            .await;
             assert!(result.is_err() || result.unwrap().is_empty());
         }
         assert!(
-            diff_selected(&repo.path, DiffMode::WorkingTree, 4, false, Some("src"))
-                .await
-                .unwrap()
-                .is_empty()
+            diff_selected(
+                &repo.path,
+                DiffMode::WorkingTree,
+                4,
+                false,
+                Some("src"),
+                true
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -1375,7 +1561,7 @@ mod tests {
         repo.commit_all("baseline");
         repo.write("first", vec![b'a'; 6_000_000]);
         repo.write("second", vec![b'b'; 6_000_000]);
-        let summary = diff_selected(&repo.path, DiffMode::WorkingTree, 4, true, None)
+        let summary = diff_selected(&repo.path, DiffMode::WorkingTree, 4, true, None, true)
             .await
             .unwrap();
         assert_eq!(summary.len(), 2);
@@ -1384,15 +1570,29 @@ mod tests {
                 .iter()
                 .all(|file| file.diff.patch.is_none() && !file.diff.truncated)
         );
-        let detail = diff_selected(&repo.path, DiffMode::WorkingTree, 4, false, Some("second"))
-            .await
-            .unwrap();
+        let detail = diff_selected(
+            &repo.path,
+            DiffMode::WorkingTree,
+            4,
+            false,
+            Some("second"),
+            true,
+        )
+        .await
+        .unwrap();
         assert!(!detail[0].diff.truncated);
         assert!(detail[0].diff.patch.as_ref().unwrap().len() > 6_000_000);
         repo.write("second", "fresh\n");
-        let detail = diff_selected(&repo.path, DiffMode::WorkingTree, 4, false, Some("second"))
-            .await
-            .unwrap();
+        let detail = diff_selected(
+            &repo.path,
+            DiffMode::WorkingTree,
+            4,
+            false,
+            Some("second"),
+            true,
+        )
+        .await
+        .unwrap();
         assert!(detail[0].diff.patch.as_ref().unwrap().contains("+fresh"));
     }
 
@@ -1503,6 +1703,317 @@ mod tests {
         let empty = &diffs["empty.txt"];
         assert_eq!(empty.diff.additions, 0);
         assert!(empty.diff.patch.is_none() && !empty.diff.truncated);
+    }
+
+    /// A folder outside the repository where the programs a repository's
+    /// configuration names leave a mark when they run.
+    struct Marks(PathBuf);
+
+    impl Marks {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("haarness-vcs-marks-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&path).expect("create marks folder");
+            Self(path)
+        }
+
+        /// A shell command that leaves the mark `name`, then runs `then`.
+        fn command(&self, name: &str, then: &str) -> String {
+            format!("touch '{}'; {then}", self.0.join(name).display())
+        }
+
+        fn left(&self) -> Vec<String> {
+            let mut names: Vec<_> = fs::read_dir(&self.0)
+                .expect("read marks")
+                .map(|entry| {
+                    entry
+                        .expect("mark")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for Marks {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Gives `relative` a new modification time, so Git refreshes its entry
+    /// in the index (and writes the index) though its content is unchanged.
+    fn touch_later(repo: &Path, relative: &str) {
+        fs::File::options()
+            .write(true)
+            .open(repo.join(relative))
+            .expect("open fixture")
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+            .expect("set modification time");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_review_runs_no_program_a_person_s_git_diff_would_not_and_untrusted_none() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marks = Marks::new();
+        let repo = TestRepo::new();
+        // `filter=` selects the filter with the empty name, `[filter ""]`.
+        repo.write(".gitattributes", "*.txt filter=evil\n*.dat filter=\n");
+        repo.write("a.txt", "one\n");
+        repo.write("b.dat", "bbb\n");
+        repo.write("same.md", "same\n");
+        repo.commit_all("baseline");
+        let config = repo.path.join(".git/config");
+        let mut text = fs::read_to_string(&config).unwrap();
+        let _ = write!(
+            text,
+            "[filter \"\"]\n\tclean = \"{}\"\n",
+            marks.command("empty", "cat")
+        );
+        fs::write(&config, text).unwrap();
+        run(
+            &repo.path,
+            &[
+                "config",
+                "filter.evil.clean",
+                &marks.command("clean", "cat"),
+            ],
+        );
+        run(&repo.path, &["config", "filter.evil.required", "true"]);
+        let monitor = repo.path.join(".git/monitor.sh");
+        fs::write(
+            &monitor,
+            format!("#!/bin/sh\n{}\n", marks.command("fsmonitor", "exit 1")),
+        )
+        .unwrap();
+        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+        run(
+            &repo.path,
+            &["config", "core.fsmonitor", &monitor.to_string_lossy()],
+        );
+        let hook = repo.path.join(".git/hooks/post-index-change");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\n{}\n", marks.command("hook", "true")),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        repo.write("a.txt", "two\n");
+        repo.write("b.dat", "BBB\n");
+        touch_later(&repo.path, "same.md");
+
+        let untrusted = by_file(
+            review(&repo.path, DiffMode::WorkingTree, false)
+                .await
+                .expect("untrusted review"),
+        );
+        assert_eq!(sorted_names(&untrusted), ["a.txt", "b.dat"]);
+        assert!(
+            untrusted["a.txt"]
+                .diff
+                .patch
+                .as_deref()
+                .unwrap()
+                .contains("+two")
+        );
+        assert!(marks.left().is_empty(), "{:?}", marks.left());
+        // A trusted project reads as the person's own `git diff`: its filters
+        // run, while the monitor and the hooks still do not.
+        touch_later(&repo.path, "same.md");
+        let trusted = by_file(working_tree_diff(&repo.path).await.expect("trusted review"));
+        assert_eq!(sorted_names(&trusted), ["a.txt", "b.dat"]);
+        assert_eq!(marks.left(), ["clean", "empty"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_untrusted_review_does_not_run_git_inside_a_changed_submodule() {
+        let marks = Marks::new();
+        let module = TestRepo::new();
+        module.write(".gitattributes", "*.txt filter=inner\n");
+        module.write("inner.txt", "inner\n");
+        module.commit_all("module");
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit_all("baseline");
+        run(
+            &repo.path,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &module.path.to_string_lossy(),
+                "module",
+            ],
+        );
+        repo.commit_all("add module");
+        let inside = repo.path.join("module");
+        run(
+            &inside,
+            &[
+                "config",
+                "filter.inner.clean",
+                &marks.command("submodule", "cat"),
+            ],
+        );
+        // The same size, so Git reads the file (through the filter) to see
+        // whether it changed.
+        fs::write(inside.join("inner.txt"), "INNER\n").unwrap();
+        repo.write("a.txt", "two\n");
+
+        let untrusted = by_file(
+            review(&repo.path, DiffMode::WorkingTree, false)
+                .await
+                .expect("untrusted review"),
+        );
+        assert!(untrusted.contains_key("a.txt"));
+        assert!(marks.left().is_empty(), "{:?}", marks.left());
+        // A trusted project's review looks inside, as `git diff` does.
+        working_tree_diff(&repo.path).await.expect("trusted review");
+        assert_eq!(marks.left(), ["submodule"]);
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_review_of_a_partial_clone_fetches_nothing() {
+        let marks = Marks::new();
+        let origin = TestRepo::new();
+        run(&origin.path, &["config", "uploadpack.allowFilter", "true"]);
+        origin.write("file.txt", "one\n");
+        origin.commit_all("one");
+        run(&origin.path, &["checkout", "-q", "-b", "feature"]);
+        origin.write("file.txt", "two\n");
+        origin.commit_all("two");
+        run(&origin.path, &["checkout", "-q", "main"]);
+        let clone = origin.path.with_extension("partial");
+        let output = StdCommand::new("git")
+            .args(["clone", "-q", "--filter=blob:none", "--branch", "feature"])
+            .arg(format!("file://{}", origin.path.display()))
+            .arg(&clone)
+            .output()
+            .expect("clone");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        run(
+            &clone,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &marks.command("fetch", "git-upload-pack"),
+            ],
+        );
+
+        // The base's copy of the file was never downloaded, and the review
+        // of an untrusted project does not fetch it; it says what to do
+        // instead of quoting Git.
+        let untrusted = review(&clone, DiffMode::Branch, false).await;
+        assert!(marks.left().is_empty(), "{:?} {untrusted:?}", marks.left());
+        assert_eq!(untrusted.unwrap_err().to_string(), MISSING_OBJECTS);
+        // A trusted project's review fetches it, as `git diff` would.
+        let trusted = branch_diff(&clone).await;
+        let _ = fs::remove_dir_all(&clone);
+        let trusted = by_file(trusted.expect("trusted review"));
+        assert!(trusted.contains_key("file.txt"));
+        assert_eq!(marks.left(), ["fetch"]);
+    }
+
+    #[test]
+    fn hooks_and_translations_point_at_an_absolute_path_that_is_no_folder() {
+        assert_eq!(null_device(false), "/dev/null");
+        // A relative `NUL` would make Git look for `<top>\NUL\<hook>`.
+        let windows = null_device(true);
+        assert!(
+            windows.starts_with('/') && windows.ends_with("NUL"),
+            "{windows}"
+        );
+        let args = read_only_args();
+        assert!(args.contains(&OsString::from(format!(
+            "core.hooksPath={}",
+            null_device(cfg!(windows))
+        ))));
+    }
+
+    #[tokio::test]
+    async fn git_tells_the_review_its_errors_in_english_in_any_locale() {
+        let folder =
+            std::env::temp_dir().join(format!("haarness-vcs-locale-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&folder).unwrap();
+        let german = [("LC_ALL", "de_DE.UTF-8"), ("LANGUAGE", "de")];
+        let guard = Guard {
+            env: german
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+            ..Guard::default()
+        };
+        let output = run_git_with(&folder, &os_args(&["status"]), 4096, &guard)
+            .await
+            .unwrap();
+        // Without the review's setting, a Git with its German catalog says
+        // "Kein Git-Repository" here.
+        let plain = StdCommand::new("git")
+            .arg("status")
+            .current_dir(&folder)
+            .envs(german)
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&folder);
+        assert!(
+            output.stderr_text().contains("not a git repository"),
+            "{} (plain Git: {})",
+            output.stderr_text(),
+            String::from_utf8_lossy(&plain.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn names_and_text_outside_ascii_read_the_same_trusted_or_not() {
+        let repo = TestRepo::new();
+        repo.write("café.txt", "avant\n");
+        repo.write("日本/ファイル.md", "一\n");
+        repo.commit_all("baseline");
+        repo.write("café.txt", "après\n");
+        repo.write("日本/ファイル.md", "二\n");
+        repo.write("新しい.txt", "ü\n");
+        for trusted in [true, false] {
+            let diffs = by_file(
+                review(&repo.path, DiffMode::WorkingTree, trusted)
+                    .await
+                    .expect("review"),
+            );
+            let mut names = diffs.keys().cloned().collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(
+                names,
+                ["café.txt", "新しい.txt", "日本/ファイル.md"],
+                "{trusted}"
+            );
+            assert!(
+                diffs["café.txt"]
+                    .diff
+                    .patch
+                    .as_deref()
+                    .unwrap()
+                    .contains("+après")
+            );
+            assert!(
+                diffs["日本/ファイル.md"]
+                    .diff
+                    .patch
+                    .as_deref()
+                    .unwrap()
+                    .contains("-一\n+二")
+            );
+        }
     }
 
     fn added_lines(patch: &str) -> usize {

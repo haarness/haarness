@@ -17,9 +17,21 @@ try {
     (await client.chat(thread.id, "Owned SDK")).text,
     "Echo: Owned SDK",
   );
-  await assert.rejects(
-    LocalServer.start({ ...options, startupTimeoutMs: 5000 }),
-  );
+  // A second start in the same folder is a front for its server: the same
+  // chats at its own address, and closing it stops only the front.
+  const front = await LocalServer.start({ ...options, startupTimeoutMs: 5000 });
+  const frontUrl = front.client.baseUrl;
+  try {
+    assert.notEqual(frontUrl, client.baseUrl);
+    assert.equal(
+      (await front.client.chat(thread.id, "Through the front")).text,
+      "Echo: Through the front",
+    );
+  } finally {
+    await front.close();
+  }
+  assert.ok(front.child.exitCode !== null || front.child.signalCode !== null);
+  await assert.rejects(fetch(`${frontUrl}/healthz`));
   assert.equal((await client.info()).name, "haarness");
   const cursor = (await client.info()).eventCursor,
     abort = new AbortController();

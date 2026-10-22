@@ -93,6 +93,56 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
   send(data: string | Uint8Array): void {
     this.socket.send(data, { binary: true });
   }
+  /**
+   * Whether the socket still reaches its server: a WebSocket ping answered
+   * within `timeoutMs`. A connection that died without closing (the machine
+   * slept, the network changed, a proxy froze) still reads as open and takes
+   * keys that go nowhere. One that misses the answer is closed, so iterating
+   * it ends and its reader can connect again from `cursor`.
+   */
+  ping(timeoutMs = 10_000): Promise<boolean> {
+    if (this.socket.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let due = Date.now() + timeoutMs;
+      let extended = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const done = (answered: boolean) => {
+        clearTimeout(timer);
+        this.socket.off("pong", answer);
+        this.socket.off("message", answer);
+        this.socket.off("close", closed);
+        if (!answered) this.socket.terminate();
+        resolve(answered);
+      };
+      // Anything from the server answers, its output included: a server
+      // sending a replay (up to 2 MB) reads no ping until it is done, but
+      // what it sends meanwhile says it is there.
+      const answer = () => done(true);
+      const closed = () => done(false);
+      // A timer that fires far past its time says this process could not
+      // run (a dialog held it, the machine slept), not that the server is
+      // gone: the answer may be waiting to be read, so give it a moment.
+      const late = () => {
+        const slack = Math.min(5_000, timeoutMs);
+        if (!extended && Date.now() - due > slack) {
+          extended = true;
+          due = Date.now() + slack;
+          timer = setTimeout(late, slack);
+          return;
+        }
+        done(false);
+      };
+      timer = setTimeout(late, timeoutMs);
+      this.socket.on("pong", answer);
+      this.socket.on("message", answer);
+      this.socket.once("close", closed);
+      try {
+        this.socket.ping();
+      } catch {
+        done(false);
+      }
+    });
+  }
   close(): void {
     if (this.socket.readyState === WebSocket.CONNECTING)
       this.socket.terminate();

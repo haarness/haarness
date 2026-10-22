@@ -21,12 +21,17 @@ case "$binary" in
   *) binary="$PWD/${binary#./}" ;;
 esac
 [ -x "$binary" ] || { echo "Haarness binary is not executable: $binary" >&2; exit 1; }
-mkdir -p "$test_root/workspace"
+mkdir -p "$test_root/workspace" "$test_root/home"
+# The commands run in the tmux server's environment, not this shell's, when a
+# tmux server is already running: say what they need. The echo provider keeps
+# the TUI on its chat instead of the first-run "Welcome to Haarness" picker,
+# which would take the keys typed below.
+run_env="env HAARNESS_TEST_PROVIDER=1 HAARNESS_HOME='$test_root/home'"
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 base="http://127.0.0.1:$port"
 
 tmux new-session -d -s "$session" -x 100 -y 30 \
-  "'$binary' --data-dir '$test_root/data' --workspace '$test_root/workspace' --trust-project serve --host 127.0.0.1 --port '$port' --token '$token'"
+  "$run_env '$binary' --data-dir '$test_root/data' --workspace '$test_root/workspace' --trust-project serve --host 127.0.0.1 --port '$port' --token '$token'"
 
 # Waits for the TUI pane to show text matching $1 (a basic regex); else
 # prints the pane and $2 and fails.
@@ -57,7 +62,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 tmux new-window -t "$session" -n tui \
-  "'$binary' --data-dir '$test_root/data' --workspace '$test_root/workspace' --trust-project attach '$base' --token '$token'"
+  "$run_env '$binary' --data-dir '$test_root/data' --workspace '$test_root/workspace' --trust-project attach '$base' --token '$token'"
 for _ in $(seq 1 100); do
   pane="$(tmux capture-pane -p -t "$session":tui.0)"
   echo "$pane" | grep -q 'Ready\|Connected' && break
@@ -65,7 +70,7 @@ for _ in $(seq 1 100); do
 done
 tmux send-keys -l -t "$session":tui.0 '/terminal'
 tmux send-keys -t "$session":tui.0 Enter
-sleep 0.5
+wait_for 'ctrl+] or f12 chat' "/terminal did not open the terminal"
 tmux send-keys -l -t "$session":tui.0 "printf 'TMUX_TUI_PTY\\n'"
 tmux send-keys -t "$session":tui.0 Enter
 found=0

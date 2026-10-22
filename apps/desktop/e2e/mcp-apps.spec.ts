@@ -107,6 +107,29 @@ async function show(argumentsJson: string) {
 }
 const content = (view: ReturnType<Page["locator"]>): FrameLocator =>
   view.frameLocator("iframe").frameLocator("iframe");
+/**
+ * Waits until the page's frame stops moving. An inline notice or request
+ * appearing or leaving under a page makes the conversation follow its end a
+ * frame or two later, and Playwright measures a press inside the nested frame,
+ * which does not see the frame itself move: the press would land on the
+ * page's empty body.
+ */
+async function steady(view: ReturnType<Page["locator"]>) {
+  const frame = view.locator("iframe");
+  let last = "";
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        const box = JSON.stringify(await frame.boundingBox());
+        const same = box === last;
+        last = box;
+        return same;
+      },
+      { intervals: [50] },
+    )
+    .toBe(true);
+}
 
 test("the page shows the tool's input and result in the app's theme and follows it", async ({}, info) => {
   const view = await show('{"city":"Porto"}');
@@ -133,6 +156,7 @@ test("the page shows the tool's input and result in the app's theme and follows 
 test("a link opens at once after a click in the page, and otherwise only once the person agrees", async () => {
   const view = page.locator(".mcp-app").last();
   const frame = content(view);
+  await steady(view);
   await frame.getByRole("button", { name: "Open forecast" }).click();
   await expect(frame.locator("#status")).toHaveText("link {}");
   await expect.poll(async () => (await calls()).shell).toEqual([["openExternal", "https://example.com/forecast"]]);
@@ -162,6 +186,7 @@ test("a message from the page goes into the message box and is never sent by its
   const before = (await client.listItems(thread)).length;
   const box = page.getByRole("textbox", { name: "Message" });
   await box.fill("Draft first");
+  await steady(view);
   await content(view).getByRole("button", { name: "Ask about tomorrow" }).click();
   await expect(content(view).locator("#status")).toHaveText("message {}");
   await expect(box).toHaveValue("Draft first\n\nWhat about tomorrow in Lisbon?");
@@ -176,6 +201,7 @@ test("one click lets the page send one message; a second waits for the person", 
   const view = page.locator(".mcp-app").last();
   const box = page.getByRole("textbox", { name: "Message" });
   await box.fill("");
+  await steady(view);
   await content(view).getByRole("button", { name: "Ask twice" }).click();
   await expect(content(view).locator("#status")).toHaveText("first {}");
   await expect(box).toHaveValue("First of two.");
@@ -191,6 +217,7 @@ test("one click lets the page send one message; a second waits for the person", 
 test("one click lets the page open one link; a second waits for the person", async () => {
   const view = page.locator(".mcp-app").last();
   const before = (await calls()).shell.length;
+  await steady(view);
   await content(view).getByRole("button", { name: "Open twice" }).click();
   await expect(content(view).locator("#status")).toHaveText("first link {}");
   const request = view.getByRole("group", { name: "Link from the app" });
@@ -211,6 +238,7 @@ test("a link the app may not open is refused, with a notice naming its scheme on
   );
   await page.waitForTimeout(300);
   await expect(view.locator(".mcp-app-refused")).toHaveCount(0);
+  await steady(view);
   // After a click in the page, the person who clicked sees why nothing opened. A scheme that is
   // not a well-known one could be words the page chose, so the notice names none.
   await content(view).getByRole("button", { name: "Open a worded link" }).click();
@@ -223,6 +251,7 @@ test("a link the app may not open is refused, with a notice naming its scheme on
   );
   await expect(notice).not.toContainText("haarness-help");
   // A well-known scheme is named; the rest of the address, the page's text, is not.
+  await steady(view);
   await content(view).getByRole("button", { name: "Open a file link" }).click();
   await expect(content(view).locator("#status")).toHaveText(
     "file link error Haarness opens only http, https and mailto links from an app.",
@@ -277,6 +306,7 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   const frame = content(view);
   // The bar the previous test dismissed can still be leaving: the conversation
   // may move under the first click, so the click is repeated until it lands.
+  await steady(view);
   await expect(async () => {
     await frame.getByRole("button", { name: "Refresh" }).click();
     await expect(frame.locator("#status")).toHaveText(

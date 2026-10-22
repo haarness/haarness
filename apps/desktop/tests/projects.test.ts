@@ -11,6 +11,8 @@ import {
   primaryLocation,
   projectSections,
   readProjectMeta,
+  rememberConnected,
+  saveConnected,
   sessionKey,
   sidebarGroups,
 } from "../src/projects";
@@ -54,6 +56,62 @@ const recent = (path: string): Recent => ({
   workspace: path,
   remote: false,
   trust: true,
+});
+
+test("a connected project replaces its saved entry or joins the list, but one removed while it connected stays removed", () => {
+  const one = { id: "local:/one", label: "one" };
+  const two = { id: "remote:https://host", label: "two" };
+  assert.deepEqual(saveConnected([one], { ...one, label: "renamed" }), [
+    { ...one, label: "renamed" },
+  ]);
+  assert.deepEqual(saveConnected([one], two), [one, two]);
+  // Asked for by its saved ID, and still saved.
+  assert.deepEqual(saveConnected([one, two], two, two.id), [one, two]);
+  // Asked for by its saved ID, and removed from the sidebar meanwhile.
+  assert.equal(saveConnected([one], two, two.id), undefined);
+});
+
+test("a project removed while its folder is looked up after it connected, or while it is saved, is not watched again", async () => {
+  const one = { id: "local:/one" };
+  let recent = [one];
+  const run = async (remove?: "save" | "after") => {
+    recent = [];
+    let watched = false;
+    const kept = await rememberConnected({
+      recent: () => recent,
+      saved: one,
+      save: async (next) => {
+        recent = next;
+        if (remove === "save") recent = [];
+      },
+      after: async () => {
+        if (remove === "after") recent = [];
+      },
+      watch: () => {
+        watched = true;
+      },
+    });
+    return { kept, watched };
+  };
+  assert.deepEqual(await run(), { kept: true, watched: true });
+  assert.deepEqual(recent, [one]);
+  assert.deepEqual(await run("after"), { kept: false, watched: false });
+  assert.deepEqual(await run("save"), { kept: false, watched: false });
+  // Removed before it connected: nothing is saved either.
+  let saved = false;
+  assert.equal(
+    await rememberConnected({
+      recent: () => [],
+      saved: one,
+      requested: one.id,
+      save: async () => {
+        saved = true;
+      },
+      watch: () => assert.fail("watched"),
+    }),
+    false,
+  );
+  assert.equal(saved, false);
 });
 
 test("registered identity groups a worktree outside the project and discovers the primary folder without conflating remote hosts", () => {

@@ -4,6 +4,7 @@ All changes are confined to a fresh data root; provider traffic uses local fixtu
 """
 import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time,urllib.request,urllib.error,uuid
 import e2e_scratch
+import e2e_tmux
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-tui-parity-')).resolve()
 workspace=root/'workspace'; workspace.mkdir()
@@ -145,8 +146,8 @@ for line in sys.stdin:
     history=until(lambda:manage('schedules',action='history',id=schedule['id'])['lines'],'Schedule did not record a run',90)
     assert json.loads(history[0])['status']=='success', history
     # Native TUI, keyboard routing, form persistence and snapshot submission.
-    args=['env',*[k+'='+v for k,v in env.items() if k in ['HAARNESS_DATA_DIR','HAARNESS_TEST_PROVIDER','HAARNESS_SCHEDULE_SKIP_INSTALL']],str(binary),'--workspace',str(workspace),'--trust-project']
-    run(['tmux','new-session','-d','-x','150','-y','42','-s',name,shlex.join(args)])
+    args=[str(binary),'--workspace',str(workspace),'--trust-project']
+    run(['tmux','new-session','-d','-x','150','-y','42','-s',name,e2e_tmux.pane_command(env,args)])
     until(lambda:'Echo 1' in capture(),'TUI did not start')
     command('/reasoning');until(lambda:'provider default' in capture(),'Reasoning picker missing');assert 'xhigh' not in capture();evidence('reasoning-model-domain');keys('Escape')
     command('/agents');until(lambda:'Select agent' in capture(),'Agent picker missing');screen=capture();assert 'compaction' not in screen and 'Fixture worker' not in screen;evidence('primary-agents');keys('Escape')
@@ -162,7 +163,7 @@ for line in sys.stdin:
     command('/providers');until(lambda:'Local provider fixture' in capture(),'Provider manager missing');choose('Local provider fixture');choose('API key');choose('API key');literal('never-show-this-key');until(lambda:'••••' in capture(),'Credential input did not render');assert 'never-show-this-key' not in capture();evidence('credential-masked');keys('Escape','Escape')
     command('/mcp');until(lambda:'fixture-mcp' in capture(),'MCP manager missing');choose('fixture-mcp');until(lambda:'Restart' in capture(),'MCP actions missing');evidence('mcp-actions');keys('Escape')
     literal('@worker');until(lambda:'Delegate to agent' in capture(),'Agent mention missing');keys('Tab');until(lambda:'[@worker]' in capture(),'Agent context missing');evidence('agent-reference');keys('C-s')
-    run(['tmux','kill-session','-t',name]);run(['tmux','new-session','-d','-x','150','-y','42','-s',name,shlex.join(args)])
+    run(['tmux','kill-session','-t',name]);run(['tmux','new-session','-d','-x','150','-y','42','-s',name,e2e_tmux.pane_command(env,args)])
     until(lambda:'Echo 1' in capture(),'TUI did not reopen')
     command('/stash');until(lambda:'@worker' in capture() and 'Delegate the relevant work' not in capture(),'Stash did not survive restart');evidence('stash-after-restart');keys('Escape')
     command('/models');until(lambda:'Select model' in capture(),'Model picker missing after restart');assert '★' in capture();evidence('favorites-after-restart');keys('Escape')

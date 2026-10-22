@@ -45,6 +45,13 @@ pub struct PtyInfo {
     pub pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
+    /// True only in the answer to the create that started this terminal, so
+    /// a client can tell a shell it started (whose output is all new to it)
+    /// from one an `ifNone` create handed back. Always sent, so a client can
+    /// tell `false` from a server too old to say (whose create always starts
+    /// one).
+    #[serde(default)]
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -62,6 +69,12 @@ pub struct PtyCreateRequest {
     pub cols: u16,
     #[serde(default = "default_rows")]
     pub rows: u16,
+    /// Start a terminal only when the project has none running; otherwise
+    /// return its oldest running one. Several windows opening "a terminal" at
+    /// once (after the server was replaced, say) then share one shell instead
+    /// of starting one each.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_none: bool,
 }
 
 const fn default_cols() -> u16 {
@@ -81,6 +94,7 @@ impl Default for PtyCreateRequest {
             cwd: None,
             cols: default_cols(),
             rows: default_rows(),
+            if_none: false,
         }
     }
 }
@@ -113,4 +127,31 @@ pub struct PtyCursor {
     /// when there are none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_terminal_always_says_whether_its_create_started_it() {
+        let info = PtyInfo {
+            id: PtyId::new(),
+            title: "zsh".into(),
+            command: "zsh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+            created: false,
+        };
+        let sent = serde_json::to_value(&info).unwrap();
+        assert_eq!(sent["created"], false);
+        // An older server says nothing; it reads as false here.
+        let mut older = sent;
+        older.as_object_mut().unwrap().remove("created");
+        assert!(!serde_json::from_value::<PtyInfo>(older).unwrap().created);
+    }
 }

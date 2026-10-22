@@ -161,3 +161,122 @@ def test_optional_password_auth(endpoint, monkeypatch):
     assert calls[-1][1]["Authorization"] == "Basic YWxleDpzZWNyZXQ="
     with pytest.raises(ValueError):
         Haarness(url, username="bad:user", password="secret")
+
+
+@pytest.fixture
+def silent_endpoint():
+    """Sends one event per connection, then holds it open and sends nothing,
+    like a connection that died without closing."""
+    cursors = []
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            cursors.append(self.headers.get("Last-Event-ID"))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            event = {
+                "type": "item.created",
+                "schemaVersion": "1",
+                "serverInstanceId": "instance",
+                "eventId": 10 + len(cursors),
+                "payload": None,
+            }
+            self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
+            self.wfile.flush()
+            release.wait(10)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", cursors
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_a_silent_event_stream_is_lost_or_continues_from_its_cursor(silent_endpoint):
+    from haarness_sdk import TransportError
+
+    url, cursors = silent_endpoint
+    with Haarness(url, token="fixture") as client:
+        seen = []
+        with pytest.raises(TransportError, match="sent nothing for 0.3 s"):
+            for event in client.events(after=10, idle_timeout=0.3):
+                seen.append(event["eventId"])
+        assert seen == [11]
+        stream = client.events(after=11, reconnect=True, retry_seconds=0.01, idle_timeout=0.3)
+        assert [next(stream)["eventId"], next(stream)["eventId"]] == [12, 13]
+        stream.close()
+    assert cursors == ["10", "11", "12"]
+
+    async def scenario():
+        async with AsyncHaarness(url, token="fixture") as client:
+            with pytest.raises(TransportError, match="sent nothing"):
+                async for _event in client.events(after=13, idle_timeout=0.3):
+                    pass
+
+    asyncio.run(scenario())
+
+
+def test_a_slow_consumer_is_not_the_servers_silence_and_the_limit_must_be_positive():
+    import time
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for index in range(1, 40):
+                event = {"type": "item.created", "schemaVersion": "1",
+                         "serverInstanceId": "instance", "eventId": index, "payload": None}
+                try:
+                    self.wfile.write(b": keepalive\n\n" + ("data: " + json.dumps(event) + "\n\n").encode())
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.05)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with Haarness(f"http://127.0.0.1:{server.server_port}", token="fixture") as client:
+            seen = []
+            stream = client.events(idle_timeout=0.2)
+            for event in stream:
+                seen.append(event["eventId"])
+                time.sleep(0.4)
+                if len(seen) == 3:
+                    break
+            stream.close()
+            assert seen == [1, 2, 3]
+            with pytest.raises(ValueError):
+                next(client.events(idle_timeout=0))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_pty_ping_says_whether_the_server_answers():
+    import websockets.sync.server
+    from haarness_sdk import PtyConnection
+
+    with websockets.sync.server.serve(lambda socket: socket.recv(), "127.0.0.1", 0) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.socket.getsockname()[1]
+        pty = PtyConnection(f"ws://127.0.0.1:{port}/", {}, 5)
+        assert pty.ping(2)
+        pty.close()
+        server.shutdown()

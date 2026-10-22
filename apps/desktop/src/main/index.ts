@@ -9,6 +9,14 @@ import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-fold
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
+import {
+  eventIdleMs,
+  onlineAgain,
+  retryWaits,
+  TERMINAL_PING_EVERY_MS,
+  terminalPingTimeoutMs,
+} from "./connection-health";
+import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { shortcutLabel } from "../renderer/search";
@@ -29,6 +37,7 @@ import {
   nativeTheme,
   nativeImage,
   globalShortcut,
+  net,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -45,8 +54,13 @@ import {
 } from "@haarness/sdk";
 import { z } from "zod";
 import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
+import { themeColors } from "../themes";
 import { serverKey } from "../servers";
-import { mergeProjectCatalog, projectKey } from "../projects";
+import {
+  mergeProjectCatalog,
+  projectKey,
+  rememberConnected,
+} from "../projects";
 import {
   connectLocal,
   establish,
@@ -134,6 +148,29 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
+/** Connections waiting to try again; a wake ends their wait. */
+const retries = retryWaits();
+/** A terminal socket that no longer reaches its server closes, and its view
+ * connects again from its cursor; a healthy one answers and is left alone. */
+function checkTerminals() {
+  for (const socket of terminals.all()) void socket.ping(terminalPingTimeoutMs());
+}
+/** The machine woke or its network came back: what waits to reconnect tries
+ * now, and terminals say whether they still reach their server. */
+function wakeConnections() {
+  retries.wake();
+  checkTerminals();
+}
+/** The computer woke: a stream that looks open may have died meanwhile, so
+ * the one behind each project's notifications follows again from its last
+ * event at once (a healthy one is only asked again), and terminals say
+ * whether they still reach their server. */
+function wakeFromSleep() {
+  for (const watch of notificationWatches.values()) watch.restart();
+  wakeConnections();
+}
+/** One window answers each terminal's programs (see terminalAnswers). */
+const answerers = terminalAnswers();
 // End-to-end tests end terminal sockets as a server or network outage does,
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
@@ -216,6 +253,9 @@ const notificationWatches = new Map<
     auth: string;
     owner: number;
     stop: () => void;
+    /** Follows again from the last event, at once and with the backoff from
+     * the start: after a wake, an open stream may be one that died. */
+    restart: () => void;
   }
 >();
 function watchNotifications(id: string, owner: number) {
@@ -229,7 +269,10 @@ function watchNotifications(id: string, owner: number) {
   previous?.stop();
   const client = new Haarness({ baseUrl: item.url, auth: item.auth });
   let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let waiting: (() => void) | undefined;
+  // Each listen is an attempt of its own; a newer one ends the older.
+  let attempt = new AbortController();
+  let attempts = 0;
   const watch = {
     client,
     endpoint: item.url,
@@ -237,8 +280,16 @@ function watchNotifications(id: string, owner: number) {
     owner,
     stop() {
       stopped = true;
-      clearTimeout(timer);
+      waiting?.();
+      attempt.abort();
       client.close();
+    },
+    restart() {
+      if (stopped) return;
+      waiting?.();
+      waiting = undefined;
+      retry = 0;
+      void listen();
     },
   };
   notificationWatches.set(id, watch);
@@ -246,8 +297,13 @@ function watchNotifications(id: string, owner: number) {
   let instance = item.view.info.serverInstanceId;
   let retry = 0;
   async function listen() {
+    const mine = ++attempts;
+    attempt.abort();
+    attempt = new AbortController();
+    const signal = attempt.signal;
+    const current = () => !stopped && mine === attempts;
     try {
-      const info = await client.info();
+      const info = await client.info({ signal });
       if (info.serverInstanceId !== instance) {
         instance = info.serverInstanceId;
         cursor = info.eventCursor ?? 0;
@@ -255,10 +311,12 @@ function watchNotifications(id: string, owner: number) {
       for await (const event of client.events({
         after: cursor,
         reconnect: true,
+        idleTimeoutMs: eventIdleMs(),
+        signal,
       })) {
-        if (stopped) return;
+        if (!current()) return;
         if (!("eventId" in event)) {
-          const info = await client.info();
+          const info = await client.info({ signal });
           instance = info.serverInstanceId;
           cursor = info.eventCursor ?? 0;
           break;
@@ -278,8 +336,10 @@ function watchNotifications(id: string, owner: number) {
     } catch {
       /* Retry without disturbing the user's foreground connection. */
     }
-    if (!stopped)
-      timer = setTimeout(
+    // The network coming back ends this wait, and a wake starts over (see
+    // wakeConnections).
+    if (current())
+      waiting = retries.wait(
         () => void listen(),
         Math.min(30000, 1000 * 2 ** Math.min(retry++, 5)),
       );
@@ -581,6 +641,7 @@ function installHandlers() {
       throw error;
     });
     menu();
+    repaintWindows();
     broadcast({ kind: "menu", data: { action: "preferences", value } });
     return value;
   });
@@ -690,9 +751,18 @@ function installHandlers() {
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
     if (cloudSession || cloudWorkspace) {
       const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
-      const index = data().recent.findIndex(item => item.id === view.id);
-      if (index >= 0) data().recent[index] = view; else data().recent.push(view);
-      await persist(); watchNotifications(view.id, win.id); return view;
+      // Removed from the sidebar while it connected: it stays removed.
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved: view,
+        requested: input.recent,
+        save: async (next) => {
+          data().recent = next;
+          await persist();
+        },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
     }
 
     let workspace = input.workspace ?? recent?.workspace;
@@ -823,36 +893,50 @@ function installHandlers() {
         checkout: view.checkout ?? current?.checkout,
         ...(url ? { url } : {}),
       };
-      if (url) {
-        saveServerAuth(serverId, auth);
-        const savedServer = {
-          id: serverId,
-          url: new URL(url).origin,
-          label: input.label?.trim() || server?.label || new URL(url).hostname,
-        };
-        const serverIndex = data().servers.findIndex(
-          (item) => item.id === serverId,
-        );
-        if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
-        else data().servers.push(savedServer);
-      }
-      const index = data().recent.findIndex((item) => item.id === view.id);
-      if (index >= 0) data().recent[index] = saved;
-      else data().recent.push(saved);
-      await persist();
-      if (!view.remote) {
-        await refreshProjects();
-        if (!data().recent.find((item) => item.id === view.id)?.project)
-          await refreshProjects();
-        const annotated = data().recent.find((item) => item.id === view.id);
-        if (annotated)
-          Object.assign(view, {
-            project: annotated.project,
-            checkout: annotated.checkout,
-          });
-      }
-      watchNotifications(view.id, win.id);
-      return view;
+      // A saved project removed from the sidebar while it connected (a row
+      // retrying in the background, a notification opening its chat), or
+      // while its folder was looked up afterwards, stays removed: nothing of
+      // it is saved or watched again.
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved,
+        requested: input.recent,
+        save: async (next) => {
+          if (url) {
+            saveServerAuth(serverId, auth);
+            const savedServer = {
+              id: serverId,
+              url: new URL(url).origin,
+              label:
+                input.label?.trim() || server?.label || new URL(url).hostname,
+            };
+            const serverIndex = data().servers.findIndex(
+              (item) => item.id === serverId,
+            );
+            if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
+            else data().servers.push(savedServer);
+          }
+          data().recent = next;
+          await persist();
+        },
+        after: view.remote
+          ? undefined
+          : async () => {
+              await refreshProjects();
+              if (!data().recent.find((item) => item.id === view.id)?.project)
+                await refreshProjects();
+              const annotated = data().recent.find(
+                (item) => item.id === view.id,
+              );
+              if (annotated)
+                Object.assign(view, {
+                  project: annotated.project,
+                  checkout: annotated.checkout,
+                });
+            },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
     });
   });
   handle("forget", async (_, id: string) => {
@@ -985,13 +1069,26 @@ function installHandlers() {
       throw new Error("Invalid event cursor");
     const item = connection(id);
     const key = randomUUID();
-    const client = new Haarness({ baseUrl: item.url, auth: item.auth });
+    // The window learns when the stream's response arrived ("opened"): only
+    // a stream that stays open from then counts as working, not one a proxy
+    // holds without an answer and then refuses.
+    const opened = (response: Response) => {
+      if (response.ok && subscriptions.has(key))
+        send(win, { kind: "connection", connection: id, id: key, data: "opened" });
+      return response;
+    };
+    const client = new Haarness({
+      baseUrl: item.url,
+      auth: item.auth,
+      fetch: (request, init) => fetch(request, init).then(opened),
+    });
     subscriptions.set(key, { owner: win.id, client });
     void (async () => {
       try {
         for await (const event of client.events({
           after: cursor,
           reconnect: false,
+          idleTimeoutMs: eventIdleMs(),
         })) {
           send(win, { kind: "server", connection: id, id: key, data: event });
         }
@@ -1033,7 +1130,9 @@ function installHandlers() {
         terminals.detach(key, z.string().max(100).parse(input));
         return;
       }
-      if (action === "write") {
+      // "write" is the person at the terminal; "answer" is xterm answering a
+      // program's query, which only one window does for a terminal.
+      if (action === "write" || action === "answer") {
         const value = z
           .array(z.number().int().min(0).max(255))
           .max(65536)
@@ -1044,6 +1143,15 @@ function installHandlers() {
         // output is forwarded, and what is sent on it meanwhile is lost.
         const current = terminals.get(key);
         if (!current || !socketOpen(current.socket)) return false;
+        const terminal = id + ":" + pty;
+        if (action === "write") answerers.use(terminal, win.id);
+        else if (
+          !answerers.answers(terminal, win.id, (other) => {
+            const socket = terminals.get(other + ":" + terminal)?.socket;
+            return !!socket && socketOpen(socket);
+          })
+        )
+          return true;
         current.socket.send(new Uint8Array(value));
         return true;
       }
@@ -1058,6 +1166,7 @@ function installHandlers() {
       });
       if (!terminals.accept(key, request.view, win.id, socket))
         throw new Error("Terminal connection replaced");
+      answerers.use(id + ":" + pty, win.id);
       const view = request.view;
       void (async () => {
         let failure: string | undefined;
@@ -1414,15 +1523,25 @@ function registerShortcut(value: GlobalShortcut = data().preferences.globalShort
   else registeredShortcut = accelerator;
   return true;
 }
+/**
+ * The saved theme's page colour. The window paints it before its page draws
+ * anything, and the page leaves it showing until it applies the theme
+ * (base.css), so a light theme never shows a dark first frame, nor a dark one
+ * a light frame.
+ */
+function windowBackground() {
+  const { theme, palette } = data().preferences;
+  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
+  return themeColors(palette, dark ? "dark" : "light").page;
+}
+function repaintWindows() {
+  for (const win of windows) if (!win.isDestroyed()) win.setBackgroundColor(windowBackground());
+}
 function createWindow() {
   if (!initialized || quitting) return;
   const state = data().values.window as
     | { width?: number; height?: number }
     | undefined;
-  // Paint the window in the appearance the page is about to use, so a
-  // light system does not flash dark before the renderer loads.
-  const theme = data().preferences.theme;
-  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
   const win = new BrowserWindow({
     // Test runs keep windows hidden, except on Linux: X11 (and Xvfb in CI)
     // draws no frames for a window that was never shown, so every screenshot
@@ -1433,7 +1552,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 640,
     title: "Haarness",
-    backgroundColor: dark ? "#151413" : "#fdfcfa",
+    backgroundColor: windowBackground(),
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 18, y: 17 },
     webPreferences: {
@@ -1521,6 +1640,7 @@ function createWindow() {
         item.client.close();
       }
     terminals.close(win.id);
+    answerers.forget(win.id);
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -1711,12 +1831,16 @@ else {
       void refreshProjects().catch(() => {});
       setupChromeOnLaunch();
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
-      powerMonitor.on("resume", () =>
-        broadcast({ kind: "connection", data: "resume" }),
-      );
-      nativeTheme.on("updated", () =>
-        broadcast({ kind: "menu", data: "theme" }),
-      );
+      powerMonitor.on("resume", () => {
+        broadcast({ kind: "connection", data: "resume" });
+        wakeFromSleep();
+      });
+      onlineAgain(() => net.isOnline(), wakeConnections);
+      setInterval(checkTerminals, TERMINAL_PING_EVERY_MS).unref();
+      nativeTheme.on("updated", () => {
+        repaintWindows();
+        broadcast({ kind: "menu", data: "theme" });
+      });
     })
     .catch((error) => {
       if (quitting) return;

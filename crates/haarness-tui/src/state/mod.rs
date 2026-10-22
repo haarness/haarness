@@ -654,6 +654,21 @@ pub struct App {
     /// SSE health: while present, stale activity is explicitly labelled as
     /// reconnecting rather than looking like a hung model.
     pub connection_lost: Option<u32>,
+    /// The provider catalog did not come in time for the first frame: it
+    /// says "Loading models…", not that nothing is connected.
+    pub(crate) models_loading: bool,
+    /// Where a provider catalog read off the event loop goes (see
+    /// `App::catalog_arrived`); without it, the read waits in place.
+    pub(crate) catalog_tx:
+        Option<tokio::sync::mpsc::Sender<Option<Vec<haarness_protocol::ProviderInfo>>>>,
+    /// When the "Connection lost" toast was last shown.
+    pub(crate) lost_toast_at: Option<std::time::Instant>,
+    /// The task following the server's events kept ending by itself: it
+    /// is tried again in a minute, and nothing retries meanwhile.
+    pub(crate) following_stopped: bool,
+    /// The chat this TUI opened on a model it chose while the catalog was
+    /// loading: its id and that model, re-chosen once the catalog comes.
+    pub(crate) auto_model: Option<(ThreadId, String, String)>,
     /// While disconnected: whether this client is bringing its local server
     /// back, or failed to.
     pub(crate) server_restart: Option<ServerRestart>,
@@ -976,6 +991,11 @@ impl App {
             billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
             connection_lost: None,
+            models_loading: false,
+            catalog_tx: None,
+            lost_toast_at: None,
+            following_stopped: false,
+            auto_model: None,
             server_restart: None,
             overlay: Overlay::None,
             reasoning: true,
@@ -1238,6 +1258,46 @@ impl App {
             &self.items,
             self.thread.revert.as_ref().map(|state| state.sequence),
         );
+    }
+
+    /// The connection to the server dropped: the status line says so at
+    /// once; the toast at most every 30 s, so a proxy that drops it over and
+    /// over cannot make it flicker.
+    pub(crate) fn connection_dropped(&mut self, attempt: u32) {
+        let first = self.connection_lost.is_none();
+        self.connection_lost = Some(attempt);
+        if first
+            && self
+                .lost_toast_at
+                .is_none_or(|shown| shown.elapsed() >= std::time::Duration::from_secs(30))
+        {
+            self.lost_toast_at = Some(std::time::Instant::now());
+            self.show_toast(
+                None,
+                "Connection lost · retrying".into(),
+                ToastVariant::Warning,
+                std::time::Duration::from_secs(4),
+            );
+        }
+    }
+
+    /// The server answers again.
+    pub(crate) fn reconnected(&mut self) {
+        self.connection_lost = None;
+        self.following_stopped = false;
+        self.notice = if self.server_restart.take() == Some(ServerRestart::Starting) {
+            "Server restarted · reconnected"
+        } else {
+            "Reconnected"
+        }
+        .into();
+    }
+
+    /// The task following the server's events kept ending by itself: the
+    /// status line says nothing is retrying, not "reconnecting".
+    pub(crate) fn stopped_following(&mut self) {
+        self.connection_lost = None;
+        self.following_stopped = true;
     }
 
     pub fn show_toast(

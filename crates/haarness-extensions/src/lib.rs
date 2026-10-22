@@ -184,6 +184,8 @@ struct Process {
     output: BufReader<ChildStdout>,
     _scratch: tempfile::TempDir,
     payload_max_bytes: usize,
+    /// Stopped by the next server should this one die before it can.
+    _recorded: haarness_core::process_groups::Recorded,
 }
 impl Drop for Process {
     fn drop(&mut self) {
@@ -237,6 +239,7 @@ impl Process {
         Ok(Self {
             input: child.stdin.take().context("extension stdin")?,
             output: BufReader::new(child.stdout.take().context("extension stdout")?),
+            _recorded: haarness_core::process_groups::recorded(child.id()),
             child,
             _scratch: scratch,
             payload_max_bytes,

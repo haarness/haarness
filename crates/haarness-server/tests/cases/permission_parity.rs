@@ -917,3 +917,172 @@ async fn parity_native_and_batch_reads_run_concurrently_with_write_barriers() {
         }
     }
 }
+
+/// A runtime whose one command (`probe`) runs `template` with `execution`.
+fn snippet_runtime(
+    workspace: &Path,
+    rules: Vec<PermissionRule>,
+    template: &str,
+    execution: haarness_protocol::DefinitionExecution,
+) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
+    let mut config = RuntimeConfig::default();
+    config.base_rules.extend(rules);
+    config.commands.push(haarness_protocol::CommandInfo {
+        name: "probe".into(),
+        description: "Snippet permissions".into(),
+        source: None,
+        agent: None,
+        model: None,
+        argument_hint: None,
+        template: template.into(),
+        plugin: None,
+        execution,
+    });
+    let provider = Capturing::default();
+    let requests = provider.requests.clone();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.to_owned())),
+        EventBus::new(2048),
+        workspace.to_owned(),
+        String::new(),
+        config,
+    );
+    (runtime, requests)
+}
+
+fn script(path: &Path, body: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+async fn probe(runtime: &AgentRuntime, thread: &Thread, arguments: &str) -> Turn {
+    let mut request = turn_request(arguments);
+    request.command = Some("probe".into());
+    runtime.start_turn(thread.id, request).await.unwrap()
+}
+
+fn permission_request(
+    items: &[haarness_protocol::Item],
+) -> Option<(String, Vec<String>, Vec<String>)> {
+    items.iter().find_map(|item| match &item.data {
+        ItemData::PermissionRequest {
+            permission,
+            patterns,
+            always_patterns,
+            ..
+        } => Some((
+            permission.clone(),
+            patterns.clone(),
+            always_patterns.clone(),
+        )),
+        _ => None,
+    })
+}
+
+/// A snippet is judged on its text with the folders filled in, as a person
+/// reads it: Always saves the real path, a rule naming the real path still
+/// allows it, and a path that leaves the project through a placeholder asks.
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_a_snippet_is_judged_with_its_folders_filled_in() {
+    let fixture = Fixture::new();
+    let workspace = fixture.0.join("ws");
+    let skill = workspace.join("skills/tool");
+    script(&skill.join("run.sh"), "printf SKILL_RAN");
+    std::fs::write(fixture.0.join("outside.txt"), "OUTSIDE_SECRET").unwrap();
+    let execution = haarness_protocol::DefinitionExecution {
+        directory: Some(skill.display().to_string()),
+        ..Default::default()
+    };
+    let run = skill.join("run.sh").display().to_string();
+
+    // The card and an Always answer name the real path.
+    let (runtime, _) = snippet_runtime(
+        &workspace,
+        vec![rule("bash:*", D::Ask)],
+        "Ctx: !`${CLAUDE_SKILL_DIR}/run.sh go`",
+        execution.clone(),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = probe(&runtime, &thread, "").await;
+    let permission = wait_permission(&runtime, thread.id).await;
+    let (_, patterns, always) =
+        permission_request(&runtime.items(thread.id, None).await.unwrap()).unwrap();
+    assert!(
+        patterns.iter().any(|pattern| pattern.contains(&run)),
+        "{patterns:?}"
+    );
+    assert!(
+        !always.is_empty() && always.iter().all(|pattern| !pattern.contains("${")),
+        "{always:?}"
+    );
+    assert!(
+        always.iter().any(|pattern| pattern.contains(&run)),
+        "{always:?}"
+    );
+    runtime
+        .reply_permission(
+            &permission,
+            PermissionReply {
+                decision: Reply::Once,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_success(&runtime, &thread, &turn).await;
+
+    // A rule a person saved earlier for the real path still allows it.
+    let (runtime, requests) = snippet_runtime(
+        &workspace,
+        vec![
+            rule("bash:*", D::Ask),
+            rule(&format!("bash:{run} *"), D::Allow),
+        ],
+        "Ctx: !`${CLAUDE_SKILL_DIR}/run.sh go`",
+        execution.clone(),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = probe(&runtime, &thread, "").await;
+    assert_success(&runtime, &thread, &turn).await;
+    assert!(permission_request(&runtime.items(thread.id, None).await.unwrap()).is_none());
+    assert!(requests.lock().unwrap().iter().any(|request| request.messages.iter().any(
+        |message| matches!(message, ProviderMessage::Text { role, content } if role == "user" && content.contains("Ctx: SKILL_RAN"))
+    )));
+
+    // A path that leaves the project through the skill's folder asks.
+    let (runtime, requests) = snippet_runtime(
+        &workspace,
+        Vec::new(),
+        "Ctx: !`cat \"${CLAUDE_SKILL_DIR}/../../../outside.txt\"`",
+        execution,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = probe(&runtime, &thread, "").await;
+    let permission = wait_permission(&runtime, thread.id).await;
+    let (kind, _, _) = permission_request(&runtime.items(thread.id, None).await.unwrap()).unwrap();
+    assert_eq!(kind, "external_directory");
+    runtime
+        .reply_permission(
+            &permission,
+            PermissionReply {
+                decision: Reply::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(!requests.lock().unwrap().iter().any(|request| request.messages.iter().any(
+        |message| matches!(message, ProviderMessage::Text { content, .. } if content.contains("OUTSIDE_SECRET"))
+    )));
+}

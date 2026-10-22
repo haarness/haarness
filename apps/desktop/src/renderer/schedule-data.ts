@@ -1,3 +1,4 @@
+import { language } from "./i18n";
 import type { Thread } from "@haarness/sdk";
 
 export type Trigger =
@@ -134,7 +135,7 @@ export function describeSchedule(trigger: Trigger, t: (key: string) => string = 
       .label.toLowerCase()
       .replace(/s$/, form.amount === 1 ? "" : "s")}`;
   if (form.frequency === "once")
-    return `Once · ${new Date((trigger as { at: string }).at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+    return `Once · ${new Date((trigger as { at: string }).at).toLocaleString(language(), { dateStyle: "medium", timeStyle: "short" })}`;
   if (form.frequency === "cron") return `Custom · ${form.cron}`;
   return `${form.frequency === "daily" ? "Every day" : form.frequency === "weekdays" ? "Weekdays" : "Every " + weekdays[form.day]} at ${form.time}`;
 }
