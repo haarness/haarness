@@ -598,6 +598,9 @@ pub(super) fn pull_remote_skills(cache: &Path, url: &str) -> Result<Option<PathB
         else {
             continue;
         };
+        // A listed file is fetched from the skill's own folder on the index
+        // host; only an entry's `url` may name another address.
+        let folder = format!("{base}{name}/");
         let files: Vec<(String, String)> = match skill.get("url").and_then(Value::as_str) {
             Some(direct) => vec![("SKILL.md".to_owned(), resolve_link(&base, direct))],
             None => skill
@@ -613,8 +616,17 @@ pub(super) fn pull_remote_skills(cache: &Path, url: &str) -> Result<Option<PathB
                 .unwrap_or_else(|| vec!["SKILL.md".to_owned()])
                 .into_iter()
                 .map(|file| {
-                    let link = format!("{base}{name}/{file}");
+                    let link = format!("{folder}{file}");
                     (file, link)
+                })
+                // `%2e%2e/` stays one folder on disk, but the address parser
+                // reads it as `..`.
+                .filter(|(file, link)| {
+                    let inside = stays_under(link, &folder);
+                    if !inside {
+                        tracing::warn!("config: skipped remote skill file {file}: its address leaves the skill's folder");
+                    }
+                    inside
                 })
                 .collect(),
         };
@@ -664,6 +676,14 @@ fn resolve_link(base: &str, link: &str) -> String {
         return format!("{origin}/{rest}");
     }
     format!("{base}{link}")
+}
+
+/// Whether `link`, read as an address, is still inside the `folder` address.
+fn stays_under(link: &str, folder: &str) -> bool {
+    match (reqwest::Url::parse(link), reqwest::Url::parse(folder)) {
+        (Ok(link), Ok(folder)) => link.as_str().starts_with(folder.as_str()),
+        _ => false,
+    }
 }
 
 fn remote_cache_key(base: &str) -> String {
@@ -2691,6 +2711,7 @@ mod tests {
                     {"name":"remote-b","url":"/direct/remote-b.md"},
                     {"name":"../escape","files":["SKILL.md"]},
                     {"name":"broken","files":["../SKILL.md"]},
+                    {"name":"sneaky","files":["SKILL.md","%2e%2e/%2E%2e/direct/remote-b.md"]},
                     {"name":"missing"}
                 ]}"#,
             ),
@@ -2699,6 +2720,10 @@ mod tests {
                 "---\nname: remote-a\ndescription: Remote A\n---\nREMOTE_A",
             ),
             ("/skills/remote-a/reference.md", "REFERENCE"),
+            (
+                "/skills/sneaky/SKILL.md",
+                "---\nname: sneaky\ndescription: Sneaky\n---\nSNEAKY",
+            ),
             (
                 "/direct/remote-b.md",
                 "---\nname: remote-b\ndescription: Remote B\n---\nREMOTE_B",
@@ -2723,11 +2748,14 @@ mod tests {
             !host.join("SKILL.md").exists(),
             "parent traversal is rejected"
         );
+        // An escaped `..` is not fetched from outside the skill's folder.
+        assert!(host.join("sneaky/SKILL.md").is_file());
+        assert!(!host.join("sneaky/%2e%2e").exists());
         let mut commands = Vec::new();
         discover_skill_commands(&mut commands, &mut Vec::new(), &host, None);
         let mut names = commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
         names.sort_unstable();
-        assert_eq!(names, vec!["remote-a", "remote-b"]);
+        assert_eq!(names, vec!["remote-a", "remote-b", "sneaky"]);
         // A trailing index.json and a trailing slash name the same index.
         assert_eq!(
             pull_remote_skills(&cache, &format!("{base}/skills/index.json")).unwrap(),

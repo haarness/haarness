@@ -101,7 +101,7 @@ Inside a command template, `@path` references that name a workspace file are app
 }
 ```
 
-`paths` are additional skill roots (`~/` and workspace-relative paths allowed; missing folders are skipped). Each `urls` entry names an index at `<url>/index.json` (or the `index.json` itself) of the shape `{"skills":[{"name":"…","description":"…","files":["SKILL.md", …]}]}`, with files fetched from `<url>/<name>/<file>`; an entry may instead point straight at its file with `"url"`. Fetches are best effort with a 10 s timeout; downloaded skills are cached under `~/.local/share/haarness/remote-skills/<host>/<name>/` and never refetched while present. Remote and path skills are listed after every native root, so a local skill with the same name wins.
+`paths` are additional skill roots (`~/` and workspace-relative paths allowed; missing folders are skipped). Each `urls` entry names an index at `<url>/index.json` (or the `index.json` itself) of the shape `{"skills":[{"name":"…","description":"…","files":["SKILL.md", …]}]}`, with files fetched from `<url>/<name>/<file>`; an entry may instead point straight at its file with `"url"`. A skill name or file that would leave its folder (`..`, an absolute path, or `%2e%2e/`, which the address reads as `..`) is skipped. Fetches are best effort with a 10 s timeout; downloaded skills are cached under `~/.local/share/haarness/remote-skills/<host>/<name>/` and never refetched while present. Remote and path skills are listed after every native root, so a local skill with the same name wins.
 
 ## Message delivery preference
 
