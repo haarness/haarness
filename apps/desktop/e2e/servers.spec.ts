@@ -19,7 +19,12 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
-import { createServer, request } from "node:http";
+import {
+  createServer,
+  request,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
@@ -302,6 +307,533 @@ async function endpoint(name: string) {
   );
   return { path, url: result.url as string, token: result.token as string };
 }
+/** An HTTP proxy in front of `target` that a test can make refuse, hold or
+ * cut requests, as a flaky network or a proxy in between would. `intercept`
+ * answers a request itself (`true`), lets it through (`false`), or holds it
+ * until a promise settles. */
+async function relay(target: string) {
+  const streams = new Set<ServerResponse>();
+  /** Event streams that stay open but carry nothing more, as a connection
+   * that died while the computer slept. */
+  const frozen = new Set<ServerResponse>();
+  const seen: string[] = [];
+  const answered: string[] = [];
+  let intercept:
+    | ((req: IncomingMessage, res: ServerResponse) => boolean | Promise<void>)
+    | undefined;
+  const forward = (req: IncomingMessage, res: ServerResponse, line: string) => {
+    if (req.url?.startsWith("/v1/events")) {
+      streams.add(res);
+      res.on("close", () => streams.delete(res));
+    }
+    res.on("finish", () => answered.push(line));
+    const upstream = request(
+      new URL(req.url!, target),
+      { method: req.method, headers: req.headers },
+      (incoming) => {
+        res.writeHead(incoming.statusCode!, incoming.headers);
+        incoming.on("data", (chunk) => {
+          if (!frozen.has(res)) res.write(chunk);
+        });
+        incoming.on("end", () => res.end());
+      },
+    );
+    upstream.on("error", () => {
+      if (res.headersSent) res.destroy();
+      else {
+        res.writeHead(502);
+        res.end();
+      }
+    });
+    res.on("close", () => upstream.destroy());
+    req.pipe(upstream);
+  };
+  const server = createServer((req, res) => {
+    const line = req.method + " " + new URL(req.url!, target).pathname;
+    seen.push(line);
+    const decision = intercept?.(req, res) ?? false;
+    if (decision === true) return;
+    void Promise.resolve(decision).then(() => forward(req, res, line));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    /** How many requests named `line` (`GET /v1/threads`) arrived. */
+    count: (line: string) => seen.filter((item) => item === line).length,
+    /** How many requests whose line ends with `end` arrived. */
+    ending: (end: string) => seen.filter((item) => item.endsWith(end)).length,
+    /** How many of them were answered by the server behind. */
+    answered: (line: string) => answered.filter((item) => item === line).length,
+    intercept(next: typeof intercept) {
+      intercept = next;
+    },
+    /** Ends the event streams in flight, as a dropped connection does. */
+    cut() {
+      for (const stream of streams) stream.destroy();
+    },
+    /** Keeps the event streams in flight open, carrying nothing more. */
+    freeze() {
+      for (const stream of streams) frozen.add(stream);
+    },
+    async close() {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+test("a project whose event stream is refused waits longer each time instead of reading every chat again twice a second", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("refused-stream");
+  const proxy = await relay(remote.url);
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    await launch();
+    await addServer("Refusing server", proxy.url, remote.token);
+    // Everything but the event stream is answered.
+    proxy.intercept((req, res) => {
+      if (!req.url?.startsWith("/v1/events")) return false;
+      req.resume();
+      res.writeHead(502);
+      res.end();
+      return true;
+    });
+    const before = proxy.count("GET /v1/threads");
+    proxy.cut();
+    await page.waitForTimeout(6000);
+    // Waits of 0.5, 1, 2 and then 4 s: three reads of every chat in six
+    // seconds, where a wait that started over each time the stream opened
+    // read them about ten times.
+    const reads = proxy.count("GET /v1/threads") - before;
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(reads).toBeLessThanOrEqual(4);
+    // Accepted again, the stream connects at the next attempt and carries
+    // changes: a chat created on the server shows without another read.
+    proxy.intercept(undefined);
+    const refused = proxy.count("GET /v1/threads");
+    await expect
+      .poll(() => proxy.count("GET /v1/threads"), { timeout: 15000 })
+      .toBeGreaterThan(refused);
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "true",
+    );
+    await page.waitForTimeout(1000);
+    const settled = proxy.count("GET /v1/threads");
+    await client.createThread({
+      title: "Arrived over the stream",
+      provider: "echo",
+      model: "echo-1",
+    });
+    await expect(
+      page.getByRole("button", { name: "Arrived over the stream", exact: true }),
+    ).toBeVisible();
+    expect(proxy.count("GET /v1/threads")).toBe(settled);
+  } finally {
+    client.close();
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("a project waiting to reconnect connects within 2 s of a wake or the network coming back, and a connected one is left alone by the network and the window", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("outage");
+  const proxy = await relay(remote.url);
+  const ready = () => page.locator(".application");
+  // Nine seconds without the server: attempts after 0.5, 1, 2 and 4 s leave
+  // an 8 s wait before the next.
+  const outage = async () => {
+    proxy.intercept((req) => {
+      req.socket.destroy();
+      return true;
+    });
+    proxy.cut();
+    await expect(ready()).toHaveAttribute("data-project-ready", "false");
+    await page.waitForTimeout(9000);
+    proxy.intercept(undefined);
+  };
+  try {
+    await launch();
+    await addServer("Outage server", proxy.url, remote.token);
+    await outage();
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", {
+        kind: "connection",
+        data: "resume",
+      }),
+    );
+    await expect(ready()).toHaveAttribute("data-project-ready", "true", {
+      timeout: 2000,
+    });
+    await outage();
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(ready()).toHaveAttribute("data-project-ready", "true", {
+      timeout: 2000,
+    });
+    // A connected project is not disturbed by the network or the window
+    // coming back: nothing is read again.
+    await page.waitForTimeout(1000);
+    const reads = proxy.count("GET /v1/threads");
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForTimeout(1500);
+    expect(proxy.count("GET /v1/threads")).toBe(reads);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("a project removed from the sidebar while it reconnects stays removed after relaunch", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("removed-while-connecting");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Removal server", proxy.url, remote.token);
+    const id = "remote:" + new URL(proxy.url).origin;
+    // The open project's next read of its server fails, so it connects again
+    // from the start, and that connection waits until released.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    let infos = 0;
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/info") return false;
+      if (++infos === 1) {
+        req.resume();
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Server is busy" } }));
+        return true;
+      }
+      holding();
+      return gate;
+    });
+    proxy.cut();
+    await held;
+    const name = "removed-while-connecting";
+    const heading = () =>
+      page.locator(".sidebar .project-heading").filter({ hasText: name });
+    await page
+      .getByRole("button", { name: `Project options for ${name}`, exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Remove project", exact: true }).click();
+    await page
+      .getByRole("dialog", { name: `Remove ${name} from the sidebar?`, exact: true })
+      .getByRole("button", { name: "Remove project", exact: true })
+      .click();
+    await expect(heading()).toHaveCount(0);
+    const answered = proxy.answered("GET /v1/info");
+    proxy.intercept(undefined);
+    release();
+    await expect
+      .poll(() => proxy.answered("GET /v1/info"))
+      .toBeGreaterThan(answered);
+    await page.waitForTimeout(1000);
+    const saved = () =>
+      page.evaluate(
+        async (id) =>
+          (await window.haarness.boot()).recent.some((item) => item.id === id),
+        id,
+      );
+    expect(await saved()).toBe(false);
+    await app.close();
+    await launch();
+    await expect(page.locator(".server-switcher-button")).toHaveText(
+      "Removal server",
+    );
+    await expect(heading()).toHaveCount(0);
+    expect(await saved()).toBe(false);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("a wake leaves a connected project connected: it subscribes again from its last event, quietly", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("quiet-wake");
+  const proxy = await relay(remote.url);
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    await launch();
+    await addServer("Wake server", proxy.url, remote.token);
+    await page.waitForTimeout(1000);
+    // The stream died while the computer slept: open, and silent.
+    proxy.freeze();
+    await page.evaluate(() => {
+      const root = document.querySelector(".application")!;
+      const seen: string[] = [];
+      (window as unknown as { readySeen: string[] }).readySeen = seen;
+      new MutationObserver(() =>
+        seen.push(root.getAttribute("data-project-ready") ?? ""),
+      ).observe(root, {
+        attributes: true,
+        attributeFilter: ["data-project-ready"],
+      });
+    });
+    const reads = () =>
+      proxy.count("GET /v1/threads") +
+      proxy.count("GET /v1/turns/active") +
+      proxy.count("GET /v1/permissions");
+    const before = reads();
+    const streams = proxy.count("GET /v1/events");
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", {
+        kind: "connection",
+        data: "resume",
+      }),
+    );
+    await expect
+      .poll(() => proxy.count("GET /v1/events"))
+      .toBeGreaterThan(streams);
+    await client.createThread({
+      title: "Arrived after the wake",
+      provider: "echo",
+      model: "echo-1",
+    });
+    await expect(
+      page.getByRole("button", { name: "Arrived after the wake", exact: true }),
+    ).toBeVisible();
+    // It stayed Connected throughout, and nothing was read again.
+    expect(reads()).toBe(before);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { readySeen: string[] }).readySeen,
+      ),
+    ).toEqual([]);
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "true",
+    );
+  } finally {
+    client.close();
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("a project connecting again starts a new attempt when the network comes back, even while one still hangs", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("hanging-attempt");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Hanging server", proxy.url, remote.token);
+    // Requests now go unanswered, as on a network that is not there yet.
+    proxy.intercept(() => new Promise<void>(() => {}));
+    const infos = proxy.count("GET /v1/info");
+    proxy.cut();
+    await expect
+      .poll(() => proxy.count("GET /v1/info"))
+      .toBeGreaterThan(infos);
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "false",
+    );
+    // The network is back, while the attempt in flight still waits.
+    proxy.intercept(undefined);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "true",
+      { timeout: 2000 },
+    );
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("the open project removed in another window while it reconnects is left, not reconnected forever", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("removed-elsewhere");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Elsewhere server", proxy.url, remote.token);
+    const id = "remote:" + new URL(proxy.url).origin;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    let infos = 0;
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/info") return false;
+      if (++infos === 1) {
+        req.resume();
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Server is busy" } }));
+        return true;
+      }
+      holding();
+      return gate;
+    });
+    proxy.cut();
+    await held;
+    // Another window removes it, through the same main process.
+    await page.evaluate((id) => window.haarness.forget(id), id);
+    proxy.intercept(undefined);
+    release();
+    await expect(page.getByRole("region", { name: "Project home" })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(
+      page.getByRole("textbox", { name: "Message", exact: true }),
+    ).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        async (id) =>
+          (await window.haarness.boot()).recent.some((item) => item.id === id),
+        id,
+      ),
+    ).toBe(false);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("an attempt a newer one replaced leaves the connected project alone when it fails late", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("late-failure");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Late server", proxy.url, remote.token);
+    // The open project's read of its server fails, so it connects again from
+    // the start, and that connection waits, to fail later.
+    let fail!: () => void;
+    const failing = new Promise<void>((resolve) => (fail = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    let infos = 0;
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/info") return false;
+      if (++infos > 2) return false;
+      req.resume();
+      const refuse = () => {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Server is busy" } }));
+      };
+      if (infos === 1) refuse();
+      else {
+        holding();
+        void failing.then(refuse);
+      }
+      return true;
+    });
+    proxy.cut();
+    await held;
+    // The network is back: a new attempt connects while the first waits.
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "true",
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(500);
+    await page.evaluate(() => {
+      const root = document.querySelector(".application")!;
+      const seen: string[] = [];
+      (window as unknown as { readySeen: string[] }).readySeen = seen;
+      new MutationObserver(() =>
+        seen.push(root.getAttribute("data-project-ready") ?? ""),
+      ).observe(root, {
+        attributes: true,
+        attributeFilter: ["data-project-ready"],
+      });
+    });
+    const reads = proxy.count("GET /v1/threads");
+    fail();
+    await page.waitForTimeout(2000);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { readySeen: string[] }).readySeen,
+      ),
+    ).toEqual([]);
+    expect(proxy.count("GET /v1/threads")).toBe(reads);
+    await expect(page.locator(".error-banner")).toHaveCount(0);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("opening another project while the one before waits to reconnect leaves the new one undisturbed", async () => {
+  test.setTimeout(180000);
+  const remote = await endpoint("switch-first");
+  const other = join(temporary, "switch-second");
+  await mkdir(other);
+  workspaces.push(other);
+  const proxy = await relay(remote.url);
+  const ready = () => page.locator(".application");
+  const heading = (name: string) =>
+    page.locator(".sidebar .project-heading").filter({ hasText: name });
+  try {
+    await launch();
+    await addServer("Switch server", proxy.url, remote.token);
+    // A second project on the same server, then back to the first.
+    await page
+      .getByRole("button", { name: "Open another project", exact: true })
+      .click();
+    const picker = page.getByRole("dialog", {
+      name: "Open remote project",
+      exact: true,
+    });
+    await picker.getByLabel("Remote folder", { exact: true }).fill(other);
+    await picker
+      .getByRole("button", { name: "Open project", exact: true })
+      .click();
+    await expect(picker).not.toBeVisible({ timeout: 60000 });
+    await expect(heading("switch-second")).toHaveClass(/current/);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    await heading("switch-first").click();
+    await expect(heading("switch-first")).toHaveClass(/current/);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    // The first project's stream is refused: its waits grow to 4 s.
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/events") return false;
+      req.resume();
+      res.writeHead(502);
+      res.end();
+      return true;
+    });
+    proxy.cut();
+    await page.waitForTimeout(4000);
+    await heading("switch-second").click();
+    await expect(heading("switch-second")).toHaveClass(/current/);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    await page.evaluate(() => {
+      const root = document.querySelector(".application")!;
+      const seen: string[] = [];
+      (window as unknown as { readySeen: string[] }).readySeen = seen;
+      new MutationObserver(() =>
+        seen.push(root.getAttribute("data-project-ready") ?? ""),
+      ).observe(root, {
+        attributes: true,
+        attributeFilter: ["data-project-ready"],
+      });
+    });
+    const reads = proxy.ending("/v1/threads");
+    // Past the moment the first project's next attempt was due.
+    await page.waitForTimeout(6000);
+    expect(proxy.ending("/v1/threads")).toBe(reads);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { readySeen: string[] }).readySeen,
+      ),
+    ).toEqual([]);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
 
 test.beforeEach(async () => {
   temporary = await realpath(
