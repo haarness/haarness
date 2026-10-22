@@ -2882,6 +2882,7 @@ impl Tool for BuiltinTool {
                         })
                     });
                     if !inside {
+                        skipped.outside += 1;
                         continue;
                     }
                     // `*` matches dotfiles and `**` follows linked folders, so
@@ -3396,6 +3397,8 @@ enum Hidden {
 struct Skipped {
     secret: usize,
     denied: usize,
+    /// Glob matches in a linked folder that leads out of the project.
+    outside: usize,
 }
 
 impl Skipped {
@@ -3538,6 +3541,14 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
             plural(skipped.denied)
         ));
     }
+    // Said so the model does not take those files for absent.
+    if skipped.outside > 0 {
+        reasons.push(format!(
+            "{at_least}{} match{} inside links that lead outside the project",
+            skipped.outside,
+            if skipped.outside == 1 { "" } else { "es" }
+        ));
+    }
     if reasons.is_empty() {
         return output;
     }
@@ -3556,6 +3567,9 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
         }
         if skipped.denied > 0 {
             metadata.insert("denied".into(), json!(skipped.denied));
+        }
+        if skipped.outside > 0 {
+            metadata.insert("outside".into(), json!(skipped.outside));
         }
     }
     output
@@ -6265,6 +6279,19 @@ export default workflow({
         assert!(!dotted.text.contains(".."), "{}", dotted.text);
         let all = glob(json!({"pattern":"**/*"})).await.unwrap();
         assert!(!all.text.contains("elsewhere.txt"), "{}", all.text);
+        // The model is told they were left out, not that they are absent.
+        assert!(
+            all.text
+                .ends_with("\n\n(skipped 1 match inside links that lead outside the project)"),
+            "{}",
+            all.text
+        );
+        assert_eq!(all.metadata["outside"], 1);
+        let none = glob(json!({"pattern":"escape/*"})).await.unwrap();
+        assert_eq!(
+            none.text,
+            "No files found\n\n(skipped 1 match inside links that lead outside the project)"
+        );
         // A link in the project is listed, and a link to another project
         // folder is followed.
         assert!(
