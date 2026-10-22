@@ -65,15 +65,16 @@ export function createBrowserPage(
   });
   const contents = view.webContents;
   const detachNetwork = options.network?.attach(contents);
-  // The agent's own input reaches the page through these DevTools commands;
-  // a press or key arriving while one is in flight is the agent's, not the
-  // person's, and the picker lets it through.
-  let dispatching = 0;
   const picker = createPicker(contents, {
     zoom: () => contents.getZoomFactor(),
-    agent: () => dispatching > 0,
+    origin: () => {
+      const content = win.getContentBounds();
+      const bounds = view.getBounds();
+      return { x: content.x + bounds.x, y: content.y + bounds.y };
+    },
     window: options.modifiers,
   });
+  contents.on("blur", () => picker.blur());
   contents.on("before-input-event", (event, input) => {
     if (picker.key(event, input)) return;
     if (input.type !== "keyDown") return;
@@ -113,16 +114,15 @@ export function createBrowserPage(
     if (mouse.type === "mouseDown") page.personActed();
   });
   const transport = createCdp(contents);
+  // The agent's own input reaches the page through these DevTools commands;
+  // the picker lets exactly the presses and keys they make through.
   const cdp: typeof transport = {
     ...transport,
-    async send(method, params, sessionID) {
+    send(method, params, sessionID) {
       if (!method.startsWith("Input.")) return transport.send(method, params, sessionID);
-      dispatching++;
-      try {
-        return await transport.send(method, params, sessionID);
-      } finally {
-        dispatching--;
-      }
+      return picker.dispatch(method, (params ?? {}) as Record<string, unknown>, () =>
+        transport.send(method, params, sessionID),
+      );
     },
   };
   // Electron reports loadURL's navigation start synchronously, before
@@ -464,7 +464,10 @@ export function createBrowserPage(
         return picker.hidden(() => page.execute(command, signal));
       return page.execute(command, signal);
     },
-    /** Lets the person pick elements in this page until they stop or a click picks one. */
+    /**
+     * Lets the person pick elements in this page until they stop or a click
+     * picks one; false when picking ended again before the page was ready.
+     */
     pick(
       request: PickRequest,
       callbacks: {

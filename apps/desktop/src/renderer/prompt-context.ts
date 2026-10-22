@@ -20,6 +20,8 @@ export type PromptContext =
   | { kind: "agent"; name: string }
   | ElementContext;
 const MAX_CONTEXT_BYTES = 128 * 1024;
+/** Enough for a page's worth of picked elements; the byte bound is the real limit. */
+const MAX_CONTEXT_ITEMS = 50;
 export const contextKey = (item: PromptContext) =>
   item.kind === "agent"
     ? JSON.stringify([item.kind, item.name])
@@ -38,12 +40,13 @@ export const contextLabel = (item: PromptContext) =>
 export const mentionAgents = (agents: AgentProfile[]) =>
   agents.filter((agent) => !agent.hidden && agent.mode !== "primary");
 function checkContext(items: PromptContext[]) {
-  if (
-    items.length > 20 ||
-    new TextEncoder().encode(JSON.stringify(items)).length > MAX_CONTEXT_BYTES
-  )
+  if (items.length > MAX_CONTEXT_ITEMS)
     throw Error(
-      "Context must fit within 128 KiB and 20 items. Select a smaller code range.",
+      `A message holds up to ${MAX_CONTEXT_ITEMS} context items. Remove some before adding more.`,
+    );
+  if (new TextEncoder().encode(JSON.stringify(items)).length > MAX_CONTEXT_BYTES)
+    throw Error(
+      "Context must fit within 128 KiB. Select a smaller code range, or remove some context.",
     );
   return items;
 }
