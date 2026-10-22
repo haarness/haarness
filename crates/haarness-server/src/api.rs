@@ -2459,11 +2459,26 @@ async fn pump_events(
             }
         }
     };
-    for event in subscription.replay {
-        if scope.allows(&event, &runtime).await && !queue(event) {
-            return;
+    // The replay is bounded by what the bus keeps, and the client has read
+    // none of it yet, so it never ends the connection: one larger than the
+    // queue holds is answered as a cursor older than the bus is, with
+    // `resync_required`, and the stream goes on with what is published next.
+    let mut replay = subscription.replay.into_iter();
+    while let Some(event) = replay.next() {
+        if !scope.allows(&event, &runtime).await {
+            continue;
+        }
+        let pushed = pending.lock().events.push_replay(event);
+        wake.notify_one();
+        if let Err(dropped) = pushed {
+            tracing::info!(
+                skipped = dropped.saturating_add(replay.len()),
+                "event stream replay is larger than a connection holds; its client resyncs"
+            );
+            break;
         }
     }
+    drop(replay);
     let mut receiver = subscription.receiver;
     loop {
         match receiver.recv().await {
