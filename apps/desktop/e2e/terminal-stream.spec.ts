@@ -424,11 +424,16 @@ test("after the server is replaced, the terminal it no longer has gives way to o
     await expect(window.locator("[data-cycle-tab]")).toHaveCount(1);
     await expect(window.locator(`[data-cycle-tab="${shell.id}"]`)).toHaveAttribute("aria-current", "true");
   }
+  // The shell asked both windows for their device attributes as it started;
+  // one answered, so nothing was left on its command line, and either
+  // window types into it.
+  await expect.poll(() => read("start-answers.txt").then((text) => text.trim().split("\n").at(-1))).toBe("answered:6");
+  const secondInput = second.locator(".xterm-helper-textarea");
+  await secondInput.fill(`printf second > ${join(temporary, "second.txt")}`);
+  await secondInput.press("Enter");
+  await expect.poll(() => read("second.txt"), { timeout: 30_000 }).toBe("second");
   await second.close();
   await prompt();
-  // Both windows answered the shell's start-up query; the second answer is
-  // left on its command line, so start a fresh one.
-  await input().press("Control+c");
   await input().fill(`printf replaced > ${join(temporary, "replaced.txt")}`);
   await input().press("Enter");
   await expect.poll(() => read("replaced.txt"), { timeout: 30_000 }).toBe("replaced");

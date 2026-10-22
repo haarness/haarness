@@ -9,6 +9,7 @@ import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-fold
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
+import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { shortcutLabel } from "../renderer/search";
@@ -134,6 +135,8 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
+/** One window answers each terminal's programs (see terminalAnswers). */
+const answerers = terminalAnswers();
 // End-to-end tests end terminal sockets as a server or network outage does,
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
@@ -1033,7 +1036,9 @@ function installHandlers() {
         terminals.detach(key, z.string().max(100).parse(input));
         return;
       }
-      if (action === "write") {
+      // "write" is the person at the terminal; "answer" is xterm answering a
+      // program's query, which only one window does for a terminal.
+      if (action === "write" || action === "answer") {
         const value = z
           .array(z.number().int().min(0).max(255))
           .max(65536)
@@ -1044,6 +1049,15 @@ function installHandlers() {
         // output is forwarded, and what is sent on it meanwhile is lost.
         const current = terminals.get(key);
         if (!current || !socketOpen(current.socket)) return false;
+        const terminal = id + ":" + pty;
+        if (action === "write") answerers.use(terminal, win.id);
+        else if (
+          !answerers.answers(terminal, win.id, (other) => {
+            const socket = terminals.get(other + ":" + terminal)?.socket;
+            return !!socket && socketOpen(socket);
+          })
+        )
+          return true;
         current.socket.send(new Uint8Array(value));
         return true;
       }
@@ -1058,6 +1072,7 @@ function installHandlers() {
       });
       if (!terminals.accept(key, request.view, win.id, socket))
         throw new Error("Terminal connection replaced");
+      answerers.use(id + ":" + pty, win.id);
       const view = request.view;
       void (async () => {
         let failure: string | undefined;
@@ -1521,6 +1536,7 @@ function createWindow() {
         item.client.close();
       }
     terminals.close(win.id);
+    answerers.forget(win.id);
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);

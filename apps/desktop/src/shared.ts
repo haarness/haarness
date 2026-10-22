@@ -373,10 +373,12 @@ export interface Bridge {
   /** Shows the unpacked Haarness for Chrome folder the last report named. */
   chromeReveal(): Promise<void>;
   reveal(connection: string, path?: string): Promise<void>;
-  /** `write` answers false when the terminal has no connection now. */
+  /** `write` (the person's keys) and `answer` (xterm answering a program's
+   * query, which only one window does per terminal) answer false when the
+   * terminal has no connection now. */
   terminal(
     connection: string,
-    action: "connect" | "write" | "detach",
+    action: "connect" | "write" | "answer" | "detach",
     id: string,
     input?: unknown,
   ): Promise<unknown>;
