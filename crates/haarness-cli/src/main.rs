@@ -1391,9 +1391,17 @@ async fn cli_main() -> Result<()> {
         cli.trust_project.then_some(true)
     };
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
-    // An edit of the global configuration asks a person; tell the
-    // permission engine which folder that is in this process.
+    // An edit of the global configuration or the base folder asks a person;
+    // tell the permission engine which folders those are in this process.
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
+    haarness_core::set_base_config_dir(crate::layout::base_config_dir());
+    if let Some(problem) = haarness_protocol::base_config_dir_problem() {
+        tracing::warn!("{problem}");
+        // A server started in the background has only its log.
+        if !matches!(cli.command, Some(Command::Serve(_))) {
+            eprintln!("haarness: {problem}");
+        }
+    }
     // Analytics must not register workspaces, migrate databases, start daemons or load credentials.
     match &cli.command {
         Some(Command::Login(args)) => return account::login(args).await,
@@ -2606,13 +2614,14 @@ fn skill_roots(
     let home = haarness_protocol::home_dir();
     let plugins = plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     // The base folder's skills come first, so every other root replaces one
-    // of the same name.
+    // of the same name: each skill folder on its own, so none a link leads
+    // into the project is read.
     let mut roots = layout::BaseFolder::for_workspace(workspace)
         .into_iter()
         .flat_map(|base| {
             ["skill", "skills"]
                 .into_iter()
-                .filter_map(move |name| base.entry(name))
+                .flat_map(move |name| base.skill_folders(name))
         })
         .map(|path| (path, true, None))
         .collect::<Vec<_>>();
@@ -4122,8 +4131,7 @@ async fn serve_command(
             executable_fingerprint: Some(current_executable_fingerprint()?),
             access_fingerprint,
             trace_endpoint: otel::configured_endpoint(),
-            base_config_dir: haarness_protocol::base_config_dir()
-                .map(|dir| dir.display().to_string()),
+            base_config_dir: crate::layout::base_config_dir().map(|dir| dir.display().to_string()),
         },
     )?;
     // Listening: what goes wrong from here is not a failure to start.
@@ -6776,7 +6784,7 @@ fn runtime_source_fingerprint_for(
         config_dir.join("extensions.json"),
         config_dir.join("extensions"),
     ];
-    if let Some(base) = haarness_protocol::base_config_dir() {
+    if let Some(base) = crate::layout::base_config_dir() {
         roots.extend(BASE_CONFIG_ENTRIES.iter().map(|name| base.join(name)));
     }
     roots.extend(capability_state::sources(paths, workspace, trust));
@@ -8819,7 +8827,7 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("rg sha256: {}", haarness_ripgrep::SHA256);
     println!("data: {}", paths.data.display());
     println!("config: {}", paths.config_dir().display());
-    if let Some(base) = haarness_protocol::base_config_dir() {
+    if let Some(base) = crate::layout::base_config_dir() {
         // Read below the global folder, never written: see
         // docs/CONFIGURATION-SCOPES.md#base-folder.
         if base.is_dir() {
@@ -11198,6 +11206,12 @@ async fn ensure_workspace_server_at(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // The server reads exactly the base folder this client resolved, never a
+    // value it would read again from another folder.
+    match crate::layout::base_config_dir() {
+        Some(base) => command.env(haarness_protocol::BASE_CONFIG_DIR_ENV, base),
+        None => command.env_remove(haarness_protocol::BASE_CONFIG_DIR_ENV),
+    };
     detach_from_caller(&mut command);
     let mut child = command
         .spawn()

@@ -88,12 +88,9 @@ pub fn all_enabled_roots(
     if !config.join(".layout-v1").exists() && !data.join(".layout-v1").exists() {
         roots.extend(local_plugin_roots(&data.join("plugins/local")));
     }
-    // The base folder's local plugins, which only its own maintainers change.
-    if let Some(local) = crate::layout::BaseFolder::for_workspace(workspace)
-        .and_then(|base| base.entry("plugins/local"))
-    {
-        roots.extend(local_plugin_roots(&local));
-    }
+    // The base folder's local plugins, which only its own maintainers change,
+    // each left out when a link leads it into the project.
+    roots.extend(base_plugin_roots(workspace));
     roots.extend(local_plugin_roots(&config.join("plugins/local")));
     if trust_project {
         for directory in crate::layout::project_directories(workspace) {
@@ -103,6 +100,23 @@ pub fn all_enabled_roots(
     roots.sort();
     roots.dedup();
     roots
+}
+
+/// The base folder's enabled local plugins, without one a link leads into
+/// the project: its hooks and MCP servers would run as the base folder's.
+fn base_plugin_roots(workspace: &Path) -> Vec<PathBuf> {
+    crate::layout::BaseFolder::for_workspace(workspace)
+        .map(|base| base_plugin_roots_in(&base))
+        .unwrap_or_default()
+}
+
+pub(crate) fn base_plugin_roots_in(base: &crate::layout::BaseFolder) -> Vec<PathBuf> {
+    base.entry("plugins/local")
+        .map(|local| local_plugin_roots(&local))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|root| !base.excluded(root))
+        .collect()
 }
 
 fn local_plugin_roots(root: &Path) -> Vec<PathBuf> {
@@ -250,10 +264,14 @@ pub fn plugin_infos(
             description: plugin.description,
         })
         .collect();
-    if let Some(local) = crate::layout::BaseFolder::for_workspace(workspace)
-        .and_then(|base| base.entry("plugins/local"))
+    if let Some(base) = crate::layout::BaseFolder::for_workspace(workspace)
+        && let Some(local) = base.entry("plugins/local")
     {
-        result.extend(local_plugin_infos(&local, "base"));
+        result.extend(
+            local_plugin_infos(&local, "base")
+                .into_iter()
+                .filter(|info| !base.excluded(Path::new(&info.path))),
+        );
     }
     result.extend(local_plugin_infos(&config.join("plugins/local"), "global"));
     if !config.join(".layout-v1").exists() && !data.join(".layout-v1").exists() {

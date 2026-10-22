@@ -41,7 +41,7 @@ pub struct Scan {
 /// apply first as defaults, then the global configuration folder. A folder
 /// trusted for prompts belongs here and in no other place.
 pub fn folders(config_dir: &Path) -> Vec<Folder> {
-    haarness_protocol::base_config_dir()
+    crate::layout::base_config_dir()
         .map(|dir| Folder {
             dir,
             source: "base",

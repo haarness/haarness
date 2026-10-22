@@ -2358,11 +2358,66 @@ mod tests {
             base_dir.join("agents/planted.md"),
         )
         .unwrap();
+        // A plugin and a skill the repository planted, linked into the base
+        // folder's plugins and skills.
+        fs::create_dir_all(workspace.join("planted/plugin/.claude-plugin")).unwrap();
+        fs::write(
+            workspace.join("planted/plugin/.claude-plugin/plugin.json"),
+            r#"{"name":"planted-plugin"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("planted/skill")).unwrap();
+        fs::write(
+            workspace.join("planted/skill/SKILL.md"),
+            "---\nname: planted-skill\ndescription: Planted\n---\nPLANTED",
+        )
+        .unwrap();
+        fs::create_dir_all(base_dir.join("plugins/local")).unwrap();
+        fs::create_dir_all(base_dir.join("skills/team")).unwrap();
+        fs::create_dir_all(base_dir.join("plugins/local/team/.claude-plugin")).unwrap();
+        fs::write(
+            base_dir.join("plugins/local/team/.claude-plugin/plugin.json"),
+            r#"{"name":"team-plugin"}"#,
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("skills/team/SKILL.md"),
+            "---\nname: team-skill\ndescription: Team\n---\nTEAM",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("planted/plugin"),
+            base_dir.join("plugins/local/planted"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("planted/skill"),
+            base_dir.join("skills/planted"),
+        )
+        .unwrap();
         let base = crate::layout::BaseFolder::at(base_dir.clone(), &workspace);
         // Project configuration off: nothing of the project may load.
         let layers = load_layers_with_base(&config, Some(&base), None, &workspace, false, &[]);
         assert!(layers.hooks.is_empty());
         assert!(layers.agents.iter().all(|agent| agent.id != "planted"));
+        assert!(
+            layers
+                .commands
+                .iter()
+                .any(|command| command.name == "team-skill")
+        );
+        assert!(
+            layers
+                .commands
+                .iter()
+                .all(|command| command.name != "planted-skill")
+        );
+        // The base folder's own plugin and skill load; the linked ones never do.
+        assert_eq!(
+            crate::plugins::base_plugin_roots_in(&base),
+            [base_dir.join("plugins/local/team")]
+        );
+        assert_eq!(base.skill_folders("skills"), [base_dir.join("skills/team")]);
         // A base folder the person points into the project stays theirs.
         let inside = crate::layout::BaseFolder::at(workspace.join("planted"), &workspace);
         let layers = load_layers_with_base(&config, Some(&inside), None, &workspace, false, &[]);

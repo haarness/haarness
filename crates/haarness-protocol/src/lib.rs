@@ -19,7 +19,9 @@ pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
-pub use home::{BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, home_dir};
+pub use home::{
+    BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, base_config_dir_problem, home_dir,
+};
 pub use input::*;
 pub use management::*;
 pub use model_names::{
