@@ -77,7 +77,10 @@ pub(super) fn overrides(listing: &str, scoped: bool) -> Vec<(String, String)> {
     };
     let extension = entries.iter().filter(|entry| own(entry)).any(|entry| {
         entry.key.starts_with("lfs.extension.")
-            && (entry.key.ends_with(".clean") || entry.key.ends_with(".smudge"))
+            && entry
+                .key
+                .rsplit_once('.')
+                .is_some_and(|(_, kind)| matches!(kind, "clean" | "smudge"))
     });
     let mut keys = BTreeSet::new();
     let mut names = BTreeSet::new();
@@ -126,7 +129,7 @@ mod tests {
     fn scoped(entries: &[(&str, &str, &str)]) -> String {
         entries
             .iter()
-            .map(|(scope, key, value)| format!("{scope}\0{key}\n{value}\0"))
+            .flat_map(|(scope, key, value)| [scope, "\0", key, "\n", value, "\0"])
             .collect()
     }
 
