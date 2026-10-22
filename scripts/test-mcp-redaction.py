@@ -3,12 +3,16 @@
 in a server's URL or command arguments, while the rest stays readable. Nor do a failed marketplace
 clone, a remote instruction URL that cannot be reached, or the log line of a request Auto approved.
 An MCP entry's `${TOKEN}` reference reaches its server resolved once and stays in the file through
-`haarness mcp disable/enable`.
+`haarness mcp disable/enable`, which write only the flag, in the entry's own (opencode) shape. A
+headersHelper's `${VAR}` holding `$(…)` reaches the server as text and never runs. `haarness mcp auth
+--no-browser` against a server whose sign-in link is `file:` stops before printing it, and its debug log
+(rmcp writes addresses as `Url { … password: Some(…) }`) and `haarness logs export` hide a raw-`@`
+password.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-redaction.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import json, os, pathlib, subprocess, tempfile, time, urllib.error, urllib.request, uuid
+import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
@@ -17,7 +21,41 @@ workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
 SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret',
            'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
-           'fixture-review-secret', 'fixture-inner-secret']
+           'fixture-review-secret', 'fixture-inner-secret', 'fixture-at']
+
+# A remote MCP server that wants OAuth and offers a `file:` sign-in link, and one that writes down the
+# headers its client sent.
+seen_headers = []
+issuer = {}
+class Fixture(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def reply(self, status, body=None, headers=()):
+        data = b'' if body is None else json.dumps(body).encode()
+        self.send_response(status)
+        for name, value in headers: self.send_header(name, value)
+        if body is not None: self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_GET(self):
+        base = f'http://127.0.0.1:{self.server.server_port}'
+        if self.path.startswith('/.well-known/oauth-authorization-server'):
+            return self.reply(200, {'issuer': issuer.get('value', base), 'authorization_endpoint': 'file:///nonexistent/haarness-fixture.app',
+                                    'token_endpoint': base + '/token', 'response_types_supported': ['code'],
+                                    'code_challenge_methods_supported': ['S256']})
+        self.reply(404 if self.path.startswith('/.well-known') else 405)
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
+        if self.path == '/oauth/mcp':
+            return self.reply(401, headers=[('WWW-Authenticate', 'Bearer')])
+        seen_headers.append({name.lower(): value for name, value in self.headers.items()})
+        if 'id' not in body: return self.reply(202)
+        result = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'helper', 'version': '1'}} \
+            if body.get('method') == 'initialize' else {'tools': []}
+        self.reply(200, {'jsonrpc': '2.0', 'id': body['id'], 'result': result})
+fixture = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Fixture)
+threading.Thread(target=fixture.serve_forever, daemon=True).start()
+port = fixture.server_port
+marker = root/'helper-ran'
+
 # Port 9 (discard) refuses the connection, so the server reports why it could not connect.
 (state/'config/config.toml').write_text('''[defaults]
 provider = "echo"
@@ -49,15 +87,22 @@ for line in sys.stdin:
         if request.get("method") == "initialize" else {"tools": []}
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
 ''')
+refs_entry = {'type': 'local', 'command': ['python3', str(root/'refs_server.py')],
+              'environment': {'FIXTURE_TOKEN': '${FIXTURE_OUTER}', 'FIXTURE_OUT': str(received)}, 'timeout': 9000}
 (state/'config/haarness.json').write_text(json.dumps({'instructions': [
     'http://fixture:fixture-instruction-secret@127.0.0.1:9/rules.md?token=fixture-instruction-secret'],
-    'mcp': {'refs': {'type': 'local', 'command': ['python3', str(root/'refs_server.py')],
-                     'environment': {'FIXTURE_TOKEN': '${FIXTURE_OUTER}', 'FIXTURE_OUT': str(received)}}}}))
+    'mcp': {'refs': refs_entry,
+            'oauthfile': {'type': 'remote', 'url': f'http://someone:fixture-at@secret@127.0.0.1:{port}/oauth/mcp',
+                          'oauthClientId': 'fixture-client', 'enabled': False},
+            'helper': {'type': 'remote', 'url': f'http://127.0.0.1:{port}/helper/mcp', 'oauth': False,
+                       'headersHelper': 'printf \'{"X-Fixture":"%s","X-Quoted":"${FIXTURE_HELPER_VALUE}"}\' "${FIXTURE_HELPER_VALUE}"'}}}))
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
            # The variable's value names another; it must reach the server as written.
-           FIXTURE_OUTER='outer-${FIXTURE_INNER}', FIXTURE_INNER='fixture-inner-secret')
+           FIXTURE_OUTER='outer-${FIXTURE_INNER}', FIXTURE_INNER='fixture-inner-secret',
+           # Shell syntax in a value a headersHelper reads: it must reach the server as text.
+           FIXTURE_HELPER_VALUE=f'v $(touch {marker}) `touch {marker}` end')
 url = None; token = None; checks = []
 
 def run(args, **kwargs): return subprocess.run(args, check=True, text=True, capture_output=True, timeout=60, **kwargs).stdout
@@ -90,14 +135,52 @@ try:
 
     def received_token(): return received.exists() and received.read_text()
     assert until(received_token, 'the MCP server was not started') == 'outer-${FIXTURE_INNER}', received.read_text()
-    for action in ('disable', 'enable'):
+    for action, enabled in (('disable', False), ('enable', True)):
         received.unlink(missing_ok=True)
         cli('mcp', action, 'refs')
         saved = (state/'config/haarness.json').read_text()
-        assert json.loads(saved)['mcp']['refs']['env']['FIXTURE_TOKEN'] == '${FIXTURE_OUTER}', saved
+        # Only the flag is written: the entry keeps opencode's shape (`type`, a `command` list,
+        # `environment`, `timeout`) and its reference as written.
+        assert json.loads(saved)['mcp']['refs'] == {**refs_entry, 'enabled': enabled}, saved
         assert 'outer-' not in saved and 'fixture-inner-secret' not in saved, saved
     assert until(received_token, 'enabling did not start the MCP server') == 'outer-${FIXTURE_INNER}', received.read_text()
-    check("an MCP environment reference is resolved once for the server and stays in the file through disable/enable")
+    check("an MCP environment reference is resolved once for the server and stays in the file through disable/enable, which write only the flag")
+    # opencode writes `timeout` in milliseconds.
+    assert json.loads(cli('mcp', 'get', 'refs'))['config']['timeoutMs'] == 9000
+    check("an opencode entry's timeout of 9000 is 9 seconds, not 9000")
+
+    sent = until(lambda: next((headers for headers in seen_headers if 'x-fixture' in headers), None),
+                 'the helper server got no headers from its headersHelper')
+    value = env['FIXTURE_HELPER_VALUE']
+    assert sent['x-fixture'] == value and sent['x-quoted'] == value, sent
+    assert not marker.exists(), 'a headersHelper value ran as a command'
+    check('a headersHelper value holding $(…) and backticks reaches the server as text, quoted or in single quotes, and never runs')
+
+    debug_env = {**env, 'HAARNESS_LOG': 'debug,rmcp=debug'}
+    def sign_in(): return subprocess.run([str(binary), '--workspace', str(workspace), 'mcp', 'auth', 'oauthfile', '--no-browser'],
+                                         env=debug_env, text=True, capture_output=True, timeout=60)
+    # rmcp's own error quotes the server's address, password included.
+    auth = sign_in()
+    assert auth.returncode != 0 and 'issuer mismatch' in auth.stderr, auth.stderr
+    clean(auth.stdout + auth.stderr, 'mcp auth error')
+    assert f'expected http://<redacted>@127.0.0.1:{port}/oauth/mcp' in auth.stderr, auth.stderr
+    check('an OAuth error that quotes the MCP server address hides its user name and password')
+    # The issuer rmcp expects for a server without resource metadata: the server's own address.
+    issuer['value'] = f'http://someone:fixture-at%40secret@127.0.0.1:{port}/oauth/mcp'
+    auth = sign_in()
+    assert auth.returncode != 0, auth.stdout
+    assert 'MCP server "oauthfile" sent a file: sign-in link; only http and https links open' in auth.stderr, auth.stderr
+    assert 'file:' not in auth.stdout and 'Authorize MCP server' not in auth.stdout, auth.stdout
+    check('haarness mcp auth --no-browser stops at a file: sign-in link before printing or opening it')
+    debug_log = logs()
+    assert 'discovery url: Url {' in debug_log, 'rmcp logged no discovery address at debug level'
+    assert 'username: "<redacted>", password: Some("<redacted>")' in debug_log, 'the debug discovery address was not hidden'
+    clean(debug_log, 'debug log')
+    exported = root/'logs.zip'
+    cli('logs', 'export', '--output', str(exported))
+    with zipfile.ZipFile(exported) as archive:
+        clean('\n'.join(archive.read(name).decode(errors='replace') for name in archive.namelist()), 'log export')
+    check('the debug log and its export hide the raw-@ password of a URL rmcp writes as debug output')
 
     keyed = json.loads(cli('mcp', 'get', 'keyed'))
     clean(json.dumps(keyed), 'mcp get')

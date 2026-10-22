@@ -85,6 +85,7 @@ rustls-native-certs = "0.8"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+socket2 = { version = "0.6.5", features = ["all"] }
 sha2 = "0.10"
 similar = { version = "2", features = ["inline"] }
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }

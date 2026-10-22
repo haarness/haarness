@@ -15,7 +15,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use haarness_core::{AgentRuntime, CoreError, McpRegistry, SkillRegistry};
 use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
@@ -43,7 +43,6 @@ use opentelemetry::global;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -327,10 +326,13 @@ pub async fn serve_with_access(
     let task = tokio::spawn(async move {
         // Peer addresses let rejected-request log lines say who was turned away.
         let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-        axum::serve(listener, app)
-            .with_graceful_shutdown(server_shutdown.cancelled_owned())
-            .await
-            .map_err(Into::into)
+        axum::serve(
+            axum::serve::ListenerExt::tap_io(listener, keep_connections_alive),
+            app,
+        )
+        .with_graceful_shutdown(server_shutdown.cancelled_owned())
+        .await
+        .map_err(Into::into)
     });
     Ok(ServerHandle {
         address,
@@ -341,6 +343,26 @@ pub async fn serve_with_access(
         language,
         ptys,
     })
+}
+
+/// Probe an accepted connection once it is idle, so one whose peer vanished
+/// (a laptop that slept, a network gone without a word) ends within minutes
+/// instead of when TCP gives up: an event stream waiting for that client would
+/// hold its queue as long. On Linux, data left unacknowledged ends it too.
+fn keep_connections_alive(connection: &mut tokio::net::TcpStream) {
+    let socket = socket2::SockRef::from(&*connection);
+    let probes = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15));
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let probes = probes.with_retries(4);
+    if let Err(error) = socket.set_tcp_keepalive(&probes) {
+        tracing::debug!(%error, "could not set TCP keepalive on a connection");
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = socket.set_tcp_user_timeout(Some(Duration::from_secs(120))) {
+        tracing::debug!(%error, "could not set TCP_USER_TIMEOUT on a connection");
+    }
 }
 
 struct HeaderExtractor<'a>(&'a HeaderMap);
@@ -1481,10 +1503,19 @@ async fn start_turn(
         ))
         .into());
     }
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(state.runtime.start_turn(id, request).await?),
-    ))
+    let turn = state
+        .runtime
+        .start_turn(id, request)
+        .await
+        .map_err(|error| match error {
+            // A chat busy elsewhere is said as a sentence, without the
+            // category the error type adds ("conflict: …").
+            CoreError::Conflict(message) => {
+                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+            }
+            other => other.into(),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(turn)))
 }
 async fn execute_command(
     State(state): State<ServerState>,
@@ -2290,8 +2321,16 @@ async fn events(
 ) -> impl IntoResponse {
     // nosniff: Apple's URL loading holds a response until 512 bytes arrive
     // while it sniffs the MIME type, which would stall the first events.
+    // X-Accel-Buffering: nginx (and proxies that follow it) in front of a
+    // server would otherwise collect the stream before passing it on.
     (
-        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        [
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (
+                axum::http::HeaderName::from_static("x-accel-buffering"),
+                "no",
+            ),
+        ],
         event_stream(state, shutdown, headers),
     )
 }
@@ -2313,16 +2352,42 @@ fn event_stream(
         // from a cursor with nothing to replay would wait for the keepalive.
         yield Ok(Event::default().comment("connected"));
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
-        for event in subscription.replay { if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); } }
-        let mut live=BroadcastStream::new(subscription.receiver);
+        // The connection takes every event as it is published, apart from
+        // writing to its client: a client that reads slowly keeps its place
+        // (see PendingEvents) instead of falling out of the bus's queue.
+        let pending = Arc::new(parking_lot::Mutex::new(Pending::default()));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let _pump = AbortOnDrop(tokio::spawn(pump_events(
+            subscription,
+            crate::remote_scope::EventScope::new(root),
+            Arc::clone(&state.runtime),
+            Arc::clone(&pending),
+            Arc::clone(&wake),
+        )));
         loop {
-            tokio::select! {
-                () = shutdown.cancelled() => break,
-                event = live.next() => match event {
-                    Some(Ok(event)) => if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); },
-                    Some(Err(_)) => yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}")),
-                    None => break,
+            let next = {
+                let mut waiting = pending.lock();
+                match waiting.events.pop() {
+                    Some(event) => Some(event),
+                    // A queue that gave up ends the response once its
+                    // `resync_required` is out: the client reconnects from
+                    // its cursor.
+                    None if waiting.closed || waiting.events.given_up() => break,
+                    None => None,
                 }
+            };
+            match next {
+                Some(event) => {
+                    let mut sent = Event::default().event(&event.name).data(event.data);
+                    if let Some(id) = event.id {
+                        sent = sent.id(id.to_string());
+                    }
+                    yield Ok(sent);
+                }
+                None => tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    () = wake.notified() => {}
+                },
             }
         }
     };
@@ -2332,11 +2397,99 @@ fn event_stream(
             .text("keepalive"),
     )
 }
-fn to_sse(event: &EventEnvelope) -> Event {
-    Event::default()
-        .id(event.event_id.to_string())
-        .event(&event.event_type)
-        .data(serde_json::to_string(event).expect("event serializes"))
+/// What waits for one event-stream connection.
+struct Pending {
+    events: haarness_core::PendingEvents,
+    /// The bus is gone.
+    closed: bool,
+}
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            events: haarness_core::PendingEvents::new(haarness_core::PENDING_EVENTS_LIMIT),
+            closed: false,
+        }
+    }
+}
+
+/// Aborts its task when dropped: a connection's pump ends with it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Moves one connection's events from the bus into its queue as they are
+/// published, the replay first: those its client may see (a published
+/// chat's stream leaves out other chats' before they could break its runs
+/// of deltas), joined while they wait.
+async fn pump_events(
+    subscription: haarness_core::EventSubscription,
+    mut scope: crate::remote_scope::EventScope,
+    runtime: Arc<AgentRuntime>,
+    pending: Arc<parking_lot::Mutex<Pending>>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    // False once the queue gave up: this connection is over.
+    let queue = |event: EventEnvelope| {
+        let pushed = pending.lock().events.push(event);
+        wake.notify_one();
+        match pushed {
+            Ok(()) => true,
+            Err(dropped) => {
+                tracing::info!(
+                    skipped = dropped,
+                    "event stream fell behind; its client resyncs"
+                );
+                false
+            }
+        }
+    };
+    // The replay is bounded by what the bus keeps, and the client has read
+    // none of it yet, so it never ends the connection: one larger than the
+    // queue holds is answered as a cursor older than the bus is, with
+    // `resync_required`, and the stream goes on with what is published next.
+    let mut replay = subscription.replay.into_iter();
+    while let Some(event) = replay.next() {
+        if !scope.allows(&event, &runtime).await {
+            continue;
+        }
+        let pushed = pending.lock().events.push_replay(event);
+        wake.notify_one();
+        if let Err(dropped) = pushed {
+            tracing::info!(
+                skipped = dropped.saturating_add(replay.len()),
+                "event stream replay is larger than a connection holds; its client resyncs"
+            );
+            break;
+        }
+    }
+    drop(replay);
+    let mut receiver = subscription.receiver;
+    loop {
+        match receiver.recv().await {
+            Ok(event) => {
+                if scope.allows(&event, &runtime).await && !queue(event) {
+                    return;
+                }
+            }
+            // The bus let go of events for this connection: what waits is
+            // older than the gap, and what follows newer, so neither goes out.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                let dropped = pending.lock().events.give_up();
+                wake.notify_one();
+                tracing::info!(
+                    skipped = skipped.saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX)),
+                    "event stream fell behind; its client resyncs"
+                );
+                return;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    pending.lock().closed = true;
+    wake.notify_one();
 }
 
 pub(crate) type ApiResult<T> = Result<T, ApiFailure>;
@@ -2459,5 +2612,23 @@ mod failure_tests {
         assert_eq!(invalid["message"], "invalid request: bad");
         let elsewhere = message(ApiFailure::from(CoreError::Tool("boom".into()))).await;
         assert_eq!(elsewhere["message"], "tool error: boom");
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    #[tokio::test]
+    async fn accepted_connections_are_probed_once_idle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (accepted, _client) = tokio::join!(listener.accept(), client);
+        let (mut accepted, _) = accepted.unwrap();
+        super::keep_connections_alive(&mut accepted);
+        let socket = socket2::SockRef::from(&accepted);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(
+            socket.tcp_keepalive_time().unwrap(),
+            std::time::Duration::from_secs(60)
+        );
     }
 }

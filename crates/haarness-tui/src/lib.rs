@@ -121,6 +121,19 @@ async fn hydrate_initial_goal(app: &mut App, client: &ApiClient) {
     hydrate_goal_snapshot(app, client).await;
 }
 
+/// The user's editor on `file`. `$EDITOR` is shell text (`code --wait`); the
+/// file goes to the shell as `$1`, so a temporary folder holding a space or
+/// `$(…)` is never read as shell syntax.
+fn editor_command(editor: &str, file: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-lc")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(file);
+    command
+}
+
 /// $EDITOR round-trip: leave the alternate screen, run the user's editor on
 /// the composer text, and rebuild the renderer when they return.
 fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
@@ -130,10 +143,7 @@ fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
     let file = std::env::temp_dir().join(format!("haarness-compose-{}.md", std::process::id()));
     let _ = std::fs::write(&file, app.composer.expanded_text());
     crate::terminal::restore_terminal();
-    let status = std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("{editor} {}", file.display()))
-        .status();
+    let status = editor_command(&editor, &file).status();
     // Re-enter raw mode + alternate screen; the original guard still owns
     // final cleanup, so resuming must not create and leak a second guard.
     let _ = crate::terminal::resume_terminal();

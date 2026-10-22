@@ -1,7 +1,7 @@
 use super::{
     Paths, asset_layers, loaded_mcp_entry, mcp_config_for_display, mcp_config_target,
     mcp_entry_target, open_browser, read_mcp_entry, receive_oauth_callback, validate_asset_name,
-    validate_mcp_name, validate_qualified_model, write_mcp_entry,
+    validate_mcp_name, validate_qualified_model, write_mcp_changes, write_mcp_entry,
 };
 use crate::plugins;
 use anyhow::{Context as _, Result, bail};
@@ -764,10 +764,11 @@ impl ManagementService {
             }
             "edit" => {
                 let name = required_string(input, "name")?;
-                let (target, scope, mut entry) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let (target, scope, before) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let mut entry = before.clone();
                 apply_mcp_edit(&mut entry, input)?;
                 validate_mcp_entry(&entry)?;
-                write_mcp_entry(&target, name, Some(&entry))?;
+                write_mcp_changes(&target, name, &before, &entry)?;
                 Ok(json!({
                     "action": "edit", "resource": "mcp", "name": name,
                     "scope": scope.name(), "file": target, "config": redact_mcp(&entry)?,
@@ -839,9 +840,10 @@ impl ManagementService {
             }
             "enable" | "disable" => {
                 let name = required_string(input, "name")?;
-                let (target, scope, mut entry) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let (target, scope, before) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let mut entry = before.clone();
                 entry.enabled = action == "enable";
-                write_mcp_entry(&target, name, Some(&entry))?;
+                write_mcp_changes(&target, name, &before, &entry)?;
                 Ok(
                     json!({"action":action,"resource":"mcp","name":name,"scope":scope.name(),"file":target,"runtimeStatus":"reload_queued","restartRequired":false,"usableFrom":"after_active_work_is_idle"}),
                 )
@@ -1004,9 +1006,11 @@ impl ManagementService {
                         true,
                     )?;
                 }
+                let read = super::memory_settings::read(&root);
                 Ok(
-                    json!({"config": super::memory_settings::load(&root)?, "directory": root,
-                    "revision": revision(&settings_path)?, "memories": self.memory_entries(&json!({}))?}),
+                    json!({"config": read.settings, "settingsUnreadable": read.unreadable,
+                    "directory": root, "revision": revision(&settings_path)?,
+                    "memories": self.memory_entries(&json!({}))?}),
                 )
             }
             "read" | "create" | "save" | "delete" => {
@@ -1567,7 +1571,7 @@ impl ManagementService {
     }
 
     pub(super) fn memory_index(&self) -> Result<String> {
-        let settings = super::memory_settings::load(&self.memory_root())?;
+        let settings = super::memory_settings::load(&self.memory_root());
         if !settings.enabled {
             return Ok(String::new());
         }
@@ -1754,9 +1758,7 @@ impl ManagementRegistry for ManagementService {
             return Err(CoreError::Cancelled);
         }
         if resource.starts_with("memory_")
-            && !super::memory_settings::load(&self.memory_root())
-                .map_err(|error| CoreError::Tool(error.to_string()))?
-                .enabled
+            && !super::memory_settings::load(&self.memory_root()).enabled
         {
             return Err(CoreError::Tool("Project memory is disabled".into()));
         }
@@ -2684,8 +2686,17 @@ fn is_plugin_path(path: &Path) -> bool {
         .any(|component| component.as_os_str() == "plugins")
 }
 
+/// A runtime error as a management answer: a tool's failure reads as its
+/// own sentence, without the `tool error:` category.
+pub(super) fn plain_error(error: CoreError) -> anyhow::Error {
+    core_error(error)
+}
+
 fn core_error(error: CoreError) -> anyhow::Error {
-    anyhow::anyhow!(error.to_string())
+    match error {
+        CoreError::Tool(message) => anyhow::anyhow!(message),
+        other => anyhow::anyhow!(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -2845,9 +2856,7 @@ mod tests {
             2
         );
         let mut runtime = haarness_core::RuntimeConfig::default();
-        super::super::memory_settings::load(&service.memory_root())
-            .unwrap()
-            .apply(&mut runtime);
+        super::super::memory_settings::load(&service.memory_root()).apply(&mut runtime);
         assert_eq!(runtime.tool_availability.get("memory_save"), Some(&false));
         let other = root.join("other");
         fs::create_dir_all(&other).unwrap();
@@ -3638,14 +3647,10 @@ mod tests {
         let text = fs::read_to_string(&file).unwrap();
         let written: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
-            written["mcp"]["local"]["env"]["TOKEN"],
-            "${HAARNESS_FIXTURE_TOKEN}"
+            written["mcp"]["local"],
+            json!({"type": "local", "command": ["server", "${HAARNESS_FIXTURE_ARG:-default}"],
+                "environment": {"TOKEN": "${HAARNESS_FIXTURE_TOKEN}"}, "enabled": false})
         );
-        assert_eq!(
-            written["mcp"]["local"]["args"],
-            json!(["${HAARNESS_FIXTURE_ARG:-default}"])
-        );
-        assert_eq!(written["mcp"]["local"]["enabled"], false);
         assert_eq!(
             written["mcp"]["remote"]["headers"]["Authorization"],
             "Bearer ${HAARNESS_FIXTURE_TOKEN}"
@@ -3656,6 +3661,129 @@ mod tests {
         );
         assert_eq!(written["mcp"]["remote"]["enabled"], true);
         assert_eq!(written["mcp"]["remote"]["oauth"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_sign_in_reads_as_its_own_sentence() {
+        let refused = CoreError::Tool(
+            "MCP server \"x\" sent a file: sign-in link; only http and https links open".into(),
+        );
+        assert_eq!(
+            plain_error(refused).to_string(),
+            "MCP server \"x\" sent a file: sign-in link; only http and https links open"
+        );
+        assert_eq!(
+            plain_error(CoreError::NotFound("MCP server x".into())).to_string(),
+            "not found: MCP server x"
+        );
+    }
+
+    pub(super) fn isolated_service(name: &str) -> (PathBuf, PathBuf, Paths, ManagementService) {
+        let root = std::env::temp_dir().join(format!("haarness-{name}-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        let paths = Paths {
+            root: Some(root.clone()),
+            data: data.clone(),
+            cache: root.join("cache"),
+            database: data.join("haarness.db"),
+            auth: root.join("config/auth.json"),
+            runtime: root.join("cache/runtime.json"),
+            server_lock: root.join("cache/server.lock"),
+            skills: data.join("skills"),
+            config: root.join("config/config.toml"),
+            workspace_id: None,
+        };
+        let skills: Arc<dyn SkillRegistry> = Arc::new(FilesystemSkillRegistry::new(vec![(
+            paths.skills.clone(),
+            true,
+        )]));
+        let mcp = Arc::new(NativeMcpRegistry::with_auth_dir(data.join("mcp-oauth")));
+        let service = ManagementService::new(paths.clone(), workspace.clone(), true, skills, mcp);
+        (root, workspace, paths, service)
+    }
+
+    /// Enable, disable and edit write only the keys that changed, under the
+    /// entry's own names: an `opencode.json` entry stays one opencode reads
+    /// (`type`, a `command` list, `environment`, its `timeout`), a Claude
+    /// entry keeps `disabled`, and comments and unknown keys stay.
+    #[tokio::test]
+    async fn mcp_saves_write_only_what_changed_in_the_entrys_own_shape() {
+        let (root, workspace, _, service) = isolated_service("mcp-own-shape");
+        let file = workspace.join("opencode.json");
+        fs::write(
+            &file,
+            r#"{
+  // The team's servers, shared with opencode.
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "files": {"type": "local", "command": ["npx", "-y", "@fixture/files"],
+              "environment": {"ROOT": "{env:FIXTURE_ROOT}"}, "timeout": 5000},
+    "claude": {"command": "server", "args": ["--x"], "disabled": true, "x-team-note": "keep"},
+    "remote": {"type": "remote", "url": "https://mcp.fixture.test/mcp", "oauth": {"clientId": "old"}},
+    "gated": {"type": "remote", "url": "https://gated.fixture.test/mcp"}
+  }
+}
+"#,
+        )
+        .unwrap();
+        for request in [
+            json!({"action": "disable", "name": "files", "scope": "local"}),
+            json!({"action": "edit", "name": "files", "scope": "local",
+                "args": ["-y", "@fixture/files", "--root", "."]}),
+            json!({"action": "enable", "name": "claude", "scope": "local"}),
+            json!({"action": "edit", "name": "remote", "scope": "local", "oauth": true,
+                "oauthClientId": "team-client", "oauthScopes": ["read", "write"]}),
+            json!({"action": "edit", "name": "gated", "scope": "local", "oauth": false}),
+        ] {
+            service.mcp(&request).await.unwrap();
+        }
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("// The team's servers, shared with opencode."),
+            "{text}"
+        );
+        let written: Value =
+            jsonc_parser::parse_to_serde_value(&text, &jsonc_parser::ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            written["mcp"]["files"],
+            json!({"type": "local", "command": ["npx", "-y", "@fixture/files", "--root", "."],
+                "environment": {"ROOT": "{env:FIXTURE_ROOT}"}, "timeout": 5000, "enabled": false})
+        );
+        assert_eq!(
+            written["mcp"]["claude"],
+            json!({"command": "server", "args": ["--x"], "disabled": false, "x-team-note": "keep"})
+        );
+        // opencode's own OAuth shape: an object, or `false`.
+        assert_eq!(
+            written["mcp"]["remote"],
+            json!({"type": "remote", "url": "https://mcp.fixture.test/mcp",
+                "oauth": {"clientId": "team-client", "scope": "read write"}})
+        );
+        assert_eq!(
+            written["mcp"]["gated"],
+            json!({"type": "remote", "url": "https://gated.fixture.test/mcp", "oauth": false})
+        );
+        // A key written twice is refused instead of edited where it is not read.
+        fs::write(
+            &file,
+            r#"{"mcp": {"twice": {"command": "a", "enabled": true, "enabled": false}}}"#,
+        )
+        .unwrap();
+        let error = service
+            .mcp(&json!({"action": "enable", "name": "twice", "scope": "local"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("\"mcp.twice.enabled\" is written more than once"),
+            "{error}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

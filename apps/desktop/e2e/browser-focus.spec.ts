@@ -61,9 +61,13 @@ test.beforeAll(async () => {
   };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.ELECTRON_RENDERER_URL;
-  site = createServer((_request, response) => {
-    response.setHeader("Content-Type", "text/html");
-    response.end(focusPage);
+  site = createServer((request, response) => {
+    // `delay=ms` holds the answer, as a slow page does.
+    const delay = Number(new URL(request.url ?? "/", "http://site").searchParams.get("delay") ?? 0);
+    setTimeout(() => {
+      response.setHeader("Content-Type", "text/html");
+      response.end(focusPage);
+    }, Math.min(delay, 10_000));
   });
   await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
   siteURL = "http://127.0.0.1:" + (site.address() as any).port;
@@ -159,6 +163,23 @@ const typeInPage = (search: string) =>
 
 // The caret is not compared: the person may type while the window is active.
 const inMessageBox = { app: true, pages: [], composer: true };
+const messageBox = () => page.getByRole("textbox", { name: "Message" });
+const tab = async (search: string) =>
+  (await tool("tabs_list")).tabs.find((item: { url: string }) => item.url.endsWith("/focus" + search))!.id as string;
+/** Types into whatever has the keyboard, as the person's keys reach it: each key goes down, types and comes up. */
+const typeKeys = (text: string) =>
+  app.evaluate(({ webContents }, text) => {
+    const focused = webContents.getFocusedWebContents();
+    for (const character of text)
+      for (const type of ["keyDown", "char", "keyUp"] as const) focused?.sendInputEvent({ type, keyCode: character });
+  }, text);
+const field = async (search: string) =>
+  (await tool("evaluate", { tabID: await tab(search), script: "document.activeElement.id + ':' + field.value" })).value;
+/** Puts the keyboard in the message box, without a key or pointer press, as the app itself can. */
+const typeInBox = async () => {
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.focus());
+  await messageBox().focus();
+};
 
 test("the message box keeps the keyboard while the agent loads, clicks and types in pages that ask for it", async () => {
   const box = page.getByRole("textbox", { name: "Message" });
@@ -230,6 +251,94 @@ test("a page put away while it has the keyboard gives it back to the message box
   expect(await settled()).toMatchObject({ app: false, pages: [] });
   await tool("tabs_close", { tabID: another });
   await tool("tabs_focus", { tabID: first });
+  expect(errors).toEqual([]);
+});
+
+test("a page the person loads themself takes the keyboard, and the agent's loads after it still do not", async () => {
+  const browser = page.getByRole("region", { name: "Web browser" });
+  const address = browser.getByRole("textbox", { name: "Browser address" });
+  await tool("tabs_open", { url: siteURL + "/focus?start" });
+  await expect(browser).toBeVisible();
+  await activate();
+
+  // Enter in the address bar loads the page, whose field then gets the keys.
+  await address.fill(siteURL + "/focus?typed");
+  await address.press("Enter");
+  expect(await settled()).toMatchObject({ app: false, pages: ["?typed"] });
+  await typeKeys("mine");
+  await expect.poll(() => field("?typed")).toBe("field:mine");
+  const typed = await tab("?typed");
+
+  // Back, from the window's own toolbar, hands the keyboard to the page it loads.
+  await typeInBox();
+  expect(await settled()).toMatchObject(inMessageBox);
+  await browser.getByRole("button", { name: "Browser back", exact: true }).click();
+  const back = await settled();
+  expect(back).toMatchObject({ app: false });
+  expect(back.pages).toHaveLength(1);
+
+  // The agent's load right after the person's own still leaves the message box alone.
+  await typeInBox();
+  expect(await settled()).toMatchObject(inMessageBox);
+  await tool("navigate", { tabID: typed, url: siteURL + "/focus?agent" });
+  expect(await settled()).toMatchObject(inMessageBox);
+  await tool("tabs_open", { url: siteURL + "/focus?agent-tab" });
+  expect(await settled()).toMatchObject(inMessageBox);
+
+  // A new tab with no address leaves the keyboard in the address bar.
+  await browser.getByRole("button", { name: "New browser tab", exact: true }).click();
+  expect(await settled()).toMatchObject({ app: true, pages: [] });
+  expect(errors).toEqual([]);
+});
+
+test("a load the person asks for while the agent works never takes the keyboard from where they went on to type", async () => {
+  const box = messageBox();
+  const browser = page.getByRole("region", { name: "Web browser" });
+  const address = browser.getByRole("textbox", { name: "Browser address" });
+  const reload = browser.getByRole("button", { name: "Reload browser page", exact: true });
+  const queued = (await tool("tabs_open", { url: siteURL + "/focus?queued" })).id;
+  await expect(browser).toBeVisible();
+  await activate();
+  await box.fill("");
+  /** The agent's slow load, which the person's request waits behind. */
+  const agentLoad = (delay: number) =>
+    tool("navigate", { tabID: queued, url: `${siteURL}/focus?slow&delay=${delay}` });
+  const reloaded = async () => {
+    await expect.poll(async () => (await tool("tabs_list")).tabs.find((item: { id: string }) => item.id === queued)?.loading).toBe(false);
+    await page.waitForTimeout(500);
+  };
+
+  // Reload waits behind the agent; meanwhile the person types in the message box.
+  let slow = agentLoad(2000);
+  await page.waitForTimeout(300);
+  await reload.click();
+  await typeInBox();
+  await typeKeys("still mine");
+  await slow;
+  await reloaded();
+  expect(await settled()).toMatchObject(inMessageBox);
+  await typeKeys(".");
+  await expect(box).toHaveValue("still mine.");
+
+  // An address sent behind the agent, then the keyboard moves to the message box without a key.
+  slow = agentLoad(1500);
+  await page.waitForTimeout(300);
+  await address.fill(siteURL + "/focus?sent");
+  await address.press("Enter");
+  await typeInBox();
+  await slow;
+  await expect.poll(async () => (await tool("tabs_list")).tabs.some((item: { url: string }) => item.url.endsWith("/focus?sent"))).toBe(true);
+  await page.waitForTimeout(500);
+  expect(await settled()).toMatchObject(inMessageBox);
+
+  // A request that waited longer than a load may for its page leaves the keyboard where it was.
+  slow = agentLoad(3500);
+  await page.waitForTimeout(300);
+  await reload.click();
+  await slow;
+  await reloaded();
+  expect(await settled()).toMatchObject({ app: true, pages: [] });
+  await box.fill("");
   expect(errors).toEqual([]);
 });
 

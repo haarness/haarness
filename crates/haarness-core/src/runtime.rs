@@ -266,6 +266,10 @@ fn workspace_tool_enabled(
 
 const TOOL_AVAILABILITY_SETTING: &str = "tool_availability.v1";
 const LAZY_TOOL_MODE_SETTING: &str = "lazy_tool_mode.v1";
+/// How often a background result is offered again to a chat whose storage
+/// failed, and the first wait (it grows by this much each time).
+const BACKGROUND_STORAGE_RETRIES: u32 = 3;
+const BACKGROUND_STORAGE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 /// Paired workspace checkpoints for one durable turn. For each checkpoint pair,
 /// these record what happened without serializing tool execution in other
 /// sessions or child agents.
@@ -927,6 +931,19 @@ fn refused_image<'a>(message: &str, sent: &'a [SentImage]) -> Option<&'a SentIma
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
     describe_error(error, None)
+}
+
+/// Why a chat refused input, as a notice quotes it: the refusal's own words,
+/// without the category the error type adds ("invalid request: …").
+#[must_use]
+pub fn refusal_reason(error: &CoreError) -> String {
+    match error {
+        CoreError::Invalid(reason)
+        | CoreError::Conflict(reason)
+        | CoreError::NotFound(reason)
+        | CoreError::PermissionDenied(reason) => reason.clone(),
+        other => user_facing_error(other),
+    }
 }
 
 /// `user_facing_error`, naming the provider (when known) that has no
@@ -2748,6 +2765,110 @@ impl AgentRuntime {
             Some(handoff),
         )
         .await
+    }
+
+    /// Keep a background result that `thread` refused as input with `error`
+    /// (its agent was removed or disabled meanwhile, or storage kept
+    /// failing), as a restart keeps one it held: a hidden message the model
+    /// reads with the person's next one, and a notice that says so, written
+    /// together while no turn can start. A turn that started meanwhile takes
+    /// the result as steering instead, so it never lands between a tool call
+    /// and its result. A chat that is gone, or archived, is not told.
+    pub async fn keep_refused_background_result(
+        &self,
+        thread: ThreadId,
+        text: String,
+        notice: String,
+        error: &CoreError,
+    ) {
+        if matches!(error, CoreError::NotFound(_)) {
+            tracing::info!(%thread, %error, "background result dropped: its chat is gone");
+            return;
+        }
+        let kept = async {
+            loop {
+                let admission = turn_admission_lock(&self.turn_admissions, thread);
+                let admitted = admission.lock().await;
+                let active = self
+                    .active
+                    .get(&thread)
+                    .map(|entry| Arc::clone(entry.value()));
+                if let Some(active) = active {
+                    drop(admitted);
+                    let changed = active.changed.notified();
+                    let accepting = active.accepting.lock().await;
+                    if *accepting {
+                        let chat = self.repository.get_thread(thread).await?;
+                        let request = QueueInputRequest {
+                            preview: None,
+                            reasoning_effort: None,
+                            delivery: haarness_protocol::InputDelivery::Steer,
+                            request_id: RequestId::new(),
+                            text,
+                            attachments: Vec::new(),
+                            synthetic: true,
+                        };
+                        self.append_queued_input(&chat, active.id, &request).await?;
+                        return CoreResult::Ok("steered into the turn that started meanwhile");
+                    }
+                    drop(accepting);
+                    // Starting or closing: wait for it, then look again.
+                    if self
+                        .active
+                        .get(&thread)
+                        .is_some_and(|current| current.id == active.id)
+                    {
+                        changed.await;
+                    }
+                    continue;
+                }
+                let chat = self.repository.get_thread(thread).await?;
+                if chat.archived {
+                    return Ok("dropped: its chat is archived");
+                }
+                let root = self.resolve_root(&chat).await;
+                let items = self
+                    .repository
+                    .append_items(
+                        thread,
+                        None,
+                        vec![
+                            ItemData::UserMessage {
+                                text,
+                                attachments: Vec::new(),
+                                queued: false,
+                                synthetic: true,
+                            },
+                            ItemData::Error {
+                                message: notice,
+                                retryable: false,
+                            },
+                        ],
+                    )
+                    .await?;
+                drop(admitted);
+                for item in items {
+                    self.events.publish_scoped(
+                        "item.created",
+                        Some(thread),
+                        Some(root),
+                        None,
+                        Some(item.id),
+                        json!(item),
+                    );
+                }
+                return Ok("kept for the chat's next message");
+            }
+        }
+        .await;
+        match kept {
+            Ok(outcome) => {
+                tracing::warn!(%thread, %error, outcome, "background result its chat refused");
+            }
+            Err(kept) => {
+                tracing::error!(%thread, %error, %kept, "failed to deliver or keep a background result");
+            }
+        }
     }
 
     /// Stop exactly one child task owned by `parent`. The selected child may
@@ -4855,8 +4976,10 @@ impl AgentRuntime {
             if active_request_id == request.request_id {
                 return self.repository.get_turn(active_turn_id).await;
             }
+            // Read by people: `haarness run --session` or an editor over
+            // ACP sending to a chat busy elsewhere.
             return Err(CoreError::Conflict(
-                "thread already has an active turn".into(),
+                "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.".into(),
             ));
         }
         let thread = self.repository.get_thread(thread_id).await?;
@@ -5555,6 +5678,14 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
+/// A definition's `!` snippet on its way to the shell tool: the text its
+/// permissions are judged on, the text that runs, and that text's values.
+pub(crate) struct DefinitionShell<'a> {
+    shown: &'a str,
+    run: &'a str,
+    env: &'a std::collections::BTreeMap<String, String>,
+}
+
 #[async_trait::async_trait]
 impl crate::ToolInvoker for TurnToolInvoker {
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
@@ -5564,34 +5695,8 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .is_some_and(|tool| tool.parallel_safe(arguments))
     }
     fn activate_skill_permissions(&self, execution: &haarness_protocol::DefinitionExecution) {
-        let expand = |s: &String| {
-            let mut value = s.replace(
-                "${CLAUDE_PROJECT_DIR}",
-                &self.runner.workspace.to_string_lossy(),
-            );
-            if let Some(dir) = &execution.directory {
-                value = value.replace("${CLAUDE_SKILL_DIR}", dir);
-            }
-            if let Some(dir) = &execution.plugin_root {
-                value = value.replace("${CLAUDE_PLUGIN_ROOT}", dir);
-            }
-            value
-        };
-        let mut rules = crate::definitions::approval_rules(
-            &execution
-                .allowed_tools
-                .iter()
-                .map(expand)
-                .collect::<Vec<_>>(),
-        );
-        rules.extend(
-            crate::definitions::approval_rules(&execution.disallowed_tools)
-                .into_iter()
-                .map(|mut rule| {
-                    rule.decision = PermissionDecision::Deny;
-                    rule
-                }),
-        );
+        let rules =
+            crate::definitions::skill_rules(execution, &self.runner.workspace.to_string_lossy());
         self.runner.skill_rules.lock().extend(rules);
     }
     fn workspace(&self) -> Option<String> {
@@ -5611,16 +5716,25 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .map(|agent| agent.id.clone())
             .collect()
     }
-    async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {
+    async fn definition_shell(
+        &self,
+        shown: String,
+        run: String,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> CoreResult<ToolOutput> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         self.runner
             .execute_call_inner(
                 &self.agent,
                 &format!("{}:{sequence}", self.parent_call_id),
                 "bash",
-                json!({"command":command}),
+                json!({"command":shown}),
                 false,
-                true,
+                Some(&DefinitionShell {
+                    shown: &shown,
+                    run: &run,
+                    env: &env,
+                }),
             )
             .await
     }
@@ -5647,7 +5761,7 @@ impl crate::ToolInvoker for TurnToolInvoker {
             + 1;
         let call_id = format!("{}:{sequence}", self.parent_call_id);
         self.runner
-            .execute_call_inner(&self.agent, &call_id, name, arguments, false, false)
+            .execute_call_inner(&self.agent, &call_id, name, arguments, false, None)
             .await
     }
 
@@ -6729,7 +6843,7 @@ impl RunnerTask {
                     })
                     .await?;
                     let output = self
-                        .execute_call_inner(agent, &call_id, "task", arguments, false, false)
+                        .execute_call_inner(agent, &call_id, "task", arguments, false, None)
                         .await?;
                     self.publish_item(ItemData::ToolResult {
                         call_id: call_id.clone(),
@@ -8533,7 +8647,7 @@ impl RunnerTask {
         arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
         let result = self
-            .execute_call_inner(agent, call_id, name, arguments, true, false)
+            .execute_call_inner(agent, call_id, name, arguments, true, None)
             .await;
         if let Err(error) = &result {
             record_span_error(&tracing::Span::current(), error);
@@ -8548,7 +8662,9 @@ impl RunnerTask {
         name: &str,
         mut arguments: serde_json::Value,
         require_advertised: bool,
-        _definition_shell: bool,
+        // A definition's `!` snippet: what runs in place of the text that
+        // was judged, and what its shell reads the placeholders from.
+        definition_shell: Option<&DefinitionShell<'_>>,
     ) -> CoreResult<ToolOutput> {
         let resolved = self.resolve_tool_name(name);
         let name = resolved.as_str();
@@ -8808,6 +8924,23 @@ impl RunnerTask {
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
         }
+        // A snippet was judged with its folders filled in; unless a hook
+        // rewrote it, the shell runs it with its references, reading the
+        // values from its environment, so a folder name is never shell text.
+        let mut executed = arguments.clone();
+        if name == "bash"
+            && let Some(snippet) = definition_shell
+        {
+            execution.shell_env.extend(
+                snippet
+                    .env
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
+                executed["command"] = json!(snippet.run);
+            }
+        }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
         } else if name == "todoread" {
@@ -8820,7 +8953,7 @@ impl RunnerTask {
         } else {
             tool.expect("non-internal tool resolved above")
                 .execute(
-                    arguments.clone(),
+                    executed,
                     ToolContext {
                         execution,
                         thread_id: self.thread.id,
@@ -9920,28 +10053,48 @@ impl RunnerTask {
             let handoff = ledger.hand_off(info.parent_thread_id, RequestId::new(), || {
                 task.handed_off.store(true, Ordering::SeqCst);
             });
-            let delivered = runtime
-                .queue_input_with_options(
-                    info.parent_thread_id,
-                    QueueInputRequest {
-                        preview: None,
-                        reasoning_effort: None,
-                        delivery: haarness_protocol::InputDelivery::Steer,
-                        request_id: handoff.request_id(),
-                        text: task.envelope(&info, state, &text),
-                        attachments: Vec::new(),
-                        synthetic: true,
-                    },
-                    task.delivery_auto_approve,
-                    task.delivery_unattended,
-                    task.delivery_tools.clone(),
-                    Some(&handoff),
-                )
-                .await;
-            drop(handoff);
+            let envelope = task.envelope(&info, state, &text);
+            let mut attempt = 0_u32;
+            let delivered = loop {
+                let delivered = runtime
+                    .queue_input_with_options(
+                        info.parent_thread_id,
+                        QueueInputRequest {
+                            preview: None,
+                            reasoning_effort: None,
+                            delivery: haarness_protocol::InputDelivery::Steer,
+                            request_id: handoff.request_id(),
+                            text: envelope.clone(),
+                            attachments: Vec::new(),
+                            synthetic: true,
+                        },
+                        task.delivery_auto_approve,
+                        task.delivery_unattended,
+                        task.delivery_tools.clone(),
+                        Some(&handoff),
+                    )
+                    .await;
+                // A busy database clears; the same request id makes a retry
+                // of an admission that did land a no-op.
+                match delivered {
+                    Err(CoreError::Storage(_)) if attempt < BACKGROUND_STORAGE_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(BACKGROUND_STORAGE_BACKOFF * attempt).await;
+                    }
+                    delivered => break delivered,
+                }
+            };
             if let Err(error) = delivered {
-                tracing::error!(%error, child = %info.child_thread_id, "failed to deliver background task result");
+                let notice = format!(
+                    "The result of the background task \u{201c}{}\u{201d} could not start a turn in this chat ({}); your next message passes it to the agent.",
+                    info.description,
+                    refusal_reason(&error)
+                );
+                runtime
+                    .keep_refused_background_result(info.parent_thread_id, envelope, notice, &error)
+                    .await;
             }
+            drop(handoff);
             tasks.remove(&info.child_thread_id);
             task.delivered.store(true, Ordering::SeqCst);
             task.delivery_done.notify_waiters();
@@ -10922,7 +11075,13 @@ async fn summarize_context(
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
-        parameters: crate::RequestParameters::default(),
+        // Its own system prompt and no tools: it shares no cached prefix with
+        // the chat, and nothing reads its prefix back afterwards, so a cache
+        // entry for it would only be paid for.
+        parameters: crate::RequestParameters {
+            uncached: true,
+            ..crate::RequestParameters::default()
+        },
         output_schema: None,
     };
     let mut stream = tokio::select! {
@@ -11462,6 +11621,22 @@ async fn permission_hook_answer(
         match decision.permission {
             Some(PermissionDecision::Deny) => {
                 return HookAnswer::Refused("denied by a PermissionRequest hook".into());
+            }
+            // An allow for input the hook rewrote approves a different call
+            // than the one asked about; the prompt rules were checked for
+            // this one, so it stays the person's to answer.
+            Some(PermissionDecision::Allow)
+                if decision
+                    .updated_input
+                    .as_ref()
+                    .is_some_and(|updated| updated != &input) =>
+            {
+                tracing::info!(
+                    %thread,
+                    permission = %plan.permission,
+                    "a PermissionRequest hook allowed a rewritten input; asking instead"
+                );
+                allowed = false;
             }
             Some(PermissionDecision::Allow) => {}
             _ => allowed = false,
@@ -15167,6 +15342,19 @@ fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::Prompt
 #[cfg(test)]
 mod prepared_usage_tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_is_quoted_in_its_own_words() {
+        assert_eq!(
+            refusal_reason(&CoreError::Invalid("Unknown agent: reviewer".into())),
+            "Unknown agent: reviewer"
+        );
+        assert_eq!(refusal_reason(&CoreError::Conflict("busy".into())), "busy");
+        assert_eq!(
+            refusal_reason(&CoreError::Storage("database is locked".into())),
+            "storage error: database is locked"
+        );
+    }
 
     #[test]
     fn prepared_estimates_include_current_tools_and_system_without_media_payloads() {

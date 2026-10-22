@@ -370,3 +370,125 @@ async fn both_sign_in_flows_name_this_computer_in_their_token_request() {
     server.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_device_sign_in_stops_at_a_link_that_is_not_http_or_https() {
+    for (link, code, said) in [
+        (
+            "file:///Applications/Calculator.app",
+            "ABCD-EFGH",
+            "The sign-in server sent a link that is not http or https, so sign-in stopped.",
+        ),
+        (
+            "x-fixture-app://open?code=ABCD-EFGH",
+            "ABCD-EFGH",
+            "The sign-in server sent a link that is not http or https, so sign-in stopped.",
+        ),
+        (
+            "https://cloud.fixture.test/device",
+            "ABCD\u{1b}]0;title\u{7}",
+            "The sign-in server sent a code with control characters, so sign-in stopped.",
+        ),
+    ] {
+        let app = Router::new().route(
+            "/oauth/device_authorization",
+            post(move || async move {
+                Json(json!({"device_code": "dc-1", "user_code": code,
+                    "verification_uri_complete": link, "expires_in": 60, "interval": 1}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+        let config = Config::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            dir.clone(),
+            "haarness-cli",
+        )
+        .unwrap();
+        let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+        let error = Client::new(config)
+            .unwrap()
+            .begin_login(true)
+            .await
+            .err()
+            .expect("the sign-in stops");
+        assert_eq!(error.to_string(), said);
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn a_renewal_the_caller_gave_up_on_is_still_saved_so_cloud_never_sees_a_spent_token() {
+    // Cloud rotates the refresh token on every renewal and revokes the whole
+    // sign-in when a spent one comes back, as `haarness-cloud` does.
+    let presented = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let app = Router::new()
+        .route(
+            "/oauth/token",
+            post(
+                |State(presented): State<Arc<std::sync::Mutex<Vec<String>>>>, body: String| async move {
+                    let token = url::form_urlencoded::parse(body.as_bytes())
+                        .find(|(name, _)| name == "refresh_token")
+                        .map(|(_, value)| value.into_owned())
+                        .unwrap_or_default();
+                    let spent = presented.lock().unwrap().contains(&token);
+                    presented.lock().unwrap().push(token.clone());
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if spent {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "invalid_grant"})),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({"access_token": format!("{token}-access"),
+                            "refresh_token": format!("{token}-next"), "expires_in": 600})),
+                    )
+                },
+            ),
+        )
+        .with_state(presented.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+    let config = Config::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        dir.clone(),
+        "haarness-cli",
+    )
+    .unwrap();
+    let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+    credentials::save(
+        &config.path(),
+        &Credentials {
+            api_url: config.api_url.to_string(),
+            access_token: "expired".into(),
+            refresh_token: "first".into(),
+            access_expires_at: Utc::now() - Duration::minutes(1),
+        },
+    )
+    .unwrap();
+    let client = Client::new(config.clone()).unwrap();
+
+    // The caller gives up while Cloud is answering, and returns at once.
+    let started = std::time::Instant::now();
+    let gave_up =
+        tokio::time::timeout(std::time::Duration::from_millis(50), client.bearer(None)).await;
+    assert!(gave_up.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_millis(250));
+
+    // The next caller waits for that renewal and uses what it saved.
+    assert_eq!(client.bearer(None).await.unwrap(), "first-access");
+    assert_eq!(
+        credentials::load(&config.path())
+            .unwrap()
+            .unwrap()
+            .refresh_token,
+        "first-next"
+    );
+    assert_eq!(presented.lock().unwrap().clone(), ["first"]);
+    server.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 import e2e_scratch
+import e2e_tmux
 
 repo = Path(__file__).resolve().parents[1]
 binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
@@ -160,7 +161,10 @@ config = {"mcp": {
     "fixture": {"type": "local", "command": [sys.executable, str(mcp), marker, str(root / "mcp-started")]},
     "disabled_fixture": {"type": "local", "enabled": False,
         "command": [sys.executable, str(mcp), "NEVER", str(root / "disabled-mcp-started")]},
-}, "input": {"delivery": "queue"}, "browser": {"policy": browser_policy}}
+}, "input": {"delivery": "queue"}, "browser": {"policy": browser_policy},
+    # A project endpoint with settings the edit form does not show.
+    "providers": {"team-proxy": {"protocol": "openai-chat-completions", "name": "Team proxy", "base_url": "https://proxy.fixture.test/v1",
+                                 "models": ["m"], "context_window": 123456, "tools": False, "x-team-note": "keep"}}}
 hook = shlex.join([sys.executable, "-c", f"from pathlib import Path; Path({str(root / 'hook-ran')!r}).write_text('hook proof')"])
 config["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": hook}]}]}
 write(project / ".haarness/haarness.json", json.dumps(config))
@@ -190,6 +194,16 @@ try:
     items = turn('!tool ext__project_probe__ping {}')
     check("Enabled project extension executes", "PROJECT_EXTENSION" in json.dumps(tool_results(items)))
     check("CLI expands a project slash command without an opt-in flag", "PROJECT_COMMAND CLI" in cli("run", "CLI", "--command", "project-proof", "--provider", "echo", "--model", "echo-1"))
+    # Editing the endpoint in Settings (the form Desktop and the TUI submit) writes only what it changed.
+    view = api("/manage/providers", {"action": "inspect", "name": "team-proxy"})
+    edit = next(entry["request"] for entry in view["entries"] if entry["request"].get("action") == "edit_form")
+    form = api("/manage/providers", edit)
+    values = {field["key"]: field["value"] for field in form["fields"]}
+    api("/manage/providers", {**form["submit"], **values, "label": "Proxy for the team", "models": "m, n"})
+    saved = json.loads((project / ".haarness/haarness.json").read_text())["providers"]["team-proxy"]
+    check("A provider edit writes only the name and models it changed, keeping settings the form does not show",
+          saved == {"protocol": "openai-chat-completions", "name": "Proxy for the team", "base_url": "https://proxy.fixture.test/v1",
+                    "models": ["m", "n"], "context_window": 123456, "tools": False, "x-team-note": "keep"})
     sibling = connect(workspace=other)
     check("Sibling project remains isolated", "project-guide" not in names("/skills", sibling) and "project-proof" not in names("/commands", sibling))
 
@@ -236,7 +250,7 @@ try:
         sessions.append(session)
         args = [str(binary), "--workspace", str(project)]
         if attached: args += ["attach", connection["url"], "--token", connection["token"]]
-        launch = shlex.join(["env", *[f"{key}={env[key]}" for key in ["HOME", "HAARNESS_HOME", "HAARNESS_DATA_DIR", "HAARNESS_TEST_PROVIDER"]], *args])
+        launch = e2e_tmux.pane_command(env, args)
         run("tmux", "new-session", "-d", "-x", "112", "-y", "34", "-s", session, launch)
         def pane(): return run("tmux", "capture-pane", "-p", "-t", session)
         until(lambda: "/ commands" in pane(), "TUI did not open")

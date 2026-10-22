@@ -16,6 +16,7 @@ import {
   TERMINAL_PING_EVERY_MS,
   terminalPingTimeoutMs,
 } from "./connection-health";
+import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { shortcutLabel } from "../renderer/search";
@@ -53,6 +54,7 @@ import {
 } from "@haarness/sdk";
 import { z } from "zod";
 import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
+import { themeColors } from "../themes";
 import { serverKey } from "../servers";
 import {
   mergeProjectCatalog,
@@ -167,6 +169,8 @@ function wakeFromSleep() {
   for (const watch of notificationWatches.values()) watch.restart();
   wakeConnections();
 }
+/** One window answers each terminal's programs (see terminalAnswers). */
+const answerers = terminalAnswers();
 // End-to-end tests end terminal sockets as a server or network outage does,
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
@@ -637,6 +641,7 @@ function installHandlers() {
       throw error;
     });
     menu();
+    repaintWindows();
     broadcast({ kind: "menu", data: { action: "preferences", value } });
     return value;
   });
@@ -1125,7 +1130,9 @@ function installHandlers() {
         terminals.detach(key, z.string().max(100).parse(input));
         return;
       }
-      if (action === "write") {
+      // "write" is the person at the terminal; "answer" is xterm answering a
+      // program's query, which only one window does for a terminal.
+      if (action === "write" || action === "answer") {
         const value = z
           .array(z.number().int().min(0).max(255))
           .max(65536)
@@ -1136,6 +1143,15 @@ function installHandlers() {
         // output is forwarded, and what is sent on it meanwhile is lost.
         const current = terminals.get(key);
         if (!current || !socketOpen(current.socket)) return false;
+        const terminal = id + ":" + pty;
+        if (action === "write") answerers.use(terminal, win.id);
+        else if (
+          !answerers.answers(terminal, win.id, (other) => {
+            const socket = terminals.get(other + ":" + terminal)?.socket;
+            return !!socket && socketOpen(socket);
+          })
+        )
+          return true;
         current.socket.send(new Uint8Array(value));
         return true;
       }
@@ -1150,6 +1166,7 @@ function installHandlers() {
       });
       if (!terminals.accept(key, request.view, win.id, socket))
         throw new Error("Terminal connection replaced");
+      answerers.use(id + ":" + pty, win.id);
       const view = request.view;
       void (async () => {
         let failure: string | undefined;
@@ -1506,15 +1523,25 @@ function registerShortcut(value: GlobalShortcut = data().preferences.globalShort
   else registeredShortcut = accelerator;
   return true;
 }
+/**
+ * The saved theme's page colour. The window paints it before its page draws
+ * anything, and the page leaves it showing until it applies the theme
+ * (base.css), so a light theme never shows a dark first frame, nor a dark one
+ * a light frame.
+ */
+function windowBackground() {
+  const { theme, palette } = data().preferences;
+  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
+  return themeColors(palette, dark ? "dark" : "light").page;
+}
+function repaintWindows() {
+  for (const win of windows) if (!win.isDestroyed()) win.setBackgroundColor(windowBackground());
+}
 function createWindow() {
   if (!initialized || quitting) return;
   const state = data().values.window as
     | { width?: number; height?: number }
     | undefined;
-  // Paint the window in the appearance the page is about to use, so a
-  // light system does not flash dark before the renderer loads.
-  const theme = data().preferences.theme;
-  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
   const win = new BrowserWindow({
     // Test runs keep windows hidden, except on Linux: X11 (and Xvfb in CI)
     // draws no frames for a window that was never shown, so every screenshot
@@ -1525,7 +1552,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 640,
     title: "Haarness",
-    backgroundColor: dark ? "#151413" : "#fdfcfa",
+    backgroundColor: windowBackground(),
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 18, y: 17 },
     webPreferences: {
@@ -1613,6 +1640,7 @@ function createWindow() {
         item.client.close();
       }
     terminals.close(win.id);
+    answerers.forget(win.id);
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -1809,9 +1837,10 @@ else {
       });
       onlineAgain(() => net.isOnline(), wakeConnections);
       setInterval(checkTerminals, TERMINAL_PING_EVERY_MS).unref();
-      nativeTheme.on("updated", () =>
-        broadcast({ kind: "menu", data: "theme" }),
-      );
+      nativeTheme.on("updated", () => {
+        repaintWindows();
+        broadcast({ kind: "menu", data: "theme" });
+      });
     })
     .catch((error) => {
       if (quitting) return;

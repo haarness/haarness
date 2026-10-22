@@ -30,6 +30,7 @@ import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
+import { toastAnchor } from "./toast-anchors";
 import { ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
 import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
@@ -257,9 +258,18 @@ export function App() {
     }
     setLayoutReady(true);
   });
+  // The layout is written 200 ms after it last changed (a drag changes it on
+  // every frame), and at once when the page goes away: a panel opened or a
+  // split dragged just before a reload, or before the window closes, is kept.
+  let unsavedLayout: Record<string, unknown> | undefined;
+  const saveLayout = () => {
+    const layout = unsavedLayout;
+    unsavedLayout = undefined;
+    if (layout) void window.haarness.storage("layout:v2", layout);
+  };
   createEffect(() => {
     if (!layoutReady()) return;
-    const layout = {
+    unsavedLayout = {
       sidebarVisible: sidebarVisible(),
       sidebarWidth: sidebarWidth(),
       dockWidth: dockWidth(),
@@ -267,11 +277,13 @@ export function App() {
       dock: dock(),
       sidebarLayout: sidebarLayout(),
     };
-    const timer = setTimeout(
-      () => void window.haarness.storage("layout:v2", layout),
-      200,
-    );
+    const timer = setTimeout(saveLayout, 200);
     onCleanup(() => clearTimeout(timer));
+  });
+  window.addEventListener("pagehide", saveLayout);
+  onCleanup(() => {
+    window.removeEventListener("pagehide", saveLayout);
+    saveLayout();
   });
   const projects = createOrdering(
     () => "list:projects",
@@ -1380,7 +1392,7 @@ export function App() {
               }
               onReset={() => setTerminalHeight(260)}
             />
-            <div class="terminal-dock">
+            <div class="terminal-dock" ref={toastAnchor("terminal")}>
               <Suspense fallback={<PanelLoading label={t("Opening terminal…")} />}>
                 <TerminalPanel />
               </Suspense>

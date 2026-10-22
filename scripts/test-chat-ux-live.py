@@ -16,6 +16,7 @@ import time
 import urllib.request
 
 import e2e_scratch
+import e2e_tmux
 
 
 repo = Path(__file__).resolve().parents[1]
@@ -163,9 +164,9 @@ try:
     _, out = chat("cli-edit", 'Edit output/space dir/receipt 日本語.txt: change apples+pears=18 to total=18 and append verified=yes on its own line. Preserve the marker. Read it back and verify.', "--session", writer)
     assert (project / "output/space dir/receipt 日本語.txt").read_text() == "harbor-528\ntotal=18\nverified=yes\n"
     t = api("/threads", {"title":"Live TUI UX", "provider":"openai", "model":model})["id"]
-    # Credentials are inherited from this process by the fixture daemon; tmux
-    # only needs its isolated state path, never a key in its command line.
-    command = shlex.join(["env", f"HAARNESS_DATA_DIR={env['HAARNESS_DATA_DIR']}", *args, "--thread", t])
+    # Credentials are inherited from this process by the fixture daemon; the
+    # pane gets the isolated state path and never a key in its command line.
+    command = e2e_tmux.pane_command(env, [*args, "--thread", t])
     run(["tmux", "new-session", "-d", "-x", "160", "-y", "48", "-s", session, command])
     until(lambda: "h a a r n e s s" in pane(), "TUI did not open")
     data = tui_chat(t, "Read fixtures/ledger.txt. Reply with its marker, then a Markdown table of the two fruit counts. Do not change files.", "tui-read-markdown")

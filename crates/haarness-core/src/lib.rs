@@ -11,6 +11,7 @@ mod execution;
 mod goal;
 pub mod images;
 pub mod instructions;
+pub mod links;
 pub mod patch;
 mod permissions;
 mod ports;
@@ -18,6 +19,7 @@ mod prefix_warmup;
 pub mod process_groups;
 pub mod redact;
 mod runtime;
+pub mod shell_text;
 mod side_question;
 mod stream_clock;
 mod stream_limits;
@@ -32,7 +34,9 @@ pub use agents::{
 };
 pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
-pub use events::{EventBus, EventSubscription};
+pub use events::{
+    EncodedEvent, EventBus, EventSubscription, PENDING_EVENTS_LIMIT, PendingEvents, join_delta,
+};
 pub use execution::ExecutionSettings;
 pub use goal::{MAX_GOAL_CHARS, apply_goal_action, goal_line, legacy_goal_state, new_goal_state};
 pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only;
@@ -45,7 +49,7 @@ pub use permissions::{
 pub use ports::*;
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
-    shorten_title,
+    refusal_reason, shorten_title,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,

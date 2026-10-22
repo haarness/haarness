@@ -1676,6 +1676,9 @@ async fn cli_main() -> Result<()> {
             "command failed"
         );
     }
+    // A sign-in renewal its server already answered must be saved, or the
+    // next one sends a spent token and the sign-in ends.
+    haarness_account::renewals::settle(Duration::from_secs(5)).await;
     drop(telemetry_guard);
     outcome
 }
@@ -5577,11 +5580,13 @@ fn elapsed_words(elapsed: Duration) -> String {
     }
 }
 
-/// Wait for `work` unless Ctrl-C or SIGTERM (a cancelled CI job) comes
-/// first. Then the chat's turns, helpers and workflows stop on the server —
-/// a run that exits must not leave them working, and spending, unwatched —
-/// and the process exits as an interrupted one does. A second signal exits
-/// at once.
+/// Wait for `work` unless Ctrl-C, SIGTERM (a cancelled CI job) or the run's
+/// terminal closing comes first. Then the chat's turns, helpers and workflows
+/// stop on the server — a run that exits must not leave them working, and
+/// spending, unwatched — and the process exits as an interrupted one does. A
+/// second Ctrl-C or SIGTERM exits at once; another SIGHUP does not, since a
+/// closing terminal's shell sends its jobs a second one (zsh does) right after
+/// the terminal's own, before the stop could reach the server.
 async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
@@ -5590,9 +5595,13 @@ async fn stop_on_signal<T>(
 ) -> Result<T> {
     let status = tokio::select! {
         result = work => return result,
-        status = run_stop_signal() => status,
+        status = run_stop_signal(true) => status,
     };
-    eprintln!("Stopping…");
+    // A closed terminal fails every write; the stop must still be sent.
+    let say = |line: &str| {
+        let _ = writeln!(io::stderr(), "{line}");
+    };
+    say("Stopping…");
     let stop = async {
         if goal {
             // Otherwise the goal would start its next turn on its own.
@@ -5604,17 +5613,21 @@ async fn stop_on_signal<T>(
     };
     tokio::select! {
         stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
-            Ok(Ok(())) => eprintln!("Stopped. The chat keeps what was done so far."),
-            Ok(Err(error)) => eprintln!("Could not stop the chat on the server: {error:#}"),
-            Err(_) => eprintln!("The server did not confirm the stop in time."),
+            Ok(Ok(())) => say("Stopped. The chat keeps what was done so far."),
+            Ok(Err(error)) => say(&format!("Could not stop the chat on the server: {error:#}")),
+            Err(_) => say("The server did not confirm the stop in time."),
         },
-        _ = run_stop_signal() => {}
+        _ = run_stop_signal(false) => {}
     }
+    haarness_account::renewals::settle(Duration::from_secs(5)).await;
     std::process::exit(status)
 }
 
-/// The exit status once Ctrl-C (130) or SIGTERM (143) arrives.
-async fn run_stop_signal() -> i32 {
+/// The exit status once Ctrl-C (130), SIGTERM (143) or, with `hangup` for a
+/// run at a terminal, SIGHUP (129: the terminal window closed) arrives. A run
+/// without a terminal leaves SIGHUP alone, so one started with `nohup` (which
+/// never leaves stderr on a terminal) keeps ignoring it.
+async fn run_stop_signal(hangup: bool) -> i32 {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -5622,13 +5635,26 @@ async fn run_stop_signal() -> i32 {
             let _ = tokio::signal::ctrl_c().await;
             return 130;
         };
+        let mut hangup = if hangup && io::stderr().is_terminal() {
+            signal(SignalKind::hangup()).ok()
+        } else {
+            None
+        };
+        let hung_up = async {
+            match &mut hangup {
+                Some(hangup) => hangup.recv().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => 130,
             _ = terminate.recv() => 143,
+            _ = hung_up => 129,
         }
     }
     #[cfg(not(unix))]
     {
+        let _ = hangup;
         let _ = tokio::signal::ctrl_c().await;
         130
     }
@@ -6178,7 +6204,7 @@ fn compose_runtime_sources(
     runtime_config
         .commands
         .retain(|command| !disabled_skills.contains(&command.name));
-    memory_settings::load(&management::memory_root_for(paths, workspace))?
+    memory_settings::load(&management::memory_root_for(paths, workspace))
         .apply(&mut runtime_config);
     runtime_config.custom_agents.clone_from(&json_layers.agents);
     Ok(ComposedRuntimeSources {
@@ -7473,7 +7499,14 @@ fn read_api_key(provider: &str, key: Option<String>) -> Result<String> {
     Ok(key.to_owned())
 }
 
+/// Opens a link in the browser, but only an http or https one: a sign-in
+/// link comes from a server, and any other scheme would make the system open
+/// a local file or start an app. The parsed address is what opens.
 fn open_browser(url: &str) -> Result<()> {
+    let Some(url) = haarness_core::links::http_url(url) else {
+        anyhow::bail!("only http and https links open in the browser");
+    };
+    let url = url.as_str();
     #[cfg(target_os = "macos")]
     let status = ProcessCommand::new("open").arg(url).status()?;
     #[cfg(target_os = "linux")]
@@ -7612,7 +7645,12 @@ async fn mcp_command(
                 .context("cannot bind the MCP OAuth loopback callback")?;
             let address = listener.local_addr()?;
             let redirect_uri = format!("http://{address}/mcp/oauth/callback");
-            let session = registry.begin_oauth(&name, &redirect_uri).await?;
+            // The refusal and rmcp's own errors read as sentences, without
+            // the `tool error:` category.
+            let session = registry
+                .begin_oauth(&name, &redirect_uri)
+                .await
+                .map_err(management::plain_error)?;
             println!("Authorize MCP server '{name}' in your browser:");
             println!("{}", session.authorization_url);
             if !no_browser && let Err(error) = open_browser(&session.authorization_url) {
@@ -7621,7 +7659,10 @@ async fn mcp_command(
             let callback_url =
                 receive_oauth_callback(&listener, &redirect_uri, &session.authorization_url)
                     .await?;
-            session.complete(&callback_url).await?;
+            session
+                .complete(&callback_url)
+                .await
+                .map_err(management::plain_error)?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
@@ -7991,9 +8032,10 @@ fn set_mcp_enabled(
     enabled: bool,
 ) -> Result<McpConfigureRequest> {
     let target = mcp_entry_target(paths, workspace, project, name);
-    let mut entry = read_mcp_entry(&target, name)?;
+    let before = read_mcp_entry(&target, name)?;
+    let mut entry = before.clone();
     entry.enabled = enabled;
-    write_mcp_entry(&target, name, Some(&entry))?;
+    write_mcp_changes(&target, name, &before, &entry)?;
     println!(
         "{} MCP server '{name}' in {}.",
         if enabled { "Enabled" } else { "Disabled" },
@@ -8139,6 +8181,208 @@ fn mcp_entry_target(paths: &Paths, workspace: &Path, project: bool, name: &str) 
 
 fn mcp_config_target(paths: &Paths, workspace: &Path, project: bool) -> PathBuf {
     scoped_config_target(paths, workspace, project)
+}
+
+/// The `section.name` entry of a configuration file as written, as JSON.
+fn raw_config_entry(path: &Path, section: &str, name: &str) -> Result<serde_json::Value> {
+    let root = if path.extension().is_some_and(|value| value != "toml") {
+        jsonconfig::read_json(path)
+            .map_err(anyhow::Error::msg)?
+            .unwrap_or_default()
+    } else {
+        serde_json::to_value(toml::from_str::<toml::Value>(&fs::read_to_string(path)?)?)?
+    };
+    root.get(section)
+        .and_then(|entries| entries.get(name))
+        .filter(|entry| entry.is_object())
+        .cloned()
+        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))
+}
+
+/// Sets only `fields` of the `section.name` entry (`None` removes a key),
+/// leaving its other keys as written. JSON keeps the file's comments and
+/// formatting; TOML round-trips its values and loses its comments.
+fn write_entry_fields(
+    path: &Path,
+    section: &str,
+    name: &str,
+    fields: Vec<(String, Option<serde_json::Value>)>,
+) -> Result<()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    if path.extension().is_some_and(|value| value != "toml") {
+        return jsonconfig::write_entry_fields(path, section, name, fields);
+    }
+    let mut root: toml::Value = toml::from_str(&fs::read_to_string(path)?)?;
+    let entry = root
+        .get_mut(section)
+        .and_then(|entries| entries.get_mut(name))
+        .and_then(toml::Value::as_table_mut)
+        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
+    for (key, value) in fields {
+        match value {
+            Some(value) => {
+                entry.insert(key, toml::Value::try_from(value)?);
+            }
+            None => {
+                entry.remove(&key);
+            }
+        }
+    }
+    fs::write(path, toml::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+/// Saves `after`, an edit of the MCP entry `before` read from `path`: only
+/// what changed is written, under the entry's own keys and in its own
+/// shape, so an entry another tool reads (an `opencode.json` one with
+/// `type`, a `command` list and `environment`) stays one it can read, and
+/// keys Haarness does not know stay.
+fn write_mcp_changes(
+    path: &Path,
+    name: &str,
+    before: &McpConfigureRequest,
+    after: &McpConfigureRequest,
+) -> Result<()> {
+    let raw = raw_config_entry(path, "mcp", name)?;
+    write_entry_fields(path, "mcp", name, mcp_changes(&raw, before, after))
+}
+
+/// The keys to write into the entry `raw` (as written) for the edit from
+/// `before` to `after`.
+fn mcp_changes(
+    raw: &serde_json::Value,
+    before: &McpConfigureRequest,
+    after: &McpConfigureRequest,
+) -> Vec<(String, Option<serde_json::Value>)> {
+    use serde_json::{Value, json};
+    let has = |key: &str| raw.get(key).is_some();
+    let mut fields: Vec<(String, Option<Value>)> = Vec::new();
+    if before.command != after.command || before.args != after.args {
+        if raw.get("command").is_some_and(Value::is_array) {
+            // `command` names the program and its arguments together.
+            let parts: Vec<&str> = after
+                .command
+                .iter()
+                .chain(&after.args)
+                .map(String::as_str)
+                .collect();
+            fields.push(("command".into(), Some(json!(parts))));
+            if has("args") {
+                fields.push(("args".into(), None));
+            }
+        } else {
+            if before.command != after.command {
+                fields.push(("command".into(), after.command.clone().map(Value::String)));
+            }
+            if before.args != after.args {
+                fields.push(("args".into(), Some(json!(after.args))));
+            }
+        }
+    }
+    if before.env != after.env {
+        let opencode = matches!(
+            raw.get("type").and_then(Value::as_str),
+            Some("local" | "remote")
+        );
+        let key = if has("environment") || (opencode && !has("env")) {
+            "environment"
+        } else {
+            "env"
+        };
+        fields.push((key.into(), Some(json!(after.env))));
+    }
+    if before.url != after.url {
+        fields.push(("url".into(), after.url.clone().map(Value::String)));
+    }
+    if before.headers != after.headers {
+        fields.push(("headers".into(), Some(json!(after.headers))));
+    }
+    let opencode = matches!(
+        raw.get("type").and_then(Value::as_str),
+        Some("local" | "remote")
+    );
+    if opencode {
+        // opencode takes `oauth` as `false` or an object holding `clientId`
+        // and a space-separated `scope`, never `true` or the other keys.
+        if before.oauth != after.oauth
+            || before.oauth_client_id != after.oauth_client_id
+            || before.oauth_scopes != after.oauth_scopes
+        {
+            let value = if after.oauth == Some(false) {
+                Some(Value::Bool(false))
+            } else {
+                let had_object = raw.get("oauth").is_some_and(Value::is_object);
+                let mut object = raw
+                    .get("oauth")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                match &after.oauth_client_id {
+                    Some(client) => object.insert("clientId".into(), json!(client)),
+                    None => object.remove("clientId"),
+                };
+                if after.oauth_scopes.is_empty() {
+                    object.remove("scope");
+                } else {
+                    object.insert("scope".into(), json!(after.oauth_scopes.join(" ")));
+                }
+                (after.oauth == Some(true) || had_object || !object.is_empty())
+                    .then_some(Value::Object(object))
+            };
+            fields.push(("oauth".into(), value));
+        }
+        if before.enabled != after.enabled {
+            fields.push(("enabled".into(), Some(Value::Bool(after.enabled))));
+        }
+        return fields;
+    }
+    if before.oauth != after.oauth {
+        fields.push(("oauth".into(), after.oauth.map(Value::Bool)));
+    }
+    // A Claude-style entry keeps its client and scopes under `auth`.
+    let mut auth = raw.get("auth").filter(|auth| auth.is_object()).cloned();
+    let mut auth_changed = false;
+    for (key, nested, value) in [
+        (
+            "oauthClientId",
+            "clientId",
+            (before.oauth_client_id != after.oauth_client_id)
+                .then(|| after.oauth_client_id.clone().map(Value::String)),
+        ),
+        (
+            "oauthScopes",
+            "scopes",
+            (before.oauth_scopes != after.oauth_scopes)
+                .then(|| (!after.oauth_scopes.is_empty()).then(|| json!(after.oauth_scopes))),
+        ),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        match auth.as_mut().and_then(Value::as_object_mut) {
+            Some(auth) if auth.contains_key(nested) => {
+                match value {
+                    Some(value) => auth.insert(nested.into(), value),
+                    None => auth.remove(nested),
+                };
+                auth_changed = true;
+            }
+            _ => fields.push((key.into(), value)),
+        }
+    }
+    if auth_changed {
+        fields.push(("auth".into(), auth));
+    }
+    if before.enabled != after.enabled {
+        if has("disabled") && !has("enabled") {
+            fields.push(("disabled".into(), Some(Value::Bool(!after.enabled))));
+        } else {
+            fields.push(("enabled".into(), Some(Value::Bool(after.enabled))));
+        }
+    }
+    fields
 }
 
 /// Upsert or delete `[mcp.<name>]` in a TOML config file. TOML round-trips
@@ -9606,7 +9850,9 @@ struct RedactedUrls<W>(W);
 impl<W: Write> Write for RedactedUrls<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
-            Ok(text) if text.contains("://") => {
+            // `Url {` is a URL as `{:?}` writes it (rmcp logs its discovery
+            // addresses that way), with the user name and password as fields.
+            Ok(text) if text.contains("://") || text.contains("Url {") => {
                 self.0.write_all(urls_between_escapes(text).as_bytes())?;
             }
             _ => self.0.write_all(buf)?,
@@ -11103,6 +11349,8 @@ mod tests {
         let writer = super::RedactUrls(sink);
         let line = "ERROR rmcp::transport::worker: Client(reqwest::Error { url: \"http://u:PRIVATE_SUFFIX@127.0.0.1:9/mcp?api_key=PRIVATE_SUFFIX&region=eu\" })\n";
         writer.make_writer().write_all(line.as_bytes()).unwrap();
+        let debug = "DEBUG rmcp::transport::auth: discovery url: Url { scheme: \"http\", cannot_be_a_base: false, username: \"u\", password: Some(\"PRIVATE_SUFFIX\"), host: Some(Ipv4(127.0.0.1)), port: Some(9), path: \"/.well-known/oauth-authorization-server\", query: None, fragment: None }\n";
+        writer.make_writer().write_all(debug.as_bytes()).unwrap();
         writer
             .make_writer()
             .write_all(b"plain line, no address\n")
@@ -11113,7 +11361,62 @@ mod tests {
             written.contains("\"http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu\""),
             "{written}"
         );
+        assert!(
+            written.contains("username: \"<redacted>\", password: Some(\"<redacted>\"), host: Some(Ipv4(127.0.0.1))"),
+            "{written}"
+        );
         assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
+    /// The runtime is built from the memory settings: a key a newer version
+    /// wrote, or a file that is not JSON, no longer stops the server, and a
+    /// broken file keeps memory off.
+    #[test]
+    fn a_memory_settings_file_haarness_cannot_fully_read_never_stops_the_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-memory-runtime-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let memory = super::management::memory_root_for(&paths, &workspace);
+        std::fs::create_dir_all(&memory).unwrap();
+        let compose = || {
+            super::compose_runtime_sources(&paths, &workspace, false, false, Vec::new(), false)
+                .map(|sources| {
+                    sources
+                        .runtime_config
+                        .tool_availability
+                        .get("memory_save")
+                        .copied()
+                })
+                .map_err(|error| error.to_string())
+        };
+        std::fs::write(
+            memory.join("settings.json"),
+            r#"{"enabled": false, "summaryModel": "from a newer Haarness"}"#,
+        )
+        .unwrap();
+        assert_eq!(compose(), Ok(Some(false)));
+        // A file that cannot be read keeps memory off rather than on.
+        std::fs::write(memory.join("settings.json"), r#"{"enabled": false,}"#).unwrap();
+        assert_eq!(compose(), Ok(Some(false)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_web_link_reaches_the_system_opener() {
+        // Should the check ever go, none of these opens anything here.
+        for refused in [
+            "file:///nonexistent/haarness-fixture.app",
+            "x-haarness-unregistered-fixture://open",
+            "not a link",
+        ] {
+            assert_eq!(
+                super::open_browser(refused).unwrap_err().to_string(),
+                "only http and https links open in the browser",
+                "{refused}"
+            );
+        }
     }
 
     #[test]
@@ -12909,6 +13212,7 @@ request_timeout = 0
             pid: Some(4243),
             cols: 80,
             rows: 24,
+            created: false,
         })
         .unwrap()
     }

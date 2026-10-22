@@ -30,7 +30,10 @@ pub struct OpenAiCompatibleProvider {
     auth_store: Option<Arc<CredentialStore>>,
     auth_aliases: Vec<String>,
     xai_oauth: Option<XaiOAuthClient>,
-    refresh_lock: Mutex<()>,
+    /// How long a sign-in renewal may wait for its server.
+    renewal_limit: std::time::Duration,
+    /// Held by the renewal task, not its caller (see [`Self::bearer_token`]).
+    refresh_lock: Arc<Mutex<()>>,
     models: Vec<ModelInfo>,
     live_models: crate::live_models::LiveModels,
     /// Models whose endpoint explicitly accepts the OpenAI-style
@@ -96,7 +99,8 @@ impl OpenAiCompatibleProvider {
             auth_store: None,
             auth_aliases: Vec::new(),
             xai_oauth: (provider_id == "xai").then(XaiOAuthClient::default),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             models: instance
                 .models
@@ -248,7 +252,8 @@ impl OpenAiCompatibleProvider {
             auth_store: None,
             auth_aliases: Vec::new(),
             xai_oauth: None,
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Arc::default(),
+            renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             models: vec![model_info("openai-compatible", "compat-test", defaults)],
             reasoning_effort_models: HashSet::from(["compat-test".into()]),
@@ -288,7 +293,7 @@ impl OpenAiCompatibleProvider {
                 || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60))
         });
         if expires_soon {
-            let _guard = self.refresh_lock.lock().await;
+            let guard = self.refresh_lock.clone().lock_owned().await;
             stored = self.stored_credential()?;
             credential = stored.as_ref().map(|(_, credential)| credential.clone());
             let current = credential
@@ -310,15 +315,46 @@ impl OpenAiCompatibleProvider {
                     .as_ref()
                     .map(|(id, _)| id.as_str())
                     .unwrap_or(self.id.as_str());
-                let next = client.refresh(oauth).await.map_err(provider_error)?;
-                if store
-                    .replace_oauth_if_current(credential_id, &expected_refresh, &next)
-                    .map_err(provider_error)?
-                {
-                    credential = Some(next);
-                } else {
-                    credential = self.stored_credential()?.map(|(_, credential)| credential);
-                }
+                // xAI spends a refresh token the moment it answers. A request
+                // that gives up mid-refresh (a Stop) must not drop the new one
+                // before it is saved, or the next request sends the spent one
+                // and the sign-in ends: the renewal runs on its own task,
+                // which keeps the lock until it has saved, or until xAI has
+                // not answered for `renewal_limit`.
+                let (client, store, stale, credential_id) = (
+                    client.clone(),
+                    store.clone(),
+                    current.clone(),
+                    credential_id.to_owned(),
+                );
+                let (limit, name) = (self.renewal_limit, self.name.clone());
+                let renewed = haarness_account::renewals::spawn(async move {
+                    let _guard = guard;
+                    let oauth = stale.oauth_parts().expect("an OAuth credential");
+                    let next = tokio::time::timeout(limit, client.refresh(oauth))
+                        .await
+                        .map_err(|_| {
+                            CoreError::Provider(format!(
+                                "{name} did not answer the sign-in renewal in time; try again"
+                            ))
+                        })?
+                        .map_err(provider_error)?;
+                    let saved = store
+                        .replace_oauth_if_current(&credential_id, &expected_refresh, &next)
+                        .map_err(provider_error)?;
+                    Ok::<_, CoreError>(saved.then_some(next))
+                })
+                .await
+                .map_err(|_| {
+                    CoreError::Provider(format!(
+                        "Renewing the {} sign-in stopped unexpectedly",
+                        self.name
+                    ))
+                })??;
+                credential = match renewed {
+                    Some(next) => Some(next),
+                    None => self.stored_credential()?.map(|(_, credential)| credential),
+                };
             }
         }
         credential
@@ -1275,7 +1311,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         messages.append(&mut tool_media);
-        if self.marks_prompt_cache(&model) {
+        if self.marks_prompt_cache(&model) && !request.parameters.uncached {
             mark_prompt_cache(&mut messages);
         }
         let mut requested_tools = request.tools;
@@ -1642,6 +1678,172 @@ mod tests {
             "refresh_token": "refresh-new",
             "expires_in": 3600
         }))
+    }
+
+    #[tokio::test]
+    async fn an_xai_refresh_the_request_gave_up_on_is_still_saved() {
+        // xAI spends a refresh token once it has it, and refuses a spent one.
+        async fn slow_refresh(
+            State(presented): State<Arc<parking_lot::Mutex<Vec<String>>>>,
+            body: String,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            let token = url::form_urlencoded::parse(body.as_bytes())
+                .find(|(name, _)| name == "refresh_token")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default();
+            let spent = presented.lock().contains(&token);
+            presented.lock().push(token);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            if spent {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_grant"})),
+                );
+            }
+            (
+                axum::http::StatusCode::OK,
+                Json(json!({
+                    "access_token": "access-new",
+                    "refresh_token": "refresh-new",
+                    "expires_in": 3600
+                })),
+            )
+        }
+        let presented = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let router = Router::new()
+            .route("/token", post(slow_refresh))
+            .with_state(presented.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-xai-cancelled-refresh-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(CredentialStore::new(root.join("auth.json")));
+        store
+            .set(
+                "xai",
+                &Credential::oauth("access-old".into(), "refresh-old".into(), 1, None),
+            )
+            .unwrap();
+        let mut provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "xai".into(),
+            name: "xAI".into(),
+            base_url: "http://unused.invalid/v1".into(),
+            api_key: None,
+            models: vec!["grok-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .with_auth_store(Some(store.clone()));
+        provider.xai_oauth = Some(XaiOAuthClient::new(XaiOAuthConfig {
+            token_url: format!("http://{address}/token"),
+            device_url: format!("http://{address}/device"),
+            client_id: "test-client".into(),
+            scope: "test".into(),
+            user_agent: "haarness-test".into(),
+        }));
+
+        // A Stop while xAI is answering the refresh, which returns at once.
+        let started = std::time::Instant::now();
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            provider.bearer_token(),
+        )
+        .await;
+        assert!(stopped.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        // The next request uses the token the refresh saved.
+        assert_eq!(
+            provider.bearer_token().await.unwrap().as_deref(),
+            Some("access-new")
+        );
+        assert_eq!(presented.lock().len(), 1);
+        let stored = store.get("xai").unwrap().unwrap();
+        assert_eq!(stored.oauth_parts().unwrap().refresh, "refresh-new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_xai_renewal_the_server_never_answers_frees_the_next_request() {
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gate = stalled.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route(
+                "/token",
+                post(move |state: State<Arc<AtomicUsize>>| {
+                    let gate = gate.clone();
+                    async move {
+                        if gate.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                        }
+                        xai_refresh(state).await
+                    }
+                }),
+            )
+            .with_state(calls.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-xai-stalled-refresh-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(CredentialStore::new(root.join("auth.json")));
+        store
+            .set(
+                "xai",
+                &Credential::oauth("access-old".into(), "refresh-old".into(), 1, None),
+            )
+            .unwrap();
+        let mut provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "xai".into(),
+            name: "xAI".into(),
+            base_url: "http://unused.invalid/v1".into(),
+            api_key: None,
+            models: vec!["grok-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .with_auth_store(Some(store.clone()));
+        provider.renewal_limit = std::time::Duration::from_millis(300);
+        provider.xai_oauth = Some(XaiOAuthClient::new(XaiOAuthConfig {
+            token_url: format!("http://{address}/token"),
+            device_url: format!("http://{address}/device"),
+            client_id: "test-client".into(),
+            scope: "test".into(),
+            user_agent: "haarness-test".into(),
+        }));
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(10), provider.bearer_token())
+                .await
+                .expect("the renewal gave up within its limit")
+                .expect_err("the stalled renewal failed")
+                .to_string();
+        assert!(
+            error.contains("xAI did not answer the sign-in renewal in time"),
+            "{error}"
+        );
+        stalled.store(false, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), provider.bearer_token())
+                .await
+                .expect("the next request was not held by the lock")
+                .unwrap()
+                .as_deref(),
+            Some("access-new")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2080,7 +2282,12 @@ mod tests {
             assume_authenticated: true,
             headers: crate::ProviderHeaders::default(),
         });
-        for model in ["anthropic/claude-sonnet-5.5", "openai/gpt-6.1-sol"] {
+        // The last: a compaction summary, which nothing reads back.
+        for (model, uncached) in [
+            ("anthropic/claude-sonnet-5.5", false),
+            ("openai/gpt-6.1-sol", false),
+            ("anthropic/claude-sonnet-5.5", true),
+        ] {
             let text = |role: &str, content: &str| ProviderMessage::Text {
                 role: role.into(),
                 content: content.into(),
@@ -2097,7 +2304,10 @@ mod tests {
                 tools: vec![],
                 reasoning_effort: None,
                 output_schema: None,
-                parameters: haarness_core::RequestParameters::default(),
+                parameters: haarness_core::RequestParameters {
+                    uncached,
+                    ..haarness_core::RequestParameters::default()
+                },
             };
             let events = provider
                 .stream(request, CancellationToken::new())
@@ -2121,6 +2331,10 @@ mod tests {
         assert!(
             marked(&requests[1]).iter().all(|marked| !marked),
             "only Anthropic accepts cache_control"
+        );
+        assert!(
+            marked(&requests[2]).iter().all(|marked| !marked),
+            "a request nothing reads back writes no cache entry"
         );
         // The runtime holds back concurrent siblings only where markers go out.
         assert!(
@@ -2257,6 +2471,7 @@ mod tests {
                 options: serde_json::Map::from_iter([("seed".to_owned(), json!(7))]),
                 cache_key: None,
                 limits: haarness_core::StreamLimits::default(),
+                uncached: false,
             },
             output_schema: None,
         };

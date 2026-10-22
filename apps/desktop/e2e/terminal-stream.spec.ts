@@ -392,9 +392,28 @@ test("a terminal whose connection went dead while the machine slept connects aga
 });
 
 // Last: it replaces the server the other tests use.
-test("after the server is replaced, the terminal it no longer has gives way to a new shell", async () => {
+test("after the server is replaced, the terminal it no longer has gives way to one new shell in every window", async () => {
   test.setTimeout(240_000);
   await prompt();
+  // A second window on the project, its terminal panel open too.
+  const opened = app.waitForEvent("window");
+  await app.evaluate(({ Menu }) => {
+    const find = (items: Electron.MenuItem[]): Electron.MenuItem | undefined =>
+      items.reduce<Electron.MenuItem | undefined>(
+        (found, item) => found ?? (item.label === "New window" ? item : item.submenu && find(item.submenu.items)),
+        undefined,
+      );
+    find(Menu.getApplicationMenu()?.items ?? [])?.click();
+  });
+  const second = await opened;
+  second.on("pageerror", (error) => errors.push(error.message));
+  await second.setViewportSize({ width: 1500, height: 950 });
+  const home = second.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true });
+  await expect(home.or(second.locator('.application[data-project-ready="true"]'))).toBeVisible({ timeout: 90_000 });
+  if (await home.isVisible()) await home.click();
+  await expect(second.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });
+  await second.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(second.locator(".terminal-view .xterm-rows")).toContainText("query-shell$");
   const old = (await client.listPtys()).map((item) => item.id);
   const instance = (await client.info()).serverInstanceId;
   await client.shutdownServer();
@@ -419,11 +438,40 @@ test("after the server is replaced, the terminal it no longer has gives way to a
   );
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect.poll(() => client.listPtys().then((items) => items.length), { timeout: 60_000 }).toBe(1);
-  const [shell] = await client.listPtys();
+  // Both windows looked for a terminal at once; neither opened a second one.
+  await expect
+    .poll(async () => (await Promise.all([page, second].map((window) => window.locator("[data-cycle-tab]").count()))).join(), {
+      timeout: 60_000,
+    })
+    .toBe("1,1");
+  await page.waitForTimeout(2000);
+  const [shell, ...others] = await client.listPtys();
+  expect(others).toEqual([]);
   expect(old).not.toContain(shell.id);
+  // A window asking for a first terminal now is handed this one, and told it
+  // did not start it, so it adopts its output instead of answering it again.
+  for (const view of [page, second]) {
+    const handed = await view.evaluate(
+      (id) => window.haarness.api<{ id: string; created?: boolean }>(id, "createPty", [{ cols: 100, rows: 20, ifNone: true }]),
+      "local:" + workspace,
+    );
+    expect(handed).toMatchObject({ id: shell.id });
+    expect(handed.created).toBe(false);
+  }
   // Only the new terminal is listed, and it is the one shown and connected.
-  await expect(page.locator("[data-cycle-tab]")).toHaveCount(1);
-  await expect(page.locator(`[data-cycle-tab="${shell.id}"]`)).toHaveAttribute("aria-current", "true");
+  for (const window of [page, second]) {
+    await expect(window.locator("[data-cycle-tab]")).toHaveCount(1);
+    await expect(window.locator(`[data-cycle-tab="${shell.id}"]`)).toHaveAttribute("aria-current", "true");
+  }
+  // The shell asked both windows for their device attributes as it started;
+  // one answered, so nothing was left on its command line, and either
+  // window types into it.
+  await expect.poll(() => read("start-answers.txt").then((text) => text.trim().split("\n").at(-1))).toBe("answered:6");
+  const secondInput = second.locator(".xterm-helper-textarea");
+  await secondInput.fill(`printf second > ${join(temporary, "second.txt")}`);
+  await secondInput.press("Enter");
+  await expect.poll(() => read("second.txt"), { timeout: 30_000 }).toBe("second");
+  await second.close();
   await prompt();
   await input().fill(`printf replaced > ${join(temporary, "replaced.txt")}`);
   await input().press("Enter");
