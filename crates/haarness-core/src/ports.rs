@@ -205,6 +205,20 @@ pub trait ThreadRepository: Send + Sync {
         turn: Option<TurnId>,
         data: ItemData,
     ) -> CoreResult<Item>;
+    /// Append `items` to `thread` in order, all or none. Stores without
+    /// transactions append them one at a time.
+    async fn append_items(
+        &self,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        items: Vec<ItemData>,
+    ) -> CoreResult<Vec<Item>> {
+        let mut appended = Vec::with_capacity(items.len());
+        for data in items {
+            appended.push(self.append_item(thread, turn, data).await?);
+        }
+        Ok(appended)
+    }
     async fn set_turn_status(
         &self,
         id: TurnId,
@@ -409,6 +423,12 @@ pub struct RequestParameters {
     /// of the request on the wire.
     #[serde(skip)]
     pub limits: crate::StreamLimits,
+    /// No later request reads this one's prefix (a compaction summary):
+    /// providers that mark prompt-cache breakpoints leave them out, so no
+    /// cache entry is written and paid for. Not part of the request on the
+    /// wire.
+    #[serde(skip)]
+    pub uncached: bool,
 }
 
 #[derive(Debug, Clone)]

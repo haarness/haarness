@@ -1833,7 +1833,16 @@ impl ApiClient {
                 }
                 let mut stream = response.bytes_stream();
                 let mut buffer = Vec::new();
-                while let Some(Ok(chunk)) = stream.next().await {
+                // A server ends the stream of a client that fell too far
+                // behind straight after `resync_required`; the state is being
+                // refreshed already, so that end reconnects quietly.
+                let mut resynced = false;
+                let ended = loop {
+                    let chunk = match stream.next().await {
+                        Some(Ok(chunk)) => chunk,
+                        Some(Err(_)) => break false,
+                        None => break true,
+                    };
                     buffer.extend_from_slice(&chunk);
                     while let Some(index) = buffer.windows(2).position(|window| window == b"\n\n") {
                         let frame: Vec<_> = buffer.drain(..index + 2).collect();
@@ -1854,11 +1863,13 @@ impl ApiClient {
                                         continue;
                                     }
                                     cursor = Some(event.event_id);
+                                    resynced = false;
                                     if tx.send(SubscriptionEvent::Event(event)).await.is_err() {
                                         return;
                                     }
                                 }
                                 SubscriptionEvent::ResyncRequired => {
+                                    resynced = true;
                                     if tx.send(SubscriptionEvent::ResyncRequired).await.is_err() {
                                         return;
                                     }
@@ -1870,6 +1881,10 @@ impl ApiClient {
                             }
                         }
                     }
+                };
+                if ended && resynced {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
                 }
                 attempt = attempt.saturating_add(1);
                 disconnected = true;
@@ -2113,6 +2128,7 @@ mod tests {
             pid: None,
             cols: 80,
             rows: 24,
+            created: false,
         })
         .unwrap();
         let (queries, mut asked) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -2478,6 +2494,66 @@ mod tests {
                 .iter()
                 .all(|request| request.contains("authorization: Bearer new-token"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_stream_the_server_ends_after_resync_required_reconnects_quietly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let instance = uuid::Uuid::now_v7();
+        let info = serde_json::to_string(&fixture_server_info(instance, "/workspace")).unwrap();
+        let event = haarness_protocol::EventEnvelope {
+            schema_version: haarness_protocol::SCHEMA_VERSION.into(),
+            server_instance_id: instance,
+            event_id: 9,
+            event_type: "thread.updated".into(),
+            thread_id: None,
+            root_thread_id: None,
+            turn_id: None,
+            item_id: None,
+            payload: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+        };
+        let server = tokio::spawn(serve_responses(
+            listener,
+            vec![
+                response("application/json", &info),
+                // A client too far behind: told to resync, then the response ends.
+                response(
+                    "text/event-stream",
+                    "event: resync_required\ndata: {\"type\":\"resync_required\"}\n\n",
+                ),
+                response("application/json", &info),
+                response(
+                    "text/event-stream",
+                    &format!(
+                        "id: 9\nevent: thread.updated\ndata: {}\n\n",
+                        serde_json::to_string(&event).unwrap()
+                    ),
+                ),
+            ],
+        ));
+        let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
+        let (mut events, event_task) = client.subscribe(None);
+        let mut seen = Vec::new();
+        while !matches!(seen.last(), Some(SubscriptionEvent::Event(_))) {
+            seen.push(
+                tokio::time::timeout(Duration::from_secs(3), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        event_task.abort();
+        let _ = event_task.await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [SubscriptionEvent::ResyncRequired, SubscriptionEvent::Event(event)] if event.event_id == 9
+            ),
+            "no connection-lost notice between the resync and the next stream: {seen:?}"
+        );
+        assert_eq!(server.await.unwrap().len(), 4);
     }
 
     #[tokio::test]

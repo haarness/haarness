@@ -9,8 +9,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use haarness_core::AgentRuntime;
 use haarness_protocol::{EventEnvelope, ThreadId};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub const HEADER: &str = "x-haarness-remote-thread";
@@ -26,33 +28,80 @@ pub fn root(headers: &axum::http::HeaderMap) -> Option<ThreadId> {
         .ok()
         .map(ThreadId)
 }
-pub async fn event_allowed(
-    event: &EventEnvelope,
+/// Which events one stream of a published chat may see: those of the chat's
+/// conversation tree. The tree is read once and again only for a chat the
+/// stream has not met yet (a subagent started meanwhile), so the events of
+/// other chats on this computer cost no lookup each.
+pub struct EventScope {
     root: Option<ThreadId>,
-    state: &ServerState,
-) -> bool {
-    let Some(root) = root else { return true };
-    // Published chats explicitly share project files and readable capability catalogs.
-    // Their invalidations carry no unrelated conversation content.
-    if event.thread_id.is_none()
-        && matches!(
-            event.event_type.as_str(),
-            "files.updated" | "assets.updated"
-        )
-    {
-        return true;
+    tree: Option<HashSet<ThreadId>>,
+    outside: HashSet<ThreadId>,
+    /// How often the tree was read.
+    reads: usize,
+}
+impl EventScope {
+    #[must_use]
+    pub fn new(root: Option<ThreadId>) -> Self {
+        Self {
+            root,
+            tree: None,
+            outside: HashSet::new(),
+            reads: 0,
+        }
     }
-    if event.root_thread_id == Some(root) || event.thread_id == Some(root) {
-        return true;
+    /// Whether `event` reaches this stream's client, when that is known
+    /// without reading the chat tree again (`None` when it is not).
+    #[must_use]
+    pub fn decided(&self, event: &EventEnvelope) -> Option<bool> {
+        let Some(root) = self.root else {
+            return Some(true);
+        };
+        // Published chats explicitly share project files and readable capability catalogs.
+        // Their invalidations carry no unrelated conversation content.
+        if event.thread_id.is_none()
+            && matches!(
+                event.event_type.as_str(),
+                "files.updated" | "assets.updated"
+            )
+        {
+            return Some(true);
+        }
+        if event.root_thread_id == Some(root) || event.thread_id == Some(root) {
+            return Some(true);
+        }
+        let Some(thread) = event.thread_id else {
+            return Some(false);
+        };
+        if self.outside.contains(&thread) {
+            return Some(false);
+        }
+        self.tree
+            .as_ref()
+            .is_some_and(|tree| tree.contains(&thread))
+            .then_some(true)
     }
-    let Some(thread) = event.thread_id else {
-        return false;
-    };
-    state
-        .runtime
-        .thread_tree_ids(root)
-        .await
-        .is_ok_and(|ids| ids.contains(&thread))
+    pub async fn allows(&mut self, event: &EventEnvelope, runtime: &AgentRuntime) -> bool {
+        if let Some(decided) = self.decided(event) {
+            return decided;
+        }
+        let (Some(root), Some(thread)) = (self.root, event.thread_id) else {
+            return false;
+        };
+        // A chat never changes its parent, so one that is outside the tree
+        // now stays outside; a new subagent joins at its first event.
+        self.reads += 1;
+        match runtime.thread_tree_ids(root).await {
+            Ok(tree) => {
+                let inside = tree.contains(&thread);
+                self.tree = Some(tree);
+                if !inside {
+                    self.outside.insert(thread);
+                }
+                inside
+            }
+            Err(_) => false,
+        }
+    }
 }
 pub async fn enforce(State(state): State<ServerState>, request: Request, next: Next) -> Response {
     if !request.headers().contains_key(HEADER) {
@@ -150,4 +199,60 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
     }
     parts.headers.remove("content-length");
     Response::from_parts(parts, Body::from(body.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use haarness_core::{EventBus, StaticProviderRegistry};
+    use haarness_protocol::CreateThreadRequest;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_published_chats_stream_reads_its_tree_once_per_chat_it_meets() {
+        let events = EventBus::new(16);
+        let runtime = AgentRuntime::new(
+            Arc::new(haarness_store::SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(Vec::new())),
+            Arc::new(crate::NativeToolRegistry::new(std::env::temp_dir())),
+            events.clone(),
+        );
+        let create = |parent| {
+            runtime.create_thread(CreateThreadRequest {
+                parent_id: parent,
+                provider: Some("echo".into()),
+                model: Some("echo-1".into()),
+                ..Default::default()
+            })
+        };
+        let root = create(None).await.unwrap().id;
+        let child = create(Some(root)).await.unwrap().id;
+        let other = create(None).await.unwrap().id;
+        let event = |thread: ThreadId| {
+            events.publish(
+                "turn.text_delta",
+                Some(thread),
+                None,
+                None,
+                json!({"delta": "x"}),
+            )
+        };
+        let mut scope = EventScope::new(Some(root));
+        for _ in 0..50 {
+            assert!(!scope.allows(&event(other), &runtime).await);
+            assert!(scope.allows(&event(child), &runtime).await);
+            assert!(scope.allows(&event(root), &runtime).await);
+        }
+        assert_eq!(
+            scope.reads, 1,
+            "another chat's events cost one read, not one each"
+        );
+        // A subagent started after the stream opened joins at its first event.
+        let late = create(Some(child)).await.unwrap().id;
+        assert!(scope.allows(&event(late), &runtime).await);
+        assert!(!scope.allows(&event(other), &runtime).await);
+        assert_eq!(scope.reads, 2);
+        let mut unscoped = EventScope::new(None);
+        assert!(unscoped.allows(&event(other), &runtime).await);
+    }
 }

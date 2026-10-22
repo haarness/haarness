@@ -159,7 +159,11 @@ Reopening Haarness hydrates an authoritative process-wide activity snapshot and
 continues streaming. Use `/cancel` for one turn or `haarness serve --stop` for
 an explicit server-wide shutdown. `haarness run` is the exception: Ctrl-C (or
 SIGTERM from a cancelled CI job) stops its chat's turns, helpers and workflows
-on the server before it exits with status 130 (143). A permission prompt during
+on the server before it exits with status 130 (143), and so does closing the
+terminal window a run is attended in (SIGHUP, status 129; the second
+hang-up a closing shell such as zsh sends does not cut that stop short, while
+a second Ctrl-C or SIGTERM still exits at once); a run without a terminal,
+such as one under `nohup`, leaves SIGHUP as it found it. A permission prompt during
 `haarness run` is asked at the terminal; without one (a script, CI), the run
 refuses it and stops, naming what was asked: allow it with a permission rule,
 or pass `--yolo`. After an ungraceful server/process failure,

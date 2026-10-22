@@ -29,6 +29,13 @@ pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
 }
 
+/// The prompt of a turn a retried start returns: read by its chat as well as
+/// its turn, so it goes through the chat's item index instead of reading
+/// every item in the database.
+const RETRIED_TURN_PROMPT: &str =
+    "SELECT id,thread_id,turn_id,sequence,data_json,created_at FROM items
+     WHERE thread_id=?1 AND turn_id=?2 ORDER BY sequence LIMIT 1";
+
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> CoreResult<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -597,8 +604,8 @@ impl SqliteStore {
         ).optional().map_err(storage)? {
             let turn = decode_turn(raw_turn)?;
             let raw = tx.query_row(
-                "SELECT id,thread_id,turn_id,sequence,data_json,created_at FROM items WHERE turn_id=?1 ORDER BY sequence LIMIT 1",
-                [turn.id.to_string()], raw_item,
+                RETRIED_TURN_PROMPT,
+                params![id.to_string(), turn.id.to_string()], raw_item,
             ).map_err(storage)?;
             return Ok((turn, decode_item(raw)?, false));
         }
@@ -681,6 +688,35 @@ impl SqliteStore {
         .map_err(storage)?;
         tx.commit().map_err(storage)?;
         Ok((turn, item, true))
+    }
+
+    /// One item appended inside `tx`, the chat's last change time with it.
+    fn insert_item(
+        tx: &rusqlite::Transaction<'_>,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        data: ItemData,
+    ) -> CoreResult<Item> {
+        let now = Utc::now();
+        let item = Item {
+            id: ItemId::new(),
+            thread_id: thread,
+            turn_id: turn,
+            sequence: Self::next_sequence(tx, thread)?,
+            data,
+            created_at: now,
+        };
+        tx.execute(
+            "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![item.id.to_string(), thread.to_string(), turn.map(|id| id.to_string()), i64::try_from(item.sequence).map_err(storage)?,
+                serde_json::to_string(&item.data).map_err(storage)?, time(now)],
+        ).map_err(storage)?;
+        tx.execute(
+            "UPDATE threads SET updated_at=?2 WHERE id=?1",
+            params![thread.to_string(), time(now)],
+        )
+        .map_err(storage)?;
+        Ok(item)
     }
 
     fn next_sequence(connection: &Connection, thread_id: ThreadId) -> CoreResult<u64> {
@@ -986,27 +1022,27 @@ impl ThreadRepository for SqliteStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
-        let now = Utc::now();
-        let item = Item {
-            id: ItemId::new(),
-            thread_id: thread,
-            turn_id: turn,
-            sequence: Self::next_sequence(&tx, thread)?,
-            data,
-            created_at: now,
-        };
-        tx.execute(
-            "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![item.id.to_string(), thread.to_string(), turn.map(|id| id.to_string()), i64::try_from(item.sequence).map_err(storage)?,
-                serde_json::to_string(&item.data).map_err(storage)?, time(now)],
-        ).map_err(storage)?;
-        tx.execute(
-            "UPDATE threads SET updated_at=?2 WHERE id=?1",
-            params![thread.to_string(), time(now)],
-        )
-        .map_err(storage)?;
+        let item = Self::insert_item(&tx, thread, turn, data)?;
         tx.commit().map_err(storage)?;
         Ok(item)
+    }
+
+    async fn append_items(
+        &self,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        items: Vec<ItemData>,
+    ) -> CoreResult<Vec<Item>> {
+        let mut connection = self.connection.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let items = items
+            .into_iter()
+            .map(|data| Self::insert_item(&tx, thread, turn, data))
+            .collect::<CoreResult<Vec<_>>>()?;
+        tx.commit().map_err(storage)?;
+        Ok(items)
     }
 
     async fn set_turn_status(
@@ -1763,6 +1799,47 @@ fn storage(error: impl std::fmt::Display) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_retried_turn_start_finds_its_prompt_through_the_chat_index() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let request = StartTurnRequest {
+            request_id: RequestId::new(),
+            text: "the prompt".into(),
+            attachments: Vec::new(),
+            synthetic: false,
+            auto_approve: false,
+            agent: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            tools: None,
+            command: None,
+        };
+        let (turn, prompt, created) = store.start_turn(thread.id, request.clone()).await.unwrap();
+        assert!(created);
+        let (again, retried, created) = store.start_turn(thread.id, request).await.unwrap();
+        assert!(!created);
+        assert_eq!((again.id, retried.id), (turn.id, prompt.id));
+        let plan = store
+            .connection
+            .lock()
+            .prepare(&format!("EXPLAIN QUERY PLAN {RETRIED_TURN_PROMPT}"))
+            .unwrap()
+            .query_map(params![thread.id.to_string(), turn.id.to_string()], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("idx_items_thread_sequence"), "{plan}");
+        assert!(!plan.contains("SCAN items"), "{plan}");
+    }
 
     #[tokio::test]
     async fn a_chosen_thread_id_is_stored_once_and_never_overwritten() {
