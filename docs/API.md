@@ -167,7 +167,11 @@ in `/v1/info.capabilities` advertise this contract.
 Interactive PTYs are process-local resources owned by one workspace server.
 Create accepts optional `title`, `command`, `args`, and workspace-contained
 `cwd`, plus positive `cols` and `rows`; omitting the command starts the user's
-shell. Patch changes the title and/or resizes using both dimensions. A WebSocket
+shell. With `ifNone: true` it starts one only when the project has no running
+terminal and otherwise answers with its oldest running one (still `201`), so
+several windows that each open a first terminal at once, as after the server
+was replaced, share one shell: Desktop's terminal panel asks this way when it
+finds none, and so does the terminal UI's first `/terminal`. Patch changes the title and/or resizes using both dimensions. A WebSocket
 client sends raw input as binary frames and receives raw output as binary
 frames. JSON text control frames mark replay boundaries and acknowledge the
 monotonic byte `cursor`; reconnecting with the last acknowledged cursor replays

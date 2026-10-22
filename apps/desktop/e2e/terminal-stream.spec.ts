@@ -363,9 +363,28 @@ test("Option types what the layout composes until Settings makes it a Meta key",
 });
 
 // Last: it replaces the server the other tests use.
-test("after the server is replaced, the terminal it no longer has gives way to a new shell", async () => {
+test("after the server is replaced, the terminal it no longer has gives way to one new shell in every window", async () => {
   test.setTimeout(240_000);
   await prompt();
+  // A second window on the project, its terminal panel open too.
+  const opened = app.waitForEvent("window");
+  await app.evaluate(({ Menu }) => {
+    const find = (items: Electron.MenuItem[]): Electron.MenuItem | undefined =>
+      items.reduce<Electron.MenuItem | undefined>(
+        (found, item) => found ?? (item.label === "New window" ? item : item.submenu && find(item.submenu.items)),
+        undefined,
+      );
+    find(Menu.getApplicationMenu()?.items ?? [])?.click();
+  });
+  const second = await opened;
+  second.on("pageerror", (error) => errors.push(error.message));
+  await second.setViewportSize({ width: 1500, height: 950 });
+  const home = second.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true });
+  await expect(home.or(second.locator('.application[data-project-ready="true"]'))).toBeVisible({ timeout: 90_000 });
+  if (await home.isVisible()) await home.click();
+  await expect(second.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });
+  await second.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(second.locator(".terminal-view .xterm-rows")).toContainText("query-shell$");
   const old = (await client.listPtys()).map((item) => item.id);
   const instance = (await client.info()).serverInstanceId;
   await client.shutdownServer();
@@ -390,12 +409,26 @@ test("after the server is replaced, the terminal it no longer has gives way to a
   );
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect.poll(() => client.listPtys().then((items) => items.length), { timeout: 60_000 }).toBe(1);
-  const [shell] = await client.listPtys();
+  // Both windows looked for a terminal at once; neither opened a second one.
+  await expect
+    .poll(async () => (await Promise.all([page, second].map((window) => window.locator("[data-cycle-tab]").count()))).join(), {
+      timeout: 60_000,
+    })
+    .toBe("1,1");
+  await page.waitForTimeout(2000);
+  const [shell, ...others] = await client.listPtys();
+  expect(others).toEqual([]);
   expect(old).not.toContain(shell.id);
   // Only the new terminal is listed, and it is the one shown and connected.
-  await expect(page.locator("[data-cycle-tab]")).toHaveCount(1);
-  await expect(page.locator(`[data-cycle-tab="${shell.id}"]`)).toHaveAttribute("aria-current", "true");
+  for (const window of [page, second]) {
+    await expect(window.locator("[data-cycle-tab]")).toHaveCount(1);
+    await expect(window.locator(`[data-cycle-tab="${shell.id}"]`)).toHaveAttribute("aria-current", "true");
+  }
+  await second.close();
   await prompt();
+  // Both windows answered the shell's start-up query; the second answer is
+  // left on its command line, so start a fresh one.
+  await input().press("Control+c");
   await input().fill(`printf replaced > ${join(temporary, "replaced.txt")}`);
   await input().press("Enter");
   await expect.poll(() => read("replaced.txt"), { timeout: 30_000 }).toBe("replaced");

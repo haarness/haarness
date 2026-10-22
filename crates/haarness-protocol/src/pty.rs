@@ -62,6 +62,12 @@ pub struct PtyCreateRequest {
     pub cols: u16,
     #[serde(default = "default_rows")]
     pub rows: u16,
+    /// Start a terminal only when the project has none running; otherwise
+    /// return its oldest running one. Several windows opening "a terminal" at
+    /// once (after the server was replaced, say) then share one shell instead
+    /// of starting one each.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_none: bool,
 }
 
 const fn default_cols() -> u16 {
@@ -81,6 +87,7 @@ impl Default for PtyCreateRequest {
             cwd: None,
             cols: default_cols(),
             rows: default_rows(),
+            if_none: false,
         }
     }
 }
