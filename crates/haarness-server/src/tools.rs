@@ -3061,10 +3061,10 @@ impl Tool for BuiltinTool {
                         ..
                     } = operation
                         && let (Ok(source), Ok(destination)) = (
-                            self.resolve_existing(path, &context),
+                            self.resolve_entry(path, &context),
                             self.resolve_new(target, &context),
                         )
-                        && same_file(&source, &destination)
+                        && same_entry(&source, &destination)
                     {
                         return Err(CoreError::Invalid(format!(
                             "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
@@ -3106,9 +3106,13 @@ impl Tool for BuiltinTool {
                             let updated = haarness_core::patch::apply_hunks(&text, &hunks)
                                 .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
                             if let Some(target) = move_to {
+                                // The move takes the source's entry away: a
+                                // link goes, not the file it leads to.
+                                let entry = self.resolve_entry(&path, &context)?;
+                                let removed = entry_diff_body(&entry).await;
                                 let destination = self.resolve_new(&target, &context)?;
                                 // A file the patch added earlier is checked here.
-                                if same_file(&resolved, &destination) {
+                                if same_entry(&entry, &destination) {
                                     return Err(CoreError::Invalid(format!(
                                         "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
                                     )));
@@ -3122,17 +3126,10 @@ impl Tool for BuiltinTool {
                                 tokio::fs::write(&destination, &updated)
                                     .await
                                     .map_err(tool_error)?;
-                                tokio::fs::remove_file(&resolved)
-                                    .await
-                                    .map_err(tool_error)?;
+                                tokio::fs::remove_file(&entry).await.map_err(tool_error)?;
                                 push_tool_diff(
                                     &mut diffs,
-                                    text_file_diff(
-                                        &path,
-                                        FileDiffStatus::Deleted,
-                                        Some(&text),
-                                        None,
-                                    ),
+                                    deletion_diff(&path, removed),
                                     &mut diffs_truncated,
                                 );
                                 push_tool_diff(
@@ -3159,8 +3156,9 @@ impl Tool for BuiltinTool {
                             }
                         }
                         haarness_core::patch::FileOp::Delete { path } => {
-                            let resolved = self.resolve_existing(&path, &context)?;
-                            let existing = existing_diff_body(&resolved).await;
+                            // A link is deleted itself, not the file it leads to.
+                            let resolved = self.resolve_entry(&path, &context)?;
+                            let existing = entry_diff_body(&resolved).await;
                             tokio::fs::remove_file(&resolved)
                                 .await
                                 .map_err(tool_error)?;
@@ -3290,6 +3288,13 @@ impl BuiltinTool {
         let path = haarness_core::resolve_permission_path(&self.workspace, value)
             .canonicalize()
             .map_err(tool_error)?;
+        self.ensure_within(path, context)
+    }
+    /// A file the tool removes (a delete, the old name of a move): a link
+    /// there is the entry itself, so only the folder holding it is followed.
+    fn resolve_entry(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+        let path = haarness_core::resolve_permission_entry(&self.workspace, value);
+        std::fs::symlink_metadata(&path).map_err(tool_error)?;
         self.ensure_within(path, context)
     }
     fn resolve_new(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
@@ -3446,6 +3451,16 @@ impl SecretFilter {
 
 /// Whether two paths name one existing file: the same device and inode on
 /// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
+/// Whether the entry a move removes is the file it writes. A link is its
+/// own entry: moving it onto the file it leads to writes that file and
+/// removes only the link.
+fn same_entry(entry: &Path, destination: &Path) -> bool {
+    if std::fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return entry == destination;
+    }
+    same_file(entry, destination)
+}
+
 fn same_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -3961,6 +3976,19 @@ async fn existing_diff_body(path: &Path) -> ExistingDiffBody {
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ExistingDiffBody::Missing,
         Err(_) => ExistingDiffBody::Opaque { binary: false },
+    }
+}
+
+/// What a removed entry held: a link's target path (as Git shows a link),
+/// otherwise the file's contents.
+async fn entry_diff_body(path: &Path) -> ExistingDiffBody {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => tokio::fs::read_link(path)
+            .await
+            .map_or(ExistingDiffBody::Opaque { binary: false }, |target| {
+                ExistingDiffBody::Text(target.to_string_lossy().into_owned())
+            }),
+        _ => existing_diff_body(path).await,
     }
 }
 
@@ -5374,6 +5402,90 @@ export default workflow({
             "a\n"
         );
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_deletes_and_moves_a_link_itself_not_the_file_it_leads_to() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("haarness-patch-links-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        std::fs::write(outside.join("kept.txt"), "outside\n").unwrap();
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        symlink(outside.join("kept.txt"), workspace.join("out.txt")).unwrap();
+        symlink("missing.txt", workspace.join("dangling.txt")).unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: &str| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            let input = input.to_owned();
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+
+        // Deleting a link removes the link, and the file it leads to stays.
+        let deleted = run("*** Begin Patch\n*** Delete File: alias.txt\n*** End Patch\n").await;
+        assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+            "real\n"
+        );
+        // The removed link's diff shows what Git shows for a link.
+        let deleted = deleted.unwrap();
+        let diffs = deleted.metadata["diffs"].as_array().unwrap();
+        assert_eq!(diffs[0]["file"], "alias.txt");
+        assert_eq!(diffs[0]["before"], "real.txt");
+        // So does one outside the project (no outside folder was granted),
+        // and a dangling link goes too.
+        run("*** Begin Patch\n*** Delete File: out.txt\n*** Delete File: dangling.txt\n*** End Patch\n")
+            .await
+            .unwrap();
+        for link in ["out.txt", "dangling.txt"] {
+            assert!(
+                std::fs::symlink_metadata(workspace.join(link)).is_err(),
+                "{link}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "outside\n"
+        );
+
+        // A move reads through the link and takes away only the link, also
+        // when it moves onto the file the link leads to.
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        run("*** Begin Patch\n*** Update File: alias.txt\n*** Move to: moved.txt\n@@\n-real\n+moved\n*** End Patch\n")
+            .await
+            .unwrap();
+        assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("moved.txt")).unwrap(),
+            "moved\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+            "real\n"
+        );
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        run("*** Begin Patch\n*** Update File: alias.txt\n*** Move to: real.txt\n@@\n-real\n+through\n*** End Patch\n")
+            .await
+            .unwrap();
+        assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+            "through\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

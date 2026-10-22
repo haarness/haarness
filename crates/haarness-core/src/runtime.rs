@@ -11864,18 +11864,16 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 let mut patterns: Vec<String> = Vec::new();
                 let mut resolved = Vec::new();
                 for operation in &parsed {
-                    let destination = match operation {
-                        crate::patch::FileOp::Update {
-                            move_to: Some(target),
-                            ..
-                        } => Some(target.as_str()),
-                        _ => None,
-                    };
-                    for path in std::iter::once(operation.path()).chain(destination) {
+                    for (path, kind) in patch_paths(operation) {
                         if !patterns.iter().any(|known| known == path) {
                             patterns.push(path.to_owned());
                         }
-                        if let Some(pattern) = resolved_file_pattern(workspace, path)
+                        let resolved_pattern = if kind == ExternalPathKind::Entry {
+                            resolved_entry_pattern(workspace, path)
+                        } else {
+                            resolved_file_pattern(workspace, path)
+                        };
+                        if let Some(pattern) = resolved_pattern
                             && !patterns.contains(&pattern)
                         {
                             resolved.push((pattern.clone(), pattern.clone()));
@@ -12000,6 +11998,42 @@ fn resolved_file_pattern(workspace: &Path, target: &str) -> Option<String> {
         return None;
     }
     let resolved = crate::permissions::resolve_permission_path(workspace, target);
+    resolved_pattern(workspace, target, &resolved)
+}
+
+/// [`resolved_file_pattern`] for a file the tool removes: a link there is
+/// the entry itself, so only the folders before it are followed.
+fn resolved_entry_pattern(workspace: &Path, target: &str) -> Option<String> {
+    if target.is_empty() || target == "*" {
+        return None;
+    }
+    let resolved = crate::permissions::resolve_permission_entry(workspace, target);
+    resolved_pattern(workspace, target, &resolved)
+}
+
+/// The paths an apply_patch operation touches and how it reaches each. A
+/// delete removes the entry, not what a link there leads to. A move reads
+/// its source through any link, writes the destination and removes the
+/// source's entry.
+fn patch_paths(operation: &crate::patch::FileOp) -> Vec<(&str, ExternalPathKind)> {
+    match operation {
+        crate::patch::FileOp::Delete { path } => vec![(path, ExternalPathKind::Entry)],
+        crate::patch::FileOp::Update {
+            path,
+            move_to: Some(target),
+            ..
+        } => vec![
+            (path, ExternalPathKind::File),
+            (path, ExternalPathKind::Entry),
+            (target, ExternalPathKind::File),
+        ],
+        crate::patch::FileOp::Add { path, .. } | crate::patch::FileOp::Update { path, .. } => {
+            vec![(path, ExternalPathKind::File)]
+        }
+    }
+}
+
+fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<String> {
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
@@ -12354,10 +12388,13 @@ mod shell_reading_tests {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ExternalPathKind {
     File,
     Directory,
+    /// A file the tool removes (a delete, the old name of a move): a link
+    /// there is the entry itself, so only its folder is followed.
+    Entry,
 }
 
 /// External-directory preflight for filesystem tools.
@@ -12368,7 +12405,11 @@ fn external_path_request(
     value: &str,
     kind: ExternalPathKind,
 ) -> Option<(String, PathBuf)> {
-    let path = crate::permissions::resolve_permission_path(workspace, value);
+    let path = if kind == ExternalPathKind::Entry {
+        crate::permissions::resolve_permission_entry(workspace, value)
+    } else {
+        crate::permissions::resolve_permission_path(workspace, value)
+    };
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
@@ -12377,7 +12418,7 @@ fn external_path_request(
     }
     let directory = match kind {
         ExternalPathKind::Directory => path.as_path(),
-        ExternalPathKind::File => path.parent().unwrap_or(path.as_path()),
+        ExternalPathKind::File | ExternalPathKind::Entry => path.parent().unwrap_or(path.as_path()),
     };
     let pattern = format!(
         "{}/*",
@@ -12451,14 +12492,9 @@ fn external_path_requests(
             if let Some(input) = arguments.get("input").and_then(serde_json::Value::as_str)
                 && let Ok(operations) = crate::patch::parse_patch(input)
             {
-                for operation in operations {
-                    add(operation.path(), ExternalPathKind::File);
-                    if let crate::patch::FileOp::Update {
-                        move_to: Some(target),
-                        ..
-                    } = operation
-                    {
-                        add(&target, ExternalPathKind::File);
+                for operation in &operations {
+                    for (path, kind) in patch_paths(operation) {
+                        add(path, kind);
                     }
                 }
             }
@@ -14631,6 +14667,54 @@ mod tests {
             vec!["vendor/lib.rs", "src/../vendor/new.rs", "vendor/new.rs"]
         );
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_patch_that_deletes_or_moves_a_link_is_judged_by_the_link_itself() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-patch-entry-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("kept.txt"), "x\n").unwrap();
+        std::fs::write(workspace.join(".env"), "SECRET=1\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("kept.txt"), workspace.join("out.txt")).unwrap();
+        std::os::unix::fs::symlink(".env", workspace.join("notes.txt")).unwrap();
+        let plans = |body: &str| {
+            super::ask_plans(
+                "apply_patch",
+                &json!({"input": format!("*** Begin Patch\n{body}*** End Patch")}),
+                &workspace,
+            )
+        };
+        // Deleting a link inside the project removes only the link: nothing
+        // outside is asked about, and the file it leads to is not named.
+        let delete = plans("*** Delete File: out.txt\n*** Delete File: notes.txt\n");
+        assert_eq!(
+            delete.len(),
+            1,
+            "{:?}",
+            delete
+                .iter()
+                .map(|plan| &plan.permission)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(delete[0].patterns, vec!["out.txt", "notes.txt"]);
+        // A move still reads through the link, so the folder it leads to is
+        // asked about and its target meets the rules, as before.
+        let moved = plans("*** Update File: out.txt\n*** Move to: copy.txt\n@@\n-x\n+y\n");
+        let outside_folder = outside.canonicalize().unwrap();
+        assert_eq!(moved[0].permission, "external_directory");
+        assert_eq!(
+            moved[0].external_paths,
+            vec![outside_folder.join("kept.txt")]
+        );
+        let moved =
+            plans("*** Update File: notes.txt\n*** Move to: copy.txt\n@@\n-SECRET=1\n+SECRET=2\n");
+        assert_eq!(moved[0].patterns, vec!["notes.txt", ".env", "copy.txt"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
