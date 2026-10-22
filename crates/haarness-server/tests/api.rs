@@ -7491,6 +7491,84 @@ async fn a_client_too_far_behind_is_told_to_resync_and_its_stream_ends() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_whose_replay_is_larger_than_its_queue_resyncs_once_and_stays_live() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let thread = haarness_protocol::ThreadId::new();
+    // While the client was away, more was published than a connection's
+    // queue holds, though less than the bus keeps.
+    let cursor = runtime.events().cursor();
+    for _ in 0..24 {
+        runtime.events().publish(
+            "item.created",
+            Some(thread),
+            None,
+            None,
+            serde_json::json!({"text": "x".repeat(1024 * 1024)}),
+        );
+    }
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let mut connection = socket.connect(handle.address).await.unwrap();
+    connection
+        .write_all(
+            format!(
+                "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer activity-token\r\nLast-Event-ID: {cursor}\r\n\r\n",
+                handle.address,
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    // It reconnects from that cursor and reads nothing while its replay is
+    // queued; then something new is published.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    runtime.events().publish(
+        "turn.finished",
+        Some(thread),
+        None,
+        None,
+        serde_json::json!({}),
+    );
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut buffer = vec![0_u8; 256 * 1024];
+        let marker = b"event: turn.finished";
+        loop {
+            let read = connection.read(&mut buffer).await.unwrap();
+            raw.extend_from_slice(&buffer[..read]);
+            assert!(
+                read > 0 && !raw.ends_with(b"\r\n0\r\n\r\n"),
+                "the stream ended: {}",
+                String::from_utf8_lossy(&dechunked(&raw))
+                    .lines()
+                    .filter(|line| line.starts_with("event: "))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let tail = &raw[raw.len().saturating_sub(read + marker.len())..];
+            if tail.windows(marker.len()).any(|window| window == marker) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("what is published next arrives");
+    let text = String::from_utf8_lossy(&dechunked(&raw)).into_owned();
+    assert_eq!(text.matches("event: resync_required").count(), 1);
+    let resync = text.find("event: resync_required").unwrap();
+    assert!(
+        !text[resync..].contains("event: item.created"),
+        "the rest of the replay is left to the resync"
+    );
+    assert!(text[resync..].contains("event: turn.finished"));
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_event_larger_than_a_connections_queue_reaches_a_client_that_reads() {
     let workspace = std::env::temp_dir();
     let (runtime, _) = p0_runtime(&workspace, true);

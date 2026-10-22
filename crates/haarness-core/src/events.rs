@@ -221,7 +221,8 @@ enum Entry {
 /// larger than the limit (a message with several screenshots) still goes
 /// out. Past it, or after the bus dropped events for it, the queue lets go of
 /// everything and holds only `resync_required`: the connection then ends, and
-/// its client reconnects from its cursor.
+/// its client reconnects from its cursor. A replay past it resyncs instead
+/// and stays open (see [`Self::push_replay`]).
 pub struct PendingEvents {
     entries: VecDeque<(Entry, usize)>,
     size: usize,
@@ -253,6 +254,23 @@ impl PendingEvents {
         self.insert(event);
         if self.over_limit() {
             return Err(self.give_up());
+        }
+        Ok(())
+    }
+
+    /// Queue `event` from the replay a connection starts with. The replay is
+    /// what the bus kept, so it is bounded already, and the client has not
+    /// read any of it yet: past the limit the queue lets go of what waits
+    /// and holds only `resync_required`, as for a cursor older than the bus,
+    /// but stays open for the events published from now on. It says how many
+    /// events it let go; the rest of the replay is not queued.
+    pub fn push_replay(&mut self, event: EventEnvelope) -> Result<(), usize> {
+        if self.given_up {
+            return Err(0);
+        }
+        self.insert(event);
+        if self.over_limit() {
+            return Err(self.resync());
         }
         Ok(())
     }
@@ -301,7 +319,8 @@ impl PendingEvents {
     /// `resync_required`; returns how many events went.
     fn resync(&mut self) -> usize {
         let dropped = self.entries.len();
-        let data = serde_json::json!({"type": "resync_required"});
+        // As a connection whose cursor is older than the bus is told.
+        let data = serde_json::json!({"schemaVersion": SCHEMA_VERSION, "type": "resync_required"});
         self.entries = VecDeque::from([(
             Entry::Encoded(EncodedEvent {
                 id: None,
@@ -691,6 +710,44 @@ mod tests {
             after += 1;
         }
         assert!((behind..=behind + 2).contains(&after), "{behind} {after}");
+    }
+
+    #[test]
+    fn a_replay_larger_than_the_queue_leaves_resync_required_first_and_stays_open() {
+        let bus = EventBus::new(16);
+        let thread = ThreadId::new();
+        let mut pending = PendingEvents::new(64 * 1024);
+        let big = "x".repeat(10_000);
+        let replayed = (0..20).find_map(|index| {
+            pending
+                .push_replay(bus.publish(
+                    "item.created",
+                    Some(thread),
+                    None,
+                    None,
+                    json!({"text": big}),
+                ))
+                .err()
+                .map(|dropped| (index, dropped))
+        });
+        let (index, dropped) = replayed.expect("the replay overflows");
+        assert!(index < 10 && dropped == index + 1, "{index} {dropped}");
+        // Not given up: what is published next follows the marker.
+        assert!(!pending.given_up());
+        let live = bus.publish("turn.finished", Some(thread), None, None, json!({}));
+        let live_id = live.event_id;
+        pending.push(live).unwrap();
+        let marker = pending.pop().unwrap();
+        assert_eq!((marker.id, marker.name.as_str()), (None, "resync_required"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&marker.data).unwrap()["schemaVersion"],
+            SCHEMA_VERSION
+        );
+        let rest: Vec<_> = drained(&mut pending)
+            .into_iter()
+            .map(|event| event.event_id)
+            .collect();
+        assert_eq!(rest, [live_id]);
     }
 
     #[test]
