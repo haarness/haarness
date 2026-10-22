@@ -34,9 +34,11 @@ import {
   createMemo,
   createRoot,
   createSignal,
+  on,
   untrack,
   type ParentProps,
 } from "solid-js";
+import { computers } from "./computers";
 import { createStore, reconcile, unwrap } from "solid-js/store";
 import type * as T from "@haarness/sdk";
 import {
@@ -889,6 +891,23 @@ function createApp(saved?: Preferences) {
     }
     return pending;
   }
+  // A computer renamed in Cloud takes its new name once the list is read.
+  createEffect(
+    on(
+      () => computers.items.map((item) => item.id + "\n" + item.name).join("\n"),
+      () => {
+        for (const computer of computers.items) {
+          const saved = state.servers.find((item) => item.host === computer.id);
+          if (saved && saved.label !== computer.name)
+            void window.haarness
+              .server({ id: computer.id, action: "host", label: computer.name })
+              .then((value) => set("servers", value))
+              .catch(() => {});
+        }
+      },
+      { defer: true },
+    ),
+  );
   const servers = createMemo(() => [
     localServer,
     ...state.servers,
@@ -1193,6 +1212,9 @@ function createApp(saved?: Preferences) {
             return (
               !!current &&
               current.checkout?.exists !== false &&
+              // Another computer is reached through Haarness Cloud: only
+              // while it is the server shown, never in the background.
+              (!current.remoteHost || serverKey(current) === state.activeServer) &&
               (!!state.expandedProjects[projectKey(current)] ||
                 state.sidebarLayout === "flat" ||
                 state.searchOpen ||

@@ -92,6 +92,28 @@ test("relayed requests carry the sign-in and are sent again with a fresh one whe
   );
 });
 
+test("a read waits out the moment the computer's connector is away; anything else is sent once", async () => {
+  let away = 2;
+  const seen: string[] = [];
+  await withCloud(
+    (request, response) => {
+      seen.push(request.method!);
+      if (away > 0 || request.method === "POST") {
+        away--;
+        return json(response, 409, { error: { code: "conflict", message: "Remote host is offline or its connection changed. Reconnect and check the current state before retrying.", retryable: false } });
+      }
+      json(response, 200, { ok: true });
+    },
+    async (url) => {
+      const relay = createRelay(async () => ({ token: "t", apiUrl: url }));
+      assert.equal((await relay.fetch(url + "/v1/info")).status, 200);
+      assert.deepEqual(seen, ["GET", "GET", "GET"]);
+      assert.equal((await relay.fetch(url + "/v1/threads", { method: "POST", body: "{}" })).status, 409);
+      assert.deepEqual(seen, ["GET", "GET", "GET", "POST"]);
+    },
+  );
+});
+
 test("a computer's projects, folders and one of its projects open through Cloud's relay path", async () => {
   const requests: string[] = [];
   await withCloud(

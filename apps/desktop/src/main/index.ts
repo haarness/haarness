@@ -1155,17 +1155,19 @@ function installHandlers() {
     };
     const client = connectionClient(item, opened);
     subscriptions.set(key, { owner: win.id, client });
-    // Cloud ends a relayed stream when the sign-in it opened with expires
-    // (every ten minutes): one that worked for a while follows on at once
-    // from its last event with a fresh one, as if nothing happened. A stream
-    // that fails at once is the computer gone, and is reported.
-    const relayed = (started: number) =>
-      !!item.resolveAuth && subscriptions.has(key) && Date.now() - started > 30_000;
+    // Cloud ends a relayed stream when the sign-in it opened with expires,
+    // and when the other computer's connector renews its own (each about
+    // every ten minutes; the computer is back within seconds). A stream that
+    // worked for a while follows on from its last event, as if nothing
+    // happened, trying for up to 15 s; a computer gone longer is reported.
+    const relayed = !!item.resolveAuth;
     void (async () => {
       try {
         let after = cursor;
+        let quietUntil = 0;
         for (;;) {
           const started = Date.now();
+          let failure: unknown;
           try {
             for await (const event of client.events({
               after,
@@ -1176,10 +1178,18 @@ function installHandlers() {
               if ("eventId" in event) after = event.eventId;
             }
           } catch (error) {
-            if (!relayed(started)) throw error;
-            continue;
+            failure = error;
           }
-          if (!relayed(started)) break;
+          if (!relayed || !subscriptions.has(key)) {
+            if (failure) throw failure;
+            break;
+          }
+          if (Date.now() - started > 30_000) quietUntil = Date.now() + 15_000;
+          if (Date.now() >= quietUntil) {
+            if (failure) throw failure;
+            break;
+          }
+          if (Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 1_000));
         }
         send(win, {
           kind: "connection",
