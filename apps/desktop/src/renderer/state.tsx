@@ -634,7 +634,12 @@ function createApp() {
     retryDue = Date.now() + delay;
     reconnectTimer = setTimeout(() => {
       retryPending = false;
-      void hydrate().catch((error) => {
+      const attempt = hydrate();
+      // A later attempt (a signal's, or another project's) replaced this one:
+      // its late failure says nothing about the connection now.
+      const operation = hydration;
+      void attempt.catch((error) => {
+        if (stopped || operation !== hydration) return;
         set("error", String(error));
         reconnect();
       });
@@ -1437,7 +1442,10 @@ function createApp() {
       lastCursor = 0;
       lastInstance = "";
       reconnectWait.reset();
+      // The project before had a reconnect of its own waiting.
       recovering = false;
+      clearTimeout(reconnectTimer);
+      retryPending = false;
       selection++;
       batch(() => {
         set("ready", false);

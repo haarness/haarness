@@ -360,6 +360,8 @@ async function relay(target: string) {
     url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
     /** How many requests named `line` (`GET /v1/threads`) arrived. */
     count: (line: string) => seen.filter((item) => item === line).length,
+    /** How many requests whose line ends with `end` arrived. */
+    ending: (end: string) => seen.filter((item) => item.endsWith(end)).length,
     /** How many of them were answered by the server behind. */
     answered: (line: string) => answered.filter((item) => item === line).length,
     intercept(next: typeof intercept) {
@@ -691,6 +693,142 @@ test("the open project removed in another window while it reconnects is left, no
         id,
       ),
     ).toBe(false);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("an attempt a newer one replaced leaves the connected project alone when it fails late", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("late-failure");
+  const proxy = await relay(remote.url);
+  try {
+    await launch();
+    await addServer("Late server", proxy.url, remote.token);
+    // The open project's read of its server fails, so it connects again from
+    // the start, and that connection waits, to fail later.
+    let fail!: () => void;
+    const failing = new Promise<void>((resolve) => (fail = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    let infos = 0;
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/info") return false;
+      if (++infos > 2) return false;
+      req.resume();
+      const refuse = () => {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Server is busy" } }));
+      };
+      if (infos === 1) refuse();
+      else {
+        holding();
+        void failing.then(refuse);
+      }
+      return true;
+    });
+    proxy.cut();
+    await held;
+    // The network is back: a new attempt connects while the first waits.
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "true",
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(500);
+    await page.evaluate(() => {
+      const root = document.querySelector(".application")!;
+      const seen: string[] = [];
+      (window as unknown as { readySeen: string[] }).readySeen = seen;
+      new MutationObserver(() =>
+        seen.push(root.getAttribute("data-project-ready") ?? ""),
+      ).observe(root, {
+        attributes: true,
+        attributeFilter: ["data-project-ready"],
+      });
+    });
+    const reads = proxy.count("GET /v1/threads");
+    fail();
+    await page.waitForTimeout(2000);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { readySeen: string[] }).readySeen,
+      ),
+    ).toEqual([]);
+    expect(proxy.count("GET /v1/threads")).toBe(reads);
+    await expect(page.locator(".error-banner")).toHaveCount(0);
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("opening another project while the one before waits to reconnect leaves the new one undisturbed", async () => {
+  test.setTimeout(180000);
+  const remote = await endpoint("switch-first");
+  const other = join(temporary, "switch-second");
+  await mkdir(other);
+  workspaces.push(other);
+  const proxy = await relay(remote.url);
+  const ready = () => page.locator(".application");
+  const heading = (name: string) =>
+    page.locator(".sidebar .project-heading").filter({ hasText: name });
+  try {
+    await launch();
+    await addServer("Switch server", proxy.url, remote.token);
+    // A second project on the same server, then back to the first.
+    await page
+      .getByRole("button", { name: "Open another project", exact: true })
+      .click();
+    const picker = page.getByRole("dialog", {
+      name: "Open remote project",
+      exact: true,
+    });
+    await picker.getByLabel("Remote folder", { exact: true }).fill(other);
+    await picker
+      .getByRole("button", { name: "Open project", exact: true })
+      .click();
+    await expect(picker).not.toBeVisible({ timeout: 60000 });
+    await expect(heading("switch-second")).toHaveClass(/current/);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    await heading("switch-first").click();
+    await expect(heading("switch-first")).toHaveClass(/current/);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    // The first project's stream is refused: its waits grow to 4 s.
+    proxy.intercept((req, res) => {
+      if (new URL(req.url!, proxy.url).pathname !== "/v1/events") return false;
+      req.resume();
+      res.writeHead(502);
+      res.end();
+      return true;
+    });
+    proxy.cut();
+    await page.waitForTimeout(4000);
+    await heading("switch-second").click();
+    await expect(heading("switch-second")).toHaveClass(/current/);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    await page.evaluate(() => {
+      const root = document.querySelector(".application")!;
+      const seen: string[] = [];
+      (window as unknown as { readySeen: string[] }).readySeen = seen;
+      new MutationObserver(() =>
+        seen.push(root.getAttribute("data-project-ready") ?? ""),
+      ).observe(root, {
+        attributes: true,
+        attributeFilter: ["data-project-ready"],
+      });
+    });
+    const reads = proxy.ending("/v1/threads");
+    // Past the moment the first project's next attempt was due.
+    await page.waitForTimeout(6000);
+    expect(proxy.ending("/v1/threads")).toBe(reads);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { readySeen: string[] }).readySeen,
+      ),
+    ).toEqual([]);
   } finally {
     await app?.close();
     await proxy.close();
