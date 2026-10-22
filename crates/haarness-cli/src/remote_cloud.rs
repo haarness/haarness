@@ -753,7 +753,25 @@ async fn relay_link(
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
             if matches!(response.status().as_u16(), 403 | 404) =>
         {
-            anyhow::bail!("Remote host access was revoked or is no longer allowed")
+            match refusal(&response) {
+                Some(reason) => {
+                    anyhow::bail!("Haarness Cloud refused this computer's connection: {reason}")
+                }
+                None => anyhow::bail!("Remote host access was revoked or is no longer allowed"),
+            }
+        }
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
+            outage.failed(&match refusal(&response) {
+                Some(reason) => format!(
+                    "Haarness Cloud refused the connection ({}): {reason}; reconnecting",
+                    response.status()
+                ),
+                None => format!(
+                    "Could not reach Haarness Cloud: HTTP error: {}; reconnecting",
+                    response.status()
+                ),
+            });
+            return Ok(Link::Failed);
         }
         Ok(Err(error)) => {
             outage.failed(&format!(
@@ -820,6 +838,30 @@ async fn relay_link(
         return Ok(Link::Failed);
     }
     Ok(Link::Ended { proven })
+}
+/// What Cloud said when it refused the relay's upgrade: its error's
+/// `message`, on one line and clipped, so the connector's output and
+/// `remote status` can name the reason. Nothing when it said nothing.
+fn refusal(
+    response: &tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+) -> Option<String> {
+    let body: Value = serde_json::from_slice(response.body().as_deref()?).ok()?;
+    let message = body["message"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())?;
+    let message: String = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(200)
+        .collect();
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_owned())
 }
 /// A connection proved itself: say how long the outage before it lasted.
 fn reconnected(outage: &mut Outage) {
@@ -1978,6 +2020,87 @@ mod tests {
         );
         assert_eq!(relay_ready(r#"{"type":"ready"}"#), None);
         assert_eq!(relay_ready(r#"{"type":"open","version":1}"#), None);
+    }
+    /// A Cloud that refuses each relay upgrade with `status` and its error body.
+    async fn refusing_cloud(refusals: Vec<(u16, &'static str)>) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/connect", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            for (status, message) in refusals {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let body = json!({"code":"forbidden","message":message,"requestId":"r1","retryable":false}).to_string();
+                let reply = format!(
+                    "HTTP/1.1 {status} Refused\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).await.unwrap();
+                let _ = stream.shutdown().await;
+            }
+        });
+        url
+    }
+    #[tokio::test]
+    async fn a_relay_refusal_names_what_cloud_said() {
+        let cloud = refusing_cloud(vec![
+            (409, "This host is connecting from another computer"),
+            (
+                403,
+                "Only the registered publisher can connect this host\u{1b}[2J",
+            ),
+        ])
+        .await;
+        let target = Target {
+            url: "http://127.0.0.1:9".into(),
+            token: "fixture".into(),
+            project: "project".into(),
+            thread: None,
+        };
+        let root = std::env::temp_dir().join(format!("haarness-remote-refusal-{}", Uuid::now_v7()));
+        let attention = attention(&Paths::new(Some(&root)).unwrap());
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = said.clone();
+        let mut outage = Outage::new(move |line| lines.lock().unwrap().push(line.to_owned()));
+        let http = reqwest::Client::new();
+        let link = relay_link(
+            cloud.as_str().into_client_request().unwrap(),
+            &target,
+            &http,
+            Duration::from_secs(60),
+            RELAY_SILENCE,
+            &attention,
+            &mut outage,
+        )
+        .await
+        .unwrap();
+        assert_eq!(link, Link::Failed);
+        assert_eq!(
+            said.lock().unwrap().as_slice(),
+            [
+                "Haarness Cloud refused the connection (409 Conflict): This host is connecting from another computer; reconnecting"
+            ]
+        );
+        let error = relay_link(
+            cloud.as_str().into_client_request().unwrap(),
+            &target,
+            &http,
+            Duration::from_secs(60),
+            RELAY_SILENCE,
+            &attention,
+            &mut outage,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Haarness Cloud refused this computer's connection: Only the registered publisher can connect this host [2J"
+        );
     }
     /// Attention context for `paths`, with waits short enough for tests.
     fn attention(paths: &Paths) -> Arc<remote_attention::Context> {
