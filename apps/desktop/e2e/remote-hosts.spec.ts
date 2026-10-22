@@ -9,20 +9,16 @@ import { execFileSync } from "node:child_process";
 /**
  * Your other computers in Desktop, through a Haarness Cloud this test plays:
  * the account's host list and the relay to a real `haarness serve` host
- * gateway standing in for another computer. The live case uses a real local
- * Cloud with real connectors:
- *
- *   HAARNESS_REMOTE_HOSTS_API=http://127.0.0.1:19080 \
- *   HAARNESS_REMOTE_HOSTS_ACCOUNT=<signed-in HAARNESS_CLOUD_CONFIG_DIR> \
- *   HAARNESS_REMOTE_HOSTS_DATA=<this computer's data dir, with its connector> \
- *   HAARNESS_REMOTE_HOSTS_OTHER=<name of another computer's connector, running> \
- *   HAARNESS_REMOTE_HOSTS_SELF=<name of this computer's connector> \
- *   npx playwright test e2e/remote-hosts.spec.ts
+ * gateway standing in for another computer. The live case runs against a real
+ * local Cloud with real connectors, set up by scripts/test-remote-hosts-live.py
+ * (HAARNESS_REMOTE_HOSTS_LONG=1 also waits past a relayed sign-in's lifetime).
  *
  * Screenshots go to HAARNESS_REMOTE_HOSTS_SHOTS when it is set.
  */
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 const shots = process.env.HAARNESS_REMOTE_HOSTS_SHOTS;
+/** The live case also waits past a relayed sign-in's ten minutes. */
+const long = process.env.HAARNESS_REMOTE_HOSTS_LONG === "1";
 const account = "00000000-0000-4000-8000-00000000c001";
 const studio = "6a0c1b2e-0000-4000-8000-000000000001";
 const away = "6a0c1b2e-0000-4000-8000-000000000002";
@@ -42,15 +38,16 @@ async function shoot(page: Page, name: string, theme?: "light" | "dark") {
 
 /** The Cloud of this test: what it was asked, and the computer it relays to. */
 async function fakeCloud(gateway: { url: string; token: string }) {
-  const seen: { method: string; path: string; authorization?: string }[] = [];
-  const state = { offline: false, issued: 0 };
+  const seen: { method: string; path: string; authorization?: string; away?: boolean }[] = [];
+  const state = { offline: false, issued: 0, renamed: false, rejectFirst: false };
+  const streams = new Set<ServerResponse>();
   const json = (response: ServerResponse, status: number, body: unknown) => {
     response.writeHead(status, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
   };
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url!, "http://cloud");
-    seen.push({ method: request.method!, path: url.pathname, authorization: request.headers.authorization });
+    seen.push({ method: request.method!, path: url.pathname, authorization: request.headers.authorization, away: state.offline });
     if (url.pathname === "/oauth/token") {
       state.issued++;
       return json(response, 200, { access_token: `renewed-${state.issued}`, refresh_token: `refresh-${state.issued}`, expires_in: 600 });
@@ -71,7 +68,7 @@ async function fakeCloud(gateway: { url: string; token: string }) {
       return json(response, 200, {
         items: [
           host(away, "Old Mac", false, "host", 3),
-          host(studio, "Studio", true),
+          host(studio, state.renamed ? "Studio Mac" : "Studio", true),
           host(self, "This Mac", true),
           host(shared, "Shared investigation", true, "sessions"),
         ],
@@ -79,7 +76,14 @@ async function fakeCloud(gateway: { url: string; token: string }) {
       });
     }
     const runtime = /^\/api\/v1\/remote-hosts\/([^/]+)\/runtime\/(.+)$/.exec(url.pathname);
+    // An expired sign-in, as Cloud refuses it.
+    if (runtime && state.rejectFirst && request.headers.authorization === "Bearer first")
+      return json(response, 401, { error: { code: "unauthorized", message: "Access token expired" } });
     if (runtime && runtime[1] === studio && !state.offline) {
+      if (url.pathname.endsWith("/v1/events")) {
+        streams.add(response);
+        response.on("close", () => streams.delete(response));
+      }
       const upstream = new URL(gateway.url);
       const proxied = forward(
         {
@@ -114,6 +118,11 @@ async function fakeCloud(gateway: { url: string; token: string }) {
     url: `http://127.0.0.1:${port}`,
     seen,
     state,
+    /** Ends every relayed event stream at once, as Cloud does when the
+     * sign-in a stream opened with expires. */
+    cutStreams: () => {
+      for (const stream of streams) stream.destroy();
+    },
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((done) => server.close(() => done()));
@@ -272,10 +281,13 @@ test("your other computers open from the server switcher through Haarness Cloud,
     await expect(page.locator(".terminal-tabs .host-badge")).toHaveText("on Studio");
     await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
 
-    // Settings → Servers lists them too, below the servers you added.
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    // Settings → Servers lists them too, below the servers you added; search
+    // finds the place by its name.
+    await page.locator(".sidebar").getByRole("button", { name: "Search", exact: true }).click();
+    await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("other computers");
+    await page.getByRole("option", { name: "Your computers", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
-    await dialog.getByRole("button", { name: "Servers", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Servers", exact: true })).toHaveClass(/active/);
     const section = dialog.getByRole("region", { name: "Your computers" });
     await expect(section.locator(".computer-row").filter({ hasText: "Studio" }).getByRole("button")).toHaveText("Selected");
     const awayRow = section.locator(".computer-row").filter({ hasText: "Old Mac" });
@@ -284,6 +296,19 @@ test("your other computers open from the server switcher through Haarness Cloud,
     await expect(dialog.locator(".setting-row").filter({ hasText: "Studio" })).toHaveCount(1);
     await shoot(page, "settings-servers");
     await dialog.getByRole("button", { name: "Close settings", exact: true }).click();
+
+    // Right to left, the tag and the computers read in the reader's order.
+    if (shots) {
+      await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+      await expect(page.locator(".titlebar .host-badge")).toHaveText("على Studio");
+      await page.getByRole("button", { name: "تبديل الخادم", exact: true }).click();
+      await expect(page.getByRole("menu").getByText("حواسيبك", { exact: true })).toBeVisible();
+      await shoot(page, "switcher-menu-ar", "light");
+      await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+      await expect(page.locator(".titlebar .host-badge")).toHaveText("on Studio");
+      if ((await switcher.getAttribute("aria-expanded")) === "true") await switcher.click();
+      await expect(switcher).toHaveAttribute("aria-expanded", "false");
+    }
 
     // Back to this computer and to the other one: each reopens its project.
     await page.getByRole("button", { name: "Switch server", exact: true }).click();
@@ -320,6 +345,69 @@ test("your other computers open from the server switcher through Haarness Cloud,
     await home.getByRole("button", { name: "Retry", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
     await expect(page.locator(".titlebar .host-badge")).toHaveText("on Studio");
+
+    // Renamed in Cloud, the computer takes its new name once listed again.
+    cloud.state.renamed = true;
+    const toggle = page.getByRole("button", { name: "Switch server", exact: true });
+    await toggle.click();
+    await expect(menu.getByRole("menuitem", { name: "Studio Mac", exact: true })).toBeVisible();
+    await expect(page.locator(".server-switcher-button")).toHaveText("Studio Mac");
+    if ((await toggle.getAttribute("aria-expanded")) === "true") await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".titlebar .host-badge")).toHaveText("on Studio Mac");
+
+    // Back on this computer, a relaunch reaches nothing through Cloud: the
+    // other computer's projects stay quiet until it is shown again.
+    await page.getByRole("button", { name: "Switch server", exact: true }).click();
+    await menu.getByRole("menuitem", { name: "This computer", exact: true }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+    await close(app);
+    const quiet = cloud.seen.length;
+    ({ app, page } = await launch(env, folders.local));
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    await page.waitForTimeout(3000);
+    expect(cloud.seen.slice(quiet).filter((item) => item.path.startsWith("/api/v1/remote-hosts"))).toEqual([]);
+  } finally {
+    if (app) await close(app);
+    await stop();
+  }
+});
+
+test("a relayed event stream Cloud ends when a sign-in expires follows on without a reconnect", async () => {
+  test.setTimeout(180000);
+  const { folders, env, cloud, stop } = await fixture();
+  let app: ElectronApplication | undefined;
+  try {
+    let page: Page;
+    ({ app, page } = await launch(env, folders.local));
+    await page.getByRole("button", { name: "Switch server", exact: true }).click();
+    await page.getByRole("menu", { name: "Switch server" }).getByRole("menuitem", { name: "Studio", exact: true }).click();
+    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: /studio-project/ }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    await page.evaluate(() => {
+      const target = document.querySelector(".application")!;
+      const flag = window as unknown as { dropped: number };
+      flag.dropped = 0;
+      new MutationObserver(() => {
+        if (target.getAttribute("data-project-ready") !== "true") flag.dropped++;
+      }).observe(target, { attributes: true, attributeFilter: ["data-project-ready"] });
+    });
+    // A stream that has worked a while is cut, the sign-in it used is
+    // refused from now on, and the computer is away for a moment, as when
+    // its connector renews its own sign-in.
+    await page.waitForTimeout(32_000);
+    cloud.state.rejectFirst = true;
+    cloud.state.offline = true;
+    cloud.cutStreams();
+    setTimeout(() => (cloud.state.offline = false), 2500);
+    // The stream comes back once the computer does, with the renewed sign-in.
+    await expect.poll(() => cloud.seen.filter((item) => item.path.endsWith("/v1/events") && item.authorization === "Bearer renewed-1" && !item.away).length, { timeout: 30000 }).toBeGreaterThan(0);
+    const message = page.getByRole("textbox", { name: "Message" });
+    await message.fill("still connected");
+    await message.press("Enter");
+    await expect(page.locator(".transcript")).toContainText("Echo: still connected", { timeout: 30000 });
+    expect(await page.evaluate(() => (window as unknown as { dropped: number }).dropped)).toBe(0);
+    expect(cloud.state.issued).toBe(1);
   } finally {
     if (app) await close(app);
     await stop();
@@ -355,5 +443,111 @@ test("signed out, the switcher shows no computers and Settings says how to see t
   } finally {
     if (app) await close(app);
     await stop();
+  }
+});
+
+test("live: Desktop opens another computer through a real local Cloud and works on it", async () => {
+  const api = process.env.HAARNESS_REMOTE_HOSTS_API;
+  test.skip(!api, "Run scripts/test-remote-hosts-live.py, which sets up a local Cloud's computers for this");
+  test.setTimeout(long ? 1_200_000 : 300_000);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-remote-hosts-live-")));
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_RENDERER_URL;
+  Object.assign(env, {
+    HAARNESS_BIN: binary,
+    HAARNESS_HOME: process.env.HAARNESS_REMOTE_HOSTS_HOME!,
+    HAARNESS_DATA_DIR: process.env.HAARNESS_REMOTE_HOSTS_DATA!,
+    HAARNESS_CLOUD_CONFIG_DIR: process.env.HAARNESS_REMOTE_HOSTS_ACCOUNT!,
+    HAARNESS_CLOUD_API_URL: api!,
+    HAARNESS_CLOUD_WEB_ORIGIN: api!,
+    HAARNESS_DESKTOP_DATA: join(root, "desktop"),
+    HAARNESS_DESKTOP_TEST: "1",
+  });
+  const project = process.env.HAARNESS_REMOTE_HOSTS_PROJECT!;
+  let app: ElectronApplication | undefined;
+  try {
+    let page: Page;
+    ({ app, page } = await launch(env, root));
+    const switcher = page.getByRole("button", { name: "Switch server", exact: true });
+    await switcher.click();
+    const menu = page.getByRole("menu", { name: "Switch server" });
+    const studioItem = menu.getByRole("menuitem", { name: "Studio", exact: true });
+    await expect(studioItem).toBeEnabled({ timeout: 30000 });
+    await expect(menu.getByRole("menuitem", { name: "Old box", exact: true })).toBeDisabled();
+    await expect(menu.getByRole("menuitem", { name: "Old box", exact: true })).toHaveAttribute("aria-description", /^Last seen/);
+    // Desktop runs on Desk, whose own connector shares it: never listed.
+    await expect(menu.getByRole("menuitem", { name: "Desk" })).toHaveCount(0);
+    await shoot(page, "live-switcher-menu");
+    if ((await switcher.getAttribute("aria-expanded")) !== "true") await switcher.click();
+    await studioItem.click();
+
+    const home = page.getByRole("region", { name: "Project home" });
+    await expect(home.getByRole("heading", { name: "Choose a project on Studio" })).toBeVisible();
+    await home.getByRole("button", { name: new RegExp(project.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    await expect(page.locator(".titlebar .host-badge")).toHaveText("on Studio");
+    const message = page.getByRole("textbox", { name: "Message" });
+    await message.fill("hello over the relay");
+    await message.press("Enter");
+    await expect(page.locator(".transcript")).toContainText("Echo: hello over the relay", { timeout: 60000 });
+    await shoot(page, "live-chat");
+
+    // Its terminal runs there, through the relay.
+    await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+    await expect(page.locator(".terminal-tabs .host-badge")).toHaveText("on Studio");
+    const terminal = page.locator(".xterm-helper-textarea");
+    await expect(terminal).toBeFocused({ timeout: 30000 });
+    await terminal.pressSequentially("echo relay-$((6*7)) && pwd\n");
+    await expect(page.locator(".terminal-view .xterm-rows")).toContainText("relay-42", { timeout: 30000 });
+    await expect(page.locator(".terminal-view .xterm-rows")).toContainText("Studio/project");
+    await shoot(page, "live-terminal");
+    await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+
+    if (long) {
+      // Past the ten minutes a relayed sign-in lives: the project stays
+      // connected throughout and a reply still streams in.
+      await page.evaluate(() => {
+        const target = document.querySelector(".application")!;
+        (window as unknown as { dropped: number }).dropped = 0;
+        new MutationObserver(() => {
+          if (target.getAttribute("data-project-ready") !== "true") (window as unknown as { dropped: number }).dropped++;
+        }).observe(target, { attributes: true, attributeFilter: ["data-project-ready"] });
+      });
+      await page.waitForTimeout(11 * 60_000);
+      await message.fill("still here after the sign-in renewed");
+      await message.press("Enter");
+      await expect(page.locator(".transcript")).toContainText("Echo: still here after the sign-in renewed", { timeout: 60000 });
+      expect(await page.evaluate(() => (window as unknown as { dropped: number }).dropped)).toBe(0);
+    }
+
+    // Another of its folders opens through its own folder browser.
+    await page.locator(".sidebar").getByRole("button", { name: "Open another project", exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "Open remote project" });
+    await expect(picker).toBeVisible();
+    await expect(picker.getByText("Choose a folder on Studio.")).toBeVisible();
+    const address = picker.getByRole("combobox", { name: "Remote folder" });
+    await address.fill(project + "/second");
+    await address.press("Enter");
+    // The folder as that computer sees it, read through the relay.
+    await expect(picker.getByRole("list", { name: "Remote folders" }).getByRole("button", { name: ".haarness" })).toBeVisible({ timeout: 30000 });
+    await shoot(page, "live-folder-browser");
+    await picker.getByRole("button", { name: "Open project", exact: true }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    await expect(page.locator(".titlebar .titlebar-caption")).toHaveText("second");
+    await expect(page.locator(".titlebar .host-badge")).toHaveText("on Studio");
+
+    // Settings shows the away computer quieter, and this one selected.
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+    await dialog.getByRole("button", { name: "Servers", exact: true }).click();
+    const section = dialog.getByRole("region", { name: "Your computers" });
+    await expect(section.locator(".computer-row").filter({ hasText: "Studio" }).getByRole("button")).toHaveText("Selected");
+    await expect(section.locator(".computer-row").filter({ hasText: "Old box" })).toHaveClass(/away/);
+    await expect(section.locator(".computer-row").filter({ hasText: "Desk" })).toHaveCount(0);
+    await shoot(page, "live-settings-servers");
+  } finally {
+    if (app) await close(app);
+    await rm(root, { recursive: true, force: true }).catch(() => {});
   }
 });
