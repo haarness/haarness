@@ -387,10 +387,20 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
         "select-router" => client.select_router(id(&input)?).await?,
         "billing-summary" => serde_json::to_value(client.billing_summary().await?)?,
         // Desktop opens another computer through Cloud's relay with the
-        // current short-lived sign-in, and keeps it in memory only. A token
-        // Cloud refused comes back as `rejected` and is renewed first.
+        // current short-lived sign-in, and keeps it in memory only. It gets
+        // one that stays valid at least five more minutes (so a connection
+        // opened with it has time before Cloud ends it), and a token Cloud
+        // refused comes back as `rejected` and is renewed first. Cloud mints
+        // no short-lived credential from an API key, so with HAARNESS_API_KEY
+        // set this is the key itself, without an expiry.
         "remote-auth" => {
-            json!({"token":client.bearer(input["rejected"].as_str()).await?,"apiUrl":client.config.api_url})
+            let (token, expires) = client
+                .bearer_until(
+                    input["rejected"].as_str(),
+                    chrono::Duration::minutes(5),
+                )
+                .await?;
+            json!({"token":token,"apiUrl":client.config.api_url,"expiresAt":expires})
         }
         "logout" => {
             client.logout().await?;
@@ -841,7 +851,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn desktop_relay_sign_in_is_the_current_token_and_renews_a_refused_one() {
+    async fn desktop_relay_sign_in_has_headroom_and_renews_a_refused_one() {
         use axum::{Json, Router, routing::post};
         let renewals = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = renewals.clone();
@@ -872,6 +882,7 @@ mod tests {
             },
         )
         .unwrap();
+        let config_path = config.path();
         let client = Client::new(config).unwrap();
         let current = rpc(&client, json!({"action":"remote-auth"})).await.unwrap();
         let renewed = rpc(
@@ -880,11 +891,29 @@ mod tests {
         )
         .await
         .unwrap();
-        server.abort();
-        std::fs::remove_dir_all(dir).unwrap();
-        assert_eq!(current, json!({"token":"fixture-access","apiUrl":url}));
+        assert_eq!(current["token"], "fixture-access");
+        assert_eq!(current["apiUrl"], url);
+        assert!(current["expiresAt"].as_str().is_some());
         assert_eq!(renewed["token"], "renewed-1");
         assert_eq!(renewals.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // One that would expire within five minutes is renewed before Desktop gets it.
+        haarness_account::credentials::save(
+            &config_path,
+            &haarness_account::Credentials {
+                api_url: url.clone(),
+                access_token: "almost-expired".into(),
+                refresh_token: "refresh-1".into(),
+                access_expires_at: chrono::Utc::now() + chrono::Duration::minutes(3),
+            },
+        )
+        .unwrap();
+        let fresh = rpc(&client, json!({"action":"remote-auth"})).await.unwrap();
+        assert_eq!(fresh["token"], "renewed-2");
+        let expires: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(fresh["expiresAt"].clone()).unwrap();
+        assert!(expires > chrono::Utc::now() + chrono::Duration::minutes(9));
+        server.abort();
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn cloud_commands_keep_templates_sessions_and_legacy_workspaces_distinct() {
