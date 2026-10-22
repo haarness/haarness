@@ -952,6 +952,7 @@ html[dir="rtl"] .tool-target {
   transition: opacity 120ms ease;
 }
 .mcp-app:hover > .mcp-app-menu,
+.mcp-app.pointed > .mcp-app-menu,
 .mcp-app-menu:focus-within,
 .mcp-app-menu:has([aria-expanded="true"]) {
   opacity: 1;

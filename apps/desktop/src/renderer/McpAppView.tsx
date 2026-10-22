@@ -12,6 +12,7 @@ import {
 } from "solid-js";
 import {
   DEFAULT_HEIGHT,
+  HOVER,
   INPUT,
   LEFT,
   MAX_HEIGHT,
@@ -89,6 +90,8 @@ export function McpAppView(props: {
   /** The scheme of the last link Haarness refused after a press in the page ("" when it has none). */
   const [refused, setRefused] = createSignal<string>();
   const [render, setRender] = createSignal(0);
+  /** The pointer is over the page, which the window cannot tell past the frame. */
+  const [pointed, setPointed] = createSignal(false);
   let root!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
   let probe!: HTMLSpanElement;
@@ -284,6 +287,7 @@ export function McpAppView(props: {
       if (data.type !== "receive") return;
       const message = data.message as Record<string, unknown> | undefined;
       if (message && Array.isArray(message[WHEEL])) return wheel(message[WHEEL] as number[]);
+      if (message && HOVER in message) return void setPointed(message[HOVER] === 1);
       if (message && INPUT in message) {
         if (message[INPUT] === token) pressed = true;
         return;
@@ -359,7 +363,7 @@ export function McpAppView(props: {
       ref={root}
       data-mcp-app={props.payload.uri}
       data-state={failure() ? "failed" : left() ? "left" : loaded() ? "ready" : "loading"}
-      classList={{ bordered: page()?.meta.prefersBorder !== false }}
+      classList={{ bordered: page()?.meta.prefersBorder !== false, pointed: pointed() }}
     >
       <span ref={probe} class="mcp-app-probe" aria-hidden="true" />
       <Show when={props.turnOff}>
