@@ -9,9 +9,14 @@ supplies missing display names, context/output limits and prices; values returne
 by the provider remain authoritative. Explicit user configuration still wins.
 
 The server discovers at startup and refreshes stale catalogs on `GET /v1/providers`
-(five-minute cache). `POST /v1/providers/refresh` requests an immediate refresh;
-concurrent requests are coalesced with a one-second minimum interval. Each full
-request, including pagination, is bounded to ten seconds. Errors, partial pages
+(five-minute cache), every provider at once. Neither waits more than three seconds
+for them: a server starts answering, and a read answers with the lists it has, while
+slower lists keep loading; a read while they still load answers at once. When they
+are all in and the catalog changed, `assets.updated` (`resource: "provider"`) tells
+clients to read it again, so the TUI's status line and an open model picker fill in
+by themselves. `POST /v1/providers/refresh` (a picker opening, a key just saved)
+waits for every list; concurrent requests are coalesced with a one-second minimum
+interval. Each full request, including pagination, is bounded to ten seconds. Errors, partial pages
 and invalid responses retain the last successful catalog. Before any successful
 fetch, configured/embedded models provide the offline fallback. The cache is held
 in memory for the server lifetime.

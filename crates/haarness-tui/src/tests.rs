@@ -18173,3 +18173,82 @@ fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
     app.providers[1].authenticated = true;
     assert!(!home(&app).contains("Replies come from"));
 }
+
+/// A model list that loads past the server's short wait arrives after the
+/// first frame, announced by `assets.updated`; the status line then stops
+/// asking to connect a provider, as connecting one does.
+#[tokio::test]
+async fn a_model_list_announced_after_the_first_frame_updates_the_connect_notice() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let thread = fixture_thread();
+    let slow = |models: Vec<haarness_protocol::ModelInfo>| ProviderInfo {
+        id: "slowlist".into(),
+        name: "Slow list".into(),
+        authenticated: true,
+        models,
+    };
+    let late = serde_json::to_string(&vec![slow(vec![haarness_protocol::ModelInfo {
+        id: "late-model".into(),
+        display_name: "Late model".into(),
+        reasoning: false,
+        reasoning_efforts: Vec::new(),
+        images: false,
+        video: false,
+        tools: true,
+        context_window: None,
+        max_output_tokens: None,
+        pricing: None,
+    }])])
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = if request.starts_with(b"GET /v1/providers ") {
+                late.as_str()
+            } else {
+                "[]"
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![],
+        vec![slow(Vec::new())],
+        vec![],
+    );
+    assert_eq!(app.notice, "Connect a provider to start · /connect");
+
+    app.reduce(
+        fixture_event(
+            "assets.updated",
+            thread.id,
+            thread.id,
+            serde_json::json!({"resource": "provider", "action": "models"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(app.any_provider_connected());
+    assert_eq!(app.notice, "openai is not connected · /connect openai");
+    server.abort();
+}
