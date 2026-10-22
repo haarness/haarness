@@ -161,3 +161,67 @@ def test_optional_password_auth(endpoint, monkeypatch):
     assert calls[-1][1]["Authorization"] == "Basic YWxleDpzZWNyZXQ="
     with pytest.raises(ValueError):
         Haarness(url, username="bad:user", password="secret")
+
+
+@pytest.fixture
+def silent_endpoint():
+    """Sends one event per connection, then holds it open and sends nothing,
+    like a connection that died without closing."""
+    cursors = []
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            cursors.append(self.headers.get("Last-Event-ID"))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            event = {
+                "type": "item.created",
+                "schemaVersion": "1",
+                "serverInstanceId": "instance",
+                "eventId": 10 + len(cursors),
+                "payload": None,
+            }
+            self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
+            self.wfile.flush()
+            release.wait(10)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", cursors
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_a_silent_event_stream_is_lost_or_continues_from_its_cursor(silent_endpoint):
+    from haarness_sdk import TransportError
+
+    url, cursors = silent_endpoint
+    with Haarness(url, token="fixture") as client:
+        seen = []
+        with pytest.raises(TransportError, match="sent nothing for 0.3 s"):
+            for event in client.events(after=10, idle_timeout=0.3):
+                seen.append(event["eventId"])
+        assert seen == [11]
+        stream = client.events(after=11, reconnect=True, retry_seconds=0.01, idle_timeout=0.3)
+        assert [next(stream)["eventId"], next(stream)["eventId"]] == [12, 13]
+        stream.close()
+    assert cursors == ["10", "11", "12"]
+
+    async def scenario():
+        async with AsyncHaarness(url, token="fixture") as client:
+            with pytest.raises(TransportError, match="sent nothing"):
+                async for _event in client.events(after=13, idle_timeout=0.3):
+                    pass
+
+    asyncio.run(scenario())
