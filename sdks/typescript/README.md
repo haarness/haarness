@@ -56,7 +56,8 @@ to 20 MiB total. Profile upload/download accepts/returns Uint8Array ZIP bytes.
 
 `await LocalServer.start({workspace, executable, dataDir})` returns an owned
 server with `.client`; `await server.close()` stops only that child. Existing
-workspace servers are never replaced. Project configuration loads by default; automatic tool approval remains a
+workspace servers are never replaced: in a folder whose server already runs, the
+child is a front for it at its own address. Project configuration loads by default; automatic tool approval remains a
 separate explicit choice.
 
 See [OPERATIONS.md](OPERATIONS.md) for every method. Server command execution is
