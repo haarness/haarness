@@ -11394,6 +11394,26 @@ test("conversation context inspector shows measured usage, retained estimates an
   await expect(metric(totals,"Cache read tokens")).toHaveText("600");
   await expect(metric(totals,"Cache write tokens")).toHaveText("100");
   await expect(metric(totals,"Known cost")).toHaveText("$0.0250");
+  // Numbers follow the display language, as the labels around them do.
+  const { translate } = await import("../src/localization");
+  const translatedTotals = (code: string) =>
+    page
+      .getByRole("region", { name: translate(code, "Chat context"), exact: true })
+      .getByRole("region", { name: translate(code, "Chat usage totals"), exact: true });
+  await page.evaluate(() => window.haarness.preferences({ language: "de" }));
+  await expect(page.locator("html")).toHaveAttribute("lang", "de");
+  await expect(metric(translatedTotals("de"), translate("de", "Input tokens"))).toHaveText("1.700");
+  await expect(metric(translatedTotals("de"), translate("de", "Known cost"))).toHaveText("0,0250\u00a0$");
+  await page.screenshot({ path: test.info().outputPath("context-numbers-de-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.screenshot({ path: test.info().outputPath("context-numbers-de-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light", language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(metric(translatedTotals("ar"), translate("ar", "Known cost"))).not.toHaveText("Not available");
+  await page.screenshot({ path: test.info().outputPath("context-numbers-rtl.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(metric(latest,"Input")).toHaveText("500");
   // Its pace: 1.24 s to the first content, then 80 streamed tokens over 2 s;
   // the other 20 output tokens never streamed.

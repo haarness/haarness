@@ -320,7 +320,7 @@ The presentation layers are `provider-brands.ts` (identity), `ProviderIcon.tsx` 
 
 ## Conversation context and usage
 
-Choose **Context** from the side-panel launcher or **View chat context** in Universal search to open the **Context** side-panel tab. It follows the selected conversation and refreshes when provider usage reports arrive. The open tab is restored with the saved layout after reload. New chats show an empty state until a conversation exists.
+Choose **Context** from the side-panel launcher or **View chat context** in Universal search to open the **Context** side-panel tab. It follows the selected conversation and refreshes when provider usage reports arrive. The open tab is restored with the saved layout after reload. New chats show an empty state until a conversation exists. Counts, shares and costs are written as the interface language writes numbers (1,234 in English, 1.234 in German), and a figure the provider did not report reads “Not available” in that language.
 
 The inspector separates three measurements:
 
