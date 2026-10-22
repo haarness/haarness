@@ -94,6 +94,8 @@ export const defaults: Preferences = {
     diff: "Mod+Shift+D",
     terminal: "Mod+J",
     browser: "Mod+Shift+B",
+    // The Chromium DevTools key for inspecting an element.
+    pick: "Mod+Shift+C",
     // Composer keys, matched while the message box has focus rather than by
     // the native menu. The TUI switches agents with Tab, but here Tab has to
     // keep moving keyboard focus, so the defaults are chords.
@@ -166,6 +168,7 @@ export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
 /** Shortcuts that may be left unset: the ones added after people could
  * choose their own keys. */
 export const optionalShortcuts = new Set([
+  "pick",
   "tabNext",
   "tabPrev",
   "chatPrev",
@@ -177,27 +180,52 @@ export const optionalShortcuts = new Set([
   "promptLast",
 ]);
 /**
- * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar and
- * prompt keys, came after people chose their own keys. A new default that is
- * already another action's key in `saved` (a `Mod+Tab` agent key off macOS,
- * say) is left unset, so that action keeps it and Settings still saves; a key
- * saved before is kept as it is.
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar,
+ * prompt and pick keys, came after people chose their own keys. A new
+ * default that is already a key the person has (another action's key in
+ * `saved`, such as a `Mod+Tab` agent key off macOS or a chat key moved to
+ * `Mod+Shift+C`, or their `global` shortcut) is left unset, so they keep it
+ * and Settings still saves; a key saved before is kept as it is.
  */
 export function migrateTabKeys(
   saved: Record<string, string> | undefined,
   shortcuts: Preferences["shortcuts"],
   platform: string,
+  global?: string,
 ) {
   let next = shortcuts;
   for (const name of optionalShortcuts) {
     if (!next[name] || (saved && name in saved)) continue;
     const mine = shortcutKeys(next[name], platform);
-    const taken = Object.entries(next).some(
-      ([other, value]) => other !== name && !optionalShortcuts.has(other) && value && shortcutKeys(value, platform) === mine,
-    );
+    const theirs = (other: string) => !optionalShortcuts.has(other) || (!!saved && other in saved);
+    const taken =
+      Object.entries(next).some(
+        ([other, value]) => other !== name && theirs(other) && value && shortcutKeys(value, platform) === mine,
+      ) || (!!global && shortcutKeys(global, platform) === mine);
     if (taken) next = { ...next, [name]: "" };
   }
   return next;
+}
+/** Optional shortcuts that are native menu accelerators, not keys the page matches. */
+export const menuShortcuts = new Set(["pick"]);
+// Menu shortcuts become native accelerators, so they need a modifier and a
+// single character. Composer, tab, chat and prompt shortcuts are matched in
+// the page and may also use a named key, such as Tab for people who want
+// the TUI's, or the arrows the page reports as ArrowUp and so on.
+const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
+const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown`;
+const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
+const accelerator = new RegExp(`^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
+const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
+/**
+ * Whether Settings may save `value` for the shortcut `name`: an optional one
+ * may be unset (""), the keys the page matches may be a named key, and the
+ * rest, menu accelerators (Pick an element included), need a modifier.
+ */
+export function shortcutAccepted(name: string, value: string) {
+  if (value === "" && optionalShortcuts.has(name)) return true;
+  const page = (name === "agentNext" || name === "agentPrev" || optionalShortcuts.has(name)) && !menuShortcuts.has(name);
+  return (page ? composer : accelerator).test(value);
 }
 export interface SavedServer {
   id: string;
@@ -281,6 +309,8 @@ export interface Bridge {
   browserLayout(connection:string,thread:string,layout:BrowserLayout):Promise<void>;
   /** A JPEG data URL of the focused page, or null when nothing is drawn. */
   browserSnapshot(connection:string,thread:string):Promise<string | null>;
+  /** Starts picking an element in the page the window shows for this chat, or stops (null). */
+  browserPick(connection: string, thread: string, request: import("./browser-pick").PickRequest | null): Promise<{ tab: string } | null>;
 
   notificationReady(): Promise<NotificationTarget | null>;
   notificationHandled(target: NotificationTarget): Promise<void>;
@@ -372,6 +402,10 @@ export interface Bridge {
   chromeSetup(action: "setup" | "status"): Promise<import("./chrome").ChromeSetupInfo>;
   /** Shows the unpacked Haarness for Chrome folder the last report named. */
   chromeReveal(): Promise<void>;
+  /** The raised log level on this computer, or Detailed logging turned on or off. */
+  logLevel(action: "status" | "detail-on" | "detail-off"): Promise<import("./diagnostics").LogLevelStatus>;
+  /** Saves this computer's logs where the person chooses and shows the zip; null when cancelled. */
+  exportLogs(): Promise<import("./diagnostics").ExportedLogs | null>;
   reveal(connection: string, path?: string): Promise<void>;
   /** `write` (the person's keys) and `answer` (xterm answering a program's
    * query, which only one window does per terminal) answer false when the

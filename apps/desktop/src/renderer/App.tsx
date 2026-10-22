@@ -46,6 +46,7 @@ import { SelectionBar } from "./SelectionBar";
 import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
+import { exportLogs } from "./Diagnostics";
 type Dock = "files" | "diff" | "context" | "browser";
 
 /** Workbench panels and their launcher copy. */
@@ -172,6 +173,12 @@ export function App() {
   });
   /** The agent took the Browser's tab to another page while another panel held the side panel. */
   const [browserMoved, setBrowserMoved] = createSignal(false);
+  /** When the person last asked the Browser to pick an element; it opens to take the request. */
+  const [pickRequest, setPickRequest] = createSignal(0);
+  function pickElement() {
+    openDock("browser");
+    setPickRequest(Date.now());
+  }
   createEffect(() => {
     if (dock() === "browser") setBrowserMoved(false);
   });
@@ -490,6 +497,8 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected,action:()=>openDock("browser")},
+      {key:"export-logs",group:"Commands",name:t("Export logs…"),keywords:"logs diagnostics zip support bug report share",icon:"download",action:()=>void app.run(exportLogs)},
+      {key:"pick",group:"Project panels",name:t("Pick an element in the browser"),keywords:"inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected,action:pickElement},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
       {
         key: "permission-mode",
@@ -830,6 +839,8 @@ export function App() {
       );
     else if (value === "palette") openPalette();
     else if (value === "browser") openDock("browser");
+    else if (value === "pick" && state.connection) pickElement();
+    else if (value === "export-logs") void app.run(exportLogs);
     else if (value === "terminal") set("terminal", (v) => !v);
     else if (value === "files" || value === "diff") set("panel", value);
   }
@@ -1371,7 +1382,7 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
+              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} pickRequest={pickRequest()} />
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>

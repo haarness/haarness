@@ -10,7 +10,7 @@ import {
   defaultShortcuts,
   migrateAgentKeys,
   migrateTabKeys,
-  optionalShortcuts,
+  shortcutAccepted,
   shortcutsClash,
   type Preferences,
   type Recent,
@@ -65,6 +65,7 @@ export async function load() {
       ? state.preferences.shortcuts
       : migrateAgentKeys(state.preferences.shortcuts),
     process.platform,
+    state.preferences.globalShortcut.enabled ? state.preferences.globalShortcut.keys : undefined,
   );
   state.agentKeysMigrated = true;
   if (
@@ -173,6 +174,7 @@ export async function preferences(input: Partial<Preferences>) {
         diff: z.string(),
         terminal: z.string(),
         browser: z.string(),
+        pick: z.string(),
         agentNext: z.string(),
         agentPrev: z.string(),
         tabNext: z.string(),
@@ -199,23 +201,8 @@ export async function preferences(input: Partial<Preferences>) {
     candidate.terminalFontSize > 24
   )
     throw new Error("Invalid appearance setting");
-  // Menu shortcuts become native accelerators, so they need a modifier and a
-  // single character. Composer, tab, chat and prompt shortcuts are matched in
-  // the page and may also use a named key, such as Tab for people who want
-  // the TUI's, or the arrows the page reports as ArrowUp and so on.
-  const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
-  const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown`;
-  const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
-  const accelerator = new RegExp(
-    `^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
-  const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
-  const composerKeys = new Set(["agentNext", "agentPrev", ...optionalShortcuts]);
   if (
-    Object.entries(candidate.shortcuts).some(
-      ([name, value]) =>
-        !(value === "" && optionalShortcuts.has(name)) &&
-        !(composerKeys.has(name) ? composer : accelerator).test(value),
-    ) ||
+    Object.entries(candidate.shortcuts).some(([name, value]) => !shortcutAccepted(name, value)) ||
     shortcutsClash(candidate.shortcuts, process.platform)
   )
     // Shown as is in Settings, so it speaks the language Settings is in.

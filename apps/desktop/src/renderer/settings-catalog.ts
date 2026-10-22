@@ -30,7 +30,7 @@ export const settingsTitles: Record<string, string> = {
 };
 export const settingsKeywords: Record<string, string> = {
   general:
-    "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy",
+    "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy logs diagnostics",
   browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval chrome google edge brave extension real profile signed in accounts",
   shortcuts: "keyboard hotkey keybind key binding accelerators",
   servers: "connections remote host url token switch computer",
@@ -94,6 +94,8 @@ export const settingsControls = [
   ["general", "Messages sent while working", "steer queue input delivery project global inherited"],
   ["general", "Send message with", "enter return command control send key"],
   ["general", "Share usage statistics", "telemetry analytics privacy tokens tracking data collection"],
+  ["general", "Diagnostics", "logs export zip share support bug report problem troubleshoot"],
+  ["general", "Detailed logging", "logs debug verbose trace diagnostics log level"],
   ["tools", "Tool loading", "lazy schema context auto optional tools"],
   ["extensions", "Enable extensions", "javascript hooks scripts"],
   ["profiles", "Save a profile", "export snapshot configuration"],
@@ -111,6 +113,7 @@ export const shortcutTitles: Record<string, string> = {
   diff: "Review changes",
   terminal: "Toggle terminal",
   browser: "Open browser",
+  pick: "Pick an element",
   agentNext: "Next agent",
   agentPrev: "Previous agent",
   tabNext: "Next tab",
@@ -125,6 +128,7 @@ export const shortcutTitles: Record<string, string> = {
 };
 /** Composer keys work only in the message box; Tab elsewhere moves focus. */
 export const shortcutDescriptions: Record<string, string> = {
+  pick: "Adds part of the browser's page to your message",
   agentNext: "While the message box has focus",
   agentPrev: "While the message box has focus",
   tabNext: "In the chats, terminal, files, browser or side panel that has the keyboard",
