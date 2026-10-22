@@ -18,9 +18,6 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
   private ended = false;
   private error?: Error;
   private queuedBytes = 0;
-  /** The replay is sent (its cursor came): until then the server is busy
-   * sending it and reads no ping. */
-  private replayed = false;
   private constructor(
     private readonly socket: WebSocket,
     signal: AbortSignal,
@@ -33,8 +30,6 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
         this.queuedBytes += binary
           ? (data as Buffer).byteLength
           : data.toString().length;
-        if (!binary && (message as PtyControl).type === "cursor")
-          this.replayed = true;
         if (this.queuedBytes > 8 * 1024 * 1024) {
           this.error = new TransportError(
             "PTY consumer exceeded 8 MiB buffer; reconnect with cursor",
@@ -107,9 +102,6 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
    */
   ping(timeoutMs = 10_000): Promise<boolean> {
     if (this.socket.readyState !== WebSocket.OPEN) return Promise.resolve(false);
-    // A server sending a replay (up to 2 MB) reads no ping until it is done;
-    // what it sends meanwhile says it is there.
-    if (!this.replayed) return Promise.resolve(true);
     return new Promise((resolve) => {
       let due = Date.now() + timeoutMs;
       let extended = false;
@@ -122,7 +114,9 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
         if (!answered) this.socket.terminate();
         resolve(answered);
       };
-      // Anything from the server answers, its output included.
+      // Anything from the server answers, its output included: a server
+      // sending a replay (up to 2 MB) reads no ping until it is done, but
+      // what it sends meanwhile says it is there.
       const answer = () => done(true);
       const closed = () => done(false);
       // A timer that fires far past its time says this process could not
