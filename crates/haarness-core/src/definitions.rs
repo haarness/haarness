@@ -545,11 +545,9 @@ pub async fn prepare(
     session: &str,
     invoker: &dyn crate::ToolInvoker,
 ) -> CoreResult<String> {
-    let project_template = template.replace(
-        "${CLAUDE_PROJECT_DIR}",
-        &invoker.workspace().unwrap_or_default(),
-    );
-    let template = project_template.as_str();
+    // Snippets are found in the definition as written: a placeholder's value
+    // (a folder name holding !`…`) can never introduce one.
+    let workspace = invoker.workspace().unwrap_or_default();
     let snippets = regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex");
     let mut prepared = String::new();
     let mut last = 0;
@@ -560,11 +558,20 @@ pub async fn prepare(
             input,
             execution,
             session,
+            &workspace,
             false,
             false,
         ));
         prepared.push_str(whole.as_str().split_once("!`").unwrap().0);
-        let command = substitutions(&capture[1], input, execution, session, true, false);
+        let command = substitutions(
+            &capture[1],
+            input,
+            execution,
+            session,
+            &workspace,
+            true,
+            false,
+        );
         let result = invoker.definition_shell(command).await?;
         if result
             .metadata
@@ -592,6 +599,7 @@ pub async fn prepare(
         input,
         execution,
         session,
+        &workspace,
         false,
         false,
     ));
@@ -752,23 +760,67 @@ fn substitutions(
     input: &str,
     execution: &DefinitionExecution,
     session: &str,
+    workspace: &str,
     shell: bool,
     _append: bool,
 ) -> String {
     // Do not let supplied arguments be reinterpreted as template substitutions.
-    let mut template = template.replace("${CLAUDE_SESSION_ID}", session);
-    if let Some(directory) = &execution.directory {
-        template = template.replace("${CLAUDE_SKILL_DIR}", directory);
-    }
-    if let Some(root) = &execution.plugin_root {
-        for key in [
-            "CLAUDE_PLUGIN_ROOT",
-            "HAARNESS_PLUGIN_ROOT",
-            "OPENCODE_PLUGIN_ROOT",
-        ] {
-            template = template.replace(&format!("${{{key}}}"), root);
+    let root = execution.plugin_root.as_deref();
+    let values: Vec<(&str, &str)> = [
+        ("CLAUDE_SESSION_ID", Some(session)),
+        ("CLAUDE_PROJECT_DIR", Some(workspace)),
+        ("CLAUDE_SKILL_DIR", execution.directory.as_deref()),
+        ("CLAUDE_PLUGIN_ROOT", root),
+        ("HAARNESS_PLUGIN_ROOT", root),
+        ("OPENCODE_PLUGIN_ROOT", root),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| Some((name, value?)))
+    .collect();
+    let find = |rest: &str| {
+        values
+            .iter()
+            .find(|(name, _)| rest.starts_with(&format!("${{{name}}}")))
+            .map(|(name, _)| name.len() + 3)
+    };
+    let value = |name: &str| {
+        values
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map_or_else(String::new, |(_, value)| (*value).to_owned())
+    };
+    // A snippet runs in the agent's shell (`sh` here, `cmd` on Windows, which
+    // gets the values as they are): each value goes in quoted for where it
+    // stands, so a folder named `a b` stays one word and one named
+    // `p$(touch x)` never runs `touch`.
+    let template = if shell && cfg!(not(windows)) {
+        crate::shell_text::place_placeholders(
+            crate::shell_text::ShellKind::Posix,
+            template,
+            &find,
+            crate::shell_text::Placeholders::Fill,
+            &value,
+        )
+    } else {
+        let mut filled = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(start) = rest.find("${") {
+            filled.push_str(&rest[..start]);
+            rest = &rest[start..];
+            match find(rest) {
+                Some(length) => {
+                    filled.push_str(&value(&rest[2..length - 1]));
+                    rest = &rest[length..];
+                }
+                None => {
+                    filled.push_str("${");
+                    rest = &rest[2..];
+                }
+            }
         }
-    }
+        filled.push_str(rest);
+        filled
+    };
     // arguments() has legacy implicit-tail behavior; suppress it for segments.
     if regex::Regex::new(r"\$ARGUMENTS|\$\d+")
         .unwrap()
@@ -1024,6 +1076,78 @@ mod tests {
         fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
             Ok(false)
         }
+    }
+
+    /// Runs each `!` snippet in `sh`, as the agent's shell tool does.
+    struct ShellInvoker {
+        workspace: String,
+    }
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for ShellInvoker {
+        fn workspace(&self) -> Option<String> {
+            Some(self.workspace.clone())
+        }
+        async fn definition_shell(&self, command: String) -> CoreResult<crate::ToolOutput> {
+            let output = tokio::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .await
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            Ok(crate::ToolOutput {
+                text: stdout.clone(),
+                metadata: serde_json::json!({"exit": output.status.code(), "stdout": stdout}),
+            })
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    /// A folder name in a `!` snippet is plain text wherever it stands, and a
+    /// folder name in the template's text can never start a snippet.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn folder_names_stay_plain_text_in_definition_snippets() {
+        let workspace = "/work/p q $(printf INJECTED) it's".to_owned();
+        let invoker = ShellInvoker {
+            workspace: workspace.clone(),
+        };
+        let execution = DefinitionExecution {
+            directory: Some("/skills/my skill".into()),
+            plugin_root: Some("/plugins/a\"b".into()),
+            ..DefinitionExecution::default()
+        };
+        let text = prepare(
+            "Dirs: !`printf '%s|' ${CLAUDE_PROJECT_DIR} \"${CLAUDE_PROJECT_DIR}\" '${CLAUDE_PROJECT_DIR}' ${CLAUDE_SKILL_DIR}/x \"${CLAUDE_PLUGIN_ROOT}\"`",
+            "",
+            &execution,
+            "session",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            format!("Dirs: {workspace}|{workspace}|{workspace}|/skills/my skill/x|/plugins/a\"b|")
+        );
+
+        let invoker = ShellInvoker {
+            workspace: "/work/w !`printf SNIPPET`".into(),
+        };
+        let text = prepare(
+            "Project: ${CLAUDE_PROJECT_DIR}",
+            "",
+            &DefinitionExecution::default(),
+            "session",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "Project: /work/w !`printf SNIPPET`");
     }
 
     #[tokio::test]
