@@ -354,8 +354,113 @@
         ],
         "type": "object"
       },
+      "BtwEvent": {
+        "description": "What `POST /v1/threads/{id}/btw/stream` sends, one per event: `delta`\nextends the answer, `text` replaces it (an attempt after a refused tool\ncall starts over), and the stream ends with `done` or `error`.",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "delta"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "text"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "answer": {
+                "type": "string"
+              },
+              "inputTokens": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outputTokens": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "done"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "answer",
+              "inputTokens",
+              "outputTokens",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The same code, message and retryable flag a failed `POST /btw` answers with.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "type": {
+                "enum": [
+                  "error"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable",
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BtwRequest": {
         "properties": {
+          "history": {
+            "description": "Earlier questions of the same side chat and their answers, oldest\nfirst. The server keeps no side chat: a follow-up carries its thread,\nand it is sent after the chat's own history, so each follow-up reads\nback the previous question's request. At most 100.",
+            "items": {
+              "$ref": "#/components/schemas/BtwTurn"
+            },
+            "type": "array"
+          },
           "question": {
             "type": "string"
           },
@@ -388,6 +493,22 @@
           "answer",
           "inputTokens",
           "outputTokens"
+        ],
+        "type": "object"
+      },
+      "BtwTurn": {
+        "description": "One finished question of a side chat.",
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "answer"
         ],
         "type": "object"
       },
@@ -9757,6 +9878,51 @@
               }
             },
             "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/btw/stream": {
+      "post": {
+        "operationId": "btw_stream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BtwRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/BtwEvent"
+                }
+              }
+            },
+            "description": "sse stream"
           },
           "401": {
             "description": "Bearer authentication required"

@@ -2725,7 +2725,9 @@ impl App {
                 if arguments.is_empty() {
                     self.notice = "Usage: /btw <side question>".into();
                 } else {
-                    let response = client.btw(self.thread.id, arguments.to_owned()).await?;
+                    let response = client
+                        .btw(self.thread.id, arguments.to_owned(), Vec::new())
+                        .await?;
                     self.open_overlay(Overlay::Panel {
                         title: "BTW · isolated read-only answer".into(),
                         lines: response.answer.lines().map(str::to_owned).collect(),

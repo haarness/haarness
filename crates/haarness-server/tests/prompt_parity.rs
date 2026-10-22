@@ -283,6 +283,7 @@ async fn side_question_reuses_prepared_context_and_settled_history_without_mutat
             BtwRequest {
                 request_id: RequestId::new(),
                 question: "Explain the current plan".into(),
+                history: Vec::new(),
             },
         )
         .await
@@ -339,6 +340,7 @@ async fn side_question_reuses_prepared_context_and_settled_history_without_mutat
             BtwRequest {
                 request_id: RequestId::new(),
                 question: "Explain the result".into(),
+                history: Vec::new(),
             },
         )
         .await
@@ -388,7 +390,8 @@ async fn cold_side_context_and_repeated_refusals_are_bounded_and_do_not_execute(
                 thread.id,
                 BtwRequest {
                     request_id: RequestId::new(),
-                    question: "Explain".into()
+                    question: "Explain".into(),
+                    history: Vec::new(),
                 }
             )
             .await

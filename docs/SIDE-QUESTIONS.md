@@ -6,23 +6,52 @@
 of the current conversation. It reuses the main request's prepared system,
 tool schemas, model settings, and settled conversation prefix, including
 context previously added by hooks. An unfinished tool call and everything
-after it are omitted until the result arrives. The answer appears in a
-temporary TUI panel:
+after it are omitted until the result arrives.
 
 ```text
 /btw Why did we choose a transaction here?
 ```
 
-The CLI equivalent is `haarness btw <session-id> <question>`. The REST endpoint
-is `POST /v1/threads/{threadId}/btw`, with `{ "question": "..." }`; the response
-contains the answer and request-local token usage.
+## A side chat
+
+A side question is the start of a side chat: follow-ups keep the thread going,
+so "and why?" or "show me the second one" need no repeating. The server keeps
+no side chat. Each follow-up carries the thread's earlier questions and answers
+(`history`, oldest first, at most 100; clients send the last 40 finished ones),
+and the server sends them after the chat's own history: the first question with
+the side-question instructions, its answer, the next question, and so on. A
+follow-up therefore starts with the previous question's request bytes and reads
+back the prompt cache it wrote. Only the first question carries the
+instructions, which allow follow-ups and a longer answer when a question needs
+one. A side chat always asks with the chat's own provider, model and agent.
+
+## API
+
+- `POST /v1/threads/{threadId}/btw` with `{ "question": "...", "history": [{ "question": "...", "answer": "..." }] }`
+  answers once the whole answer is in, with request-local token usage.
+  `history` is optional.
+- `POST /v1/threads/{threadId}/btw/stream` takes the same body and answers with
+  an event stream: one JSON `data:` event per step, `delta` (`text` extends the
+  answer), `text` (replaces it; an attempt after a refused tool call starts
+  over with an empty one), and then `done` (`answer`, `inputTokens`,
+  `outputTokens`) or `error` (`code`, `message`, `retryable`, as a failed
+  `POST /btw` answers). A missing chat (404), an empty question or a thread
+  with an empty question or answer (400) fail before the stream starts. A
+  client that goes away ends the provider request. A keepalive comment comes
+  every 15 seconds. The SDKs read it with `btwStream` (TypeScript) and
+  `btw_stream` (Python); servers that have the route list `btw.stream.v1` in
+  `/v1/info` capabilities, and clients fall back to `POST /btw` without it.
+
+The CLI equivalent is `haarness btw <session-id> <question>`.
+
+## Isolation
 
 Tool schemas provide context only. Every attempted tool call is refused locally;
 the provider gets at most three requests to return an answer. Side questions
 never run tools, rerun request hooks, initialize MCP connections, or write user,
-assistant, reasoning, usage, or turn records to the main transcript. They do not
-interrupt the main turn. Structured-output requirements are relaxed so the side
-answer can be plain text.
+assistant, reasoning, usage, or turn records to the main transcript. They take
+no lock and do not interrupt the main turn. Structured-output requirements are
+relaxed so the side answer can be plain text.
 
 Prepared requests are held in memory, with at most 16 sessions and a 4 MiB
 serialized-size budget per request. A restart, eviction, configuration reload,
