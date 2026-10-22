@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "Чтение ресурса MCP",
   "Tried to read an MCP resource": "Не удалось прочитать ресурс MCP",
   "List an MCP server's resources": "Получить список ресурсов MCP-сервера",
-  "Read a resource from an MCP server": "Прочитать ресурс MCP-сервера"
+  "Read a resource from an MCP server": "Прочитать ресурс MCP-сервера",
+  "Interactive apps": "Интерактивные приложения",
+  "Interactive apps for {name}": "Интерактивные приложения {name}",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "Показывать страницы этого сервера под его инструментами в чатах. Если выключено, инструменты показываются текстом.",
+  "{name} app options": "Параметры приложения {name}",
+  "Turn off interactive apps for {server}": "Выключить интерактивные приложения {server}",
+  "Interactive apps are off for {server}. Its tools show as text.": "Интерактивные приложения {server} выключены. Его инструменты показываются текстом."
 }

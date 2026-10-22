@@ -989,6 +989,16 @@ dialog .notifications {
   font-size: var(--ui);
   color: var(--muted);
 }
+/* A server's Interactive apps switch ends its row of actions, quietly. */
+.setting-block .mcp-apps-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-inline-start: auto;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
 /* Why an MCP server failed, under its name: a sentence, never a log dump. */
 .setting-block > .mcp-server-detail {
   margin: 0;

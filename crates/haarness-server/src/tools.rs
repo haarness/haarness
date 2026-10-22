@@ -1082,6 +1082,7 @@ impl Tool for ManagementTool {
                     "oauthClientId": {"type":"string","description":"Optional public OAuth client id."},
                     "oauthScopes": {"type":"array","items":{"type":"string"},"description":"OAuth scopes."},
                     "enabled": {"type":"boolean","description":"Initial enabled state for add. Defaults to true."},
+                    "apps": {"type":"boolean","description":"Interactive apps (MCP App pages) from this server, for add or edit. Defaults to true. false makes it a plain MCP server: it is not told pages render, its results carry no page and its pages are not served."},
                     "callbackPort": {"type":"integer","minimum":0,"maximum":65535,"description":"Loopback OAuth callback port for auth; 0 selects an ephemeral port."}
                 }),
                 vec![

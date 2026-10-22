@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "جارٍ قراءة مورد من MCP",
   "Tried to read an MCP resource": "حاول قراءة مورد من MCP",
   "List an MCP server's resources": "عرض موارد خادم MCP",
-  "Read a resource from an MCP server": "قراءة مورد من خادم MCP"
+  "Read a resource from an MCP server": "قراءة مورد من خادم MCP",
+  "Interactive apps": "التطبيقات التفاعلية",
+  "Interactive apps for {name}": "التطبيقات التفاعلية لـ {name}",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "اعرض صفحات هذا الخادم تحت أدواته في المحادثات. عند الإيقاف تظهر أدواته نصًا.",
+  "{name} app options": "خيارات تطبيق {name}",
+  "Turn off interactive apps for {server}": "إيقاف التطبيقات التفاعلية لـ {server}",
+  "Interactive apps are off for {server}. Its tools show as text.": "التطبيقات التفاعلية متوقفة لـ {server}. تظهر أدواته نصًا."
 }

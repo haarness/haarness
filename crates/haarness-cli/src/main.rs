@@ -7766,6 +7766,7 @@ async fn mcp_command(
                         oauth_client_id: None,
                         oauth_scopes: Vec::new(),
                         enabled: !disabled,
+                        apps: None,
                     }
                 }
                 (None, Some(url)) => {
@@ -7792,6 +7793,7 @@ async fn mcp_command(
                         oauth_client_id: oauth_client_id.clone(),
                         oauth_scopes: oauth_scopes.clone(),
                         enabled: !disabled,
+                        apps: None,
                     }
                 }
                 _ => anyhow::bail!("provide exactly one of --command or --url"),
@@ -8329,6 +8331,10 @@ fn mcp_changes(
     if before.headers != after.headers {
         fields.push(("headers".into(), Some(json!(after.headers))));
     }
+    if before.apps != after.apps {
+        // On is the default, so turning apps back on drops the key.
+        fields.push(("apps".into(), after.apps.filter(|on| !on).map(Value::Bool)));
+    }
     let opencode = matches!(
         raw.get("type").and_then(Value::as_str),
         Some("local" | "remote")
@@ -8519,6 +8525,9 @@ fn write_mcp_entry(path: &Path, name: &str, entry: Option<&McpConfigureRequest>)
                             .collect(),
                     ),
                 );
+            }
+            if let Some(apps) = entry.apps {
+                server.insert("apps".into(), toml::Value::Boolean(apps));
             }
             server.insert("enabled".into(), toml::Value::Boolean(entry.enabled));
             mcp.insert(name.to_owned(), toml::Value::Table(server));
@@ -12591,6 +12600,7 @@ mod tests {
             oauth_client_id: Some("fixture-client".into()),
             oauth_scopes: vec!["mcp:read".into(), "mcp:write".into()],
             enabled: false,
+            apps: None,
         };
         write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
         let restored = read_mcp_entry(&path, "fixture").unwrap();
@@ -12624,6 +12634,7 @@ mod tests {
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled: true,
+            apps: None,
         };
         let shown = mcp_config_for_display(&remote, false).unwrap();
         assert_eq!(

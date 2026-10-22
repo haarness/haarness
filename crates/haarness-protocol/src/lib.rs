@@ -954,6 +954,14 @@ pub struct McpServerInfo {
     pub transport: String,
     pub status: String,
     pub detail: Option<String>,
+    /// `false` when the server's interactive apps (MCP App pages) are
+    /// turned off in its configuration; absent while they are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<bool>,
+    /// How many of the server's tools pair with an interactive page, while
+    /// it is connected with its apps on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_tools: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -992,6 +1000,11 @@ pub struct McpConfigureRequest {
     pub oauth_scopes: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Interactive apps (MCP App pages). `Some(false)` makes it a plain MCP
+    /// server to Haarness: it is not told that pages render, its results
+    /// carry no page and its `ui://` pages are not served. On when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<bool>,
 }
 fn default_true() -> bool {
     true

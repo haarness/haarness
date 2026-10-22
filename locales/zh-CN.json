@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "正在读取 MCP 资源",
   "Tried to read an MCP resource": "未能读取 MCP 资源",
   "List an MCP server's resources": "列出 MCP 服务器的资源",
-  "Read a resource from an MCP server": "读取 MCP 服务器的资源"
+  "Read a resource from an MCP server": "读取 MCP 服务器的资源",
+  "Interactive apps": "交互式应用",
+  "Interactive apps for {name}": "{name} 的交互式应用",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "在聊天中将此服务器的页面显示在其工具下方。关闭后，其工具以文本显示。",
+  "{name} app options": "{name} 应用选项",
+  "Turn off interactive apps for {server}": "关闭 {server} 的交互式应用",
+  "Interactive apps are off for {server}. Its tools show as text.": "{server} 的交互式应用已关闭。其工具以文本显示。"
 }

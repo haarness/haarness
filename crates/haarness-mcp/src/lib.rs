@@ -111,6 +111,9 @@ struct CatalogClient {
     /// Whether the server declared the resources capability when it
     /// connected.
     resources: Arc<AtomicBool>,
+    /// Whether the server's interactive apps are on (its `apps` setting).
+    /// Off, it is a plain MCP server to Haarness.
+    apps_on: bool,
 }
 impl CatalogClient {
     fn new(
@@ -118,6 +121,7 @@ impl CatalogClient {
         name: &str,
         generation: uuid::Uuid,
         credential: Option<FileCredentialStore>,
+        apps_on: bool,
     ) -> Self {
         Self {
             home,
@@ -126,6 +130,7 @@ impl CatalogClient {
             credential,
             apps: Arc::default(),
             resources: Arc::default(),
+            apps_on,
         }
     }
     /// [`Self::catalog`] for a connection that just started, which also
@@ -144,13 +149,23 @@ impl CatalogClient {
     /// The model's view of a freshly listed catalog, remembering which of its
     /// tools have an MCP App page.
     fn catalog(&self, tools: &[rmcp::model::Tool]) -> Vec<ToolDefinition> {
-        *self.apps.write() = app_tools(&self.name, tools);
+        *self.apps.write() = if self.apps_on {
+            app_tools(&self.name, tools)
+        } else {
+            HashMap::new()
+        };
         definitions(tools)
+    }
+    /// How many tools pair with a page, as clients show it.
+    fn app_tools(&self) -> Option<u32> {
+        u32::try_from(self.apps.read().len())
+            .ok()
+            .filter(|count| *count > 0)
     }
 }
 impl rmcp::ClientHandler for CatalogClient {
     fn get_info(&self) -> rmcp::model::ClientInfo {
-        client_info()
+        client_info(self.apps_on)
     }
     async fn on_tool_list_changed(&self, context: rmcp::service::NotificationContext<RoleClient>) {
         {
@@ -193,6 +208,7 @@ impl rmcp::ClientHandler for CatalogClient {
             .collect();
         entry.remembered = entry.tools.clone();
         entry.info.detail = Some(format!("{} tools discovered", entry.tools.len()));
+        entry.info.app_tools = self.app_tools();
     }
 }
 
@@ -311,6 +327,8 @@ impl McpRegistry for NativeMcpRegistry {
             }
             .into(),
             detail: None,
+            apps: config.apps.filter(|on| !on),
+            app_tools: None,
         };
         self.servers.write().insert(
             name.into(),
@@ -398,6 +416,20 @@ impl McpRegistry for NativeMcpRegistry {
             .await
     }
     async fn read_resource(&self, name: &str, uri: &str) -> CoreResult<Value> {
+        // An app page of a server whose apps are off is never served: its
+        // results carry no page, and an older one in a transcript shows as
+        // text.
+        if uri.starts_with("ui://")
+            && self
+                .servers
+                .read()
+                .get(name)
+                .is_some_and(|entry| entry.config.apps == Some(false))
+        {
+            return Err(CoreError::PermissionDenied(format!(
+                "Interactive apps are turned off for MCP server \"{name}\""
+            )));
+        }
         self.worker_request(name, |reply| WorkerCommand::ReadResource {
             uri: uri.to_owned(),
             reply,
@@ -470,7 +502,13 @@ impl NativeMcpRegistry {
                 && oauth_enabled(&config, &config.headers))
             .then(|| manager_store(name, self.auth_dir.as_deref()));
             let home: Home = Arc::new(RwLock::new(Arc::downgrade(&self.servers)));
-            let handler = CatalogClient::new(home.clone(), name, generation, credential.clone());
+            let handler = CatalogClient::new(
+                home.clone(),
+                name,
+                generation,
+                credential.clone(),
+                config.apps != Some(false),
+            );
             let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
             let activation = async {
                 match config.transport.as_str() {
@@ -604,6 +642,7 @@ impl NativeMcpRegistry {
             entry.home = Some(home);
             entry.oversized = oversized;
             entry.resources = handler.resources.load(Ordering::Acquire);
+            entry.info.app_tools = handler.app_tools();
             entry.info.status = "connected".into();
             entry.info.detail = Some(format!("{count} tools discovered"));
             let info = entry.info.clone();
@@ -1017,12 +1056,16 @@ fn visible_to_model(tool: &rmcp::model::Tool) -> bool {
     named("model") || !named("app")
 }
 
-/// What Haarness tells a server when it connects: it renders MCP App pages.
-/// A server may then pair its tools with pages, or register tools only for
-/// hosts that render them; the tools keep their text results for the model
-/// and for clients that show text.
-fn client_info() -> rmcp::model::ClientInfo {
+/// What Haarness tells a server when it connects: it renders MCP App pages,
+/// unless the server's interactive apps are turned off. A server may then
+/// pair its tools with pages, or register tools only for hosts that render
+/// them; the tools keep their text results for the model and for clients
+/// that show text.
+fn client_info(apps: bool) -> rmcp::model::ClientInfo {
     let mut info = rmcp::model::ClientInfo::default();
+    if !apps {
+        return info;
+    }
     let mut settings = serde_json::Map::new();
     settings.insert("mimeTypes".into(), serde_json::json!([MCP_APP_MIME_TYPE]));
     info.capabilities
@@ -2340,6 +2383,7 @@ mod tests {
                     oauth_client_id: None,
                     oauth_scopes: Vec::new(),
                     enabled: true,
+                    apps: None,
                 },
             )
             .await
@@ -2379,6 +2423,7 @@ mod tests {
                     oauth_client_id: None,
                     oauth_scopes: Vec::new(),
                     enabled: true,
+                    apps: None,
                 },
             )
             .await
@@ -2449,6 +2494,7 @@ mod tests {
                 oauth_client_id: Some("fixture-client".into()),
                 oauth_scopes: vec!["mcp".into()],
                 enabled: true,
+                apps: None,
             };
             registry.configure("secure", config).await.unwrap();
             let error = registry
@@ -2487,6 +2533,7 @@ mod tests {
             oauth_client_id: Some("fixture-client".into()),
             oauth_scopes: vec!["mcp".into()],
             enabled: true,
+            apps: None,
         };
         let info = registry.configure("secure", config.clone()).await.unwrap();
         assert_eq!(info.status, "needs_auth");
@@ -2816,6 +2863,7 @@ mod tests {
                     oauth_client_id: None,
                     oauth_scopes: Vec::new(),
                     enabled: false,
+                    apps: None,
                 },
             )
             .await
@@ -2840,6 +2888,7 @@ mod tests {
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled: false,
+            apps: None,
         };
         let live = NativeMcpRegistry::default();
         live.configure("old", config.clone()).await.unwrap();
@@ -2898,6 +2947,7 @@ mod tests {
             oauth_client_id: None,
             oauth_scopes: Vec::new(),
             enabled: true,
+            apps: None,
         };
         let headers = resolve_headers("weather", &config).await.unwrap();
         assert_eq!(
@@ -3043,10 +3093,18 @@ mod tests {
 
     #[test]
     fn haarness_tells_servers_it_renders_mcp_app_pages() {
-        let info = serde_json::to_value(client_info()).unwrap();
+        let info = serde_json::to_value(client_info(true)).unwrap();
         assert_eq!(
             info["capabilities"]["extensions"]["io.modelcontextprotocol/ui"],
             json!({"mimeTypes": ["text/html;profile=mcp-app"]})
+        );
+        // A server whose apps are turned off is not told.
+        let plain = serde_json::to_value(client_info(false)).unwrap();
+        assert!(
+            plain["capabilities"]
+                .get("extensions")
+                .is_none_or(|extensions| extensions.get("io.modelcontextprotocol/ui").is_none()),
+            "{plain}"
         );
     }
 
@@ -3398,6 +3456,60 @@ mod recovery_tests {
             .unwrap();
         assert_eq!(page["contents"][0]["mimeType"], "text/html;profile=mcp-app");
         assert!(page["contents"][0]["_meta"]["ui"]["csp"].is_object());
+        registry.disconnect("app").await.unwrap();
+    }
+
+    /// With its apps off the fixture is a plain MCP server to Haarness: it
+    /// is not told pages render (so it pairs no tool with one), its results
+    /// carry no page and its page is not served.
+    #[tokio::test]
+    async fn a_server_with_its_apps_off_is_a_plain_mcp_server() {
+        let config = |apps: Option<bool>| -> McpConfigureRequest {
+            let mut config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
+                "transport": "stdio", "command": "python3",
+                "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/app.py")],
+                "enabled": true
+            }))
+            .unwrap();
+            config.apps = apps;
+            config
+        };
+        let registry = NativeMcpRegistry::default();
+        let on = registry.configure("app", config(None)).await.unwrap();
+        assert_eq!((on.apps, on.app_tools), (None, Some(1)));
+        let off = registry
+            .configure("app", config(Some(false)))
+            .await
+            .unwrap();
+        assert_eq!((off.apps, off.app_tools), (Some(false), None));
+        let output = registry
+            .call(
+                "app",
+                "mcp__app__show_weather",
+                serde_json::json!({"city": "Porto"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "Porto: sunny, 21 C");
+        assert!(
+            output.metadata.get("mcp_app").is_none(),
+            "{}",
+            output.metadata
+        );
+        let refused = registry
+            .read_resource("app", "ui://weather/view.html")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("Interactive apps are turned off for MCP server \"app\""),
+            "{refused}"
+        );
+        assert_eq!(
+            registry.list().await.unwrap()[0].apps,
+            Some(false),
+            "the status keeps saying apps are off"
+        );
         registry.disconnect("app").await.unwrap();
     }
 

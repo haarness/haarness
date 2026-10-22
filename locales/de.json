@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "Liest eine MCP-Ressource",
   "Tried to read an MCP resource": "MCP-Ressource lesen fehlgeschlagen",
   "List an MCP server's resources": "Ressourcen eines MCP-Servers auflisten",
-  "Read a resource from an MCP server": "Eine Ressource von einem MCP-Server lesen"
+  "Read a resource from an MCP server": "Eine Ressource von einem MCP-Server lesen",
+  "Interactive apps": "Interaktive Apps",
+  "Interactive apps for {name}": "Interaktive Apps für {name}",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "Seiten dieses Servers unter seinen Tools im Chat zeigen. Aus: Seine Tools erscheinen als Text.",
+  "{name} app options": "Optionen für die App {name}",
+  "Turn off interactive apps for {server}": "Interaktive Apps für {server} ausschalten",
+  "Interactive apps are off for {server}. Its tools show as text.": "Interaktive Apps sind für {server} aus. Seine Tools erscheinen als Text."
 }

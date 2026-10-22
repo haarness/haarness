@@ -2639,5 +2639,11 @@
   "Reading an MCP resource": "MCP kaynağı okunuyor",
   "Tried to read an MCP resource": "MCP kaynağı okunamadı",
   "List an MCP server's resources": "Bir MCP sunucusunun kaynaklarını listele",
-  "Read a resource from an MCP server": "Bir MCP sunucusundan kaynak oku"
+  "Read a resource from an MCP server": "Bir MCP sunucusundan kaynak oku",
+  "Interactive apps": "Etkileşimli uygulamalar",
+  "Interactive apps for {name}": "{name} için etkileşimli uygulamalar",
+  "Show this server's pages under its tools in chats. Off, its tools show as text.": "Bu sunucunun sayfalarını sohbetlerde araçlarının altında göster. Kapalıyken araçları metin olarak görünür.",
+  "{name} app options": "{name} uygulaması seçenekleri",
+  "Turn off interactive apps for {server}": "{server} için etkileşimli uygulamaları kapat",
+  "Interactive apps are off for {server}. Its tools show as text.": "{server} için etkileşimli uygulamalar kapalı. Araçları metin olarak görünür."
 }
