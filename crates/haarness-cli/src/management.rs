@@ -1006,9 +1006,11 @@ impl ManagementService {
                         true,
                     )?;
                 }
+                let read = super::memory_settings::read(&root);
                 Ok(
-                    json!({"config": super::memory_settings::load(&root), "directory": root,
-                    "revision": revision(&settings_path)?, "memories": self.memory_entries(&json!({}))?}),
+                    json!({"config": read.settings, "settingsUnreadable": read.unreadable,
+                    "directory": root, "revision": revision(&settings_path)?,
+                    "memories": self.memory_entries(&json!({}))?}),
                 )
             }
             "read" | "create" | "save" | "delete" => {

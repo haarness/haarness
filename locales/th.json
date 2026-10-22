@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "หน่วยความจำของ {project} จัดเก็บไว้นอกที่เก็บโค้ด",
   "Loading memory…": "กำลังโหลดหน่วยความจำ…",
   "Memory could not be loaded.": "ไม่สามารถโหลดหน่วยความจำได้",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "หน่วยความจำปิดอยู่เนื่องจากอ่านไฟล์การตั้งค่าไม่ได้ การบันทึกจะแทนที่ไฟล์นั้น",
   "Include the memory index in prompts and make memory tools available.": "รวมดัชนีหน่วยความจำไว้ในพร้อมท์และเปิดใช้เครื่องมือหน่วยความจำ",
   "Index limit must be between 1 and 1000.": "ขีดจำกัดดัชนีต้องอยู่ระหว่าง 1 ถึง 1000",
   "Memory settings saved. Runtime changes apply when idle.": "บันทึกการตั้งค่าหน่วยความจำแล้ว การเปลี่ยนแปลงของรันไทม์จะมีผลเมื่อว่าง",

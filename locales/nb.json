@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "Minne for {project}. Lagres utenfor repositoriet.",
   "Loading memory…": "Laster minne …",
   "Memory could not be loaded.": "Minnet kunne ikke lastes.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Minnet er slått av fordi innstillingsfilen ikke kunne leses. Lagring erstatter den.",
   "Include the memory index in prompts and make memory tools available.": "Ta med minneindeksen i prompter og gjør minneverktøy tilgjengelige.",
   "Index limit must be between 1 and 1000.": "Indeksgrensen må være mellom 1 og 1000.",
   "Memory settings saved. Runtime changes apply when idle.": "Minneinnstillinger lagret. Endringer i kjøretiden trer i kraft når den er inaktiv.",
