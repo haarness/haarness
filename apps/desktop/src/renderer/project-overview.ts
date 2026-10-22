@@ -1,6 +1,12 @@
 import { createEffect, on, onCleanup, untrack } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { readProjectCache, writeProjectCache } from "./project-cache";
+import {
+  createReconnectWait,
+  isWake,
+  onReconnectHint,
+  wakeDelay,
+} from "./reconnect-wait";
 import type {
   Thread,
   Turn,
@@ -80,11 +86,13 @@ export function createProjectOverview(input: {
       ([id, expanded, active]) => {
         if (!expanded || active) return;
         let disposed = false,
-          attempt = 0,
           subscription = "",
           instance = "",
           cursor = 0;
         let timer: ReturnType<typeof setTimeout> | undefined;
+        const wait = createReconnectWait();
+        /** A retry waits for its timer. */
+        let pending = false;
         const delegated = new Set<string>();
         let operation = 0;
         let early: DesktopEvent[] | undefined;
@@ -95,15 +103,36 @@ export function createProjectOverview(input: {
           subscription = "";
           if (previous) await input.bridge.unsubscribe(previous);
         };
-        const retry = () => {
-          if (disposed) return;
+        /** Loads again after `wait`'s wait, or after `delay`. One wait at a
+         * time: the end of a stream and the server's resync ask for the same
+         * retry. */
+        const retry = (delay?: number) => {
+          if (disposed || (pending && delay === undefined)) return;
           clearTimeout(timer);
-          timer = setTimeout(
-            () => void load(),
-            Math.min(30000, 500 * 2 ** Math.min(attempt++, 6)),
-          );
+          pending = true;
+          timer = setTimeout(() => {
+            pending = false;
+            void load();
+          }, delay ?? wait.next());
+        };
+        /** The stream ended. */
+        const dropped = () => {
+          wait.ended();
+          retry();
+        };
+        /** A wake, the network coming back or the window showing again:
+         * a project waiting to reconnect tries again soon, after the open
+         * project; a connected one is left alone. */
+        const soon = () => {
+          if (disposed || !pending) return;
+          wait.reset();
+          retry(wakeDelay());
         };
         const receive = (event: DesktopEvent) => {
+          if (isWake(event)) {
+            soon();
+            return;
+          }
           if (
             disposed ||
             event.connection !== id ||
@@ -116,7 +145,7 @@ export function createProjectOverview(input: {
           }
           if (!subscription || event.id !== subscription) return;
           if (event.kind === "connection") {
-            retry();
+            dropped();
             return;
           }
           const value = event.data as
@@ -127,7 +156,7 @@ export function createProjectOverview(input: {
             !("serverInstanceId" in value) ||
             value.serverInstanceId !== instance
           ) {
-            retry();
+            dropped();
             return;
           }
           if (value.eventId <= cursor) return;
@@ -233,11 +262,11 @@ export function createProjectOverview(input: {
               return;
             }
             subscription = key;
-            const pending = early;
+            const buffered = early;
             early = undefined;
             set({ loaded: true, loading: false, error: "" });
-            attempt = 0;
-            for (const event of pending) receive(event);
+            wait.opened();
+            for (const event of buffered) receive(event);
           } catch (error) {
             early = undefined;
             if (!valid()) return;
@@ -250,6 +279,7 @@ export function createProjectOverview(input: {
           }
         }
         const off = input.bridge.onEvent(receive);
+        const offHint = onReconnectHint(soon);
         set("loading", true);
         void untrack(load);
         onCleanup(() => {
@@ -257,6 +287,7 @@ export function createProjectOverview(input: {
           operation++;
           clearTimeout(timer);
           off();
+          offHint();
           void stop().catch(() => {});
         });
       },
