@@ -4680,10 +4680,20 @@ test("Haarness's own tools read as what they did, in every language", async () =
     const turn = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text });
     await client.waitTurn(turn.id);
   }
-  // A management tool names its action, not the delegation or command its name once suggested.
+  // Every tool the server defines itself has wording of its own, so a new one without it fails here.
+  const { describeTool, toolVerbKeys } = await import("../src/renderer/transcript");
+  const catalog = await client.toolCatalog({ threadId: thread.id });
+  const own = catalog.tools.filter((tool) => tool.source === "native" && !tool.id.startsWith("browser_"));
+  expect(own.length).toBeGreaterThan(30);
+  for (const { id } of own) {
+    const shape = describeTool(id, {});
+    expect(shape.verb, id).not.toBe(id);
+    expect(toolVerbKeys, id).toContain(shape.verb);
+  }
+  // A management tool reads as what it manages, not the delegation or command its name once suggested.
   const rows = page.locator(".message.step > .tool-call > summary");
   await expect(rows).toHaveText([
-    /^Managed chats\s*list$/,
+    /^Managed chats$/,
     // No tools wait to be loaded in this chat, so the call failed.
     /^Tried to load tools\s*browser$/,
     /^Looked through memories\s*release$/,

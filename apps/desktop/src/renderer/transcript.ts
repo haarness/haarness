@@ -118,19 +118,25 @@ const namedTools: Record<string, { icon: IconName } & Verbs> = {
 const familyTools = new Set([
   "bash", "read", "write", "edit", "multiedit", "apply_patch", "list", "glob", "grep", "webfetch", "task", "batch",
 ]);
-/** Tools that act on one of their own `action`s: the row names it and what it
-    acts on ("add github"), as the TUI's workflow rows do. */
-const actionTools = new Set([
-  "schedule", "workflow", "marketplace_manage", "capability_manage", "skill_manage", "plugin_manage", "mcp_manage",
-  "agent_manage", "command_manage", "cloud_agent_manage", "cloud_agent_session", "cloud_chat", "cloud_schedule",
-  "session_manage",
-]);
-function actionTarget(record: Record<string, unknown> | undefined) {
-  const text = (value: unknown) => (typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "");
-  const subject = ["name", "id", "runID", "sessionId", "chatId", "title", "query"]
-    .map((key) => text(record?.[key]))
-    .find(Boolean);
-  return [text(record?.action), subject].filter(Boolean).join(" ");
+/** Values a row never shows: ids that mean nothing to a reader (a UUID, a
+    ULID, a long run of hex), whatever argument carries them. */
+const opaqueId = (value: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ||
+  /^[0-9A-HJKMNP-TV-Z]{26}$/.test(value) ||
+  /^[0-9a-f]{16,}$/i.test(value);
+/** The arguments a row of Haarness's other tools may name, in the order a
+    reader recognises them: what it is called before where it is. Its
+    `action` (`add`, `rename`) is left out: the verb already says what was
+    done, and an English word in another language's row would only jar. */
+const humanFields = ["title", "name", "label", "agent", "query", "path", "filePath", "file_path", "url", "prompt", "description"];
+function humanTarget(record: Record<string, unknown> | undefined) {
+  for (const key of humanFields) {
+    const value = record?.[key];
+    if (typeof value !== "string") continue;
+    const text = value.replace(/\s+/g, " ").trim();
+    if (text && !opaqueId(text)) return text;
+  }
+  return "";
 }
 const toolKind = (name: string) =>
   /bash|shell|exec|command/.test(name)
@@ -184,10 +190,10 @@ export function describeTool(name: string, args: unknown): ToolShape {
           targetList(files),
       };
   }
-  if (known && actionTools.has(name) && typeof record?.action === "string")
-    return { ...known, target: actionTarget(record) };
   if (name === "load_tool" && Array.isArray(record?.queries))
     return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string")) };
+  if (known && !familyTools.has(name) && !["execute", "skill", "question", "todo", "todowrite", "todoread"].includes(name))
+    return { ...known, target: humanTarget(record) };
   if (known) return { ...known, target: toolTarget(args) };
   const kind = toolKind(name);
   // An unrecognised tool is named rather than described; guessing a verb for

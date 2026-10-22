@@ -512,14 +512,25 @@ test("each of Haarness's own tools reads as what it does, never as its id or ano
     verb: "Managed agents",
     doing: "Managing agents",
     attempt: "Tried to manage agents",
-    target: "create reviewer",
+    target: "reviewer",
   });
   assert.equal(describeTool("command_manage", { action: "remove", name: "ship" }).verb, "Managed commands");
-  assert.equal(describeTool("mcp_manage", { action: "add", name: "github", url: "https://x.test" }).target, "add github");
-  assert.equal(describeTool("schedule", { action: "list" }).target, "list");
-  assert.equal(describeTool("workflow", { action: "status", runID: "run-1" }).target, "status run-1");
+  // A row names what was acted on in a reader's words: never the action's
+  // English word, and never an id, whatever argument carries it.
+  assert.equal(describeTool("mcp_manage", { action: "add", name: "github", url: "https://x.test" }).target, "github");
+  assert.equal(describeTool("schedule", { action: "list" }).target, "");
+  const uuid = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+  assert.equal(describeTool("workflow", { action: "status", runID: uuid }).target, "");
+  assert.equal(describeTool("cloud_chat", { action: "rename", sessionId: uuid, chatId: uuid, title: "Release" }).target, "Release");
+  assert.equal(describeTool("task_abort", { task_id: uuid }).target, "");
+  assert.equal(describeTool("session_wait", { id: uuid }).target, "");
+  assert.equal(describeTool("session_message", { id: uuid, message: "Ship it" }).target, "");
+  assert.equal(describeTool("session_rename", { id: uuid, title: "Release" }).target, "Release");
+  assert.equal(describeTool("memory_read", { id: "01HZX3K9Q7W2V5N8R4T6Y1M3PB" }).target, "");
+  assert.equal(describeTool("agent_switch", { agent: "reviewer" }).target, "reviewer");
   assert.equal(describeTool("load_tool", { queries: ["mcp__github__*", "browser"] }).target, "mcp__github__*, browser");
   assert.equal(describeTool("websearch", { query: "solid 2" }).target, "solid 2");
+  assert.equal(describeTool("lsp", { operation: "hover", filePath: "src/a.ts", line: 3 }).target, "src/a.ts");
   assert.equal(describeTool("session_rename", { title: "Release" }).verb, "Renamed a chat");
   // A tool of someone else's is still named, or guessed from its name.
   assert.equal(describeTool("acme_zap", {}).verb, "acme_zap");
