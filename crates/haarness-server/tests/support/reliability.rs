@@ -547,6 +547,7 @@ async fn reliability_automatic_and_overflow_compaction_emit_hooks_after_commit()
                     attachments: vec![],
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             )
             .await

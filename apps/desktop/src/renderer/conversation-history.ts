@@ -1,4 +1,5 @@
 import type { Item, Thread } from "@haarness/sdk";
+import { plainMessage } from "./prompt-context";
 
 export function retainedItems(items: Item[], thread?: Thread) {
   const boundary = thread?.revert?.sequence ?? Infinity;
@@ -19,8 +20,10 @@ export function lastUserMessage(items: Item[], boundary = Infinity) {
 function conversationText(item: Item, items: Item[]) {
   const data = item.data;
   switch (data.type) {
+    // What the bubble shows: the line a slash command was typed as, and
+    // pasted text without the block it was sent in.
     case "user_message":
-      return data.synthetic ? "" : data.text;
+      return data.synthetic ? "" : plainMessage(data.command_line || data.text);
     case "assistant_message":
     case "reasoning":
       return data.text;

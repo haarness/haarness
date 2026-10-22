@@ -336,6 +336,19 @@ Names resolve case-insensitively and collisions use one explicit precedence:
 the reserved `workflow` and `goal` managers, then configured prompt commands,
 then direct discovered workflow invocations. Collision losers are omitted, so
 every advertised entry is executable by `POST /v1/threads/{id}/commands`.
+A prompt command's `user_message` item keeps the line it was typed as in
+`command_line` (`/review src/foo.rs`), while its `text` becomes the prompt the
+command expands to once it runs (`item.updated`), which is what the model
+receives. Clients show `command_line` when it is present; messages saved
+before it was kept, and ordinary messages, have none.
+
+A `reasoning` item carries `duration_ms`, how long the model took over that
+thought as the person waited for it, on a monotonic clock: from the moment
+its request was sent (or from the text or tool call before it in the same
+response) to the end of the reasoning. It therefore includes the wait for
+the first reasoning token, and each request after a tool round starts its
+own count. Clients read it as "Thought for 12s"; records made before it was
+measured have none.
 
 MCP configuration accepts stdio, Streamable HTTP, and legacy SSE transports.
 Remote entries may set `oauth`, `oauthClientId`, and `oauthScopes`; bearer and

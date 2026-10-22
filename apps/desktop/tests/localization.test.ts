@@ -275,7 +275,6 @@ test("keys translated through a variable are in the catalog", () => {
     // Settings › General switches, from their title/description tuples.
     "Task notifications", "Enable desktop notifications. Choose which alerts appear below.",
     "Compact tool activity", "Keep commands and tool output folded until you open them.",
-    "Show reasoning", "Display the reasoning supplied by your selected model.",
     "Wrap editor lines", "Keep long lines within the editor width.",
     // Desktop notification titles, chosen by event in `notifications.ts`.
     "Task finished", "Task failed", "Approval needed", "Answer needed",

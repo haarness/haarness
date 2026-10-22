@@ -524,10 +524,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.mcp_status = client.mcp().await.unwrap_or_default();
                 }
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                app.reasoning = !app.reasoning;
-                app.notice = format!("Reasoning {}", if app.reasoning { "on" } else { "off" });
-            }
+            (KeyModifiers::CONTROL, KeyCode::Char('t')) => app.cycle_thinking(),
             (KeyModifiers::CONTROL, KeyCode::Char('g')) => {
                 if app.pending_permissions.is_empty() {
                     app.notice = "No approvals pending".into();
@@ -798,10 +795,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.mcp_status = client.mcp().await.unwrap_or_default();
                 }
             }
-            KeyCode::Char('t') => {
-                app.reasoning = !app.reasoning;
-                app.notice = format!("Reasoning {}", if app.reasoning { "on" } else { "off" });
-            }
+            KeyCode::Char('t') => app.cycle_thinking(),
             KeyCode::Char('a') => app.composer.move_home(),
             KeyCode::Char('e') => app.composer.move_end(),
             KeyCode::Char('f') => app.composer.move_right(),

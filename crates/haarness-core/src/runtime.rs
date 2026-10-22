@@ -2212,6 +2212,7 @@ impl AgentRuntime {
                     attachments: request.attachments.clone(),
                     queued: true,
                     synthetic: request.synthetic,
+                    command_line: None,
                 },
             )
             .await?;
@@ -2905,6 +2906,7 @@ impl AgentRuntime {
                                 attachments: Vec::new(),
                                 queued: false,
                                 synthetic: true,
+                                command_line: None,
                             },
                             ItemData::Error {
                                 message: notice,
@@ -4959,6 +4961,9 @@ impl AgentRuntime {
         // command template cannot activate Ultracode accidentally.
         let keyword_ultracode = !request.synthetic && detects_ultracode_keyword(&request.text);
         let mut prepared_command = None;
+        // The store keeps the line a command was typed as; the runner
+        // expands the command itself, so it no longer travels on `request`.
+        let typed_command = request.command.clone();
         if let Some(name) = request.command.take() {
             let command = self
                 .live_commands
@@ -5073,14 +5078,16 @@ impl AgentRuntime {
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
+        let stored = StartTurnRequest {
+            command: typed_command,
+            ..request.clone()
+        };
         let (turn, user_item, created) = if let Some(revision) = queue_revision {
             self.repository
-                .start_queued_turn(thread_id, request.clone(), revision)
+                .start_queued_turn(thread_id, stored, revision)
                 .await?
         } else {
-            self.repository
-                .start_turn(thread_id, request.clone())
-                .await?
+            self.repository.start_turn(thread_id, stored).await?
         };
         if !created {
             return Ok(turn);
@@ -7046,6 +7053,7 @@ impl RunnerTask {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: true,
+                    command_line: None,
                 })
                 .await?;
             }
@@ -7485,6 +7493,9 @@ impl RunnerTask {
                 // as it is sent; a retry starts its own.
                 let mut clock =
                     crate::stream_clock::StreamClock::start(tokio::time::Instant::now().into_std());
+                // Where the reasoning being streamed began: the request, or
+                // the text or tool call that came before it in this round.
+                let mut thought_from = std::time::Instant::now();
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -7626,7 +7637,10 @@ impl RunnerTask {
                             // before publication. Otherwise reasoning/tool items
                             // are appended immediately while all prose is held
                             // until the end, reversing the visible transcript.
-                            self.flush_reasoning_segment(&mut reasoning).await?;
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
+                            // Reasoning after this text begins where it ends.
+                            thought_from = std::time::Instant::now();
                             streamed.push_str(&delta);
                             text.push_str(&delta);
                             self.set_status("responding", None);
@@ -7677,7 +7691,8 @@ impl RunnerTask {
                                 ));
                                 break;
                             }
-                            self.flush_reasoning_segment(&mut reasoning).await?;
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
                             if self.output_schema.is_none() {
                                 self.flush_assistant_segment(
                                     &mut text,
@@ -7685,6 +7700,7 @@ impl RunnerTask {
                                 )
                                 .await?;
                             }
+                            thought_from = std::time::Instant::now();
                             self.publish_item(ItemData::ToolCall {
                                 call_id: call_id.clone(),
                                 name: name.clone(),
@@ -7764,7 +7780,8 @@ impl RunnerTask {
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
-                self.flush_reasoning_segment(&mut reasoning).await?;
+                self.flush_reasoning_segment(&mut reasoning, thought_from)
+                    .await?;
                 if blocked.is_some() {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                         .await?;
@@ -7813,6 +7830,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             queued: false,
                             synthetic: true,
+                            command_line: None,
                         })
                         .await?;
                         continue 'provider_round;
@@ -8308,12 +8326,18 @@ impl RunnerTask {
         Ok(())
     }
 
-    async fn flush_reasoning_segment(&self, reasoning: &mut String) -> CoreResult<()> {
+    /// Persist the reasoning streamed since `started`, with how long it took.
+    async fn flush_reasoning_segment(
+        &self,
+        reasoning: &mut String,
+        started: std::time::Instant,
+    ) -> CoreResult<()> {
         if reasoning.is_empty() {
             return Ok(());
         }
         self.publish_item(ItemData::Reasoning {
             text: std::mem::take(reasoning),
+            duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         })
         .await?;
         Ok(())
@@ -10520,6 +10544,7 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             attachments: Vec::new(),
             queued: false,
             synthetic: true,
+            command_line: None,
         },
         ItemData::Error {
             message: notice,
@@ -11079,6 +11104,7 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                 attachments,
                 queued,
                 synthetic,
+                ..
             } => {
                 // A user-authored message queued while the turn was already
                 // running is live steering input. Synthetic runtime delivery
@@ -13972,6 +13998,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -13994,6 +14021,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14019,6 +14047,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -14042,6 +14071,7 @@ mod tests {
             attachments: Vec::new(),
             queued: false,
             synthetic: false,
+            command_line: None,
         };
         let messages = provider_messages(vec![
             item(1, user("read the file")),
@@ -14112,6 +14142,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14127,6 +14158,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14158,6 +14190,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -14189,6 +14222,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14208,6 +14242,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14319,6 +14354,7 @@ mod tests {
                 ],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -14343,6 +14379,7 @@ mod tests {
                     attachments: vec![source.clone()],
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14478,6 +14515,7 @@ mod tests {
                 attachments: vec![shot.into(), screen.into()],
                 queued: false,
                 synthetic: false,
+                command_line: None,
             },
         )];
         items.extend(tool_round("call-image", shot).into_iter().map(|mut item| {
@@ -14605,6 +14643,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: true,
+                    command_line: None,
                 },
             ),
             item(
@@ -14614,6 +14653,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: true,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ]);
@@ -14641,6 +14681,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let messages = provider_messages(vec![
@@ -14684,6 +14725,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let text_queued_id = text_queued.id;
@@ -14695,6 +14737,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             text_queued,
@@ -14740,6 +14783,7 @@ mod tests {
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
+                command_line: None,
             },
         );
         let tool_queued_id = tool_queued.id;
@@ -14804,6 +14848,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14828,6 +14873,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ];
@@ -14848,6 +14894,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
             item(
@@ -14871,6 +14918,7 @@ mod tests {
                     attachments: Vec::new(),
                     queued: false,
                     synthetic: false,
+                    command_line: None,
                 },
             ),
         ];

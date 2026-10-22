@@ -388,6 +388,8 @@ pub struct TuiState {
     pub theme: Option<String>,
     pub variant: Option<String>,
     pub language: Option<String>,
+    /// `compact`, `show` or `hide`; absent until Ctrl+T changes it.
+    pub thinking: Option<String>,
     pub last_thread: Option<String>,
     /// Legacy single-thread scroll value; read as a fallback for two release
     /// cycles after per-thread view state shipped.
@@ -609,6 +611,19 @@ pub fn load_language() -> crate::locale::Language {
 
 pub fn save_language(language: crate::locale::Language) {
     save_state(move |state| state.language = Some(language.code().to_owned()));
+}
+
+/// The thinking display chosen last, Compact until one is chosen.
+pub fn load_thinking() -> crate::state::ThinkingMode {
+    load_state()
+        .thinking
+        .as_deref()
+        .and_then(crate::state::ThinkingMode::parse)
+        .unwrap_or_default()
+}
+
+pub fn save_thinking(mode: crate::state::ThinkingMode) {
+    save_state(move |state| state.thinking = Some(mode.key().to_owned()));
 }
 
 pub(crate) fn load_client_json<T: serde::de::DeserializeOwned + Default>(

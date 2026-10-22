@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { formatNumber, language, t } from "./i18n";
 import {
   createEffect,
   createSignal,
@@ -14,18 +14,34 @@ import { Icon } from "./icons";
 import type { FileContent } from "../shared";
 import {
   activeMention,
+  contextKey,
   contextLabel,
+  countLines,
   fileContext,
   mentionAgents,
+  pasteSize,
   type PromptContext,
 } from "./prompt-context";
 import { shortPage, type ElementContext } from "./element-context";
 import "./prompt-context.css";
 
 type Option = { kind: "file" | "agent"; name: string; description?: string };
+/** How a paste reads, in its chip and in the transcript: `Pasted text · 214
+ * lines`, and its size once that matters, `· 2.4 MB`. */
+export function pasteLabel(text: string) {
+  const lines = Math.max(1, countLines(text));
+  const label =
+    lines === 1
+      ? t("Pasted text · 1 line")
+      : t("Pasted text · {count} lines", { count: formatNumber(lines) });
+  const size = pasteSize(text, language());
+  return size ? `${label} · ${size}` : label;
+}
+const chipLabel = (item: PromptContext) =>
+  item.kind === "paste" ? pasteLabel(item.text) : contextLabel(item);
 /** Hovering a picked element's chip says what and where it is. */
 function chipTitle(item: PromptContext) {
-  if (item.kind !== "element") return contextLabel(item);
+  if (item.kind !== "element") return chipLabel(item);
   return [
     `${item.tag} · ${item.width}×${item.height}`,
     shortPage(item.url),
@@ -65,6 +81,8 @@ export function PromptContextControls(props: {
   text: string;
   textarea: () => HTMLTextAreaElement;
   change: (value: string) => void;
+  /** Text into the message box at its caret, as typing it would. */
+  insert: (text: string) => void;
   disabled: boolean;
 }) {
   const app = useApp();
@@ -165,6 +183,51 @@ export function PromptContextControls(props: {
     }
   }
   const syncCaret = () => setCaret(props.textarea()?.selectionStart ?? 0);
+  let chips: HTMLDivElement | undefined;
+  /** A chip's preview closes with Escape or a click anywhere else, and the
+   * keyboard returns to its chip. */
+  const closePreviews = (keep?: Element | null) => {
+    for (const details of chips?.querySelectorAll<HTMLDetailsElement>("details[open]") ?? [])
+      if (!keep || !details.contains(keep)) details.open = false;
+  };
+  onMount(() => {
+    const away = (event: PointerEvent) => closePreviews(event.target as Element);
+    document.addEventListener("pointerdown", away);
+    onCleanup(() => document.removeEventListener("pointerdown", away));
+  });
+  /**
+   * The last paste put back as text. The message box's own Undo takes the
+   * text out, and then the chip comes back; Redo puts the text in again and
+   * takes the chip away, so the paste is never lost between the two.
+   */
+  let unpasted:
+    | { item: Extract<PromptContext, { kind: "paste" }>; key: string; before: string; after: string }
+    | undefined;
+  /** A paste back in the message box as text, where the caret was. */
+  function editAsText(item: Extract<PromptContext, { kind: "paste" }>) {
+    if (props.disabled) return;
+    const input = props.textarea();
+    const before = input.value;
+    props.insert(item.text);
+    unpasted = { item, key: app.draftKey(), before, after: input.value };
+    void app.run(() => app.removePromptContext(item));
+  }
+  onMount(() => {
+    const input = props.textarea();
+    const history = (event: Event) => {
+      const kind = (event as InputEvent).inputType;
+      if (!unpasted || (kind !== "historyUndo" && kind !== "historyRedo")) return;
+      const { item, key, before, after } = unpasted;
+      if (key !== app.draftKey()) return void (unpasted = undefined);
+      const chip = app.promptContext().some((value) => contextKey(value) === contextKey(item));
+      if (kind === "historyUndo" && input.value === before && !chip)
+        void app.run(() => app.addPromptContext(item, key));
+      else if (kind === "historyRedo" && input.value === after && chip)
+        void app.run(() => app.removePromptContext(item));
+    };
+    input.addEventListener("input", history);
+    onCleanup(() => input.removeEventListener("input", history));
+  });
   onMount(() => {
     const input = props.textarea();
     const update = () => queueMicrotask(syncCaret);
@@ -232,20 +295,48 @@ export function PromptContextControls(props: {
   return (
     <>
       <Show when={app.promptContext().length}>
-        <div class="prompt-context-items" aria-label={t("Attached context")}>
+        <div
+          ref={chips}
+          class="prompt-context-items"
+          aria-label={t("Attached context")}
+        >
           <For each={app.promptContext()}>
             {(item) => (
-              <div class="prompt-context-item">
+              <div class="prompt-context-item" data-kind={item.kind}>
                 <Icon
-                  name={item.kind === "file" ? "file" : item.kind === "element" ? "pick" : "agents"}
+                  name={
+                    item.kind === "file"
+                      ? "file"
+                      : item.kind === "element"
+                        ? "pick"
+                        : item.kind === "paste"
+                          ? "paste"
+                          : "agents"
+                  }
                   size="sm"
                 />
-                <details>
+                <details
+                  onToggle={(event) => {
+                    if (event.currentTarget.open)
+                      closePreviews(event.currentTarget);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape" || !event.currentTarget.open)
+                      return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.currentTarget.open = false;
+                    event.currentTarget.querySelector("summary")?.focus();
+                  }}
+                >
                   <summary title={chipTitle(item)}>
-                    {contextLabel(item)}
+                    {chipLabel(item)}
                     {item.kind === "file" && item.unsaved ? ` · ${t("unsaved")}` : ""}
                   </summary>
-                  <div class="prompt-context-preview">
+                  <div
+                    class="prompt-context-preview"
+                    classList={{ "paste-preview": item.kind === "paste" }}
+                  >
                     <Switch
                       fallback={
                         <p>
@@ -253,6 +344,24 @@ export function PromptContextControls(props: {
                         </p>
                       }
                     >
+                      <Match when={item.kind === "paste" && item}>
+                        {(paste) => (
+                          <>
+                            <pre tabIndex={0} aria-label={chipLabel(paste())}>
+                              {paste().text}
+                            </pre>
+                            <div class="paste-preview-actions">
+                              <button
+                                type="button"
+                                disabled={props.disabled}
+                                onClick={() => editAsText(paste())}
+                              >
+                                {t("Edit as text")}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </Match>
                       <Match when={item.kind === "file" && item}>
                         {(file) => (
                           <>
@@ -271,10 +380,21 @@ export function PromptContextControls(props: {
                   type="button"
                   class="icon-button"
                   disabled={props.disabled}
-                  aria-label={t("Remove context {name}", { name: contextLabel(item) })}
-                  onClick={() =>
-                    void app.run(() => app.removePromptContext(item))
-                  }
+                  aria-label={t("Remove context {name}", { name: chipLabel(item) })}
+                  // Focus stays in the message box, so the next paste still
+                  // reaches it.
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    const key = contextKey(item);
+                    void app.run(() => app.removePromptContext(item));
+                    // Removed from the keyboard, the button would take the
+                    // focus with it.
+                    if (chips?.contains(document.activeElement))
+                      queueMicrotask(() => {
+                        if (!app.promptContext().some((value) => contextKey(value) === key))
+                          props.textarea()?.focus({ preventScroll: true });
+                      });
+                  }}
                 >
                   <Icon name="close" size="xs" />
                 </button>

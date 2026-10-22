@@ -593,6 +593,17 @@ impl App {
         self.sidebar_overlay = !shown;
     }
 
+    /// Ctrl+T: the next thinking display (Compact, Show, Hide), kept for the
+    /// next launch.
+    pub fn cycle_thinking(&mut self) {
+        self.thinking = self.thinking.next();
+        crate::config::save_thinking(self.thinking);
+        self.notice = self.language.format(
+            "Thinking display: {mode}",
+            &[("mode", self.thinking.label(self.language))],
+        );
+    }
+
     fn is_home(&self) -> bool {
         self.items.is_empty()
             && self.todos.is_empty()

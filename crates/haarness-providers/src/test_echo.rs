@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 ///   `[{"name":"task","arguments":{...}}, ...]`; the follow-up round emits
 ///   `All tools finished`.
 /// - `::reason <text>` — emits a reasoning delta before the text reply.
+/// - `::thinkslow` — streams several lines of reasoning in delayed chunks,
+///   then a reply, for live thinking-display E2E.
 /// - `::md` — emits a markdown-rich reply (bold, inline code, fenced block).
 /// - `::mdslow` — emits Markdown in delayed chunks for live-rendering E2E.
 /// - `::scrollstream` — reflows delayed Markdown while scroll tests are paused.
@@ -175,6 +177,28 @@ impl ModelProvider for EchoProvider {
                 yield Ok(ProviderEvent::Usage {
                     input_tokens,
                     output_tokens: 6,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                });
+                yield Ok(ProviderEvent::Finished { reason: "completed".into() });
+            }));
+        }
+        if directive.starts_with("::thinkslow") {
+            let input_tokens = prompt.split_whitespace().count() as u64;
+            return Ok(Box::pin(async_stream::stream! {
+                for chunk in [
+                    "Reading the request",
+                    " and the files it names.\n",
+                    "Weighing two ways to fix the parser.\n",
+                    "The second keeps the public API stable.",
+                ] {
+                    yield Ok(ProviderEvent::ReasoningDelta(chunk.into()));
+                    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                }
+                yield Ok(ProviderEvent::TextDelta("Thought it through".into()));
+                yield Ok(ProviderEvent::Usage {
+                    input_tokens,
+                    output_tokens: 24,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
                 });

@@ -258,6 +258,7 @@ pub(super) fn promote(
             attachments: input.attachments,
             queued: true,
             synthetic: false,
+            command_line: None,
         },
         created_at: now,
     };

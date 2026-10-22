@@ -790,7 +790,7 @@ impl Service {
             ItemData::AssistantMessage { text } => Some(SessionUpdate::AgentMessageChunk(
                 ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
             )),
-            ItemData::Reasoning { text } => Some(SessionUpdate::AgentThoughtChunk(
+            ItemData::Reasoning { text, .. } => Some(SessionUpdate::AgentThoughtChunk(
                 ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
             )),
             ItemData::ToolCall {
