@@ -283,7 +283,7 @@ async fn run_with_client(
     auto: bool,
 ) -> Result<Option<PathBuf>> {
     let initial_info = client.info().await.ok();
-    let providers = client.providers().await.unwrap_or_default();
+    let mut providers = client.providers().await.unwrap_or_default();
     let mut threads = client.threads().await?;
     let saved = config::load_state();
     let saved_thread = saved
@@ -339,6 +339,15 @@ async fn run_with_client(
     // Capture the event boundary before snapshot hydration. SSE then replays
     // exactly the deltas that raced these REST reads.
     let server_info = client.info().await.ok();
+    // The server answers with the model lists it has and announces the ones
+    // still loading when they come (`assets.updated`). One that came before
+    // this point did so before the events this client follows: ask again,
+    // without waiting for the rest.
+    if let Ok(Ok(current)) =
+        tokio::time::timeout(Duration::from_millis(300), client.providers()).await
+    {
+        providers = current;
+    }
     let agents = client.agents().await.unwrap_or_default();
     let items = client.items(thread.id).await.unwrap_or_default();
     let restored_view = saved.thread_views.get(&thread.id.to_string());

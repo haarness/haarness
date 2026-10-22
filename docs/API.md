@@ -200,7 +200,8 @@ turn delays application, `configuration.reloaded` after the complete new
 generation is live, and `configuration.reload_failed` when validation rejects
 the candidate. `assets.updated` follows a successful reload and tells clients
 to refresh provider, command, agent, workflow, skill, MCP, and language-service
-catalogs. The `serverInstanceId` does not change during a hot reload.
+catalogs; with `resource: "provider"` it follows model lists that came in after
+a catalog read stopped waiting for them (see [Model catalogs](MODELS.md)). The `serverInstanceId` does not change during a hot reload.
 A reload follows source content, not file events: rewriting a file unchanged,
 editor scratch files (`*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `#*#`, `4913`,
 JetBrains `___jb_tmp___`/`___jb_old___`, `.DS_Store`), folder timestamps, and

@@ -10,6 +10,7 @@ mod command;
 pub mod files;
 pub mod front;
 pub mod hooks;
+pub mod models;
 pub mod plugins;
 pub mod preview;
 mod profiles;

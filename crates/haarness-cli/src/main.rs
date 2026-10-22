@@ -7022,8 +7022,9 @@ async fn application_at(
     }
     let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
     let (instances, disabled_providers) = provider_instances(&file_config, &credentials);
+    // Their live model lists load below, once the runtime can announce them.
     let providers = Arc::new(
-        NativeProviderRegistry::discover_with_providers_and_store(
+        NativeProviderRegistry::with_providers_and_store(
             instances,
             &disabled_providers,
             Arc::new(CredentialStore::new(paths.auth.clone())),
@@ -7146,6 +7147,9 @@ async fn application_at(
         ))?;
     }
     let runtime = Arc::new(runtime);
+    // A list still loading after a few seconds keeps loading while the server
+    // starts answering; clients hear when it is in (`assets.updated`).
+    haarness_server::models::catalog(&runtime, false, Some(haarness_server::models::WAIT)).await;
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
     // Chrome groups a conversation's tabs under its title and keeps
