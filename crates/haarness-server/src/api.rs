@@ -326,10 +326,13 @@ pub async fn serve_with_access(
     let task = tokio::spawn(async move {
         // Peer addresses let rejected-request log lines say who was turned away.
         let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-        axum::serve(listener, app)
-            .with_graceful_shutdown(server_shutdown.cancelled_owned())
-            .await
-            .map_err(Into::into)
+        axum::serve(
+            axum::serve::ListenerExt::tap_io(listener, keep_connections_alive),
+            app,
+        )
+        .with_graceful_shutdown(server_shutdown.cancelled_owned())
+        .await
+        .map_err(Into::into)
     });
     Ok(ServerHandle {
         address,
@@ -340,6 +343,26 @@ pub async fn serve_with_access(
         language,
         ptys,
     })
+}
+
+/// Probe an accepted connection once it is idle, so one whose peer vanished
+/// (a laptop that slept, a network gone without a word) ends within minutes
+/// instead of when TCP gives up: an event stream waiting for that client would
+/// hold its queue as long. On Linux, data left unacknowledged ends it too.
+fn keep_connections_alive(connection: &mut tokio::net::TcpStream) {
+    let socket = socket2::SockRef::from(&*connection);
+    let probes = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15));
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let probes = probes.with_retries(4);
+    if let Err(error) = socket.set_tcp_keepalive(&probes) {
+        tracing::debug!(%error, "could not set TCP keepalive on a connection");
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = socket.set_tcp_user_timeout(Some(Duration::from_secs(120))) {
+        tracing::debug!(%error, "could not set TCP_USER_TIMEOUT on a connection");
+    }
 }
 
 struct HeaderExtractor<'a>(&'a HeaderMap);
@@ -2587,5 +2610,23 @@ mod failure_tests {
         assert_eq!(invalid["message"], "invalid request: bad");
         let elsewhere = message(ApiFailure::from(CoreError::Tool("boom".into()))).await;
         assert_eq!(elsewhere["message"], "tool error: boom");
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    #[tokio::test]
+    async fn accepted_connections_are_probed_once_idle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (accepted, _client) = tokio::join!(listener.accept(), client);
+        let (mut accepted, _) = accepted.unwrap();
+        super::keep_connections_alive(&mut accepted);
+        let socket = socket2::SockRef::from(&accepted);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(
+            socket.tcp_keepalive_time().unwrap(),
+            std::time::Duration::from_secs(60)
+        );
     }
 }
