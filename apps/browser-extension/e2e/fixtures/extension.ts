@@ -17,7 +17,8 @@ import { fileURLToPath } from "node:url";
 import { FakeBridge } from "./bridge";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const EXTENSION = resolve(here, "../../dist/chrome");
+/** The unpacked extension under test: the build, or `HAARNESS_E2E_EXTENSION` (a released zip, unzipped). */
+export const EXTENSION = process.env.HAARNESS_E2E_EXTENSION ? resolve(process.env.HAARNESS_E2E_EXTENSION) : resolve(here, "../../dist/chrome");
 export const EXTENSION_ID = "accdjhmcgljbadpeanajllmcembhkomn";
 const HOST = resolve(here, "fake-host.py");
 const LOCAL_CHROMIUM = join(
