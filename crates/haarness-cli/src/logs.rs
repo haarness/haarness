@@ -544,10 +544,17 @@ pub struct StderrQueue {
 struct QueueState {
     /// Bytes waiting to be written.
     queued: std::sync::atomic::AtomicUsize,
-    /// Lines left out since the last one written.
+    /// Lines left out since the last one taken.
     skipped: std::sync::atomic::AtomicUsize,
     limit: usize,
+    /// Named in the line that reports left-out lines.
+    logs: String,
 }
+
+/// Whether this process's stderr log goes through a [`StderrQueue`]: a
+/// panic's message then reaches stderr through it (as a log line) and not
+/// by a write that could wait for a reader that stopped.
+pub static STDERR_QUEUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Held for the life of the process: dropped, it gives what is still
 /// queued up to a second to go out.
@@ -577,23 +584,14 @@ pub fn stderr_queue<W: std::io::Write + Send + 'static>(
         queued: 0.into(),
         skipped: 0.into(),
         limit,
+        logs: logs.display().to_string(),
     });
     let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
     let worker = state.clone();
-    let logs = logs.display().to_string();
     std::thread::Builder::new()
         .name("haarness-stderr-log".into())
         .spawn(move || {
             for line in receiver {
-                let skipped = worker.skipped.swap(0, Ordering::AcqRel);
-                if skipped > 0 {
-                    let _ = writer.write_all(
-                        format!(
-                            "haarness: {skipped} log lines were left out here while this output was not read; {logs} has them all\n"
-                        )
-                        .as_bytes(),
-                    );
-                }
                 // A reader that is gone for good fails every write; what is
                 // queued still drains, so the server never waits on it.
                 let _ = writer.write_all(&line);
@@ -618,8 +616,24 @@ impl std::io::Write for &StderrQueue {
         if state.queued.fetch_add(buf.len(), Ordering::AcqRel) + buf.len() > state.limit {
             state.queued.fetch_sub(buf.len(), Ordering::AcqRel);
             state.skipped.fetch_add(1, Ordering::AcqRel);
-        } else if self.sender.send(buf.to_vec()).is_err() {
-            state.queued.fetch_sub(buf.len(), Ordering::AcqRel);
+            return Ok(buf.len());
+        }
+        // The first line taken after a gap says how many were left out, so
+        // the notice stands where the gap is.
+        let mut line = Vec::with_capacity(buf.len());
+        let skipped = state.skipped.swap(0, Ordering::AcqRel);
+        if skipped > 0 {
+            let notice = format!(
+                "haarness: {skipped} log lines were left out here while this output was not read; {} has them all\n",
+                state.logs
+            );
+            state.queued.fetch_add(notice.len(), Ordering::AcqRel);
+            line.extend_from_slice(notice.as_bytes());
+        }
+        line.extend_from_slice(buf);
+        let length = line.len();
+        if self.sender.send(line).is_err() {
+            state.queued.fetch_sub(length, Ordering::AcqRel);
         }
         Ok(buf.len())
     }
@@ -954,37 +968,34 @@ mod tests {
             "a log write waited for the reader: {:?}",
             started.elapsed()
         );
-        // The reader catches up: the line it was stuck on, how many were
-        // left out, then what came after.
+        // The reader catches up.
         *open.0.lock().unwrap() = true;
         open.1.notify_all();
         (&queue).write_all(b"after\n").unwrap();
         drop(guard);
         let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
-        let notices: Vec<_> = text
-            .lines()
-            .filter(|line| line.starts_with("haarness: "))
-            .collect();
-        assert!(!notices.is_empty(), "no notice: {text}");
-        let skipped: usize = notices
+        let lines: Vec<_> = text.lines().collect();
+        // The lines from before the gap, in order, then the notice, then
+        // the line after it.
+        let kept = lines
             .iter()
-            .map(|notice| {
-                assert!(notice.ends_with("/data/logs has them all"), "{notice}");
-                notice
-                    .trim_start_matches("haarness: ")
-                    .split(' ')
-                    .next()
-                    .unwrap()
-                    .parse::<usize>()
-                    .unwrap()
-            })
-            .sum();
-        let kept: Vec<_> = text
-            .lines()
-            .filter(|line| line.starts_with("line "))
-            .collect();
-        assert_eq!(kept.first(), Some(&"line 00000"), "{text}");
-        assert_eq!(kept.len() + skipped, 10_000, "{text}");
+            .take_while(|line| line.starts_with("line "))
+            .count();
+        for (index, line) in lines[..kept].iter().enumerate() {
+            assert_eq!(*line, format!("line {index:05}"), "{text}");
+        }
+        assert_eq!(lines.len(), kept + 2, "{text}");
+        let notice = lines[kept];
+        assert!(notice.ends_with("/data/logs has them all"), "{notice}");
+        let skipped: usize = notice
+            .trim_start_matches("haarness: ")
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(kept + skipped, 10_000, "{text}");
+        assert_eq!(lines[kept + 1], "after");
         assert!(text.ends_with("after\n"), "{text}");
     }
 }
