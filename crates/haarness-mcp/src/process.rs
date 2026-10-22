@@ -10,6 +10,8 @@ pub(super) struct Process {
     inner: TokioChildProcess,
     #[cfg(unix)]
     pid: Option<i32>,
+    /// Stopped by the next server should this one die before it can.
+    _recorded: haarness_core::process_groups::Recorded,
 }
 
 impl Process {
@@ -25,6 +27,7 @@ impl Process {
         Ok(Self {
             #[cfg(unix)]
             pid: inner.id().and_then(|pid| i32::try_from(pid).ok()),
+            _recorded: haarness_core::process_groups::recorded(inner.id()),
             inner,
         })
     }

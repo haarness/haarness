@@ -10,7 +10,11 @@ Drives real, isolated workspace daemons with the echo provider:
   and every line names the process that wrote it (pid and role). A raised
   level never lowers a server started more verbose.
 - `haarness logs export` packs the logs with credentials removed.
+- A foreground `serve` whose stderr nobody reads keeps answering every
+  client and still stops in time (before, once the pipe was full, every
+  request that logged waited in that write and the server froze).
 """
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -18,6 +22,7 @@ import re
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -152,6 +157,45 @@ try:
     # Every line names the process that wrote it.
     assert lines(pid, r"INFO "), "server lines carry the pid and role"
     stop()
+
+    # A foreground server whose stderr nobody reads keeps answering.
+    token = "stalled-" + uuid.uuid4().hex
+    front = subprocess.Popen(
+        args + ["serve", "--port", "0"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+        env={**env, "HAARNESS_SERVER_TOKEN": token, "HAARNESS_LOG": "warn,axum::rejection=trace,haarness=info"})
+    try:
+        listening = front.stdout.readline()
+        assert listening.startswith("Haarness server listening on "), listening
+        connection.update(url=listening.split(" on ", 1)[1].strip(), token=token)
+
+        def rejected(_):
+            request = urllib.request.Request(
+                connection["url"] + "/v1/threads", data=b"not json", method="POST",
+                headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(request, timeout=10)
+            except urllib.error.HTTPError as error:
+                return error.code
+            return 200
+
+        # One log line each, several times what the pipe holds.
+        with ThreadPoolExecutor(64) as pool:
+            codes = list(pool.map(rejected, range(1500)))
+        assert all(400 <= code < 500 for code in codes), sorted(set(codes))
+        assert api("/info")["name"] == "haarness"
+        tool_turn()
+        started = time.monotonic()
+        stop()
+        assert time.monotonic() - started < 15, "the server took too long to stop"
+        assert front.wait(timeout=10) == 0
+        printed = front.stderr.read()
+        assert "axum::rejection" in printed, printed[-400:]
+    finally:
+        if front.poll() is None:
+            front.kill()
+            front.wait()
+    print("PASS a foreground server whose stderr nobody reads keeps answering and stops in time", flush=True)
 
     # An export removes credentials.
     secret = "sk-fixture-secret-0123456789abcdef"

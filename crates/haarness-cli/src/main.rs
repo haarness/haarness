@@ -1421,9 +1421,16 @@ async fn cli_main() -> Result<()> {
     // `serve --stop` and the `--daemon` launcher are control commands: they
     // print their result, not the server's log. A detached server's stderr
     // goes nowhere.
-    let stderr_logs = cli.print_logs
-        || matches!(&cli.command, Some(Command::Serve(args))
-            if !args.stop && !args.daemon && !args.background_child);
+    let stderr_logs = if matches!(&cli.command, Some(Command::Serve(args))
+            if !args.stop && !args.daemon && !args.background_child)
+    {
+        // Everyone the server answers would wait on a reader that stopped.
+        StderrLogs::Queued
+    } else if cli.print_logs {
+        StderrLogs::InPlace
+    } else {
+        StderrLogs::Off
+    };
     // Read-only commands stay out of the log files they inspect.
     let file_logs = !matches!(cli.command, Some(Command::Logs { .. } | Command::Doctor));
     // Processes that live as long as a window or a server get no command span:
@@ -1800,7 +1807,16 @@ fn quiet_closed_stdout() {
             "panic: {}",
             message.chars().take(500).collect::<String>()
         );
-        default_hook(info);
+        // A server's stderr log goes through its queue, which the line above
+        // reached, as the log file did. The message itself (with its
+        // backtrace note) follows once the queue is read; while a reader that
+        // stopped leaves it waiting, writing past it would hold the panicking
+        // thread, and the log line has to do.
+        if !logs::STDERR_QUEUED.load(std::sync::atomic::Ordering::Relaxed)
+            || logs::stderr_drained(Duration::from_millis(100))
+        {
+            default_hook(info);
+        }
     }));
 }
 
@@ -4028,6 +4044,18 @@ async fn serve_command(
         )
         .await;
     };
+    // The lease says the folder's previous server is gone. Commands it
+    // started and a crash or `kill -9` left running (a dev server holding its
+    // port, a `sleep`) stop now; this server then records its own.
+    // Dropped before the lease: a server that stops gives its record up
+    // before it lets go of the folder, so what it is still stopping is left
+    // to it.
+    let (stopped, _recording) = haarness_core::process_groups::take_over(
+        paths.server_lock.with_file_name("process-groups"),
+    );
+    if stopped > 0 {
+        tracing::info!(stopped, "stopped commands the previous server left running");
+    }
     let (listener, took_free_port) =
         bind_serve_listener(args.host, args.port, DEFAULT_SERVE_PORT).await?;
     if took_free_port && !args.background_child {
@@ -6247,6 +6275,7 @@ fn load_output_style(
 struct HotReloadCandidate {
     disabled_skills: Vec<String>,
     providers: Arc<dyn ProviderRegistry>,
+    provider_definitions: HashMap<String, String>,
     tools: Arc<dyn ToolRegistry>,
     project_context: String,
     runtime_config: haarness_core::RuntimeConfig,
@@ -6320,6 +6349,9 @@ struct HotReloadController {
     management: Arc<management::ManagementService>,
     language: Arc<haarness_language::LanguageService>,
     scheduler: Scheduler,
+    /// The live generation's providers, by id, as [`provider_fingerprints`]
+    /// tells them apart.
+    provider_definitions: parking_lot::Mutex<HashMap<String, String>>,
 }
 
 impl HotReloadController {
@@ -6342,15 +6374,31 @@ impl HotReloadController {
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
             provider_instances(&sources.file_config, &credentials);
-        let providers: Arc<dyn ProviderRegistry> = Arc::new(
-            NativeProviderRegistry::discover_with_providers_and_store(
-                instances,
-                &disabled_providers,
-                Arc::new(CredentialStore::new(self.paths.auth.clone())),
-            )
-            .await
-            .with_stream_limits(&stream_limits(&sources.file_config)),
-        );
+        // Its model lists load once it is live, as at start (see below). A
+        // provider defined as before is the live one, lists and all: a
+        // reload (an instructions edit, a hook added) no longer forgets every
+        // list, which left Haarness Cloud with none until it was fetched again.
+        let mut registry = NativeProviderRegistry::with_providers_and_store(
+            instances,
+            &disabled_providers,
+            Arc::new(CredentialStore::new(self.paths.auth.clone())),
+        )
+        .await
+        .with_stream_limits(&stream_limits(&sources.file_config));
+        let provider_definitions =
+            provider_fingerprints(&sources.file_config, &credentials, &registry);
+        let live = self.runtime.providers();
+        {
+            let known = self.provider_definitions.lock();
+            for (id, definition) in &provider_definitions {
+                if known.get(id) == Some(definition)
+                    && let Some(provider) = live.get(id)
+                {
+                    registry.insert(provider);
+                }
+            }
+        }
+        let providers: Arc<dyn ProviderRegistry> = Arc::new(registry);
         let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills =
@@ -6402,6 +6450,7 @@ impl HotReloadController {
         Ok(HotReloadCandidate {
             disabled_skills,
             providers,
+            provider_definitions,
             tools,
             project_context: sources.project_context,
             runtime_config: sources.runtime_config,
@@ -6421,6 +6470,9 @@ impl HotReloadController {
         let applied = self.apply_components(candidate);
         if applied {
             *self.watch.write() = candidate.watch.clone();
+            self.provider_definitions
+                .lock()
+                .clone_from(&candidate.provider_definitions);
         }
         applied
     }
@@ -6567,6 +6619,17 @@ impl HotReloadController {
             let agents_only = observed.without_agents == applied.without_agents;
             if self.apply(candidate) {
                 applied = observed.clone();
+                // The new providers' lists start loading now; a read waits
+                // for one with nothing to show, and the rest announce
+                // themselves when they come.
+                let runtime = self.runtime.clone();
+                tokio::spawn(async move {
+                    haarness_server::models::catalog(
+                        &runtime,
+                        haarness_server::models::Wait::Start(Duration::ZERO),
+                    )
+                    .await;
+                });
                 for notice in &candidate.notices {
                     tracing::info!("config: {notice}");
                 }
@@ -7041,8 +7104,9 @@ async fn application_at(
     }
     let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
     let (instances, disabled_providers) = provider_instances(&file_config, &credentials);
+    // Their live model lists load below, once the runtime can announce them.
     let providers = Arc::new(
-        NativeProviderRegistry::discover_with_providers_and_store(
+        NativeProviderRegistry::with_providers_and_store(
             instances,
             &disabled_providers,
             Arc::new(CredentialStore::new(paths.auth.clone())),
@@ -7050,6 +7114,8 @@ async fn application_at(
         .await
         .with_stream_limits(&stream_limits(&file_config)),
     );
+    let provider_definitions =
+        provider_fingerprints(&file_config, &credentials, providers.as_ref());
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
@@ -7165,6 +7231,13 @@ async fn application_at(
         ))?;
     }
     let runtime = Arc::new(runtime);
+    // A list still loading after a few seconds keeps loading while the server
+    // starts answering; clients hear when it is in (`assets.updated`).
+    haarness_server::models::catalog(
+        &runtime,
+        haarness_server::models::Wait::Start(haarness_server::models::WAIT),
+    )
+    .await;
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
     // Chrome groups a conversation's tabs under its title and keeps
@@ -7208,6 +7281,7 @@ async fn application_at(
         management: management.clone(),
         language: language.clone(),
         scheduler,
+        provider_definitions: parking_lot::Mutex::new(provider_definitions),
     };
     Ok((
         listener,
@@ -9003,6 +9077,35 @@ fn provider_instances(
 
 /// The configured stream limits by provider id (`stream_idle_timeout`,
 /// `request_timeout`); providers without either keep the defaults.
+/// What makes each of `registry`'s providers the one it is: its section of
+/// the configuration (its definition, or the tuning of a built-in one) and
+/// the stored credentials, as a digest. A reload keeps a provider whose
+/// digest is the same, and its loaded model list with it.
+fn provider_fingerprints(
+    config: &FileConfig,
+    credentials: &HashMap<String, String>,
+    registry: &NativeProviderRegistry,
+) -> HashMap<String, String> {
+    let mut stored: Vec<_> = credentials.iter().collect();
+    stored.sort();
+    let stored = serde_json::to_vec(&stored).unwrap_or_default();
+    haarness_core::ProviderRegistry::list(registry)
+        .into_iter()
+        .map(|info| {
+            let section = config
+                .providers
+                .get(&info.id)
+                .and_then(|section| serde_json::to_vec(section).ok())
+                .unwrap_or_default();
+            let mut digest = Sha256::new();
+            digest.update(&section);
+            digest.update([0]);
+            digest.update(&stored);
+            (info.id, format!("{:x}", digest.finalize()))
+        })
+        .collect()
+}
+
 fn stream_limits(config: &FileConfig) -> HashMap<String, haarness_core::StreamLimits> {
     config
         .providers
@@ -9613,9 +9716,21 @@ fn plugin_command(
     Ok(())
 }
 
+/// Where [`init_logging`] streams log lines besides the log file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StderrLogs {
+    Off,
+    /// Written as they come, in order with the command's own output.
+    InPlace,
+    /// A server's: through [`logs::StderrQueue`], so a reader that stops
+    /// reading never holds a request.
+    Queued,
+}
+
 /// Keeps asynchronous file logs alive and flushes an optional OTLP provider.
 struct TelemetryGuard {
     _file_writer: Option<tracing_appender::non_blocking::WorkerGuard>,
+    _stderr_queue: Option<logs::StderrQueueGuard>,
     tracer_provider: Option<SdkTracerProvider>,
     /// Telemetry problems are also printed on stderr (a CLI command on a terminal).
     interactive: bool,
@@ -9846,7 +9961,7 @@ fn urls_between_escapes(text: &str) -> String {
 fn init_logging(
     paths: &Paths,
     level: Option<&str>,
-    stderr_logs: bool,
+    stderr_logs: StderrLogs,
     file_logs: bool,
     role: otel::ProcessRole,
     command: &'static str,
@@ -9895,17 +10010,40 @@ fn init_logging(
     } else {
         None
     };
-    if stderr_logs {
+    let mut stderr_queue_guard = None;
+    if stderr_logs != StderrLogs::Off {
         let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
         reloads.push(reload);
-        layers.push(Box::new(
-            tracing_subscriber::fmt::layer()
-                .with_writer(RedactUrls(io::stderr))
-                // Colour only for a terminal: not in files, pipes or journald.
-                .with_ansi(io::stderr().is_terminal())
-                .with_timer(stamp())
-                .with_filter(filter),
-        ));
+        // Colour only for a terminal: not in files, pipes or journald.
+        let ansi = io::stderr().is_terminal();
+        let queue = (stderr_logs == StderrLogs::Queued)
+            .then(|| {
+                logs::stderr_queue(
+                    io::stderr(),
+                    logs::STDERR_QUEUE_LIMIT,
+                    &paths.data.join("logs"),
+                )
+            })
+            .flatten();
+        if let Some((queue, guard)) = queue {
+            stderr_queue_guard = Some(guard);
+            logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
+            layers.push(Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(RedactUrls(queue))
+                    .with_ansi(ansi)
+                    .with_timer(stamp())
+                    .with_filter(filter),
+            ));
+        } else {
+            layers.push(Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(RedactUrls(io::stderr))
+                    .with_ansi(ansi)
+                    .with_timer(stamp())
+                    .with_filter(filter),
+            ));
+        }
     }
     let otel::Tracing {
         provider: tracer_provider,
@@ -9949,6 +10087,7 @@ fn init_logging(
     }
     Ok(TelemetryGuard {
         _file_writer: file_writer_guard,
+        _stderr_queue: stderr_queue_guard,
         tracer_provider,
         interactive,
     })
@@ -11096,6 +11235,84 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Run in a process of its own (it installs the process's panic hook):
+    /// a server's stderr whose reader stopped held a panicking thread in the
+    /// message the default hook writes there, and so it goes on without it;
+    /// with a reader there, the message still reaches stderr.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_on_a_server_with_a_queued_stderr_neither_waits_for_nor_loses_its_reader() {
+        use std::io::Write as _;
+        if let Some(mode) = std::env::var_os("HAARNESS_PANIC_STDERR_PROBE") {
+            let (queue, _guard) = super::logs::stderr_queue(
+                std::io::stderr(),
+                super::logs::STDERR_QUEUE_LIMIT,
+                std::path::Path::new("/logs"),
+            )
+            .unwrap();
+            super::logs::STDERR_QUEUED.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::quiet_closed_stdout();
+            if mode == "stalled" {
+                // More than the pipe holds, through the queue, while nobody reads.
+                let line = vec![b'x'; 1024];
+                for _ in 0..512 {
+                    let _ = (&queue).write_all(&line);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            let _ = std::thread::spawn(|| panic!("a request handler failed")).join();
+            println!("the panicking thread ended");
+            let _ = std::io::stdout().flush();
+            std::process::exit(0);
+        }
+        let probe = |mode: &str| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::a_panic_on_a_server_with_a_queued_stderr_neither_waits_for_nor_loses_its_reader",
+                    "--nocapture",
+                ])
+                .env("HAARNESS_PANIC_STDERR_PROBE", mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (sender, lines) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                use std::io::BufRead as _;
+                for line in std::io::BufReader::new(stdout)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    let _ = sender.send(line);
+                }
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut ended = false;
+            while let Ok(line) =
+                lines.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                if line.contains("the panicking thread ended") {
+                    ended = true;
+                    break;
+                }
+            }
+            (child, ended)
+        };
+        // Nobody reads stderr: the thread goes on.
+        let (mut child, ended) = probe("stalled");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ended, "the panicking thread waited for stderr's reader");
+        // A reader is there: the message reaches it.
+        let (child, ended) = probe("read");
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(ended);
+        assert!(stderr.contains("a request handler failed"), "{stderr}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_permission_engine_protects_the_global_configuration_the_cli_reads() {

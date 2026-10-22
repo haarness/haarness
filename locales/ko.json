@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "서버 중지됨 · 다시 시작하는 중",
   "server stopped · restart failed · retrying": "서버 중지됨 · 다시 시작 실패 · 재시도 중",
   "server unreachable · still retrying": "서버에 연결할 수 없음 · 계속 재시도 중",
+  "not following the server": "서버를 따라가지 않음",
+  "not following the server · trying again in a minute, or restart Haarness": "서버를 따라가지 않음 · 1분 후 다시 시도하거나 Haarness를 다시 시작하세요",
   "Server restarted · reconnected": "서버 다시 시작됨 · 다시 연결됨",
   "Terminal closed · the shell exited": "터미널 닫힘 · 셸이 종료되었습니다",
   "Remove server": "서버 삭제",

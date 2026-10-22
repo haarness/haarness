@@ -1033,27 +1033,19 @@ fn read_head(head: &std::path::Path) -> Option<String> {
     }
     Some(content.get(..8).unwrap_or(content).to_owned())
 }
-async fn model_catalog(state: &ServerState, force: bool) -> Vec<ProviderInfo> {
-    let registry = state.runtime.providers();
-    let providers: Vec<_> = registry
-        .list()
-        .iter()
-        .filter(|info| info.authenticated)
-        .filter_map(|info| registry.get(&info.id))
-        .collect();
-    futures::future::join_all(
-        providers
-            .iter()
-            .map(|provider| provider.refresh_models(force)),
-    )
-    .await;
-    registry.list()
-}
+/// An ordinary read waits a little for lists still loading; an explicit
+/// refresh (a model picker opening, a key just saved) for all of them.
 async fn providers(State(state): State<ServerState>) -> Json<Vec<ProviderInfo>> {
-    Json(model_catalog(&state, false).await)
+    Json(
+        crate::models::catalog(
+            &state.runtime,
+            crate::models::Wait::Read(crate::models::WAIT),
+        )
+        .await,
+    )
 }
 async fn refresh_providers(State(state): State<ServerState>) -> Json<Vec<ProviderInfo>> {
-    Json(model_catalog(&state, true).await)
+    Json(crate::models::catalog(&state.runtime, crate::models::Wait::All).await)
 }
 async fn agents(State(state): State<ServerState>) -> Json<Vec<AgentProfile>> {
     Json(state.runtime.agent_profiles())

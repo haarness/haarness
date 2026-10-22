@@ -208,8 +208,17 @@ class Transport(Base):
         after: int | None = None,
         reconnect: bool = False,
         retry_seconds: float = 0.5,
+        idle_timeout: float | None = None,
     ) -> Iterator[ServerEvent]:
-        """Close the iterator to detach. A resync marker ends it; rehydrate REST state."""
+        """Close the iterator to detach. A resync marker ends it; rehydrate REST state.
+
+        With ``idle_timeout`` (seconds), a stream that sends nothing for that long,
+        not even the keepalive a server sends every 15 s, counts as lost: a
+        connection that died without closing. It connects again from its cursor
+        with ``reconnect``, and otherwise ends with a ``TransportError``.
+        """
+        if idle_timeout is not None and not idle_timeout > 0:
+            raise ValueError("idle_timeout must be positive")
         instance = None
         renewed = False
         while True:
@@ -222,7 +231,7 @@ class Transport(Base):
                     "GET",
                     self.base_url + "/v1/events",
                     headers=headers,
-                    timeout=httpx.Timeout(self._timeout, read=None),
+                    timeout=httpx.Timeout(self._timeout, read=idle_timeout),
                 ) as response:
                     if not response.is_success:
                         response.read()
@@ -253,6 +262,11 @@ class Transport(Base):
                     raise
                 renewed = True
                 continue
+            except httpx.ReadTimeout as error:
+                if not reconnect:
+                    raise TransportError(
+                        f"The event stream sent nothing for {idle_timeout} s"
+                    ) from error
             except httpx.HTTPError as error:
                 if not reconnect:
                     raise TransportError("Event stream failed") from error
@@ -324,7 +338,11 @@ class AsyncTransport(Base):
         after: int | None = None,
         reconnect: bool = False,
         retry_seconds: float = 0.5,
+        idle_timeout: float | None = None,
     ) -> AsyncIterator[ServerEvent]:
+        """See ``Transport.events``."""
+        if idle_timeout is not None and not idle_timeout > 0:
+            raise ValueError("idle_timeout must be positive")
         instance = None
         renewed = False
         while True:
@@ -337,7 +355,7 @@ class AsyncTransport(Base):
                     "GET",
                     self.base_url + "/v1/events",
                     headers=headers,
-                    timeout=httpx.Timeout(self._timeout, read=None),
+                    timeout=httpx.Timeout(self._timeout, read=idle_timeout),
                 ) as response:
                     if not response.is_success:
                         await response.aread()
@@ -368,6 +386,11 @@ class AsyncTransport(Base):
                     raise
                 renewed = True
                 continue
+            except httpx.ReadTimeout as error:
+                if not reconnect:
+                    raise TransportError(
+                        f"The event stream sent nothing for {idle_timeout} s"
+                    ) from error
             except httpx.HTTPError as error:
                 if not reconnect:
                     raise TransportError("Event stream failed") from error

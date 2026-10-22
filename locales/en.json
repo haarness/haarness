@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "server stopped · restarting it",
   "server stopped · restart failed · retrying": "server stopped · restart failed · retrying",
   "server unreachable · still retrying": "server unreachable · still retrying",
+  "not following the server": "not following the server",
+  "not following the server · trying again in a minute, or restart Haarness": "not following the server · trying again in a minute, or restart Haarness",
   "Server restarted · reconnected": "Server restarted · reconnected",
   "Terminal closed · the shell exited": "Terminal closed · the shell exited",
   "Remove server": "Remove server",

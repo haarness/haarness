@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "เซิร์ฟเวอร์หยุดทำงาน · กำลังรีสตาร์ต",
   "server stopped · restart failed · retrying": "เซิร์ฟเวอร์หยุดทำงาน · รีสตาร์ตไม่สำเร็จ · กำลังลองใหม่",
   "server unreachable · still retrying": "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ · ยังคงลองใหม่",
+  "not following the server": "ไม่ได้ติดตามเซิร์ฟเวอร์",
+  "not following the server · trying again in a minute, or restart Haarness": "ไม่ได้ติดตามเซิร์ฟเวอร์ · จะลองอีกครั้งในหนึ่งนาที หรือเริ่ม Haarness ใหม่",
   "Server restarted · reconnected": "รีสตาร์ตเซิร์ฟเวอร์แล้ว · เชื่อมต่อใหม่แล้ว",
   "Terminal closed · the shell exited": "ปิดเทอร์มินัลแล้ว · เชลล์ออกแล้ว",
   "Remove server": "ลบเซิร์ฟเวอร์",

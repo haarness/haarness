@@ -215,8 +215,29 @@ impl NativeProviderRegistry {
     /// Discovery backed by the live owner-only credential store, so providers
     /// observe sign-ins and sign-outs without a server restart and persist
     /// refreshed subscription tokens safely. Covers every supported custom wire
-    /// protocol; remote model discovery runs concurrently.
+    /// protocol; remote model discovery runs concurrently, so several slow or
+    /// unreachable endpoints cost one timeout, not N.
     pub async fn discover_with_providers_and_store(
+        instances: Vec<ProviderInstance>,
+        disabled: &std::collections::HashSet<String>,
+        credential_store: Arc<CredentialStore>,
+    ) -> Self {
+        let registry = Self::with_providers_and_store(instances, disabled, credential_store).await;
+        futures::future::join_all(
+            registry
+                .providers
+                .values()
+                .map(|provider| provider.refresh_models(true)),
+        )
+        .await;
+        registry
+    }
+
+    /// [`Self::discover_with_providers_and_store`] without the live model
+    /// lists: a server fetches them once it can answer (see
+    /// `haarness_server::models`), so a provider that is slow to say what it
+    /// offers never holds its start.
+    pub async fn with_providers_and_store(
         instances: Vec<ProviderInstance>,
         disabled: &std::collections::HashSet<String>,
         credential_store: Arc<CredentialStore>,
@@ -227,44 +248,12 @@ impl NativeProviderRegistry {
         let anthropic = AnthropicProvider::from_environment().with_auth_store(auth_store.clone());
         let gemini = GeminiProvider::from_environment().with_auth_store(auth_store.clone());
         let copilot = CopilotProvider::from_environment(auth_store.clone());
-        let discover_copilot = !disabled.contains("github-copilot");
-        let (openai, anthropic, gemini, copilot, locals) = tokio::join!(
-            async {
-                if disabled.contains("openai") {
-                    openai
-                } else {
-                    openai.discover_models().await
-                }
-            },
-            async {
-                if disabled.contains("anthropic") {
-                    anthropic
-                } else {
-                    anthropic.discover_models().await
-                }
-            },
-            async {
-                if disabled.contains("gemini") {
-                    gemini
-                } else {
-                    gemini.discover_models().await
-                }
-            },
-            async move {
-                if discover_copilot {
-                    copilot.discover_models().await
-                } else {
-                    copilot
-                }
-            },
-            detect_local_runtimes(disabled)
-        );
+        let locals = detect_local_runtimes(disabled).await;
         if !disabled.contains("openai") {
             registry.insert(Arc::new(openai));
         }
         if !disabled.contains("haarness") {
             if let Some(provider) = haarness_cloud::HaarnessCloudProvider::from_environment() {
-                provider.refresh_models(true).await;
                 registry.insert(Arc::new(provider));
             }
         }
@@ -364,59 +353,33 @@ impl NativeProviderRegistry {
                     .collect(),
             ));
         }
-        // Every configured endpoint is independent. Discover concurrently so
-        // several slow/unreachable remotes cost one timeout, not N timeouts.
-        let providers =
-            futures::future::join_all(configured.into_iter().map(|(instance, aliases)| {
-                let auth_store = auth_store.clone();
-                async move {
-                    match instance {
-                        ProviderInstance::OpenAiChatCompletions(instance) => Arc::new(
-                            OpenAiCompatibleProvider::new(instance)
-                                .with_auth_store(auth_store)
-                                .with_auth_aliases(aliases)
-                                .discover_models()
-                                .await,
-                        )
-                            as Arc<dyn ModelProvider>,
-                        ProviderInstance::AnthropicMessages(instance) => Arc::new(
-                            AnthropicProvider::new(instance)
-                                .with_auth_store(auth_store)
-                                .discover_models()
-                                .await,
-                        )
-                            as Arc<dyn ModelProvider>,
-                        ProviderInstance::GeminiGenerateContent(instance) => Arc::new(
-                            GeminiProvider::new(instance)
-                                .with_auth_store(auth_store)
-                                .discover_models()
-                                .await,
-                        )
-                            as Arc<dyn ModelProvider>,
-                        ProviderInstance::AzureOpenAi(instance) => {
-                            Arc::new(AzureProvider::new(instance, auth_store))
-                                as Arc<dyn ModelProvider>
-                        }
-                        ProviderInstance::GoogleVertex(instance) => {
-                            Arc::new(VertexProvider::new(instance, auth_store))
-                                as Arc<dyn ModelProvider>
-                        }
-                        ProviderInstance::GithubCopilot(instance) => Arc::new(
-                            CopilotProvider::new(instance, auth_store)
-                                .discover_models()
-                                .await,
-                        )
-                            as Arc<dyn ModelProvider>,
-                        ProviderInstance::AmazonBedrock(instance) => {
-                            Arc::new(BedrockProvider::new(instance, auth_store))
-                                as Arc<dyn ModelProvider>
-                        }
-                    }
+        for (instance, aliases) in configured {
+            let auth_store = auth_store.clone();
+            registry.insert(match instance {
+                ProviderInstance::OpenAiChatCompletions(instance) => Arc::new(
+                    OpenAiCompatibleProvider::new(instance)
+                        .with_auth_store(auth_store)
+                        .with_auth_aliases(aliases),
+                ),
+                ProviderInstance::AnthropicMessages(instance) => {
+                    Arc::new(AnthropicProvider::new(instance).with_auth_store(auth_store))
                 }
-            }))
-            .await;
-        for provider in providers {
-            registry.insert(provider);
+                ProviderInstance::GeminiGenerateContent(instance) => {
+                    Arc::new(GeminiProvider::new(instance).with_auth_store(auth_store))
+                }
+                ProviderInstance::AzureOpenAi(instance) => {
+                    Arc::new(AzureProvider::new(instance, auth_store))
+                }
+                ProviderInstance::GoogleVertex(instance) => {
+                    Arc::new(VertexProvider::new(instance, auth_store))
+                }
+                ProviderInstance::GithubCopilot(instance) => {
+                    Arc::new(CopilotProvider::new(instance, auth_store))
+                }
+                ProviderInstance::AmazonBedrock(instance) => {
+                    Arc::new(BedrockProvider::new(instance, auth_store))
+                }
+            });
         }
         for instance in locals {
             if !declared.contains(&instance.id) {
@@ -1330,5 +1293,42 @@ mod tests {
             "togetherai"
         );
         assert_eq!(super::listed_provider_id("nope", listed(presets)), "nope");
+    }
+
+    /// A server starts with the providers as they are; their lists load
+    /// once it answers. Before, a configured endpoint that accepted the
+    /// connection and never answered held the start for its whole timeout.
+    #[tokio::test]
+    async fn the_registry_is_built_without_waiting_for_a_model_list() {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let instance = super::ProviderInstance::OpenAiChatCompletions(CompatibleInstance {
+            id: "stalled".into(),
+            name: "Stalled".into(),
+            base_url: format!("http://{}/v1", silent.local_addr().unwrap()),
+            api_key: Some("fixture-key".into()),
+            models: vec!["fallback".into()],
+            discover_models: true,
+            server_output_limit: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        });
+        let store = std::sync::Arc::new(super::CredentialStore::new(
+            std::env::temp_dir().join(format!("haarness-no-auth-{}.json", std::process::id())),
+        ));
+        let started = std::time::Instant::now();
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            vec![instance],
+            &HashSet::new(),
+            store,
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        let provider = haarness_core::ProviderRegistry::get(&registry, "stalled").unwrap();
+        assert_eq!(provider.info().models[0].id, "fallback");
     }
 }

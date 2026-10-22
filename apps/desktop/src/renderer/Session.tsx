@@ -345,7 +345,7 @@ export function Session() {
   );
   let providerSetup = "";
   createEffect(() => {
-    if (!state.ready || !state.connection) return;
+    if (!state.ready || !state.connection || state.catalogLoading) return;
     if (selectedModel()) {
       providerSetup = "";
       return;
@@ -1288,7 +1288,8 @@ export function Session() {
       draftTimer = setTimeout(persistDraft, 500);
     }
   }
-  async function send(delivery?: T.InputDelivery) {
+  let waitingForModels = false;
+  async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
       await queue.save({ text: draft(), attachments: attachments() });
       return;
@@ -1362,6 +1363,19 @@ export function Session() {
         !app.promptContext().length)
     )
       return;
+    // A chat started while the model choices load would take a model chosen
+    // from an incomplete (or the last project's) catalog: send once they are
+    // in, checking again then, and only once however often Enter is pressed.
+    if (state.catalogLoading) {
+      if (waitingForModels) return;
+      waitingForModels = true;
+      try {
+        await app.catalogsSettled();
+      } finally {
+        waitingForModels = false;
+      }
+      return send(delivery);
+    }
     if (!selectedModel()) {
       app.openConnect({ onboarding: true });
       return;
@@ -2233,14 +2247,14 @@ export function Session() {
                       {cycledAgent() && t("Agent: {agent}", { agent: cycledAgent() })}
                     </span>
                     <Show
-                      when={selectedModel()}
+                      when={!state.catalogLoading && selectedModel()}
                       fallback={
                         <button
                           class="pill-select composer-model"
-                          disabled={!state.ready}
+                          disabled={!state.ready || state.catalogLoading}
                           onClick={() => app.openConnect({ onboarding: true })}
                         >
-                          {state.ready
+                          {state.ready && !state.catalogLoading
                             ? t("Connect a provider")
                             : t("Loading models…")}
                         </button>
