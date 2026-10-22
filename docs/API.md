@@ -460,7 +460,9 @@ model tool execution. Errors leave the client draft intact.
 (`agent`, `command`, or `skill`) and `action` (`list`, `get`, `create`, `edit`,
 `customize`, or `delete`). It returns definition rows/details or a mutation result,
 rather than a `ManagementView`. Writes use the connected server's configuration;
-`scope` is `global` or `local`. `customize` creates a same-name override from a
+`scope` is `global` or `local`. A listed row from the
+[base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` and is
+read-only; sent back as a request's scope, `base` reads as no scope. `customize` creates a same-name override from a
 built-in or inherited definition, retains agent permissions and skill support
 files, and refuses to overwrite an existing custom definition. Returned
 `customized` metadata identifies overrides; deleting one restores the underlying

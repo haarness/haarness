@@ -68,6 +68,19 @@ Running servers use normal idle-time configuration reload. Project configuration
 `--disable-project-config` or `HAARNESS_DISABLE_PROJECT_CONFIG=1`. Restore archives you trust:
 configuration can define tools, hooks, and workflows.
 
+## Profiles and a base folder
+
+A profile is a snapshot: restoring it copies files into the person's own global
+and project configuration, which they then own and change. A
+[base folder](CONFIGURATION-SCOPES.md#base-folder) (`HAARNESS_BASE_CONFIG_DIR`)
+is a live, read-only layer below that configuration, shared by everyone whose
+Haarness starts with the variable and updated where it lives (a `git pull`, a
+device management push). Saving a profile never includes the base folder,
+restoring one never writes into it, and whatever a profile restores overrides
+the base folder's settings and definitions of the same name. Ship team defaults
+that should stay current as a base folder; hand someone a setup to make their
+own as a profile.
+
 ## Cloud storage and discovery
 
 Any current Haarness server provides an authenticated profile catalog. Run

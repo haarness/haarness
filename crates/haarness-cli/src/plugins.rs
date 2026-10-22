@@ -88,6 +88,12 @@ pub fn all_enabled_roots(
     if !config.join(".layout-v1").exists() && !data.join(".layout-v1").exists() {
         roots.extend(local_plugin_roots(&data.join("plugins/local")));
     }
+    // The base folder's local plugins, which only its own maintainers change.
+    if let Some(local) = crate::layout::BaseFolder::for_workspace(workspace)
+        .and_then(|base| base.entry("plugins/local"))
+    {
+        roots.extend(local_plugin_roots(&local));
+    }
     roots.extend(local_plugin_roots(&config.join("plugins/local")));
     if trust_project {
         for directory in crate::layout::project_directories(workspace) {
@@ -132,7 +138,9 @@ fn local_plugin_infos(root: &Path, scope: &str) -> Vec<PluginInfo> {
             marketplace: None,
             path: path.display().to_string(),
             enabled: !path.join(".haarness-disabled").exists(),
-            managed: true,
+            // Haarness never writes into the base folder: its plugins are
+            // switched off or removed there.
+            managed: scope != "base",
             description: manifest
                 .get("description")
                 .and_then(serde_json::Value::as_str)
@@ -242,6 +250,11 @@ pub fn plugin_infos(
             description: plugin.description,
         })
         .collect();
+    if let Some(local) = crate::layout::BaseFolder::for_workspace(workspace)
+        .and_then(|base| base.entry("plugins/local"))
+    {
+        result.extend(local_plugin_infos(&local, "base"));
+    }
     result.extend(local_plugin_infos(&config.join("plugins/local"), "global"));
     if !config.join(".layout-v1").exists() && !data.join(".layout-v1").exists() {
         for legacy in local_plugin_infos(&data.join("plugins/local"), "global") {

@@ -19,7 +19,7 @@ pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
-pub use home::home_dir;
+pub use home::{BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, home_dir};
 pub use input::*;
 pub use management::*;
 pub use model_names::{
@@ -916,7 +916,9 @@ pub struct PluginInfo {
     pub name: String,
     pub spec: String,
     /// `haarness` for installed bundles; `haarness-global` or
-    /// `haarness-local` for directly loaded Haarness plugin directories.
+    /// `haarness-local` for directly loaded Haarness plugin directories, and
+    /// `haarness-base` for those of the base configuration folder, which
+    /// Haarness does not change (`managed` is false).
     pub source: String,
     #[serde(default)]
     pub marketplace: Option<String>,
