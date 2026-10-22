@@ -845,7 +845,7 @@ async fn run_with_client(
                     // itself (it panicked): say so, and follow them again,
                     // from a fresh snapshot.
                     app.connection_dropped(1);
-                    match following.as_mut().and_then(|restarts| restarts.again()) {
+                    match following.as_mut().and_then(Restarts::again) {
                         Some(()) => (event_rx, event_task) = client.subscribe(Some((uuid::Uuid::nil(), 0))),
                         None => following = None,
                     }

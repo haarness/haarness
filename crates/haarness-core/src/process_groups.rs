@@ -50,10 +50,10 @@ impl Ledger {
     }
 
     fn write(&self, groups: &BTreeMap<i32, String>) {
+        use std::fmt::Write as _;
         if self.released.load(Ordering::Acquire) {
             return;
         }
-        use std::fmt::Write as _;
         let mut text = String::new();
         if let Some((pid, start)) = &self.server {
             let _ = writeln!(text, "server {pid} {start}");
@@ -272,10 +272,10 @@ fn parse_proc_stat(stat: &str, boot: &str) -> Option<Probe> {
         .split_whitespace()
         .collect();
     let group = fields.get(2)?.parse().ok()?;
-    let start = fields.get(19)?;
+    let ticks = fields.get(19)?;
     Some(Probe::Running {
         group,
-        start: format!("{boot}:{start}"),
+        start: format!("{boot}:{ticks}"),
     })
 }
 
@@ -374,7 +374,6 @@ mod tests {
         // stopped: the pids are all above any this test could own.
         let record = "server 9 server-start\n100 a\n200 b\n300 c\n400 d\n1 e\nnot a line\n";
         let probe = |pid: i32| match pid {
-            9 => Probe::Gone,
             100 => running(100, "a"),
             200 => running(200, "other"),
             300 => running(299, "c"),
