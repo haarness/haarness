@@ -1350,7 +1350,8 @@ impl ManagementService {
                     if section.base_url.as_deref() != Some(base_url.as_str()) {
                         fields.push(("base_url".to_owned(), Some(json!(base_url))));
                     }
-                    if section.name.as_deref() != Some(name.as_str()) {
+                    // The form shows the id where the entry has no name.
+                    if section.name.as_deref().unwrap_or(id) != name {
                         fields.push(("name".to_owned(), Some(json!(name))));
                     }
                     if section.models != models {
@@ -2285,7 +2286,9 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
   "providers": {
     // The team's proxy.
     "proxy": {"protocol": "openai-chat-completions", "base_url": "https://proxy.fixture.test/v1",
-              "models": ["m"], "x-team-note": "keep"}
+              "models": ["m"], "x-team-note": "keep"},
+    "plain": {"protocol": "openai-chat-completions", "base_url": "https://plain.fixture.test/v1",
+              "models": ["m"]}
   }
 }
 "#;
@@ -2306,6 +2309,15 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
                 "https://proxy.fixture.test/v2",
                 "Proxy",
                 "m",
+            ),
+            // The form shows the id as the name of an entry without one.
+            (
+                "plain",
+                "project",
+                project.clone(),
+                "https://plain.fixture.test/v1",
+                "plain",
+                "m, n",
             ),
         ] {
             service
@@ -2338,6 +2350,11 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
             written["providers"]["proxy"],
             json!({"protocol": "openai-chat-completions", "base_url": "https://proxy.fixture.test/v2",
                 "models": ["m"], "x-team-note": "keep", "name": "Proxy"})
+        );
+        assert_eq!(
+            written["providers"]["plain"],
+            json!({"protocol": "openai-chat-completions", "base_url": "https://plain.fixture.test/v1",
+                "models": ["m", "n"]})
         );
         fs::remove_dir_all(root).unwrap();
     }
