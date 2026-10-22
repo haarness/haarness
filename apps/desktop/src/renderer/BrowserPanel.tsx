@@ -422,6 +422,7 @@ export function BrowserPanel(props: {
           <Icon name="refresh" size="sm" />
         </button>
         <input
+          data-browser-address=""
           aria-label={t("Browser address")}
           placeholder={t("Enter a URL")}
           value={editingAddress() ? address() : browserAddress(address(), state.preferences.browserShowFullURL)}
