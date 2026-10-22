@@ -2021,7 +2021,9 @@ mod tests {
         assert_eq!(relay_ready(r#"{"type":"ready"}"#), None);
         assert_eq!(relay_ready(r#"{"type":"open","version":1}"#), None);
     }
-    /// A Cloud that refuses each relay upgrade with `status` and its error body.
+    /// A Cloud that refuses each relay upgrade with `status` and its error
+    /// body; a message starting with `split:` comes in a write of its own,
+    /// after the headers.
     async fn refusing_cloud(refusals: Vec<(u16, &'static str)>) -> String {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2035,12 +2037,26 @@ mod tests {
                     let read = stream.read(&mut buffer).await.unwrap();
                     request.extend_from_slice(&buffer[..read]);
                 }
+                let (split, message) = match message.strip_prefix("split:") {
+                    Some(message) => (true, message),
+                    None => (false, message),
+                };
                 let body = json!({"code":"forbidden","message":message,"requestId":"r1","retryable":false}).to_string();
-                let reply = format!(
-                    "HTTP/1.1 {status} Refused\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                let head = format!(
+                    "HTTP/1.1 {status} Refused\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
                 );
-                stream.write_all(reply.as_bytes()).await.unwrap();
+                if split {
+                    stream.write_all(head.as_bytes()).await.unwrap();
+                    stream.flush().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _ = stream.write_all(body.as_bytes()).await;
+                } else {
+                    stream
+                        .write_all(format!("{head}{body}").as_bytes())
+                        .await
+                        .unwrap();
+                }
                 let _ = stream.shutdown().await;
             }
         });
@@ -2054,6 +2070,7 @@ mod tests {
                 403,
                 "Only the registered publisher can connect this host\u{1b}[2J",
             ),
+            (403, "split:A reason that arrives after the headers"),
         ])
         .await;
         let target = Target {
@@ -2100,6 +2117,23 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Haarness Cloud refused this computer's connection: Only the registered publisher can connect this host [2J"
+        );
+        // A body that comes after the headers is not waited for: the refusal
+        // still stops the connector, in the words it had before.
+        let error = relay_link(
+            cloud.as_str().into_client_request().unwrap(),
+            &target,
+            &http,
+            Duration::from_secs(60),
+            RELAY_SILENCE,
+            &attention,
+            &mut outage,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Remote host access was revoked or is no longer allowed"
         );
     }
     /// Attention context for `paths`, with waits short enough for tests.
