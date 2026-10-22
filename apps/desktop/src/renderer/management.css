@@ -35,6 +35,18 @@
   gap: var(--s2);
   min-height: var(--icon-button);
 }
+/* A hook whose matcher matches nothing its event sends: said once, in the
+   copper of things that need a look, never as an error. */
+.hook-never-tag {
+  color: var(--accent);
+  font-size: var(--ui-sm);
+}
+.hook-never {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--accent);
+}
 .management-command,
 .management-source {
   overflow-wrap: anywhere;

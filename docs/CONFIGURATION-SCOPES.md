@@ -162,11 +162,13 @@ The same rule covers the other shell text Haarness runs from configuration. An M
 | `FileChanged` | after a successful `write`, `edit`, `multiedit` or notebook edit | `tool_name`, `tool_input`, `file_path` | tool name |
 | `Stop` | a root turn completed | — | — |
 | `PostCompact` | after a compaction commits | `trigger`, `compaction` | `manual` or `automatic` |
-| `StopFailure` | once after terminal failure and exhausted recovery | `error`, `error_details`, `provider_id`, `model_id` | `incomplete`, `content_filter`, `provider`, `tool`, `other` |
+| `StopFailure` | once after terminal failure and exhausted recovery | `error`, `error_details`, `provider_id`, `model_id` | `authentication_failed`, `rate_limit`, `overloaded`, `server_error`, `invalid_request`, `provider` (any other provider error), `incomplete`, `content_filter`, `tool`, `other` |
 | `TurnEnd` | after `Stop`, once per completed root turn | `turn_id`, `agent`, `provider`, `model`, `finish_reason` | — |
 | `Notification` | a permission prompt is waiting (`permission_prompt`) or a turn completed (`turn_completed`) | `notification_type`, `message` | `notification_type` |
 | `SessionEnd` | a thread is archived | `reason` (`archived`) | `reason` |
 | `ConfigChange` | a hot-reloaded configuration generation became active | `source` (`reload`); no `session_id` | — |
+
+A matcher is `*` (or empty), names separated by `|` (`Bash|Edit`; Claude Code's tool names are accepted), or a regular expression found anywhere in the value. Events marked — in the table have nothing to match: their matcher is ignored and the hook runs every time. Events that send only certain values (`SessionStart`, `SessionEnd`, `Notification`, `PostCompact`, `StopFailure`, `FileChanged`) never run a hook whose matcher matches none of them, such as a `SessionEnd` hook for `clear`; the Desktop editor and `/hooks` in the TUI mark such a hook **Never runs**. `StopFailure` names a provider error for what happened, as Claude Code does: a rejected sign-in or API key (`authentication_failed`, also for HTTP 401 and 403), a rate limit or quota (`rate_limit`), an overloaded provider (`overloaded`, HTTP 529), another HTTP 5xx (`server_error`) or a refused request, including one too long for the context window (`invalid_request`). A provider error that says nothing Haarness recognises stays `provider`, and a matcher for `provider` (the name every provider error had before) still matches all of them.
 
 `additionalContext` (top level or in `hookSpecificOutput`) from `UserPromptSubmit` reaches the model with that prompt: it is stored with the turn as a hidden message after the prompt, and later turns replay it as history. It is not added to the system prompt, so a hook that answers differently every turn does not rewrite the provider's cached prompt.
 

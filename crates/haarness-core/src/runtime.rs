@@ -629,6 +629,61 @@ fn parse_goal_criteria_selection(proposed: &[String], answer: &str) -> CoreResul
         .collect())
 }
 
+/// The `StopFailure` category of a turn's terminal error. A provider error
+/// is named for what its message says happened (as Claude Code names them);
+/// one that says nothing Haarness recognises stays `provider`,
+/// the name every provider error had before, which a hook matcher still
+/// uses for all of them.
+fn stop_failure_category(error: &CoreError) -> &'static str {
+    let CoreError::Provider(message) = error else {
+        return match error {
+            CoreError::ProviderIncomplete(_) => "incomplete",
+            CoreError::ProviderBlocked(_) => "content_filter",
+            CoreError::Tool(_) => "tool",
+            _ => "other",
+        };
+    };
+    let lower = message.to_ascii_lowercase();
+    let status = http_status(&lower);
+    if matches!(status, Some(401 | 403))
+        || [
+            "unauthorized",
+            "authentication_error",
+            "invalid_api_key",
+            "api key is not configured",
+            "api_key is not configured",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        "authentication_failed"
+    } else if is_provider_usage_limit(error) {
+        "rate_limit"
+    } else if status == Some(529) || lower.contains("overloaded") || lower.contains("high demand") {
+        "overloaded"
+    } else if status.is_some_and(|status| (500..600).contains(&status)) {
+        "server_error"
+    } else if is_provider_context_overflow(error)
+        || status.is_some_and(|status| (400..500).contains(&status))
+    {
+        "invalid_request"
+    } else {
+        "provider"
+    }
+}
+
+/// The HTTP status a provider error names (`HTTP 429 Too Many Requests`,
+/// `status 503`), already in lower case.
+fn http_status(lower: &str) -> Option<u16> {
+    ["http ", "status "].iter().find_map(|marker| {
+        lower.match_indices(marker).find_map(|(at, _)| {
+            let rest = &lower[at + marker.len()..];
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            (digits == 3).then(|| rest[..3].parse().ok()).flatten()
+        })
+    })
+}
+
 fn is_provider_usage_limit(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
@@ -6402,13 +6457,7 @@ impl RunnerTask {
             && !self.cancel.is_cancelled()
             && let Some(hooks) = &self.hooks
         {
-            let category = match error {
-                CoreError::ProviderIncomplete(_) => "incomplete",
-                CoreError::ProviderBlocked(_) => "content_filter",
-                CoreError::Provider(_) => "provider",
-                CoreError::Tool(_) => "tool",
-                _ => "other",
-            };
+            let category = stop_failure_category(error);
             let detail = json!({"error":category,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
             tokio::select! {
                 biased;
@@ -13026,6 +13075,64 @@ mod tests {
             question_request(&json!({"choices": ["Green"]})),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn stop_failure_categories_name_what_happened() {
+        let provider =
+            |message: &str| super::stop_failure_category(&CoreError::Provider(message.into()));
+        assert_eq!(
+            provider("HTTP 401 Unauthorized: invalid x-api-key"),
+            "authentication_failed"
+        );
+        assert_eq!(provider("HTTP 403 Forbidden"), "authentication_failed");
+        assert_eq!(
+            provider("openai api_key is not configured"),
+            "authentication_failed"
+        );
+        assert_eq!(
+            provider("HTTP 429 Too Many Requests: rate limit"),
+            "rate_limit"
+        );
+        assert_eq!(
+            provider("[insufficient_quota] You exceeded your quota"),
+            "rate_limit"
+        );
+        assert_eq!(provider("HTTP 529: Overloaded"), "overloaded");
+        assert_eq!(
+            provider("This model is experiencing high demand"),
+            "overloaded"
+        );
+        assert_eq!(provider("HTTP 502 Bad Gateway"), "server_error");
+        assert_eq!(
+            provider("HTTP 400 Bad Request: unknown field"),
+            "invalid_request"
+        );
+        assert_eq!(
+            provider("prompt is too long: 250000 tokens"),
+            "invalid_request"
+        );
+        assert_eq!(
+            provider("provider ended the response with an error"),
+            "provider"
+        );
+        assert_eq!(provider("HTTP 4000 nonsense"), "provider");
+        assert_eq!(
+            super::stop_failure_category(&CoreError::ProviderIncomplete("length".into())),
+            "incomplete"
+        );
+        assert_eq!(
+            super::stop_failure_category(&CoreError::ProviderBlocked("refusal".into())),
+            "content_filter"
+        );
+        assert_eq!(
+            super::stop_failure_category(&CoreError::Tool("x".into())),
+            "tool"
+        );
+        assert_eq!(
+            super::stop_failure_category(&CoreError::Storage("x".into())),
+            "other"
+        );
     }
 
     #[test]
