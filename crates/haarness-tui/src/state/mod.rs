@@ -657,6 +657,10 @@ pub struct App {
     /// The provider catalog did not come in time for the first frame: it
     /// says "Loading models…", not that nothing is connected.
     pub(crate) models_loading: bool,
+    /// Where a provider catalog read off the event loop goes (see
+    /// `App::catalog_arrived`); without it, the read waits in place.
+    pub(crate) catalog_tx:
+        Option<tokio::sync::mpsc::Sender<Option<Vec<haarness_protocol::ProviderInfo>>>>,
     /// When the "Connection lost" toast was last shown.
     pub(crate) lost_toast_at: Option<std::time::Instant>,
     /// The task following the server's events kept ending by itself: it
@@ -988,6 +992,7 @@ impl App {
             language: crate::locale::Language::default(),
             connection_lost: None,
             models_loading: false,
+            catalog_tx: None,
             lost_toast_at: None,
             following_stopped: false,
             auto_model: None,

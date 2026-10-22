@@ -18389,3 +18389,67 @@ fn a_restarted_event_task_clears_the_indicator_and_one_that_stopped_says_so() {
     app.reconnected();
     assert!(!status(&app).contains("not following"), "{}", status(&app));
 }
+
+/// A configuration reload announces itself with `assets.updated`; the
+/// provider catalog the TUI then reads may wait up to 10 s on the server (a
+/// list being fetched). The TUI once waited for it inside its event loop:
+/// keys, redraws and streaming stalled.
+#[tokio::test]
+async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let thread = fixture_thread();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = vec![0_u8; 4096];
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                let slow =
+                    String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/providers ");
+                if slow {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+                let body = "[]";
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (sender, mut catalogs) = tokio::sync::mpsc::channel(4);
+    app.catalog_tx = Some(sender);
+    let started = std::time::Instant::now();
+    app.reduce(
+        fixture_event(
+            "assets.updated",
+            thread.id,
+            thread.id,
+            serde_json::json!({"resource": "configuration", "action": "reload"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the loop waited {:?} for the catalog",
+        started.elapsed()
+    );
+    let arrived = tokio::time::timeout(std::time::Duration::from_secs(5), catalogs.recv())
+        .await
+        .expect("the catalog came")
+        .unwrap();
+    assert_eq!(arrived.map(|providers| providers.len()), Some(0));
+    server.abort();
+}

@@ -6275,6 +6275,7 @@ fn load_output_style(
 struct HotReloadCandidate {
     disabled_skills: Vec<String>,
     providers: Arc<dyn ProviderRegistry>,
+    provider_definitions: HashMap<String, String>,
     tools: Arc<dyn ToolRegistry>,
     project_context: String,
     runtime_config: haarness_core::RuntimeConfig,
@@ -6348,6 +6349,9 @@ struct HotReloadController {
     management: Arc<management::ManagementService>,
     language: Arc<haarness_language::LanguageService>,
     scheduler: Scheduler,
+    /// The live generation's providers, by id, as [`provider_fingerprints`]
+    /// tells them apart.
+    provider_definitions: parking_lot::Mutex<HashMap<String, String>>,
 }
 
 impl HotReloadController {
@@ -6370,16 +6374,31 @@ impl HotReloadController {
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
             provider_instances(&sources.file_config, &credentials);
-        // Its model lists load once it is live, as at start (see below).
-        let providers: Arc<dyn ProviderRegistry> = Arc::new(
-            NativeProviderRegistry::with_providers_and_store(
-                instances,
-                &disabled_providers,
-                Arc::new(CredentialStore::new(self.paths.auth.clone())),
-            )
-            .await
-            .with_stream_limits(&stream_limits(&sources.file_config)),
-        );
+        // Its model lists load once it is live, as at start (see below). A
+        // provider defined as before is the live one, lists and all: a
+        // reload (an instructions edit, a hook added) no longer forgets every
+        // list, which left Haarness Cloud with none until it was fetched again.
+        let mut registry = NativeProviderRegistry::with_providers_and_store(
+            instances,
+            &disabled_providers,
+            Arc::new(CredentialStore::new(self.paths.auth.clone())),
+        )
+        .await
+        .with_stream_limits(&stream_limits(&sources.file_config));
+        let provider_definitions =
+            provider_fingerprints(&sources.file_config, &credentials, &registry);
+        let live = self.runtime.providers();
+        {
+            let known = self.provider_definitions.lock();
+            for (id, definition) in &provider_definitions {
+                if known.get(id) == Some(definition)
+                    && let Some(provider) = live.get(id)
+                {
+                    registry.insert(provider);
+                }
+            }
+        }
+        let providers: Arc<dyn ProviderRegistry> = Arc::new(registry);
         let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills =
@@ -6431,6 +6450,7 @@ impl HotReloadController {
         Ok(HotReloadCandidate {
             disabled_skills,
             providers,
+            provider_definitions,
             tools,
             project_context: sources.project_context,
             runtime_config: sources.runtime_config,
@@ -6450,6 +6470,9 @@ impl HotReloadController {
         let applied = self.apply_components(candidate);
         if applied {
             *self.watch.write() = candidate.watch.clone();
+            self.provider_definitions
+                .lock()
+                .clone_from(&candidate.provider_definitions);
         }
         applied
     }
@@ -7091,6 +7114,7 @@ async fn application_at(
         .await
         .with_stream_limits(&stream_limits(&file_config)),
     );
+    let provider_definitions = provider_fingerprints(&file_config, &credentials, providers.as_ref());
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
@@ -7256,6 +7280,7 @@ async fn application_at(
         management: management.clone(),
         language: language.clone(),
         scheduler,
+        provider_definitions: parking_lot::Mutex::new(provider_definitions),
     };
     Ok((
         listener,
@@ -9051,6 +9076,35 @@ fn provider_instances(
 
 /// The configured stream limits by provider id (`stream_idle_timeout`,
 /// `request_timeout`); providers without either keep the defaults.
+/// What makes each of `registry`'s providers the one it is: its section of
+/// the configuration (its definition, or the tuning of a built-in one) and
+/// the stored credentials, as a digest. A reload keeps a provider whose
+/// digest is the same, and its loaded model list with it.
+fn provider_fingerprints(
+    config: &FileConfig,
+    credentials: &HashMap<String, String>,
+    registry: &NativeProviderRegistry,
+) -> HashMap<String, String> {
+    let mut stored: Vec<_> = credentials.iter().collect();
+    stored.sort();
+    let stored = serde_json::to_vec(&stored).unwrap_or_default();
+    haarness_core::ProviderRegistry::list(registry)
+        .into_iter()
+        .map(|info| {
+            let section = config
+                .providers
+                .get(&info.id)
+                .and_then(|section| serde_json::to_vec(section).ok())
+                .unwrap_or_default();
+            let mut digest = Sha256::new();
+            digest.update(&section);
+            digest.update([0]);
+            digest.update(&stored);
+            (info.id, format!("{:x}", digest.finalize()))
+        })
+        .collect()
+}
+
 fn stream_limits(config: &FileConfig) -> HashMap<String, haarness_core::StreamLimits> {
     config
         .providers

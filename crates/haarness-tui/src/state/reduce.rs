@@ -294,7 +294,16 @@ impl App {
             }
             "assets.updated" => {
                 self.server_commands = client.commands().await.unwrap_or_default();
-                if let Ok(providers) = client.providers().await {
+                // The server may wait up to 10 s for a provider's list: keys,
+                // redraws and streaming go on meanwhile.
+                if let Some(catalog) = self.catalog_tx.clone() {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        if let Ok(providers) = client.providers().await {
+                            let _ = catalog.send(Some(providers)).await;
+                        }
+                    });
+                } else if let Ok(providers) = client.providers().await {
                     self.catalog_arrived(providers, client).await;
                 }
                 if let Ok(agents) = client.agents().await {
