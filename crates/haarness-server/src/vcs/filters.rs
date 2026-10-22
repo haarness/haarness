@@ -135,6 +135,9 @@ pub(super) fn version(text: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Overrides as Git takes them: `-c` arguments and environment variables.
+pub(super) type Carried = (Vec<OsString>, Vec<(String, String)>);
+
 /// How `pairs` reach Git: as `GIT_CONFIG_*` variables after the `base` pairs
 /// already in the environment (Git 2.31 and later, any key), or else as
 /// `-c key=value` arguments, which cannot name a key holding `=`. An unknown
@@ -143,7 +146,7 @@ pub(super) fn carry(
     pairs: &[(String, String)],
     version: Option<(u32, u32)>,
     base: usize,
-) -> Result<(Vec<OsString>, Vec<(String, String)>), Refusal> {
+) -> Result<Carried, Refusal> {
     if pairs.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }

@@ -3508,10 +3508,10 @@ fn glob_walk(
 ) -> CoreResult<GlobFound> {
     let mut folders = HashMap::<PathBuf, bool>::new();
     let mut found = GlobFound::default();
-    let mut looked = 0usize;
-    for path in glob::glob(pattern)
+    for (looked, path) in glob::glob(pattern)
         .map_err(tool_error)?
         .filter_map(Result::ok)
+        .enumerate()
     {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -3525,7 +3525,6 @@ fn glob_walk(
             found.stopped = true;
             break;
         }
-        looked += 1;
         // A part starting with `.`, such as `.*`, also matches `.` and `..`.
         if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
             !relative
