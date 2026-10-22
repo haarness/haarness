@@ -217,12 +217,16 @@ enum Entry {
 /// queue; while deltas wait, each one continuing the run of the one before it
 /// joins it (see [`join_delta`]), so the client reads fewer, longer ones and
 /// catches up. Other events wait as the text they go out as, written once.
-/// Past its limit, or after the bus dropped events for it, the queue lets go
-/// of everything and holds only `resync_required`: the connection then ends,
-/// and its client reconnects from its cursor.
+/// The limit counts what waits besides the largest entry, so one event
+/// larger than the limit (a message with several screenshots) still goes
+/// out. Past it, or after the bus dropped events for it, the queue lets go of
+/// everything and holds only `resync_required`: the connection then ends, and
+/// its client reconnects from its cursor.
 pub struct PendingEvents {
     entries: VecDeque<(Entry, usize)>,
     size: usize,
+    /// The largest waiting entry's size, when known.
+    largest: Option<usize>,
     limit: usize,
     given_up: bool,
 }
@@ -233,6 +237,7 @@ impl PendingEvents {
         Self {
             entries: VecDeque::new(),
             size: 0,
+            largest: Some(0),
             limit,
             given_up: false,
         }
@@ -245,12 +250,22 @@ impl PendingEvents {
         if self.given_up {
             return Err(0);
         }
+        self.insert(event);
+        if self.over_limit() {
+            return Err(self.give_up());
+        }
+        Ok(())
+    }
+
+    fn insert(&mut self, event: EventEnvelope) {
         if let Some((Entry::Delta(last), size)) = self.entries.back_mut() {
             let added = delta_text(&event.payload).map_or(0, str::len);
             if join_delta(last, &event) {
                 *size += added;
                 self.size += added;
-                return self.within_limit();
+                let grown = *size;
+                self.largest = self.largest.map(|largest| largest.max(grown));
+                return;
             }
         }
         let delta = is_delta(&event)
@@ -266,32 +281,45 @@ impl PendingEvents {
         };
         let size = size + ENTRY_OVERHEAD;
         self.size += size;
+        self.largest = self.largest.map(|largest| largest.max(size));
         self.entries.push_back((entry, size));
-        self.within_limit()
     }
 
-    fn within_limit(&mut self) -> Result<(), usize> {
+    /// Whether what waits besides the largest entry is past the limit.
+    fn over_limit(&mut self) -> bool {
         if self.size <= self.limit {
-            return Ok(());
+            return false;
         }
-        Err(self.give_up())
+        let entries = &self.entries;
+        let largest = *self
+            .largest
+            .get_or_insert_with(|| entries.iter().map(|(_, size)| *size).max().unwrap_or(0));
+        self.size - largest > self.limit
     }
 
     /// Let go of every waiting event, and the memory they took, keeping only
     /// `resync_required`; returns how many events went.
-    pub fn give_up(&mut self) -> usize {
+    fn resync(&mut self) -> usize {
         let dropped = self.entries.len();
+        let data = serde_json::json!({"type": "resync_required"});
         self.entries = VecDeque::from([(
             Entry::Encoded(EncodedEvent {
                 id: None,
                 name: "resync_required".into(),
-                data: serde_json::json!({"type": "resync_required"}).to_string(),
+                data: data.to_string(),
             }),
             0,
         )]);
         self.size = 0;
-        self.given_up = true;
+        self.largest = Some(0);
         dropped
+    }
+
+    /// Let go of every waiting event, as [`Self::resync`] does, and take
+    /// nothing more: once `resync_required` is sent the connection ends.
+    pub fn give_up(&mut self) -> usize {
+        self.given_up = true;
+        self.resync()
     }
 
     /// Whether the queue gave up: once what it holds is sent, the connection
@@ -305,6 +333,9 @@ impl PendingEvents {
     pub fn pop(&mut self) -> Option<EncodedEvent> {
         let (entry, size) = self.entries.pop_front()?;
         self.size -= size;
+        if self.largest == Some(size) {
+            self.largest = None;
+        }
         Some(match entry {
             Entry::Delta(event) => EncodedEvent::of(&event),
             Entry::Encoded(encoded) => encoded,
@@ -615,6 +646,51 @@ mod tests {
             .map(|event| event.name)
             .collect();
         assert_eq!(sent, ["resync_required"]);
+    }
+
+    #[test]
+    fn one_event_larger_than_the_limit_goes_out_and_the_limit_counts_what_waits_besides_it() {
+        let bus = EventBus::new(16);
+        let thread = ThreadId::new();
+        let limit = 8 * 1024;
+        let mut pending = PendingEvents::new(limit);
+        let event = |text: &str| {
+            bus.publish(
+                "item.created",
+                Some(thread),
+                None,
+                None,
+                json!({"text": text}),
+            )
+        };
+        let huge = "x".repeat(4 * limit);
+        // A small event waits in front of one four times the limit: both
+        // stay, and so do others behind them while they fit the limit.
+        pending.push(event("first")).unwrap();
+        pending.push(event(&huge)).unwrap();
+        let mut behind = 0;
+        while pending.push(event("behind")).is_ok() {
+            behind += 1;
+        }
+        assert!(behind >= 4, "{behind}");
+        assert!(pending.given_up());
+
+        // Once the large one is out, another may take its place, but not two.
+        let mut pending = PendingEvents::new(limit);
+        pending.push(event(&huge)).unwrap();
+        assert!(pending.pop().unwrap().data.contains(&huge));
+        pending.push(event(&huge)).unwrap();
+        assert_eq!(pending.push(event(&huge)), Err(2));
+
+        // And once it is out, the limit counts all that waits again.
+        let mut pending = PendingEvents::new(limit);
+        pending.push(event(&huge)).unwrap();
+        pending.pop().unwrap();
+        let mut after = 0;
+        while pending.push(event("behind")).is_ok() {
+            after += 1;
+        }
+        assert!((behind..=behind + 2).contains(&after), "{behind} {after}");
     }
 
     #[test]
