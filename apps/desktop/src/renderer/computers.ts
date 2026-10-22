@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import type { Computer } from "../shared";
 import { sortComputers } from "../servers";
@@ -9,8 +10,16 @@ const [computers, setComputers] = createStore<{
   status: Status;
   items: Computer[];
   error: string;
-}>({ status: "idle", items: [], error: "" });
+  /** Counts the lists the account gave, so each can be acted on once. */
+  revision: number;
+}>({ status: "idle", items: [], error: "", revision: 0 });
 export { computers };
+
+/** Whether the account menu last found Desktop signed in: the server switcher
+ * keeps a row for your computers while the first list is read only then, so
+ * the menu does not grow under the pointer, and shows nothing signed out. */
+const [signedIn, setSignedIn] = createSignal(false);
+export { signedIn, setSignedIn };
 
 let pending: Promise<void> | undefined;
 let generation = 0;
@@ -35,13 +44,18 @@ export function loadComputers() {
   }
   if (pending) return pending;
   const asked = generation;
-  if (computers.status !== "ready") setComputers({ status: "loading", error: "" });
+  // A list or a signed-out answer read before stays while it is read again.
+  if (computers.status !== "ready" && computers.status !== "signed-out")
+    setComputers({ status: "loading", error: "" });
   const request: Promise<void> = window.haarness
     .account({ action: "remote-hosts" })
     .then((value: { loggedIn?: boolean; items?: Computer[] }) => {
       if (asked !== generation) return;
-      if (value?.loggedIn === false) setComputers({ status: "signed-out", items: [], error: "" });
-      else setComputers({ status: "ready", items: sortComputers(value?.items ?? [], language()), error: "" });
+      setSignedIn(value?.loggedIn !== false);
+      if (value?.loggedIn === false)
+        setComputers({ status: "signed-out", items: [], error: "", revision: computers.revision + 1 });
+      else
+        setComputers({ status: "ready", items: sortComputers(value?.items ?? [], language()), error: "", revision: computers.revision + 1 });
     })
     .catch((error: unknown) => {
       if (asked !== generation) return;

@@ -207,6 +207,8 @@ export const RECONNECTING_AFTER = 1000;
 /** After this long without its connection, a terminal says it cannot reach
  * its shell, and offers to retry or to open another terminal. */
 export const DISCONNECTED_AFTER = 15_000;
+/** {@link RECONNECTING_AFTER} for a terminal of another computer. */
+export const RELAYED_RECONNECTING_AFTER = 4000;
 
 /**
  * Follows a terminal's connection for what its view shows. While the server
@@ -215,6 +217,10 @@ export const DISCONNECTED_AFTER = 15_000;
  */
 export function linkWatch(input: {
   onState: (link: Link) => void;
+  /** How long a drop may last before the view says so; a terminal of another
+   * computer is cut each time a Haarness Cloud sign-in expires, and its
+   * connector may be away a second or two, so it waits longer. */
+  quietMs?: number;
   schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
   cancel?: (timer: ReturnType<typeof setTimeout>) => void;
 }) {
@@ -238,7 +244,7 @@ export function linkWatch(input: {
       if (down) return;
       down = true;
       timers = [
-        schedule(() => set("reconnecting"), RECONNECTING_AFTER),
+        schedule(() => set("reconnecting"), input.quietMs ?? RECONNECTING_AFTER),
         schedule(() => set("disconnected"), DISCONNECTED_AFTER),
       ];
     },

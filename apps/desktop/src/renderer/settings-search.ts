@@ -193,14 +193,17 @@ export function createSettingsSearch(
     })),
     ...(inventory
       ? [
+          // Your other computers are found as "Your computers", which lists
+          // only the ones the account still has.
           ...app
             .servers()
+            .filter((server) => !server.host)
             .map((server) =>
               entry(
                 "servers",
                 server.label,
                 "server:" + server.id,
-                server.url ?? (server.host ? "remote computer" : "local computer"),
+                server.url ?? "local computer",
               ),
             ),
           ...app

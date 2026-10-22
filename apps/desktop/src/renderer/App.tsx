@@ -28,7 +28,7 @@ import {
 import { Button, Icon, Forms, type IconName } from "./ui";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
-import { computers, lastSeen, loadComputers, platformName } from "./computers";
+import { computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
 import { toastAnchor } from "./toast-anchors";
@@ -125,6 +125,19 @@ export function App() {
             : []),
           ...computers.items,
         ];
+    // While the first list is read, signed in, one quiet row holds the
+    // place, so the menu does not grow under the pointer.
+    if (!listed.length && signedIn() && ["idle", "loading"].includes(computers.status))
+      return [
+        {
+          label: t("Looking for your computers…"),
+          detail: "Haarness Cloud",
+          icon: "host",
+          disabled: true,
+          divider: true,
+          heading: t("Your computers"),
+        },
+      ];
     return listed.map((computer, index) => ({
       label: computer.name,
       detail: computer.connected
@@ -187,7 +200,16 @@ export function App() {
   const dockMax = () => Math.max(360, (workbench?.clientWidth ?? 1050) - 480);
   const dockVisible = () =>
     !!state.connection && !!dock() && state.panel === "chat";
+  /** Another computer's pages would all load through Haarness Cloud, and
+   * its relayed socket ends with each sign-in: the Browser is for projects on
+   * this computer and your servers. */
+  const browserHere = () => !state.connection?.remoteHost;
+  createEffect(() => {
+    if (!browserHere() && dock() === "browser")
+      setDock(dockTabs().filter((tab) => tab !== "browser").at(-1) ?? "tools");
+  });
   function openDock(value: Dock) {
+    if (value === "browser" && !browserHere()) return;
     setDock(value);
     if (!dockTabs().includes(value)) setDockTabs((tabs) => [...tabs, value]);
     if (value === "files") setFilesVisited(true);
@@ -236,6 +258,7 @@ export function App() {
    * another panel or leaves another page for the chat.
    */
   function revealBrowser() {
+    if (!browserHere()) return;
     const step = agentReveal(browserStage(), browserAway());
     if (step === "none") return;
     if (!dockTabs().includes("browser"))
@@ -516,7 +539,7 @@ export function App() {
         state.platform,
       );
     const actions: SearchEntry[] = [
-      {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected,action:()=>openDock("browser")},
+      {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected||!browserHere(),action:()=>openDock("browser")},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
       {
         key: "permission-mode",
@@ -1309,7 +1332,7 @@ export function App() {
               style={{ display: dockVisible() ? "flex" : "none" }}
             >
               <div class="dock-tabs">
-                <For each={panelTabs.ordered() as Dock[]}>
+                <For each={(panelTabs.ordered() as Dock[]).filter((tab) => tab !== "browser" || browserHere())}>
                   {(tab) => (
                     <div
                       class="dock-tab"
@@ -1369,7 +1392,7 @@ export function App() {
                 >
                   <h2>{t("Your tools, alongside chat")}</h2>
                   <p>{t("Open what you need without leaving the chat.")}</p>
-                  <For each={panelChoices}>
+                  <For each={panelChoices.filter((item) => item.shortcut !== "browser" || browserHere())}>
                     {(item) => (
                       <button
                         onClick={() =>
@@ -1415,7 +1438,9 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
+              <Show when={browserHere()}>
+                <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
+              </Show>
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>

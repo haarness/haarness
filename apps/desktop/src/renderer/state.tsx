@@ -891,14 +891,21 @@ function createApp(saved?: Preferences) {
     }
     return pending;
   }
-  // A computer renamed in Cloud takes its new name once the list is read.
+  // Each time the account lists your computers: one renamed in Cloud takes
+  // its new name, and one it no longer lists (removed from the account, or
+  // of another account) is forgotten here with its saved projects; its chats
+  // stay on that computer.
   createEffect(
     on(
-      () => computers.items.map((item) => item.id + "\n" + item.name).join("\n"),
+      () => computers.revision,
       () => {
-        for (const computer of computers.items) {
-          const saved = state.servers.find((item) => item.host === computer.id);
-          if (saved && saved.label !== computer.name)
+        // Signed out says nothing about which computers are still shared.
+        if (computers.status !== "ready") return;
+        for (const saved of state.servers) {
+          if (!saved.host) continue;
+          const computer = computers.items.find((item) => item.id === saved.host);
+          if (!computer) void run(() => removeServer(saved.id));
+          else if (saved.label !== computer.name)
             void window.haarness
               .server({ id: computer.id, action: "host", label: computer.name })
               .then((value) => set("servers", value))
@@ -906,6 +913,13 @@ function createApp(saved?: Preferences) {
         }
       },
       { defer: true },
+    ),
+  );
+  // Main reaches another computer only while a window shows it.
+  createEffect(
+    on(
+      () => state.activeServer,
+      (id) => void window.haarness.server({ id, action: "shown" }).catch(() => {}),
     ),
   );
   const servers = createMemo(() => [
@@ -2019,6 +2033,11 @@ function createApp(saved?: Preferences) {
       return;
     }
     if (event.kind === "menu") {
+      // Signed out, or on another account: another computer shown here was
+      // reached with the account before, so the window goes to this
+      // computer's projects instead of trying it again and again.
+      if ((event.data as { closed?: unknown })?.closed && currentServer().host)
+        void run(() => switchServer(localServer.id));
       menuHandler(event.data);
       return;
     }

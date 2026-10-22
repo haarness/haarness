@@ -6,6 +6,8 @@ import type { Connection } from "../shared";
 export interface RelaySignIn {
   token: string;
   apiUrl: string;
+  /** When Cloud stops taking the token; none for an API key. */
+  expiresAt?: string | null;
 }
 
 /** A host's projects as Desktop opens them through Cloud's relay. */
@@ -17,28 +19,39 @@ export interface HostLocation {
   fetch: typeof fetch;
 }
 
-// Access tokens live ten minutes; renew well before that so a request never
-// leaves with one that expires on the way.
-const reuseMs = 4 * 60_000;
+/** Cloud ends a relayed stream or socket when the token it opened with
+ * expires (access tokens live ten minutes). One that has less than this left
+ * is renewed first, so a connection opened with it has time; the account
+ * bridge renews below five minutes, so a renewed token is never refused here. */
+const headroomMs = 3 * 60_000;
 
 /** Another of your computers, reached through Haarness Cloud's relay with
  * the account's own short-lived sign-in. One sign-in serves every host. */
 export function createRelay(signIn: (rejected?: string) => Promise<RelaySignIn>) {
-  let current: (RelaySignIn & { at: number }) | undefined;
+  let current: (RelaySignIn & { until: number }) | undefined;
   let pending: Promise<RelaySignIn> | undefined;
   let generation = 0;
+  // The tokens handed out lately, kept out of error messages.
+  const handed: string[] = [];
   /** The sign-in to send now; `rejected` names one Cloud refused. */
   function credential(rejected?: string): Promise<RelaySignIn> {
-    if (current && current.token !== rejected && Date.now() - current.at < reuseMs)
+    if (current && current.token !== rejected && current.until - Date.now() > headroomMs)
       return Promise.resolve(current);
     const asked = generation;
     pending ??= signIn(rejected)
       .then((value) => {
         const apiUrl = cloudOrigin(value.apiUrl);
         if (typeof value.token !== "string" || !value.token) throw new Error("Sign in to Haarness to open your other computers.");
+        if (!handed.includes(value.token)) {
+          handed.push(value.token);
+          if (handed.length > 8) handed.shift();
+        }
+        // An API key has no expiry; an unreadable one is asked for again.
+        const until = value.expiresAt ? Date.parse(value.expiresAt) : Infinity;
         // A sign-out or account switch meanwhile forgot this one.
-        if (asked === generation) current = { token: value.token, apiUrl, at: Date.now() };
-        return { token: value.token, apiUrl };
+        if (asked === generation)
+          current = { token: value.token, apiUrl, expiresAt: value.expiresAt, until: Number.isNaN(until) ? 0 : until };
+        return { token: value.token, apiUrl, expiresAt: value.expiresAt };
       })
       .finally(() => {
         pending = undefined;
@@ -52,7 +65,9 @@ export function createRelay(signIn: (rejected?: string) => Promise<RelaySignIn>)
     const send = (token: string) => {
       const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
       headers.set("Authorization", `Bearer ${token}`);
-      return fetch(input, { ...init, headers });
+      // Cloud answers relayed requests itself: a redirect would take the
+      // sign-in somewhere else.
+      return fetch(input, { ...init, headers, redirect: "error" });
     };
     let response = await send(first.token);
     const body = init?.body;
@@ -76,6 +91,8 @@ export function createRelay(signIn: (rejected?: string) => Promise<RelaySignIn>)
     credential,
     fetch: relayFetch,
     auth: async (): Promise<ServerAuth> => ({ type: "bearer", token: (await credential()).token }),
+    /** The tokens handed out lately, for redacting error messages. */
+    secrets: () => [...handed],
     /** Drops the sign-in, after a sign-out or an account switch. */
     forget() {
       generation++;

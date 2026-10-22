@@ -5,6 +5,7 @@ import {
   RECONNECTING_AFTER,
   inputQueue,
   linkWatch,
+  RELAYED_RECONNECTING_AFTER,
   reconnectDelay,
   reconnects,
   restoredLine,
@@ -175,6 +176,20 @@ function clock() {
     },
   };
 }
+
+test("another computer's terminal says nothing while Haarness Cloud renews a sign-in", () => {
+  const time = clock();
+  const states: Link[] = [];
+  const watch = linkWatch({ onState: (link) => states.push(link), quietMs: RELAYED_RECONNECTING_AFTER, ...time });
+  watch.lost();
+  time.advance(RELAYED_RECONNECTING_AFTER - 1);
+  watch.connected();
+  assert.deepEqual(states, []);
+  watch.lost();
+  time.advance(RELAYED_RECONNECTING_AFTER);
+  assert.deepEqual(states, ["reconnecting"]);
+  assert.ok(RELAYED_RECONNECTING_AFTER > RECONNECTING_AFTER && RELAYED_RECONNECTING_AFTER < DISCONNECTED_AFTER);
+});
 
 test("a dropped terminal says nothing for a quick reconnect, then that it reconnects, then that it cannot reach its shell", () => {
   const time = clock();
