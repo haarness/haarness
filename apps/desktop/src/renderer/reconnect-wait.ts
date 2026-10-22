@@ -51,14 +51,35 @@ export function createReconnectWait(now: () => number = Date.now) {
   };
 }
 
-let wakeSlot = 0;
-/** How long one of the sidebar's waiting projects waits after a wake: each a
- * little after the one before, all after the open project's first attempt,
- * so a wake does not send every project's requests at once. */
-export function wakeDelay(at: number = Date.now()) {
-  wakeSlot = Math.max(wakeSlot, at + RECONNECT_BASE_MS) + WAKE_SPACING_MS;
-  return wakeSlot - at;
+/** Signals that arrive together (a wake brings the network and the window
+ * back too) count as one when they are this close. */
+export const SIGNAL_MERGE_MS = 1000;
+
+/**
+ * Retry times for the sidebar's waiting projects after a wake: each a little
+ * after the one before, all after the open project's first attempt, so a wake
+ * does not send every project's requests at once. `peek` says what the next
+ * slot would be without taking it, so a project whose retry is already due
+ * sooner keeps it and takes no slot.
+ */
+export function createWakeSlots() {
+  let last = 0;
+  const next = (at: number) =>
+    Math.max(last, at + RECONNECT_BASE_MS) + WAKE_SPACING_MS;
+  return {
+    /** The delay from `at` the next slot would have. */
+    peek(at: number) {
+      return next(at) - at;
+    },
+    /** Takes the next slot; answers its delay from `at`. */
+    take(at: number) {
+      last = next(at);
+      return last - at;
+    },
+  };
 }
+/** The slots the sidebar's projects share. */
+export const wakeSlots = createWakeSlots();
 
 /** The computer woke from sleep (Desktop's main process says so to every
  * window). */

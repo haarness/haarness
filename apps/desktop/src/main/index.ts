@@ -990,7 +990,19 @@ function installHandlers() {
       throw new Error("Invalid event cursor");
     const item = connection(id);
     const key = randomUUID();
-    const client = new Haarness({ baseUrl: item.url, auth: item.auth });
+    // The window learns when the stream's response arrived ("opened"): only
+    // a stream that stays open from then counts as working, not one a proxy
+    // holds without an answer and then refuses.
+    const opened = (response: Response) => {
+      if (response.ok && subscriptions.has(key))
+        send(win, { kind: "connection", connection: id, id: key, data: "opened" });
+      return response;
+    };
+    const client = new Haarness({
+      baseUrl: item.url,
+      auth: item.auth,
+      fetch: (request, init) => fetch(request, init).then(opened),
+    });
     subscriptions.set(key, { owner: win.id, client });
     void (async () => {
       try {

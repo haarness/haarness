@@ -1,5 +1,10 @@
 import { previewInfo } from "./preview-actions";
-import { createReconnectWait, onReconnectHint } from "./reconnect-wait";
+import {
+  RECONNECT_BASE_MS,
+  createReconnectWait,
+  isWake,
+  onReconnectHint,
+} from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
@@ -228,8 +233,16 @@ function createApp() {
     connectAttempt = 0,
     stopped = false;
   const reconnectWait = createReconnectWait();
-  /** A reconnect waits for its timer. */
-  let retryPending = false;
+  /** A reconnect waits for its timer, due at `retryDue`. */
+  let retryPending = false,
+    retryDue = 0;
+  /** The open project lost its connection and is connecting again (not the
+   * first connection of a project being opened). */
+  let recovering = false;
+  /** A quiet subscription is being asked for (`resubscribe`). */
+  let renewing = false;
+  /** A stream main said opened before its subscription was known here. */
+  let openedEarly = "";
   const journals = new Set<T.EventEnvelope[]>();
   // The latest history read of the open chat after a revert or compaction;
   // an older one landing later is dropped.
@@ -612,27 +625,83 @@ function createApp() {
    * reconnect. `restart` begins a new wait, after a wake or a reset. */
   function reconnect(restart = false) {
     if (stopped || !state.connection) return;
+    recovering = true;
     set("connectionStatus", "Reconnecting…");
     if (retryPending && !restart) return;
     clearTimeout(reconnectTimer);
     retryPending = true;
+    const delay = reconnectWait.next();
+    retryDue = Date.now() + delay;
     reconnectTimer = setTimeout(() => {
       retryPending = false;
       void hydrate().catch((error) => {
         set("error", String(error));
         reconnect();
       });
-    }, reconnectWait.next());
+    }, delay);
   }
-  // A project waiting to reconnect tries again soon when the network comes
-  // back or the window shows again; a connected one is left alone.
-  onCleanup(
-    onReconnectHint(() => {
-      if (!retryPending) return;
+  /** A wake (`wake`), the network coming back or the window showing again.
+   * A project connecting again tries again within half a second, superseding
+   * an attempt still in flight (the network may only now be back); a retry
+   * already due sooner is kept. A connected project is left alone, except
+   * that a wake subscribes it again quietly (`resubscribe`): its stream may
+   * have died while the computer slept. */
+  function hint(wake: boolean) {
+    if (stopped || !state.connection) return;
+    if (recovering) {
+      if (retryPending && retryDue - Date.now() <= RECONNECT_BASE_MS) return;
       reconnectWait.reset();
       reconnect(true);
-    }),
-  );
+      return;
+    }
+    if (wake && state.connectionStatus === "Connected" && subscription)
+      void resubscribe();
+  }
+  onCleanup(onReconnectHint(() => hint(false)));
+  /** Subscribes the connected open project again from its last event, and
+   * keeps everything it shows: it stays Connected and nothing is read again.
+   * Another server instance, or a server out of reach, reconnects as a
+   * dropped stream does. */
+  async function resubscribe() {
+    if (renewing) return;
+    renewing = true;
+    const current = generation,
+      operation = ++hydration,
+      connection = state.connection!.id;
+    // A drop meanwhile has a full reconnect of its own waiting.
+    const valid = () =>
+      current === generation &&
+      operation === hydration &&
+      !stopped &&
+      !retryPending;
+    try {
+      const info = await api<T.ServerInfo>("info");
+      if (!valid()) return;
+      if (info.serverInstanceId !== lastInstance) {
+        forceSnapshot = true;
+        reconnectWait.ended();
+        reconnect();
+        return;
+      }
+      const previous = subscription;
+      // Events of both streams meanwhile are taken once, by event ID.
+      const id = await window.haarness.subscribe(connection, lastCursor);
+      if (!valid()) {
+        await window.haarness.unsubscribe(id);
+        return;
+      }
+      subscription = id;
+      if (openedEarly === id) reconnectWait.opened();
+      openedEarly = "";
+      if (previous) await window.haarness.unsubscribe(previous);
+    } catch {
+      if (!valid()) return;
+      reconnectWait.ended();
+      reconnect();
+    } finally {
+      renewing = false;
+    }
+  }
   async function hydrate(knownInfo?: T.ServerInfo) {
     const current = generation,
       operation = ++hydration;
@@ -681,7 +750,12 @@ function createApp() {
       return;
     }
     subscription = id;
-    reconnectWait.opened();
+    if (openedEarly === id) reconnectWait.opened();
+    openedEarly = "";
+    // Connected: a retry a signal asked for meanwhile is not needed.
+    clearTimeout(reconnectTimer);
+    retryPending = false;
+    recovering = false;
     set("connectionStatus", "Connected");
   }
   createEffect(() => applyLanguage(state.preferences.language));
@@ -787,6 +861,7 @@ function createApp() {
     activation = undefined;
     clearTimeout(reconnectTimer);
     retryPending = false;
+    recovering = false;
     const previous = subscription;
     subscription = "";
     tabHistory = [];
@@ -1355,6 +1430,7 @@ function createApp() {
       lastCursor = 0;
       lastInstance = "";
       reconnectWait.reset();
+      recovering = false;
       selection++;
       batch(() => {
         set("ready", false);
@@ -1843,9 +1919,19 @@ function createApp() {
       event.kind === "connection" &&
       (!event.connection || event.connection === state.connection?.id)
     ) {
+      // Main says when a stream's response arrived: only a stream that stayed
+      // open from then counts as working (see `createReconnectWait`).
+      if (event.data === "opened" && event.id) {
+        if (event.id === subscription) reconnectWait.opened();
+        else openedEarly = event.id;
+        return;
+      }
+      if (isWake(event)) {
+        hint(true);
+        return;
+      }
       if (event.id && event.id !== subscription) return;
-      // The stream ended, or (with no stream named) the computer woke: a
-      // wake begins the wait again.
+      // The stream ended, or (with no stream named) a reconnect was asked for.
       if (event.id) reconnectWait.ended();
       else reconnectWait.reset();
       reconnect(!event.id);
