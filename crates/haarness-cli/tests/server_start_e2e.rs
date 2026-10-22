@@ -314,7 +314,7 @@ fn a_serve_whose_stderr_nobody_reads_keeps_answering() {
         .spawn()
         .expect("launch haarness serve");
     let stdout = server.stdout.take().expect("serve stdout");
-    let _stop = Cleanup(move || {
+    let stop = Cleanup(move || {
         let _ = server.kill();
         let _ = server.wait();
     });
@@ -366,6 +366,6 @@ fn a_serve_whose_stderr_nobody_reads_keeps_answering() {
             .expect("the server still answers");
         assert!(info.status().is_success(), "{}", info.status());
     });
-    drop(_stop);
+    drop(stop);
     let _ = std::fs::remove_dir_all(root);
 }
