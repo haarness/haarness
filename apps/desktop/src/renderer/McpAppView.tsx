@@ -287,7 +287,11 @@ export function McpAppView(props: {
       if (data.type !== "receive") return;
       const message = data.message as Record<string, unknown> | undefined;
       if (message && Array.isArray(message[WHEEL])) return wheel(message[WHEEL] as number[]);
-      if (message && HOVER in message) return void setPointed(message[HOVER] === 1);
+      if (message && HOVER in message) {
+        const [value, from] = Array.isArray(message[HOVER]) ? (message[HOVER] as unknown[]) : [];
+        if (from === token) setPointed(value === 1);
+        return;
+      }
       if (message && INPUT in message) {
         if (message[INPUT] === token) pressed = true;
         return;
