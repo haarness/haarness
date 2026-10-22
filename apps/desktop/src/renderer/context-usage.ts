@@ -1,4 +1,5 @@
 import type { Item, ItemData, Thread } from "@haarness/sdk";
+import { t } from "./i18n";
 
 export const contextKinds = [
   "User messages",
@@ -97,8 +98,22 @@ export function contextUsage(items: Item[], thread: Thread) {
   };
 }
 
-export const tokenNumber = (value: number | null | undefined) =>
-  value == null ? "Not available" : value.toLocaleString("en-US");
+/** A token count in the reader's language ("1,234", "1.234"), or that it is not known. */
+export const tokenNumber = (value: number | null | undefined, locale: string) =>
+  value == null ? t("Not available") : new Intl.NumberFormat(locale).format(value);
+
+/** A share of a limit for a "{percent}%" label, to one decimal ("12.5", "12,5"). */
+export const percentNumber = (value: number, locale: string) =>
+  new Intl.NumberFormat(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value);
+
+/** A cost in dollars to four decimals, written as the reader's language writes money. */
+export const costNumber = (usd: number, locale: string) =>
+  new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
+  }).format(usd);
 
 /** A request's pace from its usage record: the wait for its first streamed
  * content, and the tokens that streamed per second while they streamed (not

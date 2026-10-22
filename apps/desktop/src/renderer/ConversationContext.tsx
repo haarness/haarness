@@ -15,7 +15,9 @@ import { ProviderLabel } from "./ProviderIcon";
 import { modelName } from "../model-names";
 import {
   contextUsage,
+  costNumber,
   paceSeconds,
+  percentNumber,
   paceSpeed,
   requestPace,
   tokenNumber,
@@ -144,10 +146,10 @@ export function ConversationContext() {
               <h3>{t("Context in use")}</h3>
               <div class="context-total">
                 <strong data-testid="context-tokens">
-                  {tokenNumber(usage().tokens)}
+                  {tokenNumber(usage().tokens, language())}
                 </strong>
                 <span>
-                  {t("of {count} tokens", { count: tokenNumber(usage().window) })}
+                  {t("of {count} tokens", { count: tokenNumber(usage().window, language()) })}
                 </span>
               </div>
               <progress
@@ -157,11 +159,11 @@ export function ConversationContext() {
               />
               <small>
                 {t("{percent}% of the context window", {
-                  percent: usage().percent.toFixed(1),
+                  percent: percentNumber(usage().percent, language()),
                 })}
               </small>
               <p class="context-note">
-                {t("Last request reported by the provider plus an estimate of what was added since. Compacts automatically above {count} tokens.", { count: tokenNumber(usage().compactAt) })}
+                {t("Last request reported by the provider plus an estimate of what was added since. Compacts automatically above {count} tokens.", { count: tokenNumber(usage().compactAt, language()) })}
               </p>
             </section>
           )}
@@ -170,13 +172,13 @@ export function ConversationContext() {
           <h3>{t("Retained text estimate")}</h3>
           <div class="context-total">
             <strong data-testid="context-estimate">
-              {tokenNumber(context()?.total)}
+              {tokenNumber(context()?.total, language())}
             </strong>
             <span>{t("estimated tokens")}</span>
           </div>
           <p>
             {limit()
-              ? t("{count} model context limit", { count: tokenNumber(limit()) })
+              ? t("{count} model context limit", { count: tokenNumber(limit(), language()) })
               : t("Model context limit unavailable")}
           </p>
           <Show when={percent() != null}>
@@ -186,7 +188,7 @@ export function ConversationContext() {
               value={Math.min(100, percent()!)}
             />
             <small>
-              {t("{percent}% of the model limit, before overhead", { percent: percent()!.toFixed(1) })}
+              {t("{percent}% of the model limit, before overhead", { percent: percentNumber(percent()!, language()) })}
             </small>
           </Show>
           <p class="context-note">
@@ -207,7 +209,7 @@ export function ConversationContext() {
               {(row) => (
                 <div>
                   <dt>{t(row.label)}</dt>
-                  <dd>{tokenNumber(row.tokens)}</dd>
+                  <dd>{tokenNumber(row.tokens, language())}</dd>
                 </div>
               )}
             </For>
@@ -224,13 +226,13 @@ export function ConversationContext() {
               <section aria-label={t("Prepared request estimate")}>
                 <h4>{t("Prepared request estimate")}</h4>
                 <dl class="context-breakdown">
-                  <div><dt>{t("System instructions")}</dt><dd>{tokenNumber(prompt().system_tokens)}</dd></div>
-                  <div><dt>{t("Tool definitions")}</dt><dd>{tokenNumber(prompt().tool_tokens)}</dd></div>
-                  <div><dt>{t("Chat history")}</dt><dd>{tokenNumber(prompt().history_tokens)}</dd></div>
+                  <div><dt>{t("System instructions")}</dt><dd>{tokenNumber(prompt().system_tokens, language())}</dd></div>
+                  <div><dt>{t("Tool definitions")}</dt><dd>{tokenNumber(prompt().tool_tokens, language())}</dd></div>
+                  <div><dt>{t("Chat history")}</dt><dd>{tokenNumber(prompt().history_tokens, language())}</dd></div>
                   <Show when={prompt().media_tokens}>
-                    <div><dt>{t("Media")}</dt><dd>{tokenNumber(prompt().media_tokens)}</dd></div>
+                    <div><dt>{t("Media")}</dt><dd>{tokenNumber(prompt().media_tokens, language())}</dd></div>
                   </Show>
-                  <div><dt>{t("Total estimated tokens")}</dt><dd>{tokenNumber(prompt().system_tokens + prompt().tool_tokens + prompt().history_tokens + (prompt().media_tokens ?? 0))}</dd></div>
+                  <div><dt>{t("Total estimated tokens")}</dt><dd>{tokenNumber(prompt().system_tokens + prompt().tool_tokens + prompt().history_tokens + (prompt().media_tokens ?? 0), language())}</dd></div>
                 </dl>
                 <p class="context-note">
                   {prompt().media_tokens || !prompt().media_attachments
@@ -260,19 +262,19 @@ export function ConversationContext() {
             <dl class="context-stats">
               <div>
                 <dt>{t("Input")}</dt>
-                <dd>{tokenNumber(latest()?.input_tokens)}</dd>
+                <dd>{tokenNumber(latest()?.input_tokens, language())}</dd>
               </div>
               <div>
                 <dt>{t("Output")}</dt>
-                <dd>{tokenNumber(latest()?.output_tokens)}</dd>
+                <dd>{tokenNumber(latest()?.output_tokens, language())}</dd>
               </div>
               <div>
                 <dt>{t("Cache read")}</dt>
-                <dd>{tokenNumber(latest()?.cache_read_tokens ?? 0)}</dd>
+                <dd>{tokenNumber(latest()?.cache_read_tokens ?? 0, language())}</dd>
               </div>
               <div>
                 <dt>{t("Cache write")}</dt>
-                <dd>{tokenNumber(latest()?.cache_write_tokens ?? 0)}</dd>
+                <dd>{tokenNumber(latest()?.cache_write_tokens ?? 0, language())}</dd>
               </div>
               <Show when={pace()}>
                 {(pace) => (
@@ -328,7 +330,7 @@ export function ConversationContext() {
                 {([label, value]) => (
                   <div>
                     <dt>{t(label)}</dt>
-                    <dd>{tokenNumber(value)}</dd>
+                    <dd>{tokenNumber(value, language())}</dd>
                   </div>
                 )}
               </For>
@@ -337,7 +339,7 @@ export function ConversationContext() {
                 <dd>
                   {totals()?.costUsd == null
                     ? t("Not available")
-                    : "$" + totals()!.costUsd!.toFixed(4)}
+                    : costNumber(totals()!.costUsd!, language())}
                 </dd>
               </div>
             </dl>

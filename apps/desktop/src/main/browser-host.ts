@@ -12,6 +12,7 @@ import {
 } from "@haarness/browser-driver/rpc";
 import { createAgentActivity } from "./browser-activity";
 import { createBrowserPage, type BrowserPage } from "./browser-chromium";
+import { createKeyboardHandoff } from "./browser-keyboard";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
 import { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
@@ -44,6 +45,10 @@ type Entry = {
   ready: Promise<void>;
   disposed: boolean;
   layout?: BrowserLayout;
+  /** The tab whose page is drawn now. */
+  shown?: Browser.TabID;
+  /** A page the person just loaded, which takes the keyboard once it is shown. */
+  keyboard: ReturnType<typeof createKeyboardHandoff>;
   save?: ReturnType<typeof setTimeout>;
   abort: AbortController;
   access?: { policy: BrowserPolicy; approved: Set<string>; error?: string };
@@ -154,6 +159,7 @@ export function createBrowserHost(
       if (!value?.visible || id !== e.focusedTabID || e.disposed)
         page.setVisible(false);
     }
+    e.shown = undefined;
     if (!value?.visible || e.disposed || !e.focusedTabID) return;
     const b = value.bounds;
     const size = e.win.getContentSize();
@@ -177,6 +183,23 @@ export function createBrowserHost(
         : undefined);
     page?.layout(bounds, undefined, 0);
     page?.setVisible(true);
+    if (page) e.shown = e.focusedTabID;
+    offerKeyboard(e);
+  }
+  function offerKeyboard(e: Entry) {
+    const page = e.shown && !e.disposed ? e.pages.get(e.shown) : undefined;
+    void e.keyboard.offer(e.shown, page?.contents);
+  }
+  /** Windows whose own key and pointer presses are watched for the browsers in them. */
+  const watched = new WeakSet<BrowserWindow>();
+  /** A press in the window's own page means the person has moved on from a load they asked for. */
+  function watchInput(win: BrowserWindow) {
+    if (watched.has(win)) return;
+    watched.add(win);
+    win.webContents.on("input-event", (_event, input) => {
+      if (!["mouseDown", "rawKeyDown", "keyDown", "touchStart"].includes(input.type)) return;
+      for (const e of entries.values()) if (e.win === win) e.keyboard.input();
+    });
   }
   function focus(e: Entry, id: Browser.TabID, agent = false) {
     e.focusedTabID = id;
@@ -455,6 +478,7 @@ export function createBrowserHost(
       requests: new Map(),
       requestTabs: new Map(),
       activity: createAgentActivity(),
+      keyboard: createKeyboardHandoff(win),
       queue: Promise.resolve(),
       ready,
       disposed: false,
@@ -664,11 +688,25 @@ export function createBrowserHost(
           await execute(e, { action, files: [] }, new AbortController().signal)
         ).value;
       }
+      // A page the person loads takes the keyboard, as in a browser; a new
+      // tab with no address leaves it in the address bar. Its time runs from
+      // now, though the command may wait behind the agent's.
+      const load =
+        action.type === "navigate" || action.type === "back" || action.type === "forward" || action.type === "reload";
+      const opens = action.type === "tabs.open" && !!action.url;
+      if (load || opens) {
+        watchInput(win);
+        e.keyboard.want(load ? action.tabID : undefined);
+      }
       const result = e.queue
         .catch(() => {})
-        .then(() =>
-          execute(e, { action, files: [] }, new AbortController().signal),
-        );
+        .then(() => {
+          const run = execute(e, { action, files: [] }, new AbortController().signal);
+          // A new tab is the one focused once its command has started.
+          if (opens && e.focusedTabID) e.keyboard.bind(e.focusedTabID);
+          if (load || opens) offerKeyboard(e);
+          return run;
+        });
       e.queue = result;
       return (await result).value;
     },
