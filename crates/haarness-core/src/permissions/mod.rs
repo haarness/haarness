@@ -811,29 +811,49 @@ fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
 /// `external_directory` gate.
 #[must_use]
 pub fn resolve_permission_path(workspace: &Path, value: &str) -> PathBuf {
+    resolve_joined(&joined_path(workspace, value))
+}
+
+/// Resolve a path a tool removes rather than writes through: a deleted
+/// file, or the old name of a move. The entry itself goes, not what a link
+/// there leads to, so only the folder holding it is followed and the last
+/// part stays as named.
+#[must_use]
+pub fn resolve_permission_entry(workspace: &Path, value: &str) -> PathBuf {
+    let joined = joined_path(workspace, value);
+    match (joined.parent(), joined.file_name()) {
+        (Some(parent), Some(name)) => resolve_joined(parent).join(name),
+        _ => resolve_joined(&joined),
+    }
+}
+
+/// `value` on the canonical workspace, with `.` and `..` folded.
+fn joined_path(workspace: &Path, value: &str) -> PathBuf {
     let workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| normalize_absolute(workspace));
     let requested = Path::new(value);
-    let joined = if requested.is_absolute() {
+    normalize_absolute(&if requested.is_absolute() {
         requested.to_path_buf()
     } else {
         workspace.join(requested)
-    };
-    let joined = normalize_absolute(&joined);
+    })
+}
+
+fn resolve_joined(joined: &Path) -> PathBuf {
     if let Ok(path) = joined.canonicalize() {
         return path;
     }
 
-    let mut ancestor = joined.as_path();
+    let mut ancestor = joined;
     let mut suffix = Vec::new();
     while !ancestor.exists() {
         let Some(name) = ancestor.file_name() else {
-            return joined;
+            return joined.to_path_buf();
         };
         suffix.push(name.to_os_string());
         let Some(parent) = ancestor.parent() else {
-            return joined;
+            return joined.to_path_buf();
         };
         ancestor = parent;
     }
