@@ -7783,6 +7783,26 @@ async fn receive_oauth_callback(
     redirect_uri: &str,
     authorization_url: &str,
 ) -> Result<String> {
+    receive_oauth_callback_from(
+        move || listener.accept(),
+        redirect_uri,
+        authorization_url,
+        Duration::from_secs(300),
+    )
+    .await
+}
+
+async fn receive_oauth_callback_from<F, A>(
+    mut accept: F,
+    redirect_uri: &str,
+    authorization_url: &str,
+    patience: Duration,
+) -> Result<String>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<(tokio::net::TcpStream, SocketAddr)>>,
+{
+    use haarness_account::loopback::{AcceptFailures, next_connection};
     let state = reqwest::Url::parse(authorization_url)
         .ok()
         .and_then(|url| {
@@ -7792,13 +7812,14 @@ async fn receive_oauth_callback(
         .context("the MCP authorization URL carries no state")?;
     // Each connection is read in a task of its own while the listener keeps
     // accepting, so idle ones (a browser's spare socket, a page's preconnect)
-    // never hold up the real return.
+    // never hold up the real return. A connection that failed before it was
+    // accepted ends only itself.
     let mut connections = tokio::task::JoinSet::new();
-    let query = tokio::time::timeout(Duration::from_secs(300), async {
+    let failures = AcceptFailures::default();
+    let query = tokio::time::timeout(patience, async {
         loop {
             tokio::select! {
-                accepted = listener.accept() => {
-                    let (stream, peer) = accepted?;
+                (stream, peer) = next_connection(&mut accept, &failures) => {
                     if peer.ip().is_loopback() {
                         connections.spawn(answer_mcp_oauth_callback(stream, state.clone()));
                     }
@@ -7815,7 +7836,9 @@ async fn receive_oauth_callback(
         }
     })
     .await
-    .context("timed out waiting for the MCP OAuth callback")??;
+    .map_err(|_| {
+        anyhow::anyhow!(failures.explain("timed out waiting for the MCP OAuth callback"))
+    })??;
     Ok(format!("{redirect_uri}{query}"))
 }
 
@@ -11802,6 +11825,84 @@ mod tests {
             receive_oauth_callback(&listener, &redirect, "https://auth.example/authorize")
                 .await
                 .is_err()
+        );
+    }
+
+    /// A connection that failed before it was accepted (reset by its client,
+    /// or no file descriptor left for it) does not end the authorization.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_mcp_callback() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let listener = &listener;
+        let mut failures = vec![
+            std::io::Error::other("Too many open files"),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ];
+        let accept = move || {
+            let failure = failures.pop();
+            async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => listener.accept().await,
+                }
+            }
+        };
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?code=real&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stream
+        };
+        let (callback, _stream) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                super::receive_oauth_callback_from(
+                    accept,
+                    &redirect,
+                    "https://auth.example/authorize?state=st-1",
+                    Duration::from_secs(300),
+                ),
+                browser
+            )
+        })
+        .await
+        .expect("the callback is taken after the failed accepts");
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
+        );
+    }
+
+    /// A callback port that cannot take connections keeps the authorization
+    /// waiting, and the failure is what its timeout says.
+    #[tokio::test]
+    async fn an_mcp_callback_that_times_out_names_why_its_port_took_no_connection() {
+        let accept = || async {
+            Err::<(tokio::net::TcpStream, std::net::SocketAddr), _>(std::io::Error::other(
+                "Too many open files",
+            ))
+        };
+        let error = super::receive_oauth_callback_from(
+            accept,
+            "http://127.0.0.1:1/mcp/oauth/callback",
+            "https://auth.example/authorize?state=st-1",
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "timed out waiting for the MCP OAuth callback; the sign-in's port on this computer \
+             could not accept connections (Too many open files)"
         );
     }
 

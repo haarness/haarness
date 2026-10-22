@@ -54,7 +54,11 @@ import {
 import { z } from "zod";
 import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
 import { serverKey } from "../servers";
-import { mergeProjectCatalog, projectKey } from "../projects";
+import {
+  mergeProjectCatalog,
+  projectKey,
+  rememberConnected,
+} from "../projects";
 import {
   connectLocal,
   establish,
@@ -713,9 +717,18 @@ function installHandlers() {
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
     if (cloudSession || cloudWorkspace) {
       const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
-      const index = data().recent.findIndex(item => item.id === view.id);
-      if (index >= 0) data().recent[index] = view; else data().recent.push(view);
-      await persist(); watchNotifications(view.id, win.id); return view;
+      // Removed from the sidebar while it connected: it stays removed.
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved: view,
+        requested: input.recent,
+        save: async (next) => {
+          data().recent = next;
+          await persist();
+        },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
     }
 
     let workspace = input.workspace ?? recent?.workspace;
@@ -846,36 +859,50 @@ function installHandlers() {
         checkout: view.checkout ?? current?.checkout,
         ...(url ? { url } : {}),
       };
-      if (url) {
-        saveServerAuth(serverId, auth);
-        const savedServer = {
-          id: serverId,
-          url: new URL(url).origin,
-          label: input.label?.trim() || server?.label || new URL(url).hostname,
-        };
-        const serverIndex = data().servers.findIndex(
-          (item) => item.id === serverId,
-        );
-        if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
-        else data().servers.push(savedServer);
-      }
-      const index = data().recent.findIndex((item) => item.id === view.id);
-      if (index >= 0) data().recent[index] = saved;
-      else data().recent.push(saved);
-      await persist();
-      if (!view.remote) {
-        await refreshProjects();
-        if (!data().recent.find((item) => item.id === view.id)?.project)
-          await refreshProjects();
-        const annotated = data().recent.find((item) => item.id === view.id);
-        if (annotated)
-          Object.assign(view, {
-            project: annotated.project,
-            checkout: annotated.checkout,
-          });
-      }
-      watchNotifications(view.id, win.id);
-      return view;
+      // A saved project removed from the sidebar while it connected (a row
+      // retrying in the background, a notification opening its chat), or
+      // while its folder was looked up afterwards, stays removed: nothing of
+      // it is saved or watched again.
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved,
+        requested: input.recent,
+        save: async (next) => {
+          if (url) {
+            saveServerAuth(serverId, auth);
+            const savedServer = {
+              id: serverId,
+              url: new URL(url).origin,
+              label:
+                input.label?.trim() || server?.label || new URL(url).hostname,
+            };
+            const serverIndex = data().servers.findIndex(
+              (item) => item.id === serverId,
+            );
+            if (serverIndex >= 0) data().servers[serverIndex] = savedServer;
+            else data().servers.push(savedServer);
+          }
+          data().recent = next;
+          await persist();
+        },
+        after: view.remote
+          ? undefined
+          : async () => {
+              await refreshProjects();
+              if (!data().recent.find((item) => item.id === view.id)?.project)
+                await refreshProjects();
+              const annotated = data().recent.find(
+                (item) => item.id === view.id,
+              );
+              if (annotated)
+                Object.assign(view, {
+                  project: annotated.project,
+                  checkout: annotated.checkout,
+                });
+            },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
     });
   });
   handle("forget", async (_, id: string) => {
@@ -1008,7 +1035,19 @@ function installHandlers() {
       throw new Error("Invalid event cursor");
     const item = connection(id);
     const key = randomUUID();
-    const client = new Haarness({ baseUrl: item.url, auth: item.auth });
+    // The window learns when the stream's response arrived ("opened"): only
+    // a stream that stays open from then counts as working, not one a proxy
+    // holds without an answer and then refuses.
+    const opened = (response: Response) => {
+      if (response.ok && subscriptions.has(key))
+        send(win, { kind: "connection", connection: id, id: key, data: "opened" });
+      return response;
+    };
+    const client = new Haarness({
+      baseUrl: item.url,
+      auth: item.auth,
+      fetch: (request, init) => fetch(request, init).then(opened),
+    });
     subscriptions.set(key, { owner: win.id, client });
     void (async () => {
       try {

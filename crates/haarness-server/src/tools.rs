@@ -2831,48 +2831,58 @@ impl Tool for BuiltinTool {
                         root.display()
                     )));
                 }
-                let pattern = root
-                    .join(string(&args, "pattern")?)
-                    .to_string_lossy()
-                    .into_owned();
+                let pattern = string(&args, "pattern")?;
+                // A `..` would leave the folder the outside-folder check
+                // judged; the folder is given as `path` instead.
+                if climbs(pattern) {
+                    return Err(CoreError::Invalid(
+                        "a glob pattern cannot contain `..`; pass the folder to search as path"
+                            .into(),
+                    ));
+                }
+                let pattern = root.join(pattern).to_string_lossy().into_owned();
+                let workspace = self
+                    .workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
                     .as_ref()
                     .and_then(|invoker| invoker.read_rules());
                 let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
-                let mut values = Vec::new();
-                let mut skipped = Skipped::default();
-                let mut partial = false;
-                for path in glob::glob(&pattern)
-                    .map_err(tool_error)?
-                    .filter_map(Result::ok)
-                    .filter(|path| path.starts_with(&root))
-                {
-                    if values.len() == 10_000 {
-                        partial = true;
-                        break;
-                    }
-                    // `*` matches dotfiles and `**` follows linked folders, so
-                    // each file is checked by where it really leads as well.
-                    if !path.is_dir()
-                        && let Some(hidden) = secrets.hides(&path)
-                    {
-                        skipped.count(hidden);
-                        continue;
-                    }
-                    values.push(
-                        path.strip_prefix(&self.workspace)
-                            .unwrap_or(&path)
-                            .display()
-                            .to_string(),
-                    );
-                }
-                Ok(with_skipped(
-                    truncate_output(values.join("\n")).await?,
-                    skipped,
-                    partial,
-                ))
+                let named = self.workspace.clone();
+                let cancel = context.cancel.clone();
+                // The walk reads folders synchronously and `**` follows links
+                // (one to `/` reaches everything), so it runs off the async
+                // workers, stops on Stop and at a budget of matches looked at.
+                let walk = tokio::task::spawn_blocking(move || {
+                    glob_walk(
+                        &pattern,
+                        &GlobScope {
+                            root,
+                            workspace,
+                            named,
+                        },
+                        &secrets,
+                        &cancel,
+                        GLOB_LOOK_LIMIT,
+                    )
+                });
+                let found = tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    found = walk => found.map_err(tool_error)??,
+                };
+                let output = with_skipped(
+                    truncate_output(found.values.join("\n")).await?,
+                    found.skipped,
+                    found.partial,
+                );
+                Ok(if found.stopped {
+                    with_stop(output, GLOB_LOOK_LIMIT)
+                } else {
+                    output
+                })
             }
             Kind::Grep => {
                 let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
@@ -3061,10 +3071,14 @@ impl Tool for BuiltinTool {
                         ..
                     } = operation
                         && let (Ok(source), Ok(destination)) = (
-                            self.resolve_existing(path, &context),
+                            self.resolve_entry(path, &context),
                             self.resolve_new(target, &context),
                         )
-                        && same_file(&source, &destination)
+                        && same_entry(
+                            &source,
+                            &destination,
+                            &haarness_core::resolve_permission_entry(&self.workspace, target),
+                        )
                     {
                         return Err(CoreError::Invalid(format!(
                             "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
@@ -3106,9 +3120,20 @@ impl Tool for BuiltinTool {
                             let updated = haarness_core::patch::apply_hunks(&text, &hunks)
                                 .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
                             if let Some(target) = move_to {
+                                // The move takes the source's entry away: a
+                                // link goes, not the file it leads to.
+                                let entry = self.resolve_entry(&path, &context)?;
+                                let removed = entry_diff_body(&entry).await;
                                 let destination = self.resolve_new(&target, &context)?;
                                 // A file the patch added earlier is checked here.
-                                if same_file(&resolved, &destination) {
+                                if same_entry(
+                                    &entry,
+                                    &destination,
+                                    &haarness_core::resolve_permission_entry(
+                                        &self.workspace,
+                                        &target,
+                                    ),
+                                ) {
                                     return Err(CoreError::Invalid(format!(
                                         "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
                                     )));
@@ -3122,17 +3147,10 @@ impl Tool for BuiltinTool {
                                 tokio::fs::write(&destination, &updated)
                                     .await
                                     .map_err(tool_error)?;
-                                tokio::fs::remove_file(&resolved)
-                                    .await
-                                    .map_err(tool_error)?;
+                                tokio::fs::remove_file(&entry).await.map_err(tool_error)?;
                                 push_tool_diff(
                                     &mut diffs,
-                                    text_file_diff(
-                                        &path,
-                                        FileDiffStatus::Deleted,
-                                        Some(&text),
-                                        None,
-                                    ),
+                                    deletion_diff(&path, removed),
                                     &mut diffs_truncated,
                                 );
                                 push_tool_diff(
@@ -3159,8 +3177,9 @@ impl Tool for BuiltinTool {
                             }
                         }
                         haarness_core::patch::FileOp::Delete { path } => {
-                            let resolved = self.resolve_existing(&path, &context)?;
-                            let existing = existing_diff_body(&resolved).await;
+                            // A link is deleted itself, not the file it leads to.
+                            let resolved = self.resolve_entry(&path, &context)?;
+                            let existing = entry_diff_body(&resolved).await;
                             tokio::fs::remove_file(&resolved)
                                 .await
                                 .map_err(tool_error)?;
@@ -3292,6 +3311,13 @@ impl BuiltinTool {
             .map_err(tool_error)?;
         self.ensure_within(path, context)
     }
+    /// A file the tool removes (a delete, the old name of a move): a link
+    /// there is the entry itself, so only the folder holding it is followed.
+    fn resolve_entry(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+        let path = haarness_core::resolve_permission_entry(&self.workspace, value);
+        std::fs::symlink_metadata(&path).map_err(tool_error)?;
+        self.ensure_within(path, context)
+    }
     fn resolve_new(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
         if value.is_empty() {
             return Err(CoreError::Invalid("path cannot be empty".into()));
@@ -3360,6 +3386,8 @@ enum Hidden {
 struct Skipped {
     secret: usize,
     denied: usize,
+    /// Glob matches in a linked folder that leads out of the project.
+    outside: usize,
 }
 
 impl Skipped {
@@ -3444,6 +3472,151 @@ impl SecretFilter {
     }
 }
 
+/// How many matches a glob looks at, those it leaves out included, before it
+/// stops: `**` through a link to `/` or the home folder would otherwise walk
+/// everything there.
+const GLOB_LOOK_LIMIT: usize = 100_000;
+
+/// What a glob found: its matches, what it left out, and whether it stopped
+/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`]).
+#[derive(Default)]
+struct GlobFound {
+    values: Vec<String>,
+    skipped: Skipped,
+    partial: bool,
+    stopped: bool,
+}
+
+/// Where a glob looks: the canonical folder it searches, the canonical
+/// workspace, and the workspace as configured, which its output is written
+/// relative to.
+struct GlobScope {
+    root: PathBuf,
+    workspace: PathBuf,
+    named: PathBuf,
+}
+
+/// Walk `pattern` (already joined to the scope's root), looking at no more
+/// than `limit` matches. Runs synchronously; the caller keeps it off the async
+/// workers.
+fn glob_walk(
+    pattern: &str,
+    scope: &GlobScope,
+    secrets: &SecretFilter,
+    cancel: &tokio_util::sync::CancellationToken,
+    limit: usize,
+) -> CoreResult<GlobFound> {
+    let mut folders = HashMap::<PathBuf, bool>::new();
+    let mut found = GlobFound::default();
+    for (looked, path) in glob::glob(pattern)
+        .map_err(tool_error)?
+        .filter_map(Result::ok)
+        .enumerate()
+    {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        if found.values.len() == 10_000 {
+            found.partial = true;
+            break;
+        }
+        if looked == limit {
+            found.partial = true;
+            found.stopped = true;
+            break;
+        }
+        // A part starting with `.`, such as `.*`, also matches `.` and `..`.
+        if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
+            !relative
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        }) {
+            continue;
+        }
+        // `**` follows linked folders: a match in a folder a link takes out
+        // of the project and the searched folder is left out, as a list of
+        // that folder would ask first.
+        let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
+        let inside = *folders.entry(parent).or_insert_with_key(|parent| {
+            parent.canonicalize().is_ok_and(|real| {
+                real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
+            })
+        });
+        if !inside {
+            found.skipped.outside += 1;
+            continue;
+        }
+        // `*` matches dotfiles and `**` follows linked folders, so each file
+        // is checked by where it really leads as well.
+        if !path.is_dir()
+            && let Some(hidden) = secrets.hides(&path)
+        {
+            found.skipped.count(hidden);
+            continue;
+        }
+        found.values.push(
+            path.strip_prefix(&scope.named)
+                .unwrap_or(&path)
+                .display()
+                .to_string(),
+        );
+    }
+    Ok(found)
+}
+
+/// Ends a glob's output saying it stopped at its budget, so an empty or short
+/// list is not read as everything there is.
+fn with_stop(mut output: ToolOutput, limit: usize) -> ToolOutput {
+    let note =
+        format!("(stopped after looking at {limit} matches; narrow the pattern or the path)");
+    output.text = if output.text.is_empty() {
+        note
+    } else {
+        format!("{}\n\n{note}", output.text)
+    };
+    output
+}
+
+/// Whether a glob pattern has a `..` part.
+fn climbs(pattern: &str) -> bool {
+    pattern.split(['/', '\\']).any(|part| part == "..")
+}
+
+/// Whether the entry a move removes is the file it writes. A link is its
+/// own entry: moving it onto the file it leads to writes that file and
+/// removes only the link.
+fn same_entry(entry: &Path, destination: &Path, target_entry: &Path) -> bool {
+    if std::fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        // The move would write the file the link leads to and then remove
+        // the link: refused when it names the link itself (`L`, `./L`,
+        // another case on a case-insensitive disk).
+        return same_link(entry, target_entry);
+    }
+    same_file(entry, destination)
+}
+
+/// Whether two entries are the same, without following a link at either.
+fn same_link(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let (Ok(left), Ok(right)) = (
+            std::fs::symlink_metadata(left),
+            std::fs::symlink_metadata(right),
+        ) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        left == right
+            || left
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+}
+
 /// Whether two paths name one existing file: the same device and inode on
 /// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
 fn same_file(left: &Path, right: &Path) -> bool {
@@ -3487,6 +3660,14 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
             plural(skipped.denied)
         ));
     }
+    // Said so the model does not take those files for absent.
+    if skipped.outside > 0 {
+        reasons.push(format!(
+            "{at_least}{} match{} inside links that lead outside the project",
+            skipped.outside,
+            if skipped.outside == 1 { "" } else { "es" }
+        ));
+    }
     if reasons.is_empty() {
         return output;
     }
@@ -3505,6 +3686,9 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
         }
         if skipped.denied > 0 {
             metadata.insert("denied".into(), json!(skipped.denied));
+        }
+        if skipped.outside > 0 {
+            metadata.insert("outside".into(), json!(skipped.outside));
         }
     }
     output
@@ -3961,6 +4145,19 @@ async fn existing_diff_body(path: &Path) -> ExistingDiffBody {
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ExistingDiffBody::Missing,
         Err(_) => ExistingDiffBody::Opaque { binary: false },
+    }
+}
+
+/// What a removed entry held: a link's target path (as Git shows a link),
+/// otherwise the file's contents.
+async fn entry_diff_body(path: &Path) -> ExistingDiffBody {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => tokio::fs::read_link(path)
+            .await
+            .map_or(ExistingDiffBody::Opaque { binary: false }, |target| {
+                ExistingDiffBody::Text(target.to_string_lossy().into_owned())
+            }),
+        _ => existing_diff_body(path).await,
     }
 }
 
@@ -5376,6 +5573,112 @@ export default workflow({
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_deletes_and_moves_a_link_itself_not_the_file_it_leads_to() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("haarness-patch-links-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        std::fs::write(outside.join("kept.txt"), "outside\n").unwrap();
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        symlink(outside.join("kept.txt"), workspace.join("out.txt")).unwrap();
+        symlink("missing.txt", workspace.join("dangling.txt")).unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: &str| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            let input = input.to_owned();
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+
+        // Deleting a link removes the link, and the file it leads to stays.
+        let deleted = run("*** Begin Patch\n*** Delete File: alias.txt\n*** End Patch\n").await;
+        assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+            "real\n"
+        );
+        // The removed link's diff shows what Git shows for a link.
+        let deleted = deleted.unwrap();
+        let diffs = deleted.metadata["diffs"].as_array().unwrap();
+        assert_eq!(diffs[0]["file"], "alias.txt");
+        assert_eq!(diffs[0]["before"], "real.txt");
+        // So does one outside the project (no outside folder was granted),
+        // and a dangling link goes too.
+        run("*** Begin Patch\n*** Delete File: out.txt\n*** Delete File: dangling.txt\n*** End Patch\n")
+            .await
+            .unwrap();
+        for link in ["out.txt", "dangling.txt"] {
+            assert!(
+                std::fs::symlink_metadata(workspace.join(link)).is_err(),
+                "{link}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "outside\n"
+        );
+
+        // A move reads through the link and takes away only the link, also
+        // when it moves onto the file the link leads to.
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        run("*** Begin Patch\n*** Update File: alias.txt\n*** Move to: moved.txt\n@@\n-real\n+moved\n*** End Patch\n")
+            .await
+            .unwrap();
+        assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("moved.txt")).unwrap(),
+            "moved\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+            "real\n"
+        );
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        run("*** Begin Patch\n*** Update File: alias.txt\n*** Move to: real.txt\n@@\n-real\n+through\n*** End Patch\n")
+            .await
+            .unwrap();
+        assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+            "through\n"
+        );
+        // A move onto the link's own name would write the file it leads to
+        // and then remove the link, so it is refused as before.
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        let mut targets = vec!["alias.txt", "./alias.txt"];
+        // On a case-insensitive disk another case is the same entry too.
+        if workspace.join("ALIAS.TXT").exists() {
+            targets.push("ALIAS.TXT");
+        }
+        for target in targets {
+            let error = run(&format!(
+                "*** Begin Patch\n*** Update File: alias.txt\n*** Move to: {target}\n@@\n-through\n+lost\n*** End Patch\n"
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("names the same file"), "{target}: {error}");
+            assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_ok());
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+                "through\n"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn apply_patch_executes_v4a_envelopes_across_files() {
         let workspace =
@@ -6069,6 +6372,133 @@ export default workflow({
         );
         assert_eq!(result.metadata["skipped"], 1);
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_glob_stays_in_the_folder_it_searches() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-scope-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join("src/inner")).unwrap();
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("outside/elsewhere.txt"), "").unwrap();
+        std::fs::write(workspace.join("src/inner/main.rs"), "").unwrap();
+        std::fs::write(workspace.join("docs/guide.md"), "").unwrap();
+        std::os::unix::fs::symlink("../outside", workspace.join("escape")).unwrap();
+        std::os::unix::fs::symlink("../docs", workspace.join("src/docs")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("outside/elsewhere.txt"),
+            workspace.join("note.txt"),
+        )
+        .unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let glob = |arguments: Value| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            async move {
+                registry
+                    .get("glob")
+                    .unwrap()
+                    .execute(arguments, context)
+                    .await
+            }
+        };
+        let error = glob(json!({"pattern":"../*"})).await.unwrap_err();
+        assert!(error.to_string().contains("cannot contain `..`"), "{error}");
+        let error = glob(json!({"pattern":"src/../../outside/*"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot contain `..`"), "{error}");
+        // `.*` also matches `..`, and `**` follows linked folders.
+        let dotted = glob(json!({"pattern":".*/*"})).await.unwrap();
+        assert!(!dotted.text.contains("outside"), "{}", dotted.text);
+        let dotted = glob(json!({"pattern":".*/*","path":"src"})).await.unwrap();
+        assert!(!dotted.text.contains(".."), "{}", dotted.text);
+        let all = glob(json!({"pattern":"**/*"})).await.unwrap();
+        assert!(!all.text.contains("elsewhere.txt"), "{}", all.text);
+        // The model is told they were left out, not that they are absent.
+        assert!(
+            all.text
+                .ends_with("\n\n(skipped 1 match inside links that lead outside the project)"),
+            "{}",
+            all.text
+        );
+        assert_eq!(all.metadata["outside"], 1);
+        let none = glob(json!({"pattern":"escape/*"})).await.unwrap();
+        assert_eq!(
+            none.text,
+            "No files found\n\n(skipped 1 match inside links that lead outside the project)"
+        );
+        // A link in the project is listed, and a link to another project
+        // folder is followed.
+        assert!(
+            all.text.lines().any(|line| line == "note.txt"),
+            "{}",
+            all.text
+        );
+        assert!(
+            all.text.lines().any(|line| line == "escape"),
+            "{}",
+            all.text
+        );
+        assert!(
+            all.text.lines().any(|line| line == "src/docs/guide.md"),
+            "{}",
+            all.text
+        );
+        let nested = glob(json!({"pattern":"**/*.md","path":"src"}))
+            .await
+            .unwrap();
+        assert_eq!(nested.text, "src/docs/guide.md");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_glob_through_a_link_out_of_the_project_stops_at_its_budget_and_on_stop() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-budget-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        for index in 0..30 {
+            std::fs::write(root.join(format!("outside/{index}.txt")), "").unwrap();
+        }
+        std::fs::write(workspace.join("inside.txt"), "").unwrap();
+        std::os::unix::fs::symlink("../outside", workspace.join("escape")).unwrap();
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let pattern = workspace.join("**/*").to_string_lossy().into_owned();
+        let cancel = CancellationToken::new();
+        // Matches left out count against the budget too.
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, 10).unwrap();
+        assert!(found.stopped && found.partial);
+        assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
+        assert!(found.values.len() + found.skipped.outside <= 10);
+        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, 1_000).unwrap();
+        assert!(!everything.stopped && !everything.partial);
+        assert_eq!(everything.skipped.outside, 30);
+        cancel.cancel();
+        assert!(matches!(
+            glob_walk(&pattern, &scope, &secrets, &cancel, 1_000),
+            Err(CoreError::Cancelled)
+        ));
+        let stopped = with_stop(output(String::new()), 10);
+        assert_eq!(
+            stopped.text,
+            "(stopped after looking at 10 matches; narrow the pattern or the path)"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
