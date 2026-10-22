@@ -156,6 +156,10 @@ python3 scripts/test-release-quarantine.py           # macOS only
 - `test-release-install-ps1.py`: corrupt/missing checksum, plain-HTTP origin, unknown channel and
   a download that cannot run are all refused with the folder untouched; on Windows with
   `HAARNESS_BIN` the real binary installs over a previous copy.
+- Both installer tests cover the release domain: the file comes from the `Content-Location` the
+  service names to `HEAD` (resuming there too, for install.sh) and must match the service's
+  SHA-256; a release domain that does not deliver, or a plain-HTTP address, leaves the service to
+  send it. Without `pwsh`, run the PowerShell one in `mcr.microsoft.com/powershell` with python3.
 
 ## 4. Signing
 
