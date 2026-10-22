@@ -2357,20 +2357,23 @@ fn event_stream(
         loop {
             let next = {
                 let mut waiting = pending.lock();
-                if waiting.behind {
-                    waiting.behind = false;
-                    Some(None)
-                } else if let Some(event) = waiting.events.pop() {
-                    Some(Some(event))
-                } else if waiting.closed {
-                    break;
-                } else {
-                    None
+                match waiting.events.pop() {
+                    Some(event) => Some(event),
+                    // A queue that gave up ends the response once its
+                    // `resync_required` is out: the client reconnects from
+                    // its cursor.
+                    None if waiting.closed || waiting.events.given_up() => break,
+                    None => None,
                 }
             };
             match next {
-                Some(Some(event)) => yield Ok(to_sse(&event)),
-                Some(None) => yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}")),
+                Some(event) => {
+                    let mut sent = Event::default().event(&event.name).data(event.data);
+                    if let Some(id) = event.id {
+                        sent = sent.id(id.to_string());
+                    }
+                    yield Ok(sent);
+                }
                 None => tokio::select! {
                     () = shutdown.cancelled() => break,
                     () = wake.notified() => {}
@@ -2387,8 +2390,6 @@ fn event_stream(
 /// What waits for one event-stream connection.
 struct Pending {
     events: haarness_core::PendingEvents,
-    /// The connection lost events and its client must resync.
-    behind: bool,
     /// The bus is gone.
     closed: bool,
 }
@@ -2396,7 +2397,6 @@ impl Default for Pending {
     fn default() -> Self {
         Self {
             events: haarness_core::PendingEvents::new(haarness_core::PENDING_EVENTS_LIMIT),
-            behind: false,
             closed: false,
         }
     }
@@ -2421,47 +2421,50 @@ async fn pump_events(
     pending: Arc<parking_lot::Mutex<Pending>>,
     wake: Arc<tokio::sync::Notify>,
 ) {
+    // False once the queue gave up: this connection is over.
     let queue = |event: EventEnvelope| {
-        let mut waiting = pending.lock();
-        if let Err(dropped) = waiting.events.push(event) {
-            tracing::info!(
-                skipped = dropped,
-                "event stream fell behind; its client resyncs"
-            );
-            waiting.behind = true;
-        }
-        drop(waiting);
+        let pushed = pending.lock().events.push(event);
         wake.notify_one();
+        match pushed {
+            Ok(()) => true,
+            Err(dropped) => {
+                tracing::info!(
+                    skipped = dropped,
+                    "event stream fell behind; its client resyncs"
+                );
+                false
+            }
+        }
     };
     for event in subscription.replay {
-        if scope.allows(&event, &runtime).await {
-            queue(event);
+        if scope.allows(&event, &runtime).await && !queue(event) {
+            return;
         }
     }
     let mut receiver = subscription.receiver;
     loop {
         match receiver.recv().await {
             Ok(event) => {
-                if scope.allows(&event, &runtime).await {
-                    queue(event);
+                if scope.allows(&event, &runtime).await && !queue(event) {
+                    return;
                 }
             }
+            // The bus let go of events for this connection: what waits is
+            // older than the gap, and what follows newer, so neither goes out.
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::info!(skipped, "event stream fell behind; its client resyncs");
-                pending.lock().behind = true;
+                let dropped = pending.lock().events.give_up();
                 wake.notify_one();
+                tracing::info!(
+                    skipped = skipped.saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX)),
+                    "event stream fell behind; its client resyncs"
+                );
+                return;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
     pending.lock().closed = true;
     wake.notify_one();
-}
-fn to_sse(event: &EventEnvelope) -> Event {
-    Event::default()
-        .id(event.event_id.to_string())
-        .event(&event.event_type)
-        .data(serde_json::to_string(event).expect("event serializes"))
 }
 
 pub(crate) type ApiResult<T> = Result<T, ApiFailure>;
