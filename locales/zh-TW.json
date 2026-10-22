@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "伺服器已停止 · 正在重新啟動",
   "server stopped · restart failed · retrying": "伺服器已停止 · 重新啟動失敗 · 正在重試",
   "server unreachable · still retrying": "無法連線到伺服器 · 仍在重試",
+  "not following the server": "未在追蹤伺服器",
+  "not following the server · trying again in a minute, or restart Haarness": "未在追蹤伺服器 · 一分鐘後重試，或重新啟動 Haarness",
   "Server restarted · reconnected": "伺服器已重新啟動 · 已重新連線",
   "Terminal closed · the shell exited": "終端機已關閉 · Shell 已結束",
   "Remove server": "移除伺服器",

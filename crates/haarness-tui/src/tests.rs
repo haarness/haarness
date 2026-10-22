@@ -18355,3 +18355,37 @@ fn the_external_editor_gets_its_file_as_one_word() {
     assert!(!root.join("marker").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// After the task following the server's events ended by itself and started
+/// again, its first answer clears the red indicator; when it keeps ending,
+/// the status line says nothing retries, never "reconnecting".
+#[test]
+fn a_restarted_event_task_clears_the_indicator_and_one_that_stopped_says_so() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let status = |app: &App| {
+        app.lines((140, 30))
+            .last()
+            .map(line_text)
+            .unwrap_or_default()
+    };
+    app.connection_dropped(1);
+    assert!(status(&app).contains("reconnecting"), "{}", status(&app));
+    app.reconnected();
+    assert!(app.connection_lost.is_none());
+    assert!(!status(&app).contains("reconnecting"), "{}", status(&app));
+
+    app.connection_dropped(1);
+    app.stopped_following();
+    let text = status(&app);
+    assert!(!text.contains("reconnecting"), "{text}");
+    assert!(
+        text.contains("not following the server · trying again in a minute, or restart Haarness"),
+        "{text}"
+    );
+    // Tried again and answering: back to normal.
+    app.following_stopped = false;
+    app.connection_dropped(1);
+    app.reconnected();
+    assert!(!status(&app).contains("not following"), "{}", status(&app));
+}

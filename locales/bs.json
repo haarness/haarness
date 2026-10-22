@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "server zaustavljen · ponovo se pokreće",
   "server stopped · restart failed · retrying": "server zaustavljen · ponovno pokretanje nije uspjelo · pokušava se ponovo",
   "server unreachable · still retrying": "server nedostupan · i dalje se pokušava",
+  "not following the server": "server se ne prati",
+  "not following the server · trying again in a minute, or restart Haarness": "server se ne prati · novi pokušaj za minutu, ili ponovo pokrenite Haarness",
   "Server restarted · reconnected": "Server ponovo pokrenut · ponovo povezano",
   "Terminal closed · the shell exited": "Terminal zatvoren · ljuska je završila",
   "Remove server": "Ukloni server",

@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "server stoppet · genstarter den",
   "server stopped · restart failed · retrying": "server stoppet · genstart mislykkedes · prøver igen",
   "server unreachable · still retrying": "serveren kan ikke nås · prøver stadig igen",
+  "not following the server": "følger ikke serveren",
+  "not following the server · trying again in a minute, or restart Haarness": "følger ikke serveren · prøver igen om et minut, eller genstart Haarness",
   "Server restarted · reconnected": "Server genstartet · forbundet igen",
   "Terminal closed · the shell exited": "Terminal lukket · shellen afsluttede",
   "Remove server": "Fjern server",

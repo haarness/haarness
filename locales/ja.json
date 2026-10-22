@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "サーバー停止 · 再起動中",
   "server stopped · restart failed · retrying": "サーバー停止 · 再起動に失敗 · 再試行中",
   "server unreachable · still retrying": "サーバーに接続できません · 再試行を続けています",
+  "not following the server": "サーバーを追跡していません",
+  "not following the server · trying again in a minute, or restart Haarness": "サーバーを追跡していません · 1 分後に再試行します。または Haarness を再起動してください",
   "Server restarted · reconnected": "サーバーを再起動しました · 再接続しました",
   "Terminal closed · the shell exited": "ターミナルを閉じました · シェルが終了しました",
   "Remove server": "サーバーを削除",

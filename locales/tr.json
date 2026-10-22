@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "sunucu durdu · yeniden başlatılıyor",
   "server stopped · restart failed · retrying": "sunucu durdu · yeniden başlatılamadı · tekrar deneniyor",
   "server unreachable · still retrying": "sunucuya ulaşılamıyor · denemeye devam ediliyor",
+  "not following the server": "sunucu izlenmiyor",
+  "not following the server · trying again in a minute, or restart Haarness": "sunucu izlenmiyor · bir dakika içinde yeniden denenecek veya Haarness'ı yeniden başlatın",
   "Server restarted · reconnected": "Sunucu yeniden başlatıldı · yeniden bağlanıldı",
   "Terminal closed · the shell exited": "Terminal kapandı · kabuk sonlandı",
   "Remove server": "Sunucuyu kaldır",

@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "توقّف الخادم · جارٍ إعادة تشغيله",
   "server stopped · restart failed · retrying": "توقّف الخادم · فشلت إعادة التشغيل · جارٍ إعادة المحاولة",
   "server unreachable · still retrying": "تعذّر الوصول إلى الخادم · ما زالت المحاولة مستمرة",
+  "not following the server": "لا تتم متابعة الخادم",
+  "not following the server · trying again in a minute, or restart Haarness": "لا تتم متابعة الخادم · ستُعاد المحاولة خلال دقيقة، أو أعد تشغيل Haarness",
   "Server restarted · reconnected": "أُعيد تشغيل الخادم · أُعيد الاتصال",
   "Terminal closed · the shell exited": "أُغلقت المحطة الطرفية · انتهت جلسة Shell",
   "Remove server": "إزالة الخادم",
