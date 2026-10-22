@@ -46,7 +46,8 @@ import { SelectionBar } from "./SelectionBar";
 import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
-type Dock = "files" | "diff" | "context" | "browser";
+import { SideChatPanel, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
+type Dock = "files" | "diff" | "context" | "browser" | "side-chat";
 
 /** Workbench panels and their launcher copy. */
 const panelChoices: {
@@ -80,18 +81,34 @@ const panelChoices: {
     detail: "Inspect chat tokens, cache and context",
     shortcut: "context",
   },
+  {
+    name: "Side chat",
+    icon: "side-chat",
+    detail: "Ask about this chat without adding to it",
+    shortcut: "sideChat",
+  },
 ];
 const dockNames: Record<Dock, string> = {
   browser: "Browser",
   files: "Files",
   diff: "Review",
   context: "Context",
+  "side-chat": "Side chat",
+};
+/** How a dock tab's buttons name it to assistive technology ("Show files panel"). */
+const dockLabels: Record<Dock, string> = {
+  browser: "browser",
+  files: "files",
+  diff: "diff",
+  context: "context",
+  "side-chat": "side chat",
 };
 const dockIcons: Record<Dock, IconName> = {
   browser: "web",
   files: "folder",
   diff: "diff",
   context: "chart",
+  "side-chat": "side-chat",
 };
 const Explorer = lazy(() =>
   import("./Explorer").then((module) => ({ default: module.Explorer })),
@@ -230,6 +247,26 @@ export function App() {
     if (state.panel === "files" || state.panel === "diff")
       openDock(state.panel);
   });
+  /** Brings the open chat's side chat on screen, its box focused; `fresh` starts another thread. */
+  function openSide(fresh = false) {
+    if (!state.connection) return;
+    if (!state.selected) {
+      app.notify(t("Send a first message, then ask side questions with /btw."));
+      return;
+    }
+    void openSideChat({ connection: state.connection.id, chat: state.selected, fresh });
+  }
+  /**
+   * The side chat's key: brings it on screen with its box focused, and from
+   * that box puts it away again, back to the panel before it and the message box.
+   */
+  function toggleSide() {
+    if (!(dockVisible() && dock() === "side-chat" && sideChatFocused())) return openSide();
+    setDock(dockTabs().filter((tab) => tab !== "side-chat").at(-1) ?? null);
+    document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+  }
+  createEffect(on(sideChatRequested, () => openDock("side-chat"), { defer: true }));
+  createEffect(on(sideChatEmptied, () => closeDock("side-chat"), { defer: true }));
   onMount(async () => {
     const raw = (await window.haarness.storage("layout:v2")) as Record<
       string,
@@ -252,7 +289,7 @@ export function App() {
         setTerminalHeight(clamp(raw.terminalHeight, 160, 600));
       if (raw.sidebarLayout === "flat" || raw.sidebarLayout === "project")
         setSidebarLayout(raw.sidebarLayout);
-      if (["files", "diff", "context", "browser"].includes(String(raw.dock)))
+      if (["files", "diff", "context", "browser", "side-chat"].includes(String(raw.dock)))
         openDock(raw.dock as Dock);
       else if (raw.dock === "tools") setDock("tools");
     }
@@ -490,6 +527,8 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected,action:()=>openDock("browser")},
+      {key:"side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
+      {key:"side-chat-new",group:"Project panels",name:t("New side chat"),keywords:"btw side question aside ask thread another",icon:"side-chat",disabled:!connected||!state.selected,action:()=>openSide(true)},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
       {
         key: "permission-mode",
@@ -830,6 +869,7 @@ export function App() {
       );
     else if (value === "palette") openPalette();
     else if (value === "browser") openDock("browser");
+    else if (value === "side-chat") toggleSide();
     else if (value === "terminal") set("terminal", (v) => !v);
     else if (value === "files" || value === "diff") set("panel", value);
   }
@@ -851,6 +891,11 @@ export function App() {
           ))
       )
         return;
+      if (matchesShortcut(event, state.preferences.shortcuts.sideChat ?? "", state.platform)) {
+        event.preventDefault();
+        toggleSide();
+        return;
+      }
       if (event.key === "Escape") {
         if (palette()) {
           setPalette(false);
@@ -1279,7 +1324,7 @@ export function App() {
                       <button
                         data-cycle-tab={tab}
                         aria-current={tab === dock() ? "true" : undefined}
-                        aria-label={t("Show {name} panel", { name: tab })}
+                        aria-label={t("Show {name} panel", { name: dockLabels[tab] })}
                         aria-description={
                           tab === "browser" && browserMoved()
                             ? t("The agent opened another page")
@@ -1295,7 +1340,7 @@ export function App() {
                       </button>
                       <Button
                         icon="close"
-                        label={t("Close {name} panel", { name: tab })}
+                        label={t("Close {name} panel", { name: dockLabels[tab] })}
                         onClick={() => closeDock(tab)}
                       />
                     </div>
@@ -1332,6 +1377,7 @@ export function App() {
                           app.run(async () => {
                             if (item.shortcut === "terminal")
                               await openTerminal();
+                            else if (item.shortcut === "sideChat") openSide();
                             else openDock(item.shortcut as Dock);
                           })
                         }
@@ -1370,6 +1416,9 @@ export function App() {
               </Show>
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
+              </Show>
+              <Show when={state.connection && dock() === "side-chat"}>
+                <SideChatPanel />
               </Show>
               <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
             </aside>

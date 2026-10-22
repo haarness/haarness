@@ -147,6 +147,8 @@ const subscriptions = new Map<string, { owner: number; client: Haarness }>();
 if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
+/** Side questions whose answers are still coming, by the id their window gave them. */
+const sideQuestions = new Map<string, { owner: number; abort: AbortController }>();
 const terminals = terminalSockets<PtyConnection>();
 /** Connections waiting to try again; a wake ends their wait. */
 const retries = retryWaits();
@@ -1063,6 +1065,47 @@ function installHandlers() {
   handle("cancel", (win, id: string) => {
     const child = commands.get(id);
     if (child && commandOwners.get(id) === win.id) stopCommand(child);
+    const side = sideQuestions.get(id);
+    if (side?.owner === win.id) side.abort.abort();
+  });
+  // A side question's answer arrives as "btw" events with the id the window
+  // chose, and the call answers with the last of them (done or error), so the
+  // window never depends on an event outrunning the reply. Cancelling that id
+  // ends the request, which stops the provider. A server from before streamed
+  // side questions answers in one piece.
+  handle("btw", async (win, id: string, thread: string, raw: unknown, stream: string) => {
+    z.string().uuid().parse(stream);
+    z.string().min(1).max(200).parse(thread);
+    const body = z
+      .object({
+        question: z.string().trim().min(1).max(200_000),
+        history: z
+          .array(z.object({ question: z.string().trim().min(1), answer: z.string().trim().min(1) }).strict())
+          .max(100)
+          .optional(),
+      })
+      .strict()
+      .parse(raw);
+    const item = connection(id);
+    if (sideQuestions.has(stream)) throw new Error("This side question is already being answered");
+    const abort = new AbortController();
+    sideQuestions.set(stream, { owner: win.id, abort });
+    try {
+      if (!item.view.info.capabilities.includes("btw.stream.v1")) {
+        const answer = await item.client.btw(thread, body, { signal: abort.signal, timeoutMs: 310_000 });
+        return { type: "done" as const, ...answer };
+      }
+      for await (const event of item.client.btwStream(thread, body, {
+        signal: abort.signal,
+        idleTimeoutMs: eventIdleMs(),
+      })) {
+        if (event.type === "done" || event.type === "error") return event;
+        send(win, { kind: "btw", id: stream, data: event });
+      }
+      return undefined;
+    } finally {
+      sideQuestions.delete(stream);
+    }
   });
   handle("subscribe", (win, id: string, cursor: number) => {
     if (!Number.isSafeInteger(cursor) || cursor < 0)
@@ -1625,6 +1668,9 @@ function createWindow() {
   win.webContents.on("did-start-navigation", () => {
     browserHost.hide(win);
     resumeShortcut(win.id);
+    // A reloaded page has forgotten the answers it was waiting for.
+    for (const side of sideQuestions.values())
+      if (side.owner === win.id) side.abort.abort();
   });
   win.on("closed", () => {
     screenshotListings.forget(win.id);
@@ -1639,6 +1685,8 @@ function createWindow() {
         subscriptions.delete(id);
         item.client.close();
       }
+    for (const side of sideQuestions.values())
+      if (side.owner === win.id) side.abort.abort();
     terminals.close(win.id);
     answerers.forget(win.id);
   });
@@ -1767,6 +1815,16 @@ function menu() {
               "CmdOrCtrl",
             ),
             click: () => action("browser"),
+          },
+          {
+            label: t("Side chat"),
+            accelerator: data().preferences.shortcuts.sideChat
+              ? data().preferences.shortcuts.sideChat.replace(/\bMod\b/g, "CmdOrCtrl")
+              : undefined,
+            // Shown here, heard by the window: the same key from the side
+            // chat's own box puts it away again (see App.tsx).
+            registerAccelerator: false,
+            click: () => action("side-chat"),
           },
           { type: "separator" },
           { label: t("Actual size"), role: "resetZoom" },

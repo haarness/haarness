@@ -1,0 +1,293 @@
+/*
+ * The side chat: /btw threads beside the conversation, in the side panel.
+ *
+ * It borrows the conversation's own shapes — the user's bubble, plain prose for
+ * the answer, actions that wait for the pointer — so a side answer reads like
+ * any other, only narrower. Its tab strip is the Browser's: the same chrome
+ * height as the panel tabs above, one tab per thread.
+ */
+.side-chat-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.side-chat-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  min-height: 36px;
+  padding: var(--s0) var(--s1);
+  border-bottom: 1px solid var(--hairline);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: none;
+}
+.side-chat-tab {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  flex: 0 1 auto;
+  min-width: 72px;
+  max-width: 200px;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  overflow: hidden;
+}
+.side-chat-tab:hover {
+  background: var(--hover);
+}
+.side-chat-tab.active {
+  background: var(--selected);
+  color: var(--text);
+}
+.side-chat-tab button {
+  border: 0;
+  min-height: 0;
+  height: 28px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.side-chat-tab-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: var(--s2);
+  padding-inline: var(--s2) var(--s1);
+  font-size: var(--ui);
+}
+.side-chat-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A fixed icon slot, so a thread answering and one at rest line up. */
+.side-chat-tab-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+}
+.side-chat-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: var(--r-pill);
+  border: 1.5px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-top-color: var(--primary);
+  animation: side-chat-spin 0.8s linear infinite;
+}
+@keyframes side-chat-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .side-chat-spinner {
+    animation: none;
+    border-color: var(--primary);
+  }
+}
+.side-chat-tab-close {
+  flex: none;
+  width: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-xs);
+  opacity: 0;
+}
+.side-chat-tab:hover .side-chat-tab-close,
+.side-chat-tab.active .side-chat-tab-close,
+.side-chat-tab:focus-within .side-chat-tab-close {
+  opacity: 1;
+}
+.side-chat-tab-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.side-chat-new {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+}
+.side-chat-new:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* -- the thread ----------------------------------------------------------- */
+.side-chat-thread {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.side-chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.side-chat-column {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: var(--s3) var(--s5) var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.side-chat-turn .message.user {
+  margin-top: 0;
+}
+.side-chat-turn .message.user .bubble {
+  max-width: 88%;
+}
+.side-chat-answer {
+  min-width: 0;
+}
+.side-chat-answer > .message-footer {
+  margin-top: 0;
+}
+.side-chat-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: var(--s1) 0 0;
+  font-size: var(--ui-lg);
+  color: var(--muted);
+}
+.side-chat-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin-top: var(--s1);
+}
+.side-chat-error p {
+  margin: 0;
+  font-size: var(--ui-lg);
+  color: var(--danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.side-chat-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  height: 26px;
+  min-height: 0;
+  padding: 0 var(--s2);
+  font-size: var(--ui-sm);
+}
+.side-chat-link {
+  border: 0;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: inherit;
+  text-underline-offset: 2px;
+}
+.side-chat-link:hover {
+  text-decoration: underline;
+  background: transparent;
+}
+
+/* An empty thread, and a chat that has none yet: quiet and centred. */
+.side-chat-welcome,
+.side-chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s8) var(--s4) var(--s5);
+  text-align: center;
+  color: var(--muted);
+}
+.side-chat-empty {
+  flex: 1;
+  justify-content: center;
+}
+.side-chat-welcome h2 {
+  margin: var(--s1) 0 0;
+  font-size: var(--ui-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+.side-chat-welcome p,
+.side-chat-empty p {
+  margin: 0;
+  max-width: 300px;
+  font-size: var(--ui);
+  line-height: 1.55;
+}
+
+/* -- its box: one slim field, the send key turning into Stop -------------- */
+.side-chat-composer {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s1);
+  margin: 0 var(--s3) var(--s3);
+  padding: var(--s1) var(--s1) var(--s1) var(--s4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  background: var(--raised);
+  cursor: text;
+  transition: border-color var(--fast) var(--ease);
+}
+.side-chat-composer:focus-within {
+  border-color: color-mix(in srgb, var(--primary) 60%, transparent);
+}
+.side-chat-composer.running {
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+}
+.side-chat-composer textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  max-height: 180px;
+  resize: none;
+  border: 0;
+  padding: var(--s1) 0;
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+  font-size: var(--font-size);
+  line-height: var(--lh-read);
+  color: var(--text);
+}
+.side-chat-composer textarea:focus {
+  box-shadow: none;
+}
+.side-chat-composer .side-chat-send {
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--page);
+}
+.side-chat-composer .side-chat-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 85%, var(--page));
+}
+.side-chat-composer .side-chat-send:disabled {
+  background: transparent;
+  color: var(--faint);
+  opacity: 1;
+}

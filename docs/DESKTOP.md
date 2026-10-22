@@ -106,6 +106,8 @@ Undo restores the previous conversation boundary and the files changed by that t
 
 Manual compaction asks the conversation's model to summarize its history. History actions are unavailable during an active turn or another history operation. Redo or continue an undone conversation before compacting. Provider errors leave the draft available to retry.
 
+`/btw <question>` asks a side question in the **Side chat** panel, beside the conversation, without adding a turn to it; follow-ups keep its thread going, and a bare `/btw` just opens the panel. **⇧⌘J** (Ctrl+Shift+J elsewhere), **Open side chat** and **New side chat** in **Search**, and the panel launcher open it too. See [Side questions](SIDE-QUESTIONS.md#desktop).
+
 Press **Cmd+F** on macOS or **Ctrl+F** elsewhere while in a conversation to search messages and tool output, including older messages outside the currently rendered viewport. Search is literal and case insensitive; the counter counts matching messages. Enter and Shift+Enter move between matches, and Escape closes search. File editor search keeps its own shortcut when the editor has focus.
 
 ## Hooks and memory
