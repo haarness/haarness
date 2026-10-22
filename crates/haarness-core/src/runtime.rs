@@ -3872,6 +3872,22 @@ impl AgentRuntime {
         arguments = tool
             .prepare_arguments(arguments, thread_id, cancel.clone())
             .await?;
+        if is_resource_tool(name) {
+            let custom = self.custom_agent(&thread.agent);
+            arguments = scope_resource_arguments(
+                arguments,
+                components.tools.resource_servers(),
+                |tools| {
+                    !workspace_tool_enabled(
+                        &components.config.tool_availability,
+                        &self.tool_availability,
+                        tools,
+                    ) || custom.as_ref().is_some_and(|custom| {
+                        crate::definitions::tool_override(&custom.tools, tools) == Some(false)
+                    }) || engine.disables_tool(tools)
+                },
+            )?;
+        }
         let confirmed_revert = self.repository.confirm_revert(thread_id).await?;
         let thread = if confirmed_revert {
             self.repository.get_thread(thread_id).await?
@@ -7180,6 +7196,12 @@ impl RunnerTask {
                 // refused when called, naming the parent's rule.
                 let permission_engine = self.permission_engine(agent);
                 let catalog = self.tools.list();
+                // The resource tools reach only servers whose tools this
+                // agent may have; with none left they would only fail.
+                let resources_open = self.tools.resource_servers().iter().any(|server| {
+                    let tools = mcp_server_tools(server);
+                    self.tool_enabled(&tools) && !permission_engine.hides_tool(&tools)
+                });
                 let eligible_tools = catalog
                     .clone()
                     .into_iter()
@@ -7189,6 +7211,7 @@ impl RunnerTask {
                                 && tool.name == "task")
                             && !permission_engine.hides_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
+                            && (resources_open || !is_resource_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
                 if !tool_round_limit_reached
@@ -8794,6 +8817,13 @@ impl RunnerTask {
             arguments = tool
                 .prepare_arguments(arguments, self.thread.id, self.cancel.clone())
                 .await?;
+        }
+        if is_resource_tool(name) {
+            let engine = self.permission_engine(agent);
+            arguments =
+                scope_resource_arguments(arguments, self.tools.resource_servers(), |tools| {
+                    !self.tool_enabled(tools) || engine.disables_tool(tools)
+                })?;
         }
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
@@ -12166,6 +12196,44 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         shell: None,
     });
     plans
+}
+
+/// Whether `name` is one of the model's MCP resource tools.
+fn is_resource_tool(name: &str) -> bool {
+    matches!(name, "mcp_resource_list" | "mcp_resource_read")
+}
+
+/// The name every tool of MCP server `server` matches, as rules and tool
+/// settings that cover all of them are written (`mcp__docs__*`).
+fn mcp_server_tools(server: &str) -> String {
+    format!("mcp__{server}__*")
+}
+
+/// A resource tool's arguments with the servers it may reach (`__servers`).
+/// A rule or setting that takes every tool of a server away (`closed` for
+/// [`mcp_server_tools`]) keeps that server's resources from the model too:
+/// a listing leaves it out without asking, and a call that names it is
+/// refused.
+fn scope_resource_arguments(
+    mut arguments: serde_json::Value,
+    servers: Vec<String>,
+    closed: impl Fn(&str) -> bool,
+) -> CoreResult<serde_json::Value> {
+    if let Some(server) = arguments.get("server").and_then(serde_json::Value::as_str)
+        && closed(&mcp_server_tools(server))
+    {
+        return Err(CoreError::PermissionDenied(format!(
+            "MCP server \"{server}\" is turned off for this chat by a rule or tool setting that covers all of its tools, and so are its resources. This is configured policy — do not retry this action."
+        )));
+    }
+    let open: Vec<String> = servers
+        .into_iter()
+        .filter(|server| !closed(&mcp_server_tools(server)))
+        .collect();
+    if let Some(fields) = arguments.as_object_mut() {
+        fields.insert("__servers".into(), json!(open));
+    }
+    Ok(arguments)
 }
 
 /// An MCP server's name as resource permission patterns spell it: letters,

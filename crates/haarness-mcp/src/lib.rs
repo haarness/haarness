@@ -409,12 +409,18 @@ impl McpRegistry for NativeMcpRegistry {
         self.call_once(name, tool, arguments).await
     }
     async fn resources(&self, name: &str) -> CoreResult<Vec<Value>> {
-        self.worker_request(name, |reply| WorkerCommand::Resources { reply })
-            .await
+        self.bounded(
+            name,
+            self.worker_request(name, |reply| WorkerCommand::Resources { reply }),
+        )
+        .await
     }
     async fn resource_templates(&self, name: &str) -> CoreResult<Vec<Value>> {
-        self.worker_request(name, |reply| WorkerCommand::ResourceTemplates { reply })
-            .await
+        self.bounded(
+            name,
+            self.worker_request(name, |reply| WorkerCommand::ResourceTemplates { reply }),
+        )
+        .await
     }
     async fn read_resource(&self, name: &str, uri: &str) -> CoreResult<Value> {
         // An app page of a server whose apps are off is never served: its
@@ -431,10 +437,13 @@ impl McpRegistry for NativeMcpRegistry {
                 "Interactive apps are turned off for MCP server \"{name}\""
             )));
         }
-        self.worker_request(name, |reply| WorkerCommand::ReadResource {
-            uri: uri.to_owned(),
-            reply,
-        })
+        self.bounded(
+            name,
+            self.worker_request(name, |reply| WorkerCommand::ReadResource {
+                uri: uri.to_owned(),
+                reply,
+            }),
+        )
         .await
     }
     async fn prompts(&self, name: &str) -> CoreResult<Vec<Value>> {
@@ -858,6 +867,31 @@ impl NativeMcpRegistry {
             .await
             .map_err(|_| disconnected())?;
         reply_rx.await.map_err(|_| disconnected())?
+    }
+
+    /// `request`, given as long as `name`'s connection timeout (30 s unless
+    /// its `timeout_ms` says otherwise). A resource listing or read that
+    /// takes longer ends with an error; the server is told to stop a read.
+    async fn bounded<T>(
+        &self,
+        name: &str,
+        request: impl std::future::Future<Output = CoreResult<T>>,
+    ) -> CoreResult<T> {
+        let limit = self
+            .servers
+            .read()
+            .get(name)
+            .map_or(Duration::from_millis(DEFAULT_TIMEOUT_MS), |entry| {
+                connection_timeout(&entry.config)
+            });
+        tokio::time::timeout(limit, request)
+            .await
+            .unwrap_or_else(|_| {
+                Err(CoreError::Tool(format!(
+                    "MCP server \"{name}\" did not answer within {}",
+                    describe_timeout(limit)
+                )))
+            })
     }
 
     /// Why requests to `name` fail, when its server was stopped for sending
@@ -4110,6 +4144,28 @@ mod recovery_tests {
         .expect("a cancelled read held up the next one")
         .unwrap();
         assert_eq!(next["contents"][0]["text"], "Page 7");
+        // A read waits as long as the server's connection timeout, and no
+        // longer.
+        let mut quick: McpConfigureRequest = serde_json::from_value(serde_json::json!({
+            "transport": "stdio", "command": "python3",
+            "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resources.py")],
+            "env": {"CANCEL_LOG": dir.join("quick-cancels")}, "enabled": true
+        }))
+        .unwrap();
+        quick.timeout_ms = Some(300);
+        registry.configure("quick", quick).await.unwrap();
+        let started = std::time::Instant::now();
+        let error = registry
+            .read_resource("quick", "docs://slow")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            error.contains("MCP server \"quick\" did not answer within 300 ms"),
+            "{error}"
+        );
+        registry.disconnect("quick").await.unwrap();
         registry.disconnect("docs").await.unwrap();
         assert!(McpRegistry::resource_servers(&registry).is_empty());
         registry.disconnect("plain").await.unwrap();

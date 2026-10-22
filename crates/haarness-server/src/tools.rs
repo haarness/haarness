@@ -1798,6 +1798,12 @@ impl ToolRegistry for NativeToolRegistry {
             registry: self.mcp.as_ref()?.clone(),
         }))
     }
+    fn resource_servers(&self) -> Vec<String> {
+        self.mcp
+            .as_ref()
+            .map(|mcp| mcp.resource_servers())
+            .unwrap_or_default()
+    }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         if let Some(mcp) = &self.mcp {

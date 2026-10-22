@@ -121,7 +121,7 @@ When a connected MCP server declares resources, the model can list and read them
 | `mcp_resource_list` | The server name. Listing every server asks about each server it lists, so a rule about one server still applies. |
 | `mcp_resource_read` | `<server>:<uri>`. **Always** remembers `<server>:*`, every resource of that server and no other. |
 
-In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. To be asked before reading anything but one server's resources:
+In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. A rule or setting that takes every tool of a server away (`"mcp__docs__*": "deny"`) keeps its resources from the model as well, before either permission is asked: a listing of every server leaves it out, and a read naming it is refused as configured policy. To be asked before reading anything but one server's resources:
 
 ```json
 {
