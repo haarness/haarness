@@ -295,18 +295,118 @@ test("a terminal socket's ping says whether its server still answers, and closes
     server.on("connection", (socket) => socket.send(JSON.stringify({ type: "cursor", start: 0, end: 0, truncated: false })));
     const client = new Haarness({ baseUrl: `http://127.0.0.1:${server.address().port}` });
     const pty = await client.connectPty("fixture");
+    let cursor;
+    const arrived = new Promise((resolve) => (cursor = resolve));
+    const reading = (async () => {
+      for await (const _message of pty) cursor();
+    })();
+    try {
+      // Pinged once its replay is sent, as Desktop pings a terminal.
+      await arrived;
+      const started = Date.now();
+      assert.equal(await pty.ping(200), autoPong);
+      if (autoPong) {
+        assert.ok(Date.now() - started < 200);
+        pty.close();
+      }
+      // A socket that missed its answer ends, so its reader connects again.
+      await reading;
+    } finally {
+      pty.close();
+      client.close();
+      for (const socket of server.clients) socket.terminate();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+});
+
+test("the time a consumer spends with an event is not the server's silence", async () => {
+  const client = new Haarness({
+    baseUrl: "http://localhost:8080",
+    fetch: async (_url, init) => {
+      const stream = openStream(init);
+      let id = 0;
+      const timer = setInterval(() => {
+        stream.send(": keepalive\n\n");
+        if (++id % 2 === 0) stream.send(sseEvent(id));
+      }, 50);
+      init.signal.addEventListener("abort", () => clearInterval(timer));
+      return stream.response;
+    },
+  });
+  const seen = [];
+  for await (const event of client.events({ idleTimeoutMs: 200 })) {
+    seen.push(event.eventId);
+    // Longer than the limit with each event: a slow consumer.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    if (seen.length === 3) break;
+  }
+  assert.deepEqual(seen.length, 3);
+  client.close();
+});
+
+test("a terminal ping counts anything the server sends, waits out a replay, and survives a blocked event loop", async () => {
+  const { WebSocketServer } = await import("ws");
+  const cursor = JSON.stringify({ type: "cursor", start: 0, end: 0, truncated: false });
+  const open = async (onConnection) => {
+    const server = new WebSocketServer({ port: 0, autoPong: false });
+    await new Promise((resolve) => server.once("listening", resolve));
+    server.on("connection", onConnection);
+    const client = new Haarness({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const pty = await client.connectPty("fixture");
     const reading = (async () => {
       for await (const _message of pty);
     })();
-    const started = Date.now();
-    assert.equal(await pty.ping(200), autoPong);
-    if (autoPong) {
-      assert.ok(Date.now() - started < 200);
-      pty.close();
+    return {
+      pty,
+      async close() {
+        pty.close();
+        await reading;
+        client.close();
+        for (const socket of server.clients) socket.terminate();
+        await new Promise((resolve) => server.close(resolve));
+      },
+    };
+  };
+  // Each case closes its server whatever it finds, so a failure fails
+  // instead of holding the test open.
+  const check = async (onConnection, run) => {
+    const opened = await open(onConnection);
+    try {
+      return await run(opened.pty);
+    } finally {
+      await opened.close();
     }
-    // A socket that missed its answer ends, so its reader connects again.
-    await reading;
-    client.close();
-    await new Promise((resolve) => server.close(resolve));
-  }
+  };
+  // Still sending its replay: the server reads no ping, so none is asked.
+  assert.equal(await check(() => {}, (pty) => pty.ping(100)), true);
+
+  // No pong, but output: the server is there.
+  const busy = await check(
+    (socket) => {
+      socket.send(cursor);
+      socket.on("ping", () => setTimeout(() => socket.send(new Uint8Array([65])), 30));
+    },
+    async (pty) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return pty.ping(300);
+    },
+  );
+  assert.equal(busy, true);
+
+  // The pong came while this process was blocked past the limit.
+  const blocked = await check(
+    (socket) => {
+      socket.send(cursor);
+      socket.on("ping", (data) => socket.pong(data));
+    },
+    async (pty) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const answered = pty.ping(100);
+      const until = Date.now() + 400;
+      while (Date.now() < until);
+      return answered;
+    },
+  );
+  assert.equal(blocked, true);
 });

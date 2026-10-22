@@ -71,6 +71,17 @@ connected, a reconnect, a task being stopped — are written to the status line
 under the composer instead. Desktop notifications follow the same rule: they
 are sent only while the terminal is unfocused.
 
+The **Connection lost · retrying** card shows at most once every 30 seconds,
+so a proxy that keeps dropping the event stream cannot make it flicker; the
+status line says **reconnecting** while the connection is down, and
+**Reconnected** as soon as the server sends anything again, a keepalive
+included. The server sends one every 15 seconds: a stream that brings nothing
+for 45 seconds died without closing (the computer slept, the network changed,
+a proxy froze) and is followed again from its last event, as is a terminal
+socket that has brought nothing, its pings' answers included, for as long. A
+stream counts as working again only once it has stayed open 10 seconds or
+brought an event; until then its retries keep backing off, up to 5 seconds.
+
 "Finished" means the turn completed. A **finished** card and banner wait half a
 second (`state::completion`, the same grace as Desktop) because the daemon
 starts the next queued prompt as a new turn moments after the last one ends; if

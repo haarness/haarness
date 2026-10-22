@@ -103,6 +103,20 @@ pub(crate) async fn hydrate_goal_snapshot(app: &mut App, client: &ApiClient) -> 
     }
 }
 
+/// The event task's restarts after it ended by itself: three within a minute.
+#[derive(Default)]
+struct Restarts(Vec<std::time::Instant>);
+
+impl Restarts {
+    /// Whether it may start again now.
+    fn again(&mut self) -> Option<()> {
+        let now = std::time::Instant::now();
+        self.0
+            .retain(|at| now.duration_since(*at) < Duration::from_secs(60));
+        (self.0.len() < 3).then(|| self.0.push(now))
+    }
+}
+
 async fn hydrate_initial_goal(app: &mut App, client: &ApiClient) {
     hydrate_goal_snapshot(app, client).await;
 }
@@ -493,6 +507,9 @@ async fn run_with_client(
         .as_ref()
         .map(|info| (info.server_instance_id, info.event_cursor));
     let (mut event_rx, mut event_task) = client.subscribe(initial_cursor);
+    // How often the event task may be started again after it ended by
+    // itself; past that the indicator stays, rather than a panic looping.
+    let mut following = Some(Restarts::default());
     // Open completion only after SSE owns the captured cursor. If a localized
     // completion event raced snapshot hydration, its replay can now replace
     // the fallback dialog without a visible stale-copy window.
@@ -822,7 +839,18 @@ async fn run_with_client(
                     }
                 }
             },
-            Some(event) = event_rx.recv() => {
+            event = event_rx.recv(), if following.is_some() => {
+                let Some(event) = event else {
+                    // The task that follows the server's events ended by
+                    // itself (it panicked): say so, and follow them again,
+                    // from a fresh snapshot.
+                    app.connection_dropped(1);
+                    match following.as_mut().and_then(|restarts| restarts.again()) {
+                        Some(()) => (event_rx, event_task) = client.subscribe(Some((uuid::Uuid::nil(), 0))),
+                        None => following = None,
+                    }
+                    continue;
+                };
                 match event {
                     crate::api::SubscriptionEvent::Event(event) => {
                         app.reduce(*event, &client).await?;
@@ -859,16 +887,7 @@ async fn run_with_client(
                         app.notice = "Reconnected — state refreshed".into();
                     }
                     crate::api::SubscriptionEvent::ConnectionLost { attempt } => {
-                        let first = app.connection_lost.is_none();
-                        app.connection_lost = Some(attempt);
-                        if first {
-                            app.show_toast(
-                                None,
-                                "Connection lost · retrying".into(),
-                                ToastVariant::Warning,
-                                Duration::from_secs(4),
-                            );
-                        }
+                        app.connection_dropped(attempt);
                     }
                     crate::api::SubscriptionEvent::ServerRestarting => {
                         app.server_restart = Some(state::ServerRestart::Starting);

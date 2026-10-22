@@ -1,6 +1,7 @@
 """Authenticated PTY connections. Binary output and JSON cursor/replay controls."""
 
 from __future__ import annotations
+import asyncio
 import json
 from typing import Iterator, AsyncIterator, Literal, cast
 from typing_extensions import NotRequired, Self, TypedDict
@@ -36,6 +37,18 @@ class PtyConnection:
 
     def send(self, data: str | bytes) -> None:
         self._socket.send(data.encode() if isinstance(data, str) else data)
+
+    def ping(self, timeout: float = 10.0) -> bool:
+        """Whether the server still answers, within ``timeout`` seconds. A
+        socket that died without closing does not; it is closed, so reading
+        it ends. The connection also pings by itself every 20 s."""
+        try:
+            answered = self._socket.ping().wait(timeout)
+        except Exception:
+            answered = False
+        if not answered:
+            self._socket.close_socket()
+        return answered
 
     def recv(self, timeout: float | None = None) -> bytes | PtyControl:
         data = self._socket.recv(timeout=timeout)
@@ -85,6 +98,15 @@ class AsyncPtyConnection:
 
     async def send(self, data: str | bytes) -> None:
         await self._socket.send(data.encode() if isinstance(data, str) else data)
+
+    async def ping(self, timeout: float = 10.0) -> bool:
+        """See ``PtyConnection.ping``."""
+        try:
+            await asyncio.wait_for(await self._socket.ping(), timeout)
+            return True
+        except Exception:
+            self._socket.transport.abort()
+            return False
 
     async def recv(self) -> bytes | PtyControl:
         data = await self._socket.recv()

@@ -262,3 +262,48 @@ test("a wake ends the backoff of a notification stream that is trying again", as
     await front.close();
   }
 });
+
+test("a wake follows a notification stream again that still looks open but died while asleep", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("asleep");
+  const front = await proxy(remote.url);
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const shown = await chat(client, "Shown chat");
+    const background = await chat(client, "Background chat");
+    await launch();
+    await app.evaluate(({ Notification }) => {
+      (globalThis as any).notificationRecords = [];
+      Notification.isSupported = () => true;
+      Notification.prototype.show = function () {
+        (globalThis as any).notificationRecords.push(this);
+      };
+    });
+    await addServer("Asleep server", front.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: shown.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Shown chat start");
+    const window = await app.browserWindow(page);
+    await window.evaluate((win) => win.hide());
+    await expect.poll(() => window.evaluate((win) => win.isFocused())).toBe(false);
+
+    // Every open stream went dead without closing, as across a sleep.
+    front.freeze();
+    await app.evaluate(({ powerMonitor }) => powerMonitor.emit("resume"));
+    await turn(client, background, "finished after the wake");
+    await expect
+      .poll(
+        () =>
+          app.evaluate(() =>
+            (globalThis as any).notificationRecords.some((record: { body: string }) =>
+              record.body.startsWith("Background chat · "),
+            ),
+          ),
+        { timeout: 6000 },
+      )
+      .toBe(true);
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+    await front.close();
+  }
+});

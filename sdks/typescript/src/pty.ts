@@ -18,6 +18,9 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
   private ended = false;
   private error?: Error;
   private queuedBytes = 0;
+  /** The replay is sent (its cursor came): until then the server is busy
+   * sending it and reads no ping. */
+  private replayed = false;
   private constructor(
     private readonly socket: WebSocket,
     signal: AbortSignal,
@@ -30,6 +33,8 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
         this.queuedBytes += binary
           ? (data as Buffer).byteLength
           : data.toString().length;
+        if (!binary && (message as PtyControl).type === "cursor")
+          this.replayed = true;
         if (this.queuedBytes > 8 * 1024 * 1024) {
           this.error = new TransportError(
             "PTY consumer exceeded 8 MiB buffer; reconnect with cursor",
@@ -102,18 +107,40 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
    */
   ping(timeoutMs = 10_000): Promise<boolean> {
     if (this.socket.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    // A server sending a replay (up to 2 MB) reads no ping until it is done;
+    // what it sends meanwhile says it is there.
+    if (!this.replayed) return Promise.resolve(true);
     return new Promise((resolve) => {
+      let due = Date.now() + timeoutMs;
+      let extended = false;
+      let timer: ReturnType<typeof setTimeout>;
       const done = (answered: boolean) => {
         clearTimeout(timer);
         this.socket.off("pong", answer);
+        this.socket.off("message", answer);
         this.socket.off("close", closed);
         if (!answered) this.socket.terminate();
         resolve(answered);
       };
+      // Anything from the server answers, its output included.
       const answer = () => done(true);
       const closed = () => done(false);
-      const timer = setTimeout(() => done(false), timeoutMs);
+      // A timer that fires far past its time says this process could not
+      // run (a dialog held it, the machine slept), not that the server is
+      // gone: the answer may be waiting to be read, so give it a moment.
+      const late = () => {
+        const slack = Math.min(5_000, timeoutMs);
+        if (!extended && Date.now() - due > slack) {
+          extended = true;
+          due = Date.now() + slack;
+          timer = setTimeout(late, slack);
+          return;
+        }
+        done(false);
+      };
+      timer = setTimeout(late, timeoutMs);
       this.socket.on("pong", answer);
+      this.socket.on("message", answer);
       this.socket.once("close", closed);
       try {
         this.socket.ping();

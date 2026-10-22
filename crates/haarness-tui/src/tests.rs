@@ -18299,3 +18299,36 @@ async fn a_model_list_that_comes_after_the_first_frame_gives_the_new_chat_its_mo
     assert_eq!(app.notice, "Ready");
     server.abort();
 }
+
+/// A proxy that drops the event stream over and over: the status line says
+/// so each time, the toast once in 30 s.
+#[test]
+fn the_connection_lost_toast_shows_at_most_every_thirty_seconds() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.connection_dropped(1);
+    assert!(app.notification_toast.is_some());
+    assert_eq!(app.connection_lost, Some(1));
+    // Back, and dropped again at once.
+    app.notification_toast = None;
+    app.connection_lost = None;
+    app.connection_dropped(1);
+    assert_eq!(app.connection_lost, Some(1));
+    assert!(app.notification_toast.is_none(), "the toast flickered");
+    // Long enough after the last one.
+    app.connection_lost = None;
+    app.lost_toast_at = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(31));
+    app.connection_dropped(1);
+    assert!(app.notification_toast.is_some());
+}
+
+#[test]
+fn the_event_task_is_started_again_three_times_a_minute_at_most() {
+    let mut restarts = crate::Restarts::default();
+    assert_eq!(
+        (0..4)
+            .map(|_| restarts.again().is_some())
+            .collect::<Vec<_>>(),
+        [true, true, true, false]
+    );
+}

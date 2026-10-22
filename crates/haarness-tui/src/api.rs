@@ -1659,10 +1659,21 @@ impl ApiClient {
                 request.headers_mut().insert("authorization", value);
             }
             // An attached server behind HTTPS is checked as its HTTP API is.
-            let socket = match haarness_account::websocket::connect(request, None).await {
-                Ok((socket, _)) => socket,
-                Err(error) => {
-                    if error.to_string().contains("404") {
+            // A proxy that accepts and never answers is given up after the
+            // silence limit, and closing the terminal ends the wait.
+            let connected = tokio::select! {
+                () = cancel.cancelled() => return,
+                connected = tokio::time::timeout(
+                    self.stream_idle,
+                    haarness_account::websocket::connect(request, None),
+                ) => connected,
+            };
+            let socket = match connected {
+                Ok(Ok((socket, _))) => socket,
+                failed => {
+                    if let Ok(Err(error)) = &failed
+                        && error.to_string().contains("404")
+                    {
                         let _ = self.pty_events.send(PtyClientEvent::Exited(id));
                         return;
                     }
@@ -1875,18 +1886,12 @@ impl ApiClient {
                 };
                 let opened = tokio::time::Instant::now();
                 let mut proven = false;
-                // The stream proved itself: after an outage, say so once.
+                // The stream held (10 s, or an event): its retries start over.
                 macro_rules! prove {
                     () => {
                         if !proven {
                             proven = true;
-                            if disconnected {
-                                attempt = 0;
-                                disconnected = false;
-                                if tx.send(SubscriptionEvent::Reconnected).await.is_err() {
-                                    return;
-                                }
-                            }
+                            attempt = 0;
                         }
                     };
                 }
@@ -1909,6 +1914,14 @@ impl ApiClient {
                         // Ended, failed, or silent for `stream_idle`: lost.
                         Ok(_) | Err(_) => break,
                     };
+                    // The server answers again: the outage is over for the
+                    // person at once, a keepalive comment being enough.
+                    if disconnected && !chunk.is_empty() {
+                        disconnected = false;
+                        if tx.send(SubscriptionEvent::Reconnected).await.is_err() {
+                            return;
+                        }
+                    }
                     buffer.extend_from_slice(&chunk);
                     while let Some(index) = buffer.windows(2).position(|window| window == b"\n\n") {
                         let frame: Vec<_> = buffer.drain(..index + 2).collect();
@@ -2903,6 +2916,133 @@ mod tests {
             assert_eq!(query, expected);
         }
         client.disconnect_all_ptys();
+        server.abort();
+    }
+
+    /// The connection is back as soon as the server sends anything, a
+    /// keepalive comment included: "Reconnected" no longer waited for an
+    /// event or 10 s of an open stream, which left the indicator red.
+    #[tokio::test]
+    async fn the_outage_ends_with_the_first_byte_the_server_sends() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let instance = uuid::Uuid::now_v7();
+        let info = serde_json::to_string(&fixture_server_info(instance, "/w")).unwrap();
+        let server = tokio::spawn(async move {
+            let mut streams = 0;
+            let mut open_sockets = Vec::new();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let head = request_head(&mut socket).await;
+                if !head.starts_with("GET /v1/events ") {
+                    let _ = socket
+                        .write_all(response("application/json", &info).as_bytes())
+                        .await;
+                    continue;
+                }
+                streams += 1;
+                let body = if streams == 1 {
+                    // A stream that held, then dropped.
+                    sse_event(instance, 1)
+                } else {
+                    ": connected\n\n".to_owned()
+                };
+                let _ = socket
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n{body}")
+                            .as_bytes(),
+                    )
+                    .await;
+                if streams == 1 {
+                    continue;
+                }
+                open_sockets.push(socket);
+            }
+        });
+        let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
+        let (mut events, task) = client.subscribe(None);
+        let mut lost = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("the outage ended")
+                .unwrap()
+            {
+                SubscriptionEvent::ConnectionLost { .. } => {
+                    lost = Some(std::time::Instant::now());
+                }
+                SubscriptionEvent::Reconnected => break,
+                _ => {}
+            }
+        }
+        let back = lost.expect("the first stream dropped").elapsed();
+        assert!(back < Duration::from_secs(3), "{back:?}");
+        task.abort();
+        server.abort();
+    }
+
+    /// A proxy that accepts a terminal's connection and never answers it:
+    /// the connect is given up after the silence limit and tried again, and
+    /// closing the terminal ends the wait.
+    #[tokio::test]
+    async fn a_terminal_connect_that_never_answers_is_given_up_and_ends_with_the_terminal() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = tokio::spawn({
+            let accepted = accepted.clone();
+            async move {
+                let mut held = Vec::new();
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    held.push(socket);
+                }
+            }
+        });
+        let client = ApiClient::new(&format!("http://{address}"), "token")
+            .unwrap()
+            .with_stream_idle(Duration::from_millis(300));
+        let id = haarness_protocol::PtyId(uuid::Uuid::now_v7());
+        client.connect_pty(id, 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while accepted.load(std::sync::atomic::Ordering::SeqCst) < 2
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "a connect that never answered held the terminal"
+        );
+        client.disconnect_all_ptys();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), after);
+        server.abort();
+    }
+
+    /// The event task, started again after it ended by itself, begins from
+    /// a fresh snapshot.
+    #[tokio::test]
+    async fn a_subscription_started_again_resyncs_first() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let info = serde_json::to_string(&fixture_server_info(uuid::Uuid::now_v7(), "/w")).unwrap();
+        let server = tokio::spawn(serve_responses(
+            listener,
+            vec![response("application/json", &info)],
+        ));
+        let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
+        let (mut events, task) = client.subscribe(Some((uuid::Uuid::nil(), 0)));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap(),
+            Some(SubscriptionEvent::ResyncRequired)
+        ));
+        task.abort();
         server.abort();
     }
 }

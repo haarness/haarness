@@ -159,6 +159,14 @@ function wakeConnections() {
   retries.wake();
   checkTerminals();
 }
+/** The computer woke: a stream that looks open may have died meanwhile, so
+ * the one behind each project's notifications follows again from its last
+ * event at once (a healthy one is only asked again), and terminals say
+ * whether they still reach their server. */
+function wakeFromSleep() {
+  for (const watch of notificationWatches.values()) watch.restart();
+  wakeConnections();
+}
 // End-to-end tests end terminal sockets as a server or network outage does,
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
@@ -241,6 +249,9 @@ const notificationWatches = new Map<
     auth: string;
     owner: number;
     stop: () => void;
+    /** Follows again from the last event, at once and with the backoff from
+     * the start: after a wake, an open stream may be one that died. */
+    restart: () => void;
   }
 >();
 function watchNotifications(id: string, owner: number) {
@@ -255,6 +266,9 @@ function watchNotifications(id: string, owner: number) {
   const client = new Haarness({ baseUrl: item.url, auth: item.auth });
   let stopped = false;
   let waiting: (() => void) | undefined;
+  // Each listen is an attempt of its own; a newer one ends the older.
+  let attempt = new AbortController();
+  let attempts = 0;
   const watch = {
     client,
     endpoint: item.url,
@@ -263,7 +277,15 @@ function watchNotifications(id: string, owner: number) {
     stop() {
       stopped = true;
       waiting?.();
+      attempt.abort();
       client.close();
+    },
+    restart() {
+      if (stopped) return;
+      waiting?.();
+      waiting = undefined;
+      retry = 0;
+      void listen();
     },
   };
   notificationWatches.set(id, watch);
@@ -271,8 +293,13 @@ function watchNotifications(id: string, owner: number) {
   let instance = item.view.info.serverInstanceId;
   let retry = 0;
   async function listen() {
+    const mine = ++attempts;
+    attempt.abort();
+    attempt = new AbortController();
+    const signal = attempt.signal;
+    const current = () => !stopped && mine === attempts;
     try {
-      const info = await client.info();
+      const info = await client.info({ signal });
       if (info.serverInstanceId !== instance) {
         instance = info.serverInstanceId;
         cursor = info.eventCursor ?? 0;
@@ -281,10 +308,11 @@ function watchNotifications(id: string, owner: number) {
         after: cursor,
         reconnect: true,
         idleTimeoutMs: eventIdleMs(),
+        signal,
       })) {
-        if (stopped) return;
+        if (!current()) return;
         if (!("eventId" in event)) {
-          const info = await client.info();
+          const info = await client.info({ signal });
           instance = info.serverInstanceId;
           cursor = info.eventCursor ?? 0;
           break;
@@ -304,8 +332,9 @@ function watchNotifications(id: string, owner: number) {
     } catch {
       /* Retry without disturbing the user's foreground connection. */
     }
-    // A wake ends this wait (see wakeConnections).
-    if (!stopped)
+    // The network coming back ends this wait, and a wake starts over (see
+    // wakeConnections).
+    if (current())
       waiting = retries.wait(
         () => void listen(),
         Math.min(30000, 1000 * 2 ** Math.min(retry++, 5)),
@@ -1776,7 +1805,7 @@ else {
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
       powerMonitor.on("resume", () => {
         broadcast({ kind: "connection", data: "resume" });
-        wakeConnections();
+        wakeFromSleep();
       });
       onlineAgain(() => net.isOnline(), wakeConnections);
       setInterval(checkTerminals, TERMINAL_PING_EVERY_MS).unref();
