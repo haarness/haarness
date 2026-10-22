@@ -7245,7 +7245,7 @@ async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message()
 }
 
 #[tokio::test]
-async fn a_reconnecting_event_stream_gets_waiting_deltas_joined() {
+async fn a_reconnecting_event_stream_gets_waiting_deltas_joined_and_unbuffered() {
     let workspace = std::env::temp_dir();
     let (runtime, _) = p0_runtime(&workspace, true);
     let runtime = Arc::new(runtime);
@@ -7282,6 +7282,14 @@ async fn a_reconnecting_event_stream_gets_waiting_deltas_joined() {
         .unwrap()
         .error_for_status()
         .unwrap();
+    assert_eq!(
+        response
+            .headers()
+            .get("x-accel-buffering")
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "nginx in front of a server must not hold the stream"
+    );
     let mut stream = response.bytes_stream();
     let mut text = String::new();
     tokio::time::timeout(Duration::from_secs(5), async {
