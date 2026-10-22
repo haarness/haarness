@@ -419,6 +419,16 @@ test("after the server is replaced, the terminal it no longer has gives way to o
   const [shell, ...others] = await client.listPtys();
   expect(others).toEqual([]);
   expect(old).not.toContain(shell.id);
+  // A window asking for a first terminal now is handed this one, and told it
+  // did not start it, so it adopts its output instead of answering it again.
+  for (const view of [page, second]) {
+    const handed = await view.evaluate(
+      (id) => window.haarness.api<{ id: string; created?: boolean }>(id, "createPty", [{ cols: 100, rows: 20, ifNone: true }]),
+      "local:" + workspace,
+    );
+    expect(handed).toMatchObject({ id: shell.id });
+    expect(handed.created).toBeFalsy();
+  }
   // Only the new terminal is listed, and it is the one shown and connected.
   for (const window of [page, second]) {
     await expect(window.locator("[data-cycle-tab]")).toHaveCount(1);

@@ -17588,6 +17588,7 @@ async fn ctrl_five_detaches_the_terminal_view() {
             pid: None,
             cols: 80,
             rows: 24,
+            created: false,
         },
     ]));
     crate::input::handle_key(
@@ -17613,6 +17614,7 @@ fn a_new_terminal_tab_can_take_focus() {
         pid: None,
         cols: 20,
         rows: 4,
+        created: false,
     };
     let (first, second, third) = (info("first"), info("second"), info("third"));
     let mut terminal =

@@ -47,12 +47,13 @@ async function ensureTerminal(connection: string) {
         [],
       );
       if (!tabs.length) {
-        // Whichever window started it, the shell is newer than the empty
-        // list, so all of its output is new here.
+        // Only the window whose create started the shell has all of its
+        // output new; another one adopts it, as any terminal it did not start,
+        // so it never answers the queries a replay brings back.
         const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
           { cols: 100, rows: 20, ifNone: true },
         ]);
-        shownOutput.started(connection + ":" + item.id);
+        if (item.created) shownOutput.started(connection + ":" + item.id);
       }
     })();
     openings.set(connection, pending);

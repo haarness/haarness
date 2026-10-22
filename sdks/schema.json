@@ -3969,6 +3969,10 @@
           "command": {
             "type": "string"
           },
+          "created": {
+            "description": "True only in the answer to the create that started this terminal, so\na client can tell a shell it started (whose output is all new to it)\nfrom one an `ifNone` create handed back. Left out everywhere else.",
+            "type": "boolean"
+          },
           "cwd": {
             "type": "string"
           },
