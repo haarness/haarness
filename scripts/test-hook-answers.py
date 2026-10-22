@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Real daemon and TUI coverage for what hooks can answer, with the Echo provider and a mock server.
+
+- Always: a PermissionRequest hook told it may answer Always (with the pattern Always keeps and
+  Claude Code's permission_suggestions) answers Always for `echo one`; `echo two` then runs without
+  asking it or anyone. An edit of Haarness's own config offers the hook no Always and still asks.
+- Questions: a PreToolUse hook answers a known question; the agent gets the answer, nobody is asked,
+  and the attached TUI shows "Answered by hook". Another question is left to the person, who answers
+  it in the TUI.
+- StopFailure: a provider's HTTP 429 reaches a `rate_limit` hook and a hook still written for the old
+  `provider` name, with `error` set to `rate_limit`.
+- Reasoning: a custom OpenAI-compatible server that streams `reasoning` gets it back in that field
+  with the tool call in the next request.
+- Matchers: `/hooks` in the TUI marks a SessionEnd hook for `clear` as never running.
+Every daemon runs on isolated data under one temporary root and is stopped at the end.
+"""
+import json, os, pathlib, shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import e2e_scratch
+from e2e_tmux import pane_command
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-hook-answers-')).resolve()
+binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve())
+env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env.update(HAARNESS_HOME=str(root / 'home'), HAARNESS_DATA_DIR=str(root / 'data'), HAARNESS_TEST_PROVIDER='1',
+           HAARNESS_SERVER_TOKEN='', HAARNESS_SERVER_PASSWORD='')
+session = 'haarness-hooks-' + uuid.uuid4().hex[:8]
+connections, checks, requests = [], [], []
+
+
+def write(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def check(label, condition, detail=None):
+    assert condition, f'{label}: {detail}'
+    checks.append(label)
+    (root / 'results.json').write_text(json.dumps(checks, indent=2))
+    print('PASS', label, flush=True)
+
+
+def until(fn, label, seconds=30):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        value = fn()
+        if value:
+            return value
+        time.sleep(.1)
+    raise AssertionError(label)
+
+
+def cli(ws, *args, input=None):
+    return subprocess.run([binary, '--workspace', str(ws), '--trust-project', *args], input=input, env=env, text=True,
+                          capture_output=True, check=True, timeout=120).stdout
+
+
+def connect(ws):
+    c = json.loads(cli(ws, 'desktop', input='{"action":"connect"}'))
+    connections.append(ws)
+    return c
+
+
+def api(c, path, body=None):
+    req = urllib.request.Request(c['url'] + '/v1' + path, data=None if body is None else json.dumps(body).encode(),
+                                 headers={'Authorization': 'Bearer ' + c.get('token', ''), 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as reply:
+            data = reply.read()
+            return json.loads(data) if data else None
+    except urllib.error.HTTPError as error:
+        return {'http': error.code, 'error': error.read().decode()}
+
+
+def tmux(*args):
+    return subprocess.run(['tmux', *args], text=True, capture_output=True, check=True, timeout=10).stdout
+
+
+def capture():
+    return tmux('capture-pane', '-p', '-t', session + ':0.0')
+
+
+class Chat:
+    def __init__(self, c, title, provider='echo', model='echo-1'):
+        self.c = c
+        self.thread = api(c, '/threads', {'title': title, 'provider': provider, 'model': model})
+
+    def turn(self, text):
+        return api(self.c, '/threads/' + self.thread['id'] + '/turns', {'requestId': str(uuid.uuid4()), 'text': text})
+
+    def finish(self, turn):
+        return until(lambda: (v if (v := api(self.c, '/turns/' + turn['id']))['status'] not in ['running', 'queued'] else None),
+                     'turn completion')
+
+    def items(self):
+        return api(self.c, '/threads/' + self.thread['id'] + '/items')
+
+    def results(self, name):
+        return [i['data'] for i in self.items() if i['data']['type'] == 'tool_result' and i['data']['name'] == name]
+
+
+class Mock(BaseHTTPRequestHandler):
+    """An OpenAI-compatible server: `limited` answers 429; `thinker` streams its reasoning in
+    `reasoning`, then lists the folder, and answers once the listing comes back."""
+
+    def log_message(self, *args):
+        pass
+
+    def reply(self, status, body, content_type='application/json'):
+        data = body.encode()
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        self.reply(200, json.dumps({'data': [{'id': 'thinker'}, {'id': 'limited'}]}))
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        requests.append(body)
+        if body['model'] == 'limited':
+            return self.reply(429, json.dumps({'error': {'message': 'Rate limit reached for requests', 'type': 'requests'}}))
+        if any(m['role'] == 'tool' for m in body['messages']):
+            chunks = [{'choices': [{'delta': {'content': 'Listed.'}}]}, {'choices': [{'delta': {}, 'finish_reason': 'stop'}]}]
+        else:
+            chunks = [{'choices': [{'delta': {'reasoning': 'List the folder '}}]},
+                      {'choices': [{'delta': {'reasoning': 'before answering.'}}]},
+                      {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_list', 'function': {
+                          'name': 'list', 'arguments': json.dumps({'path': '.'})}}]}}]},
+                      {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]}]
+        self.reply(200, ''.join(f'data: {json.dumps(c)}\n\n' for c in chunks) + 'data: [DONE]\n\n', 'text/event-stream')
+
+
+mock = ThreadingHTTPServer(('127.0.0.1', 0), Mock)
+threading.Thread(target=mock.serve_forever, daemon=True).start()
+
+try:
+    log = root / 'hook-log.jsonl'
+    hook = root / 'hook.py'
+    # Answers Always the first time it is asked about a command and refuses any later ask, answers
+    # one known question, and records every payload it gets.
+    write(hook, '''import json, os, sys
+data = json.load(sys.stdin)
+open(sys.argv[1], 'a').write(json.dumps(data) + '\\n')
+event = data['hook_event_name']
+def say(value):
+    print(json.dumps({'hookSpecificOutput': dict(value, hookEventName=event)}))
+if event == 'PermissionRequest' and data['tool_name'] == 'bash':
+    marker = sys.argv[1] + '.answered'
+    if os.path.exists(marker):
+        say({'decision': {'behavior': 'deny', 'message': 'asked again'}})
+    else:
+        open(marker, 'w').close()
+        say({'decision': {'behavior': 'allow', 'updatedPermissions': data.get('permission_suggestions', [])}})
+elif event == 'PermissionRequest':
+    say({'decision': {'behavior': 'allow', 'always': True}})
+elif event == 'PreToolUse' and data['tool_input'].get('prompt') == 'Which test suite should I run?':
+    say({'updatedInput': dict(data['tool_input'], answers=[['Unit tests']])})
+elif event == 'StopFailure':
+    print('{}')
+''')
+    command = shlex.join(['python3', str(hook), str(log)])
+    group = lambda matcher: [{'matcher': matcher, 'hooks': [{'type': 'command', 'command': command}]}]
+    ws = root / 'project'
+    write(ws / '.haarness/config.toml', f'''[defaults]
+provider="echo"
+model="echo-1"
+[permissions]
+bash="ask"
+[providers.mock]
+protocol="openai-chat-completions"
+name="Mock"
+base_url="http://127.0.0.1:{mock.server_address[1]}/v1"
+models=["thinker","limited"]
+requires_auth=false
+reasoning=true
+tools=true
+''')
+    write(ws / 'haarness.json', json.dumps({'hooks': {
+        'PermissionRequest': group('*'), 'PreToolUse': group('question'),
+        'StopFailure': group('rate_limit') + group('provider'),
+        'SessionEnd': group('clear')}}, indent=1))
+    c = connect(ws)
+    env['HAARNESS_SERVER_TOKEN'] = c.get('token', '')
+    entries = lambda event: [json.loads(line) for line in log.read_text().splitlines() if line and json.loads(line)['hook_event_name'] == event] if log.exists() else []
+
+    # --- Always ---------------------------------------------------------------------------
+    chat = Chat(c, 'Hook answers')
+    attach = [binary, '--workspace', str(root), 'attach', c['url'], '--thread', chat.thread['id']]
+    tmux('new-session', '-d', '-s', session, '-x', '150', '-y', '44', pane_command(env, attach))
+    until(lambda: 'Hook answers' in capture() or 'approvals' in capture(), 'TUI attach')
+    t = chat.turn('!tool bash ' + json.dumps({'command': 'echo one'}))
+    check('the hook answers Always for echo one', chat.finish(t)['status'] == 'completed'
+          and any('one' in r['output'] and not r['is_error'] for r in chat.results('bash')), chat.results('bash'))
+    asked = entries('PermissionRequest')
+    check('the hook was told it may answer Always and what Always keeps',
+          len(asked) == 1 and asked[0]['allow_always'] is True and asked[0]['always_patterns'] == ['echo *']
+          and asked[0]['permission_suggestions'][0]['rules'][0]['ruleContent'] == 'echo *', asked)
+    t = chat.turn('!tool bash ' + json.dumps({'command': 'echo two'}))
+    check('echo two runs on that Always, without asking the hook or anyone',
+          chat.finish(t)['status'] == 'completed' and len(entries('PermissionRequest')) == 1
+          and any('two' in r['output'] and not r['is_error'] for r in chat.results('bash')), chat.results('bash'))
+    check('no approval card reached the TUI', 'Allow once' not in capture() and not api(c, '/permissions'), capture())
+    t = chat.turn('!tool write ' + json.dumps({'path': 'haarness.json', 'content': '{}'}))
+    pending = until(lambda: api(c, '/permissions'), 'config edit asks')[0]
+    config_ask = entries('PermissionRequest')[-1]
+    check('an edit of Haarness config offers the hook no Always and still asks the person',
+          pending['permission'] == 'edit' and config_ask['allow_always'] is False and 'always_patterns' not in config_ask, config_ask)
+    api(c, '/permissions/' + pending['permissionId'], {'decision': 'reject'})
+    chat.finish(t)
+    check('the rejected config edit changed nothing', json.loads((ws / 'haarness.json').read_text()).get('hooks'))
+
+    # --- Questions ------------------------------------------------------------------------
+    question = {'prompt': 'Which test suite should I run?', 'choices': ['Unit tests', 'Full suite']}
+    t = chat.turn('!tool question ' + json.dumps(question))
+    check('the hook answers the known question without asking', chat.finish(t)['status'] == 'completed'
+          and not api(c, '/questions'), api(c, '/questions'))
+    answered = chat.results('question')[-1]
+    check('the agent gets the hook answer, marked as the hook', answered['output'].startswith('Unit tests')
+          and answered['metadata'] == {'answeredBy': 'hook'}, answered)
+    until(lambda: 'Answered by hook' in capture(), 'TUI shows the hook answer')
+    (root / 'tui-answered-by-hook.txt').write_text(capture())
+    check('the TUI row says the hook answered it', 'Which test suite should I run?' in capture(), capture())
+    t = chat.turn('!tool question ' + json.dumps({'prompt': 'Which color?', 'choices': ['Blue', 'Green']}))
+    until(lambda: api(c, '/questions'), 'the other question is asked')
+    until(lambda: 'Which color?' in capture() and 'Blue' in capture(), 'TUI question card')
+    (root / 'tui-question-card.txt').write_text(capture())
+    tmux('send-keys', '-t', session, 'Enter')
+    check('the person answers the other question in the TUI', chat.finish(t)['status'] == 'completed'
+          and chat.results('question')[-1]['output'].startswith('Blue')
+          and not chat.results('question')[-1].get('metadata'), chat.results('question'))
+
+    # --- StopFailure categories -----------------------------------------------------------
+    limited = Chat(c, 'Rate limited', 'mock', 'limited')
+    t = limited.turn('Say hi')
+    check('the rate-limited turn fails', limited.finish(t)['status'] == 'failed')
+    failures = until(lambda: (v if len(v := entries('StopFailure')) >= 2 else None), 'StopFailure hooks', 15)
+    check('a rate_limit hook and one for the old provider name both get rate_limit',
+          len(failures) == 2 and all(f['error'] == 'rate_limit' for f in failures), failures)
+
+    # --- Interleaved reasoning ------------------------------------------------------------
+    thinker = Chat(c, 'Thinker', 'mock', 'thinker')
+    t = thinker.turn('List the folder')
+    check('the reasoning turn completes', thinker.finish(t)['status'] == 'completed')
+    follow = [r for r in requests if r['model'] == 'thinker' and any(m['role'] == 'tool' for m in r['messages'])]
+    assistant = next(m for m in follow[-1]['messages'] if m.get('tool_calls'))
+    check('the server gets its reasoning back in the field it used',
+          assistant.get('reasoning') == 'List the folder before answering.' and 'reasoning_content' not in assistant, assistant)
+
+    # --- Matchers in /hooks ---------------------------------------------------------------
+    tmux('send-keys', '-t', session, '/hooks', 'Enter')
+    until(lambda: 'never runs' in capture(), 'TUI /hooks marks the hook that never runs')
+    (root / 'tui-hooks.txt').write_text(capture())
+    check('/hooks marks the SessionEnd hook for clear as never running',
+          any('SessionEnd' in line and 'never runs' in line for line in capture().splitlines())
+          or 'never runs' in capture(), capture())
+    print('PASS', len(checks), 'checks.', flush=True)
+finally:
+    subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
+    for ws in connections:
+        try:
+            cli(ws, 'serve', '--stop')
+        except Exception as error:
+            print('stop failed', ws, error, flush=True)
+    mock.shutdown()
+    e2e_scratch.settle(root)

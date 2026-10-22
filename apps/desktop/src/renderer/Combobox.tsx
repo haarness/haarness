@@ -21,10 +21,11 @@ export interface ComboboxOption {
 
 /**
  * A text field with suggestions. Any text is accepted; the suggestions only
- * help. They appear while typing, or with ↓ or the caret, filtered by what
- * is being typed; ↑/↓ move, Enter or a click puts one in, and Esc closes
- * them without closing the dialog around the field. Enter with nothing
- * highlighted belongs to the form.
+ * help. They appear while typing, filtered by what is typed (exact and
+ * leading matches first), or all of them with ↓ or the caret; ↑/↓ move,
+ * Enter or a click puts one in, and Esc closes them without closing the
+ * dialog around the field. Enter with nothing highlighted belongs to the
+ * form.
  */
 export function Combobox(props: {
   value: string;
@@ -39,6 +40,9 @@ export function Combobox(props: {
 }) {
   const id = createUniqueId();
   const [open, setOpen] = createSignal(false);
+  // Typing filters the suggestions; opening them with ↓ or the caret shows
+  // them all, the current one highlighted.
+  const [typing, setTyping] = createSignal(false);
   const [cursor, setCursor] = createSignal(-1);
   const [position, setPosition] = createSignal({ left: 0, top: 0, width: 280 });
   let field!: HTMLDivElement;
@@ -49,12 +53,23 @@ export function Combobox(props: {
       query: props.value.trim(),
       replace: (option: string) => option,
     };
+  // What is typed exactly first, then values that start with it, then the
+  // rest that hold it in their value or their words, each in their order.
   const matches = createMemo(() => {
     const query = completion().query.toLocaleLowerCase();
-    if (!query) return props.options;
-    return props.options.filter((option) =>
-      `${option.value} ${option.label ?? ""}`.toLocaleLowerCase().includes(query),
-    );
+    if (!query || !typing()) return props.options;
+    const rank = (option: ComboboxOption) => {
+      const value = option.value.toLocaleLowerCase();
+      if (value === query) return 0;
+      if (value.startsWith(query)) return 1;
+      if (value.includes(query)) return 2;
+      return option.label?.toLocaleLowerCase().includes(query) ? 3 : 4;
+    };
+    return props.options
+      .map((option) => ({ option, rank: rank(option) }))
+      .filter(({ rank }) => rank < 4)
+      .sort((a, b) => a.rank - b.rank)
+      .map(({ option }) => option);
   });
   const visible = () => open() && !props.disabled && matches().length > 0;
   // A highlight that no longer names a suggestion is dropped, so Enter goes
@@ -73,13 +88,22 @@ export function Combobox(props: {
     queueMicrotask(() =>
       popup?.querySelector(`#${CSS.escape(`${id}-${cursor()}`)}`)?.scrollIntoView({ block: "nearest" }),
     );
+  const show = () => {
+    setTyping(false);
+    setOpen(true);
+    const current = completion().query;
+    setCursor(props.options.findIndex((option) => option.value === current));
+  };
   const move = (step: number) => {
+    if (!open()) {
+      show();
+      if (cursor() < 0) setCursor(step > 0 ? 0 : matches().length - 1);
+      reveal();
+      return;
+    }
     const count = matches().length;
     if (!count) return;
-    if (!open()) {
-      setOpen(true);
-      setCursor(step > 0 ? 0 : count - 1);
-    } else setCursor((index) => (index < 0 ? (step > 0 ? 0 : count - 1) : (index + step + count) % count));
+    setCursor((index) => (index < 0 ? (step > 0 ? 0 : count - 1) : (index + step + count) % count));
     reveal();
   };
   createEffect(
@@ -132,6 +156,7 @@ export function Combobox(props: {
           value={props.value}
           onInput={(event) => {
             props.onInput(event.currentTarget.value);
+            setTyping(true);
             setCursor(-1);
             setOpen(true);
           }}
@@ -161,10 +186,7 @@ export function Combobox(props: {
           onClick={() => {
             input.focus({ preventScroll: true });
             if (visible()) close();
-            else {
-              setOpen(true);
-              setCursor(-1);
-            }
+            else show();
           }}
         >
           <Icon name="down" size="sm" />
