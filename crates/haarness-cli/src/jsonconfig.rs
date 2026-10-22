@@ -1835,21 +1835,112 @@ pub(super) fn write_entries(
     updates: Vec<(String, Option<Value>)>,
 ) -> Result<()> {
     use anyhow::Context as _;
-    use jsonc_parser::cst::{CstInputValue, CstRootNode};
-    fn input(value: Value) -> CstInputValue {
-        match value {
-            Value::Null => CstInputValue::Null,
-            Value::Bool(v) => CstInputValue::Bool(v),
-            Value::Number(v) => CstInputValue::Number(v.to_string()),
-            Value::String(v) => CstInputValue::String(v),
-            Value::Array(v) => CstInputValue::Array(v.into_iter().map(input).collect()),
-            Value::Object(v) => CstInputValue::Object(
-                v.into_iter()
-                    .map(|(key, value)| (key, input(value)))
-                    .collect(),
-            ),
+    edit_json_file(path, |object| {
+        let entries = object
+            .object_value_or_create(section)
+            .context("configuration section must be an object")?;
+        for (name, value) in updates {
+            match (entries.get(&name), value) {
+                (Some(entry), Some(value)) => entry.set_value(cst_input(value)),
+                (None, Some(value)) => {
+                    entries.append(&name, cst_input(value));
+                }
+                (Some(entry), None) => entry.remove(),
+                (None, None) => {
+                    anyhow::bail!("no {section} entry named '{name}' in {}", path.display())
+                }
+            }
         }
+        Ok(())
+    })
+}
+
+/// Sets only `fields` of the `name` entry of `section` (`None` removes a
+/// key), leaving every other key of that entry, and the file's comments and
+/// formatting, as written. A key written twice on the way is refused: the
+/// edit would land on the first copy while the last one is in force.
+pub(super) fn write_entry_fields(
+    path: &Path,
+    section: &str,
+    name: &str,
+    fields: Vec<(String, Option<Value>)>,
+) -> Result<()> {
+    use anyhow::Context as _;
+    let repeated = |object: &jsonc_parser::cst::CstObject, key: &str| {
+        object
+            .properties()
+            .iter()
+            .filter(|property| {
+                property
+                    .name()
+                    .and_then(|name| name.decoded_value().ok())
+                    .as_deref()
+                    == Some(key)
+            })
+            .count()
+            > 1
+    };
+    edit_json_file(path, |object| {
+        anyhow::ensure!(
+            !repeated(object, section),
+            "\"{section}\" is written more than once in {}; remove the extra copy first",
+            path.display()
+        );
+        let entries = object
+            .object_value(section)
+            .with_context(|| format!("no {section} section in {}", path.display()))?;
+        anyhow::ensure!(
+            !repeated(&entries, name),
+            "\"{section}.{name}\" is written more than once in {}; remove the extra copy first",
+            path.display()
+        );
+        let entry = entries
+            .object_value(name)
+            .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
+        for (key, value) in fields {
+            anyhow::ensure!(
+                !repeated(&entry, &key),
+                "\"{section}.{name}.{key}\" is written more than once in {}; remove the extra copy first",
+                path.display()
+            );
+            match (entry.get(&key), value) {
+                (Some(property), Some(value)) => property.set_value(cst_input(value)),
+                (None, Some(value)) => {
+                    entry.append(&key, cst_input(value));
+                }
+                (Some(property), None) => property.remove(),
+                (None, None) => {}
+            }
+        }
+        Ok(())
+    })
+}
+
+fn cst_input(value: Value) -> jsonc_parser::cst::CstInputValue {
+    use jsonc_parser::cst::CstInputValue;
+    match value {
+        Value::Null => CstInputValue::Null,
+        Value::Bool(v) => CstInputValue::Bool(v),
+        Value::Number(v) => CstInputValue::Number(v.to_string()),
+        Value::String(v) => CstInputValue::String(v),
+        Value::Array(v) => CstInputValue::Array(v.into_iter().map(cst_input).collect()),
+        Value::Object(v) => CstInputValue::Object(
+            v.into_iter()
+                .map(|(key, value)| (key, cst_input(value)))
+                .collect(),
+        ),
     }
+}
+
+/// Edits a JSON or JSONC configuration file in place under the folder's
+/// writer lock, keeping its comments and formatting, and replaces it
+/// atomically with owner-only permissions.
+fn edit_json_file(
+    path: &Path,
+    edit: impl FnOnce(&jsonc_parser::cst::CstObject) -> Result<()>,
+) -> Result<()> {
+    use anyhow::Context as _;
+    use jsonc_parser::cst::CstRootNode;
     let parent = path.parent().context("configuration parent")?;
     fs::create_dir_all(parent)?;
     // Writers lock the folder itself: a lock file beside a project's
@@ -1873,21 +1964,7 @@ pub(super) fn write_entries(
     let object = root
         .object_value_or_create()
         .context("configuration must be an object")?;
-    let entries = object
-        .object_value_or_create(section)
-        .context("configuration section must be an object")?;
-    for (name, value) in updates {
-        match (entries.get(&name), value) {
-            (Some(entry), Some(value)) => entry.set_value(input(value)),
-            (None, Some(value)) => {
-                entries.append(&name, input(value));
-            }
-            (Some(entry), None) => entry.remove(),
-            (None, None) => {
-                anyhow::bail!("no {section} entry named '{name}' in {}", path.display())
-            }
-        }
-    }
+    edit(&object)?;
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
     let result = (|| -> Result<()> {
         use std::io::Write as _;
