@@ -7,6 +7,7 @@ import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
 import { errorText } from "./error-text";
 import { registerCyclePanel, tabButton } from "./tab-cycle";
+import { shortcutLabel } from "./search";
 import {
   type SideChats,
   type SideTurn,
@@ -229,8 +230,8 @@ const answer = (id: string, turn: SideTurn) => (turn.state === "pending" ? (stor
 /** Within this many pixels of the bottom, a growing answer keeps the view pinned to it. */
 const PIN = 32;
 
-/** The side chat panel: one tab per thread, the thread in front, and its box. */
-export function SideChatPanel() {
+/** The side chat: one tab per thread, the thread in front, and its box. */
+export function SideChatPanel(props: { onHide: () => void }) {
   const app = useApp();
   const key = createMemo(() =>
     app.state.connection && app.state.selected ? sideChatKey(app.state.connection.id, app.state.selected) : undefined,
@@ -270,62 +271,86 @@ export function SideChatPanel() {
     setStore("chats", value, "front", id);
     setWant({ id, at: Date.now() });
   }
+  // One header row, like the session bar beside it: a tab per thread, + for
+  // another, and at the far end the control that puts the side chat away.
+  const Hide = () => {
+    const keys = () => shortcutLabel(app.state.preferences.shortcuts.sideChat ?? "", app.state.platform);
+    return (
+      <button
+        class="side-chat-hide"
+        aria-label={t("Hide side chat")}
+        title={keys() ? `${t("Hide side chat")} (${keys()})` : t("Hide side chat")}
+        onClick={() => props.onHide()}
+      >
+        <Icon name="close" size="sm" />
+      </button>
+    );
+  };
   return (
     <section class="side-chat-panel" data-cycle-panel="side-chat" aria-label={t("Side chat")}>
       <Show
         when={key()}
         fallback={
-          <div class="side-chat-empty">
-            <Icon name="side-chat" size="lg" />
-            <p>{t("Send a first message, then ask side questions with /btw.")}</p>
-          </div>
+          <>
+            <header class="side-chat-header">
+              <span class="side-chat-heading">{t("Side chat")}</span>
+              <Hide />
+            </header>
+            <div class="side-chat-empty">
+              <Icon name="side-chat" size="lg" />
+              <p>{t("Send a first message, then ask side questions with /btw.")}</p>
+            </div>
+          </>
         }
       >
         {(value) => (
           <>
-            <div class="side-chat-tabs" role="tablist" aria-label={t("Side chats")} ref={strip}>
-              <For each={threads()}>
-                {(item) => (
-                  <div class="side-chat-tab" classList={{ active: item.id === front() }}>
-                    <button
-                      class="side-chat-tab-title"
-                      role="tab"
-                      data-cycle-tab={item.id}
-                      aria-selected={item.id === front()}
-                      title={item.turns[0]?.question}
-                      onClick={() => show(value(), item.id)}
-                      onAuxClick={(event) => event.button === 1 && close(value(), item.id)}
-                    >
-                      <span class="side-chat-tab-icon" aria-hidden="true">
-                        <Show when={sideBusy(item)} fallback={<Icon name="side-chat" size="sm" />}>
-                          <span class="side-chat-spinner" />
-                        </Show>
-                      </span>
-                      <span class="side-chat-tab-label">{sideTitle(item) ?? t("Side chat")}</span>
-                    </button>
-                    <button
-                      class="side-chat-tab-close"
-                      aria-label={t("Close {name}", { name: sideTitle(item) ?? t("Side chat") })}
-                      title={t("Close {name}", { name: sideTitle(item) ?? t("Side chat") })}
-                      onClick={() => close(value(), item.id)}
-                    >
-                      <Icon name="close" size="sm" />
-                    </button>
-                  </div>
-                )}
-              </For>
-              <button
-                class="side-chat-new"
-                aria-label={t("New side chat")}
-                title={t("New side chat")}
-                onClick={() => {
-                  const id = create(value());
-                  show(value(), id);
-                }}
-              >
-                <Icon name="plus" size="sm" />
-              </button>
-            </div>
+            <header class="side-chat-header">
+              <div class="side-chat-tabs" role="tablist" aria-label={t("Side chats")} ref={strip}>
+                <For each={threads()}>
+                  {(item) => (
+                    <div class="side-chat-tab" classList={{ active: item.id === front() }}>
+                      <button
+                        class="side-chat-tab-title"
+                        role="tab"
+                        data-cycle-tab={item.id}
+                        aria-selected={item.id === front()}
+                        title={item.turns[0]?.question}
+                        onClick={() => show(value(), item.id)}
+                        onAuxClick={(event) => event.button === 1 && close(value(), item.id)}
+                      >
+                        <span class="side-chat-tab-icon" aria-hidden="true">
+                          <Show when={sideBusy(item)} fallback={<Icon name="side-chat" size="sm" />}>
+                            <span class="side-chat-spinner" />
+                          </Show>
+                        </span>
+                        <span class="side-chat-tab-label">{sideTitle(item) ?? t("Side chat")}</span>
+                      </button>
+                      <button
+                        class="side-chat-tab-close"
+                        aria-label={t("Close {name}", { name: sideTitle(item) ?? t("Side chat") })}
+                        title={t("Close {name}", { name: sideTitle(item) ?? t("Side chat") })}
+                        onClick={() => close(value(), item.id)}
+                      >
+                        <Icon name="close" size="sm" />
+                      </button>
+                    </div>
+                  )}
+                </For>
+                <button
+                  class="side-chat-new"
+                  aria-label={t("New side chat")}
+                  title={t("New side chat")}
+                  onClick={() => {
+                    const id = create(value());
+                    show(value(), id);
+                  }}
+                >
+                  <Icon name="plus" size="sm" />
+                </button>
+              </div>
+              <Hide />
+            </header>
             <Show when={front()} keyed>
               {(id) => <SideThreadView chat={value()} id={id} />}
             </Show>
@@ -424,7 +449,7 @@ function SideThreadView(props: { chat: string; id: string }) {
         ref={scroller}
         onScroll={() => (pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < PIN)}
       >
-        <div class="side-chat-column" ref={content}>
+        <div class="side-chat-measure" ref={content}>
           <Show
             when={turns().length}
             fallback={

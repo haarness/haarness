@@ -2652,5 +2652,7 @@
   "New side chat": "Novi usputni razgovor",
   "The answer ended before it finished.": "Odgovor je prekinut prije kraja.",
   "Open side chat": "Otvori usputni razgovor",
-  "Ask about this chat without adding to it": "Pitajte o ovom razgovoru bez dodavanja u njega"
+  "Ask about this chat without adding to it": "Pitajte o ovom razgovoru bez dodavanja u njega",
+  "Hide side chat": "Sakrij usputni razgovor",
+  "Resize side chat": "Promijeni veličinu usputnog razgovora"
 }

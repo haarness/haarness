@@ -2652,5 +2652,7 @@
   "New side chat": "Nouvelle discussion annexe",
   "The answer ended before it finished.": "La réponse s’est interrompue avant la fin.",
   "Open side chat": "Ouvrir la discussion annexe",
-  "Ask about this chat without adding to it": "Poser des questions sur cette discussion sans rien y ajouter"
+  "Ask about this chat without adding to it": "Poser des questions sur cette discussion sans rien y ajouter",
+  "Hide side chat": "Masquer la discussion annexe",
+  "Resize side chat": "Redimensionner la discussion annexe"
 }

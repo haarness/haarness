@@ -69,29 +69,41 @@ arrives in one piece.
 
 ## Desktop
 
-The side chat is a panel of its own in the side panel, beside Files, Review
-and the Browser. Each thread is a tab named after its first question, with
-**+** for another; the answer streams in the conversation's own style, with
-**Copy** on a finished answer, **Retry** under one that failed or was stopped,
-and a slim box of its own at the bottom whose send key turns into **Stop**
-while an answer is written.
+The side chat is a column of its own between the conversation and the side
+panel, so Files, Review or the Browser stay open beside it. Its one header row
+has a tab per thread, named after its first question, **+** for another, and
+at the far end **×** to put it away. The answer streams in the conversation's
+own style, with **Copy** on a finished answer, **Retry** under one that failed
+or was stopped, and a slim box of its own at the bottom whose send key turns
+into **Stop** while an answer is written. Drag the divider on its left to
+resize it (arrow keys on the focused divider, double-click to reset); its width
+and whether it is open are remembered.
 
 | Action | How |
 | --- | --- |
-| Ask | `/btw <question>` in the message box: the panel opens with its box focused. A bare `/btw` just opens it |
+| Ask | `/btw <question>` in the message box: the side chat opens with its box focused. A bare `/btw` just opens it |
 | Open the side chat | **⇧⌘J** (Ctrl+Shift+J elsewhere; change it in **Settings → Keyboard shortcuts**), **Open side chat** in **Search**, the side panel's launcher, or **View → Side chat** |
-| Back to the message box | **⇧⌘J** again from the side chat's box (it puts the panel away), or `esc` in an idle box |
-| Another thread | **+** in its tab strip, or **New side chat** in **Search** |
+| Put it away | **×** at the end of its header, or **⇧⌘J** again from its box; either way the keyboard goes back to the message box. `esc` in an idle box goes back without closing it |
+| Another thread | **+** in its header, or **New side chat** in **Search** |
 | Stop an answer | The stop key, or `esc` in its box |
-| Close a thread | Its tab's ×, or a middle click. Closing the last one puts the panel away |
+| Close a thread | Its tab's ×, or a middle click. Closing the last one puts the side chat away |
+
+The conversation keeps at least 480 pixels and the side panel 360; the side
+chat gives way first, down to 300. Where the three do not fit, the side chat
+and the side panel take turns in one place: whichever was asked for last is in
+front (opening the side panel, or a file from a link, brings it forward;
+`/btw` or ⇧⌘J bring the side chat back), and the other returns when there is
+room. In a window too narrow for the conversation and the side chat, the side
+chat takes the whole workspace, as the side panel does there, until it is put
+away. Previews the agent opens never take its place.
 
 Threads are kept per chat (at most 12 per chat, for the 20 chats used most
 recently) and survive a reload, as does what was typed in each box; an answer
 still being written when the window reloads comes back stopped, with Retry.
-An answer keeps streaming while another chat is shown. A chat that has not
-been started yet has nothing to ask about: `/btw` there says to send a first
-message. Against a server without `btw.stream.v1` the answer arrives in one
-piece.
+An answer keeps streaming while another chat is shown, and the side chat shows
+the chat in front. A chat that has not been started yet has nothing to ask
+about: `/btw` there says to send a first message. Against a server without
+`btw.stream.v1` the answer arrives in one piece.
 
 ## Isolation
 

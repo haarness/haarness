@@ -2652,5 +2652,7 @@
   "New side chat": "Nova conversa paralela",
   "The answer ended before it finished.": "A resposta terminou antes de ficar completa.",
   "Open side chat": "Abrir conversa paralela",
-  "Ask about this chat without adding to it": "Pergunte sobre esta conversa sem acrescentar nada a ela"
+  "Ask about this chat without adding to it": "Pergunte sobre esta conversa sem acrescentar nada a ela",
+  "Hide side chat": "Ocultar conversa paralela",
+  "Resize side chat": "Redimensionar conversa paralela"
 }

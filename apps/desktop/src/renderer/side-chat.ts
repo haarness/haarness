@@ -145,3 +145,42 @@ export function btwQuestion(text: string) {
   const match = /^\/btw(?:\s+([\s\S]*))?$/.exec(text.trim());
   return match ? (match[1] ?? "").trim() : undefined;
 }
+
+/** The conversation's narrowest width beside the side chat (the side panel keeps the same). */
+export const CHAT_MIN = 480;
+/** The side chat's narrowest and widest, and where it starts. */
+export const SIDE_MIN = 300;
+export const SIDE_MAX = 640;
+export const SIDE_WIDTH = 380;
+/** The side panel's narrowest. */
+export const DOCK_MIN = 360;
+/** A divider between two columns. */
+const RULE = 1;
+
+/**
+ * Where the side chat stands in a workbench `width` wide, and how wide it is:
+ * a column of its own between the conversation and the side panel when they
+ * all fit (`column`); in the side panel's place when only the conversation and
+ * the side chat do (`instead`); over the whole workbench when not even those
+ * do, or when the side panel itself is laid over everything in a narrow
+ * window (`over`). `dock` is how the side panel stands: not shown, a column,
+ * expanded over the conversation, or laid over everything.
+ */
+export function sidePlace(input: {
+  width: number;
+  wanted: number;
+  dock: "none" | "column" | "expanded" | "overlay";
+}): { place: "column" | "instead" | "over"; width: number } {
+  const fit = (room: number) => Math.max(SIDE_MIN, Math.min(input.wanted, SIDE_MAX, room));
+  if (input.dock === "overlay") return { place: "over", width: input.width };
+  if (input.dock === "expanded")
+    return input.width >= SIDE_MIN + RULE + DOCK_MIN
+      ? { place: "column", width: fit(input.width - RULE - DOCK_MIN) }
+      : { place: "over", width: input.width };
+  const three = CHAT_MIN + RULE + SIDE_MIN + RULE + DOCK_MIN;
+  if (input.dock === "column" && input.width >= three)
+    return { place: "column", width: fit(input.width - three + SIDE_MIN) };
+  if (input.width >= CHAT_MIN + RULE + SIDE_MIN)
+    return { place: input.dock === "column" ? "instead" : "column", width: fit(input.width - CHAT_MIN - RULE) };
+  return { place: "over", width: input.width };
+}

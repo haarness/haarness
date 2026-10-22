@@ -2652,5 +2652,7 @@
   "New side chat": "新しいサイドチャット",
   "The answer ended before it finished.": "回答が完了する前に終了しました。",
   "Open side chat": "サイドチャットを開く",
-  "Ask about this chat without adding to it": "このチャットに追加せずに質問する"
+  "Ask about this chat without adding to it": "このチャットに追加せずに質問する",
+  "Hide side chat": "サイドチャットを隠す",
+  "Resize side chat": "サイドチャットのサイズを変更"
 }

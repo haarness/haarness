@@ -2652,5 +2652,7 @@
   "New side chat": "Neuer Nebenchat",
   "The answer ended before it finished.": "Die Antwort brach ab, bevor sie fertig war.",
   "Open side chat": "Nebenchat öffnen",
-  "Ask about this chat without adding to it": "Fragen zu diesem Chat stellen, ohne ihn zu ergänzen"
+  "Ask about this chat without adding to it": "Fragen zu diesem Chat stellen, ohne ihn zu ergänzen",
+  "Hide side chat": "Nebenchat ausblenden",
+  "Resize side chat": "Größe des Nebenchats ändern"
 }

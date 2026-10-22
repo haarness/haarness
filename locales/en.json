@@ -2652,5 +2652,7 @@
   "New side chat": "New side chat",
   "The answer ended before it finished.": "The answer ended before it finished.",
   "Open side chat": "Open side chat",
-  "Ask about this chat without adding to it": "Ask about this chat without adding to it"
+  "Ask about this chat without adding to it": "Ask about this chat without adding to it",
+  "Hide side chat": "Hide side chat",
+  "Resize side chat": "Resize side chat"
 }

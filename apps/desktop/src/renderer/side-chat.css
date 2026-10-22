@@ -1,11 +1,35 @@
 /*
- * The side chat: /btw threads beside the conversation, in the side panel.
+ * The side chat: /btw threads in a column of their own between the conversation
+ * and the side panel, both of which stay on screen.
  *
  * It borrows the conversation's own shapes — the user's bubble, plain prose for
  * the answer, actions that wait for the pointer — so a side answer reads like
- * any other, only narrower. Its tab strip is the Browser's: the same chrome
- * height as the panel tabs above, one tab per thread.
+ * any other, only narrower. Its one header row has the session bar's height, so
+ * the hairlines under the window's split line up: a tab per thread, + for
+ * another, and the control that puts it away at the far end.
  */
+.side-chat-column {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--page);
+  overflow: hidden;
+  container-type: inline-size;
+}
+/* Where not even the conversation and the side chat fit, it takes the whole
+   workbench, as the side panel does in a narrow window. */
+.side-chat-column.over {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  width: 100%;
+  z-index: 11;
+}
+.workbench.side-over > .chat-pane {
+  visibility: hidden;
+}
 .side-chat-panel {
   display: flex;
   flex-direction: column;
@@ -13,39 +37,70 @@
   min-height: 0;
   min-width: 0;
 }
-.side-chat-tabs {
+.side-chat-header {
   display: flex;
   align-items: center;
-  gap: var(--s0);
-  min-height: 36px;
-  padding: var(--s0) var(--s1);
+  gap: var(--s1);
+  height: 36px;
+  flex: none;
+  padding-inline: var(--s2) var(--s1);
   border-bottom: 1px solid var(--hairline);
+  min-width: 0;
+}
+.side-chat-heading {
+  flex: 1;
+  padding-inline: var(--s2);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.side-chat-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 100%;
   overflow-x: auto;
   scrollbar-width: none;
-  flex: none;
 }
+.side-chat-tabs::-webkit-scrollbar {
+  display: none;
+}
+/* The chat tabs' pill; the one in front is also underlined on the header's
+   hairline, so the thread shown below reads as hanging from it. */
 .side-chat-tab {
+  position: relative;
   display: flex;
   align-items: center;
-  height: 28px;
+  height: 26px;
   flex: 0 1 auto;
-  min-width: 72px;
-  max-width: 200px;
-  border-radius: var(--r-sm);
+  min-width: 64px;
+  max-width: 190px;
+  border-radius: var(--r-md);
   color: var(--muted);
-  overflow: hidden;
 }
 .side-chat-tab:hover {
   background: var(--hover);
 }
+/* The thread in front keeps its title; the others give way first. */
 .side-chat-tab.active {
+  flex-shrink: 0;
   background: var(--selected);
   color: var(--text);
+}
+.side-chat-tab.active::after {
+  content: "";
+  position: absolute;
+  inset-inline: var(--s2);
+  bottom: -4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text);
 }
 .side-chat-tab button {
   border: 0;
   min-height: 0;
-  height: 28px;
+  height: 26px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -54,9 +109,9 @@
   flex: 1 1 auto;
   min-width: 0;
   justify-content: flex-start;
-  gap: var(--s2);
+  gap: var(--s1);
   padding-inline: var(--s2) var(--s1);
-  font-size: var(--ui);
+  font-size: var(--ui-sm);
 }
 .side-chat-tab-label {
   min-width: 0;
@@ -93,7 +148,7 @@
 }
 .side-chat-tab-close {
   flex: none;
-  width: 22px;
+  width: 20px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -109,10 +164,11 @@
   background: var(--hover);
   color: var(--text);
 }
-.side-chat-new {
+.side-chat-new,
+.side-chat-hide {
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   min-height: 0;
   padding: 0;
   display: grid;
@@ -122,7 +178,8 @@
   background: transparent;
   color: var(--muted);
 }
-.side-chat-new:hover {
+.side-chat-new:hover,
+.side-chat-hide:hover {
   background: var(--hover);
   color: var(--text);
 }
@@ -140,7 +197,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.side-chat-column {
+.side-chat-measure {
   max-width: 680px;
   margin: 0 auto;
   padding: var(--s3) var(--s5) var(--s5);

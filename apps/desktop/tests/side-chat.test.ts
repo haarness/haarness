@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  CHAT_MIN,
+  DOCK_MIN,
+  SIDE_MAX,
+  SIDE_MIN,
+  sidePlace,
   MAX_CHATS,
   MAX_HISTORY,
   MAX_STORED,
@@ -114,4 +119,26 @@ test("the most recently used chats keep their side chats", () => {
   assert.equal(next.order[0], "new");
   assert.deepEqual(next.dropped, [`c${MAX_CHATS - 1}`]);
   assert.deepEqual(sideRecent(["a", "b"], "b"), { order: ["b", "a"], dropped: [] });
+});
+
+test("the side chat is a column of its own while it fits, then takes the side panel's place, then the whole workbench", () => {
+  // Wide: conversation, side chat and side panel side by side, the side chat as wide as asked.
+  assert.deepEqual(sidePlace({ width: 1600, wanted: 380, dock: "column" }), { place: "column", width: 380 });
+  // Tighter: the side chat gives way first, down to its narrowest.
+  assert.deepEqual(sidePlace({ width: 1180, wanted: 380, dock: "column" }), { place: "column", width: 338 });
+  // The conversation and the side panel keep their narrowest, dividers included.
+  assert.deepEqual(sidePlace({ width: CHAT_MIN + SIDE_MIN + DOCK_MIN + 2, wanted: 380, dock: "column" }), { place: "column", width: SIDE_MIN });
+  assert.equal(sidePlace({ width: CHAT_MIN + SIDE_MIN + DOCK_MIN + 1, wanted: 380, dock: "column" }).place, "instead");
+  // No room for all three: in the side panel's place.
+  assert.deepEqual(sidePlace({ width: 1000, wanted: 380, dock: "column" }), { place: "instead", width: 380 });
+  // Without a side panel it is a column as long as the conversation keeps its measure.
+  assert.deepEqual(sidePlace({ width: 900, wanted: 900, dock: "none" }), { place: "column", width: 419 });
+  assert.equal(sidePlace({ width: 760, wanted: 380, dock: "none" }).place, "over");
+  // Never wider than its widest, never narrower than its narrowest.
+  assert.equal(sidePlace({ width: 3000, wanted: 2000, dock: "none" }).width, SIDE_MAX);
+  assert.equal(sidePlace({ width: 1600, wanted: 100, dock: "column" }).width, SIDE_MIN);
+  // A side panel expanded over the conversation keeps the side chat beside it; one laid over a narrow window is covered.
+  assert.deepEqual(sidePlace({ width: 1000, wanted: 380, dock: "expanded" }), { place: "column", width: 380 });
+  assert.equal(sidePlace({ width: 1000, wanted: 900, dock: "expanded" }).width, 639);
+  assert.equal(sidePlace({ width: 1000, wanted: 380, dock: "overlay" }).place, "over");
 });

@@ -21,6 +21,9 @@ let client: Haarness;
 let errors: string[] = [];
 
 const panel = () => page.locator(".side-chat-panel");
+const column = () => page.locator(".side-chat-column");
+const sidePanel = () => page.getByRole("complementary", { name: "Project side panel", exact: true });
+const chatPane = () => page.locator(".chat-pane");
 const box = () => panel().getByRole("textbox", { name: "Ask a side question", exact: true });
 const threadTabs = () => panel().getByRole("tab");
 const composer = () => page.getByRole("textbox", { name: "Message", exact: true });
@@ -124,10 +127,11 @@ test("/btw opens a side chat beside the chat that streams answers and keeps foll
   await expect(page.locator(".transcript")).toContainText("Echo: Plan the release notes");
   const before = await chatRows("Plan the release notes");
 
-  // /btw in the composer asks in a panel of its own, and the keyboard follows.
+  // /btw in the composer asks in a column of its own beside the chat, and the keyboard follows.
   await send("/btw what changed in the plan?");
   await expect(panel()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Show side chat panel", exact: true })).toHaveAttribute("aria-current", "true");
+  await expect(chatPane()).toBeVisible();
+  await expect(sidePanel()).toBeHidden();
   await expect(panel()).toContainText("Echo: what changed in the plan?");
   await expect(threadTabs()).toHaveText(["what changed in the plan?"]);
   await expect(box()).toBeFocused();
@@ -167,6 +171,63 @@ test("/btw opens a side chat beside the chat that streams answers and keeps foll
   await panel().locator(".side-chat-turn").first().hover();
   await expect(panel().locator(".side-chat-turn").first().getByRole("button", { name: "Copy message", exact: true })).toBeVisible();
   await expect(panel().locator(".side-chat-turn").last().getByRole("button", { name: "Copy message", exact: true })).toHaveCount(0);
+
+  // The side panel opens beside it: conversation, side chat and Files all on screen.
+  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  await sidePanel().getByRole("button", { name: "Open Files", exact: true }).click();
+  await expect(sidePanel()).toBeVisible();
+  await expect(column()).toBeVisible();
+  await expect(chatPane()).toBeVisible();
+  const [chatBox, sideBox, dockBox] = await Promise.all([chatPane(), column(), sidePanel()].map((item) => item.boundingBox()));
+  expect(chatBox!.x + chatBox!.width).toBeLessThanOrEqual(sideBox!.x + 1);
+  expect(sideBox!.x + sideBox!.width).toBeLessThanOrEqual(dockBox!.x + 1);
+  expect(chatBox!.width).toBeGreaterThanOrEqual(479);
+  await shoot("4-beside-files");
+
+  // Its width follows the divider and is kept.
+  const divider = page.getByRole("separator", { name: "Resize side chat", exact: true });
+  await divider.focus();
+  const width = Number(await divider.getAttribute("aria-valuenow"));
+  await divider.press("ArrowRight");
+  await expect(divider).toHaveAttribute("aria-valuenow", String(width - 20));
+
+  // Where all three do not fit, the side chat and the side panel share one
+  // place, and whichever was asked for last is in front: Files, then the side chat.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1250, 860));
+  await expect(sidePanel()).toBeVisible();
+  await expect(column()).toBeHidden();
+  await composer().click();
+  await page.keyboard.press(`${mod}+Shift+J`);
+  await expect(column()).toBeVisible();
+  await expect(sidePanel()).toBeHidden();
+  await expect(chatPane()).toBeVisible();
+  await expect(box()).toBeFocused();
+  await shoot("5-instead-of-files");
+  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  await expect(sidePanel()).toBeVisible();
+  await expect(column()).toBeHidden();
+  await page.keyboard.press(`${mod}+Shift+J`);
+  await expect(column()).toBeVisible();
+  await expect(sidePanel()).toBeHidden();
+  // In a narrow window it takes the whole workbench.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1000, 800));
+  await expect(page.locator(".workbench")).toHaveClass(/side-over/);
+  await expect(column()).toBeVisible();
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1440, 900));
+  await expect(page.locator(".workbench")).not.toHaveClass(/side-over/);
+  await expect(sidePanel()).toBeVisible();
+  // The side panel goes, the side chat stays.
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await expect(sidePanel()).toBeHidden();
+  await expect(column()).toBeVisible();
+
+  // The far-end × puts the side chat away, back to the message box.
+  await panel().getByRole("button", { name: "Hide side chat", exact: true }).click();
+  await expect(column()).toBeHidden();
+  await expect(composer()).toBeFocused();
+  await send("/btw");
+  await expect(column()).toBeVisible();
+  await expect(box()).toBeFocused();
 
   // The chat itself never changed.
   expect((await client.listItems(before.id)).length).toBe(before.rows);
