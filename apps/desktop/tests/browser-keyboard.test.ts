@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createKeyboardHandoff, giveKeyboard, returnKeyboard } from "../src/main/browser-keyboard";
+import { createKeyboardHandoff, returnKeyboard } from "../src/main/browser-keyboard";
 
 /** A window and a page, with what the window's renderer answers about its focused element. */
 function setup(state: { window?: boolean; page?: boolean; composer?: boolean; blurWhileAsking?: boolean } = {}) {
@@ -48,44 +48,79 @@ test("a page without the keyboard, or a control other than the message box, gets
   assert.deepEqual(control.calls, ["ask"]);
 });
 
-test("a page the person loads takes the keyboard once it is shown, while the window is the one in use", () => {
-  const focused: string[] = [];
-  const win = (active: boolean) => ({ isDestroyed: () => false, isFocused: () => active, webContents: {} });
-  const page = (closed = false) => ({ isDestroyed: () => closed, focus: () => void focused.push("page") });
-  assert.equal(giveKeyboard(win(true) as never, page() as never, true), true);
-  assert.deepEqual(focused, ["page"]);
-  // Not drawn yet, another application in front, or the page gone: nothing moves.
-  assert.equal(giveKeyboard(win(true) as never, page() as never, false), false);
-  assert.equal(giveKeyboard(win(false) as never, page() as never, true), false);
-  assert.equal(giveKeyboard(win(true) as never, page(true) as never, true), false);
-  assert.deepEqual(focused, ["page"]);
-});
-
-test("a load the person made gives its page the keyboard when that tab is drawn, once, and gives up in time", () => {
+/** A window whose own keyboard is in a field (`typing`) or not, and a clock the test moves. */
+function handoff(state: { typing?: boolean } = {}) {
   let time = 0;
   let active = true;
   const focused: string[] = [];
-  const win = { isDestroyed: () => false, isFocused: () => active, webContents: {} };
+  const win = {
+    isDestroyed: () => false,
+    isFocused: () => active,
+    webContents: {
+      focus: () => void focused.push("window"),
+      executeJavaScript: async (code: string) => {
+        assert.match(code, /data-browser-address/);
+        return state.typing ?? false;
+      },
+    },
+  };
   const page = (name: string) => ({ isDestroyed: () => false, focus: () => void focused.push(name) });
-  const handoff = createKeyboardHandoff(win as never, 3000, () => time);
+  return {
+    focused,
+    page,
+    keyboard: createKeyboardHandoff(win as never, 3000, () => time),
+    at: (ms: number) => void (time = ms),
+    away: (value: boolean) => void (active = !value),
+  };
+}
+
+test("a load the person made gives its page the keyboard when that tab is drawn, once", async () => {
+  const { focused, page, keyboard, at } = handoff();
   // Nothing asked: drawing a tab moves nothing (the agent's loads never ask).
-  assert.equal(handoff.offer("a", page("a") as never), false);
-  // A new tab is drawn a moment after its load starts; another tab drawn meanwhile gets nothing.
-  handoff.want("b");
-  assert.equal(handoff.offer("a", page("a") as never), false);
-  time = 500;
-  assert.equal(handoff.offer("b", page("b") as never), true);
-  assert.equal(handoff.offer("b", page("b") as never), false);
+  assert.equal(await keyboard.offer("a", page("a") as never), false);
+  // A new tab names itself once its command starts; another tab drawn meanwhile gets nothing.
+  keyboard.want();
+  assert.equal(await keyboard.offer("a", page("a") as never), false);
+  keyboard.bind("b");
+  at(500);
+  assert.equal(await keyboard.offer("b", page("b") as never), true);
+  assert.equal(await keyboard.offer("b", page("b") as never), false);
   assert.deepEqual(focused, ["b"]);
-  // Drawn too late, the page leaves the keyboard where the person has it by then.
-  handoff.want("c");
-  time = 4000;
-  assert.equal(handoff.offer("c", page("c") as never), false);
-  // Another application in front: the load gives up, and coming back later does not revive it.
-  handoff.want("d");
-  active = false;
-  assert.equal(handoff.offer("d", page("d") as never), false);
-  active = true;
-  assert.equal(handoff.offer("d", page("d") as never), false);
-  assert.deepEqual(focused, ["b"]);
+});
+
+test("a load's time runs from the request, so one that waited behind the agent leaves the keyboard alone", async () => {
+  const { focused, page, keyboard, at } = handoff();
+  keyboard.want("c");
+  // The command ran (and its page was drawn) only after the agent's slow one.
+  at(4000);
+  assert.equal(await keyboard.offer("c", page("c") as never), false);
+  at(4100);
+  assert.equal(await keyboard.offer("c", page("c") as never), false);
+  assert.deepEqual(focused, []);
+});
+
+test("a press in the window after the request, or a field there with the keyboard, keeps the keyboard where the person is", async () => {
+  const pressed = handoff();
+  pressed.keyboard.want("d");
+  pressed.keyboard.input();
+  assert.equal(await pressed.keyboard.offer("d", pressed.page("d") as never), false);
+  // The press came before a later request, which still counts.
+  pressed.keyboard.want("d");
+  assert.equal(await pressed.keyboard.offer("d", pressed.page("d") as never), true);
+  // Typing in the message box, find or a terminal (not the address bar): the request is dropped.
+  const typing = handoff({ typing: true });
+  typing.keyboard.want("e");
+  assert.equal(await typing.keyboard.offer("e", typing.page("e") as never), false);
+  assert.equal(await typing.keyboard.offer("e", typing.page("e") as never), false);
+  assert.deepEqual(typing.focused, []);
+});
+
+test("the keyboard never moves while another application is in front, and coming back does not revive the request", async () => {
+  const { focused, page, keyboard, away } = handoff();
+  keyboard.want("f");
+  away(true);
+  assert.equal(await keyboard.offer("f", page("f") as never), false);
+  away(false);
+  assert.equal(await keyboard.offer("f", page("f") as never), false);
+  assert.deepEqual(focused, []);
 });

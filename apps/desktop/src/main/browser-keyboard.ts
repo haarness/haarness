@@ -31,40 +31,61 @@ export async function returnKeyboard(win: Window, page: PageContents): Promise<b
 }
 
 /**
- * A page the person loads themself (an address they typed, Back, Forward,
- * Reload, a link they opened) takes the keyboard, as a browser's page does,
- * so its own field gets what they type next. Only once the page is shown and
- * while the window is the one the person is using: the app never comes in
- * front of another application. The agent's loads never come here.
+ * Whether the window's own keyboard is in a field the person types in (the
+ * message box, find, a terminal, the file editor), other than the Browser's
+ * address bar, whose Enter is what loads a page.
  */
-export function giveKeyboard(win: Window, page: ShownPage, shown: boolean): boolean {
-  if (!shown || win.isDestroyed() || page.isDestroyed() || !win.isFocused()) return false;
-  page.focus();
-  return true;
-}
+const TYPING_ELSEWHERE = `(() => {
+  const element = document.activeElement;
+  if (!element || element.closest?.("[data-browser-address]")) return false;
+  if (element.isContentEditable || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return true;
+  return element instanceof HTMLInputElement &&
+    !["button", "checkbox", "color", "file", "image", "radio", "range", "reset", "submit"].includes(element.type);
+})()`;
 
 /**
- * The keyboard a load the person made asks for. `want` records its tab when
- * the load starts; `offer` is called whenever a tab is drawn and gives that
- * tab's page the keyboard once it is the one wanted (a new tab is drawn when
- * the window lays it out). A load gives up after `wait` milliseconds, or as
- * soon as the window is not the one in use, so a page never takes the
- * keyboard later, when the person has moved on.
+ * The keyboard a load the person made asks for. A page the person loads
+ * themself (an address they typed, Back, Forward, Reload, a link they opened)
+ * takes the keyboard, as a browser's page does, so its own field gets what
+ * they type next; the agent's loads never ask.
+ *
+ * `want` is called when the request arrives, so its time runs from then even
+ * when the command waits behind the agent's: a load waits at most `wait`
+ * milliseconds to be shown. A new tab's request names its tab once its
+ * command has started (`bind`). Any key or pointer press in the window after
+ * the request (`input`) means the person has moved on, and drops it. `offer`
+ * is called whenever a tab is drawn and gives that tab's page the keyboard
+ * when it is the one wanted, only while the window is the one in use (the
+ * app never comes in front of another application), and never while the
+ * person's keyboard is in a field of the window's own.
  */
 export function createKeyboardHandoff(win: Window, wait = 3000, now = () => Date.now()) {
-  let wanted: { tab: string; until: number } | undefined;
+  let wanted: { tab?: string; until: number } | undefined;
   return {
-    want(tab: string) {
+    want(tab?: string) {
       wanted = { tab, until: now() + wait };
     },
-    offer(shown: string | undefined, page: ShownPage | undefined) {
-      if (!wanted) return false;
-      if (now() > wanted.until || win.isDestroyed() || !win.isFocused()) {
-        wanted = undefined;
+    bind(tab: string) {
+      if (wanted && wanted.tab === undefined) wanted.tab = tab;
+    },
+    input() {
+      wanted = undefined;
+    },
+    async offer(shown: string | undefined, page: ShownPage | undefined): Promise<boolean> {
+      const request = wanted;
+      if (!request) return false;
+      const live = () =>
+        wanted === request && now() <= request.until && !win.isDestroyed() && win.isFocused();
+      if (!live()) {
+        if (wanted === request) wanted = undefined;
         return false;
       }
-      if (!page || shown !== wanted.tab || !giveKeyboard(win, page, true)) return false;
+      if (!page || request.tab === undefined || shown !== request.tab || page.isDestroyed()) return false;
+      const typing = await win.webContents.executeJavaScript(TYPING_ELSEWHERE).catch(() => true);
+      if (!live() || page.isDestroyed()) return false;
       wanted = undefined;
+      if (typing === true) return false;
+      page.focus();
       return true;
     },
   };
