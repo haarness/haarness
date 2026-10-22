@@ -1,5 +1,5 @@
 import { measureRow } from "./measure-row";
-import { onNativeArea, toastClearance } from "./native-area";
+import { toastAnchor } from "./toast-anchors";
 import { t, splitAround, parseLanguage } from "./i18n";
 import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
@@ -594,43 +594,6 @@ export function Session() {
       scrolling.removeEventListener("scrollend", settle);
       cancelAnimationFrame(scrollFrame);
     });
-  });
-  /* Toasts sit in the window's bottom corner, where the composer keeps Send,
-     Stop and a waiting approval; lift them above that dock while it runs
-     under them. Its top moves when the dock grows and when the window or the
-     terminal resizes the chat; a side panel or the browser opening moves it
-     out from under them, and an expanded side panel hides it. */
-  let dock: HTMLDivElement | undefined;
-  const liftToasts = () => {
-    const root = document.documentElement.style;
-    let clearance: number | undefined;
-    if (dock?.isConnected) {
-      const box = dock.getBoundingClientRect();
-      const style = getComputedStyle(dock);
-      const left = box.left + parseFloat(style.paddingLeft);
-      const right = box.right - parseFloat(style.paddingRight);
-      clearance = toastClearance({ left, right, top: box.top, width: right - left, height: box.height });
-    }
-    if (clearance === undefined) root.removeProperty("--composer-clearance");
-    else root.setProperty("--composer-clearance", clearance + "px");
-  };
-  const dockResize = new ResizeObserver(liftToasts);
-  const observeDock = (element: HTMLDivElement) => {
-    dock = element;
-    dockResize.disconnect();
-    // Its padding takes up a change of width, so watch the border box; the
-    // conversation around it, once it is in it, says when its top moves.
-    dockResize.observe(element, { box: "border-box" });
-    queueMicrotask(() => {
-      if (dock === element && element.parentElement) dockResize.observe(element.parentElement);
-    });
-  };
-  onCleanup(onNativeArea(liftToasts));
-  window.addEventListener("resize", liftToasts);
-  onCleanup(() => {
-    dockResize.disconnect();
-    window.removeEventListener("resize", liftToasts);
-    document.documentElement.style.removeProperty("--composer-clearance");
   });
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let draftSave: { key: string; text: string } | undefined;
@@ -1868,7 +1831,7 @@ export function Session() {
         </Show>
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
-        <div class="composer-area" ref={observeDock}>
+        <div class="composer-area" ref={toastAnchor("composer")}>
           <Show when={empty()}>
             <div class="composer-project">
               <ProjectPicker />
