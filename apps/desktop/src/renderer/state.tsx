@@ -719,10 +719,17 @@ function createApp() {
     } catch (error) {
       if (!valid()) return;
       if (!state.connection) throw error;
-      const view = await window.haarness.connect({
-        recent: state.connection.id,
-      });
-      if (!view || !valid()) return;
+      // Removed from the sidebar meanwhile (here or in another window), the
+      // project is left as a removal leaves it, not reconnected forever.
+      const gone = () => {
+        recovering = false;
+        void switchServer(state.activeServer);
+      };
+      const id = state.connection.id;
+      if (!state.recent.some((item) => item.id === id)) return gone();
+      const view = await window.haarness.connect({ recent: id });
+      if (!valid()) return;
+      if (!view) return gone();
       set("connection", view);
       info = view.info;
     }
