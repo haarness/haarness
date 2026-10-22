@@ -425,6 +425,8 @@ pub enum Overlay {
     RemoteControl,
     /// `/chrome`; the state lives in `App::chrome`.
     Chrome,
+    /// `/btw`: the open chat's side chat; the state lives in `App::side`.
+    SideChat,
 }
 
 /// What the workflow inspector is showing: a durable run, or a definition you
@@ -536,7 +538,8 @@ impl Overlay {
             | Self::Workflow { .. }
             | Self::ProviderLogin
             | Self::RemoteControl
-            | Self::Chrome => false,
+            | Self::Chrome
+            | Self::SideChat => false,
         }
     }
 }
@@ -614,6 +617,8 @@ pub struct App {
     pub(crate) remote: crate::remote_control::RemoteControl,
     /// `/chrome`: whether agents can use the person's own Chrome.
     pub(crate) chrome: crate::chrome::Chrome,
+    /// `/btw`: each chat's side chat.
+    pub(crate) side: crate::side_chat::SideChats,
     pub thread: Thread,
     pub threads: Vec<Thread>,
     /// Whether the current session catalog includes archived conversations.
@@ -1050,6 +1055,7 @@ impl App {
             connect: crate::connect::ConnectFlow::default(),
             remote: crate::remote_control::RemoteControl::default(),
             chrome: crate::chrome::Chrome::default(),
+            side: crate::side_chat::SideChats::default(),
             pending_server: None,
             original_client: None,
             keybindings: crate::keybindings::load().unwrap_or_default(),
@@ -2407,7 +2413,8 @@ impl App {
             Overlay::Workflow { .. }
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
-            | Overlay::Chrome => 0,
+            | Overlay::Chrome
+            | Overlay::SideChat => 0,
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
@@ -2813,7 +2820,8 @@ impl App {
             | Overlay::Workflow { .. }
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
-            | Overlay::Chrome => None,
+            | Overlay::Chrome
+            | Overlay::SideChat => None,
         }
     }
 }

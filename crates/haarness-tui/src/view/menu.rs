@@ -142,7 +142,8 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
         | Overlay::Workflow { .. }
         | Overlay::ProviderLogin
         | Overlay::RemoteControl
-        | Overlay::Chrome => {
+        | Overlay::Chrome
+        | Overlay::SideChat => {
             return TaggedLines::default();
         }
     };
@@ -527,7 +528,8 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
         | Overlay::Workflow { .. }
         | Overlay::ProviderLogin
         | Overlay::RemoteControl
-        | Overlay::Chrome => {
+        | Overlay::Chrome
+        | Overlay::SideChat => {
             unreachable!()
         }
     };
