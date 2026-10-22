@@ -5575,15 +5575,24 @@ impl crate::ToolInvoker for TurnToolInvoker {
             }
             value
         };
-        let mut rules = crate::definitions::approval_rules(
-            &execution
-                .allowed_tools
+        // A `!` snippet keeps its placeholders as written (its shell reads
+        // them), while the model writes the real paths: each pattern counts in
+        // both spellings.
+        let both = |entries: &[String]| {
+            entries
                 .iter()
-                .map(expand)
-                .collect::<Vec<_>>(),
-        );
+                .flat_map(|entry| {
+                    let expanded = expand(entry);
+                    (expanded != *entry)
+                        .then(|| entry.clone())
+                        .into_iter()
+                        .chain([expanded])
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut rules = crate::definitions::approval_rules(&both(&execution.allowed_tools));
         rules.extend(
-            crate::definitions::approval_rules(&execution.disallowed_tools)
+            crate::definitions::approval_rules(&both(&execution.disallowed_tools))
                 .into_iter()
                 .map(|mut rule| {
                     rule.decision = PermissionDecision::Deny;
@@ -5609,7 +5618,11 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .map(|agent| agent.id.clone())
             .collect()
     }
-    async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {
+    async fn definition_shell(
+        &self,
+        command: String,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> CoreResult<ToolOutput> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         self.runner
             .execute_call_inner(
@@ -5618,7 +5631,7 @@ impl crate::ToolInvoker for TurnToolInvoker {
                 "bash",
                 json!({"command":command}),
                 false,
-                true,
+                Some(&env),
             )
             .await
     }
@@ -5645,7 +5658,7 @@ impl crate::ToolInvoker for TurnToolInvoker {
             + 1;
         let call_id = format!("{}:{sequence}", self.parent_call_id);
         self.runner
-            .execute_call_inner(&self.agent, &call_id, name, arguments, false, false)
+            .execute_call_inner(&self.agent, &call_id, name, arguments, false, None)
             .await
     }
 
@@ -6727,7 +6740,7 @@ impl RunnerTask {
                     })
                     .await?;
                     let output = self
-                        .execute_call_inner(agent, &call_id, "task", arguments, false, false)
+                        .execute_call_inner(agent, &call_id, "task", arguments, false, None)
                         .await?;
                     self.publish_item(ItemData::ToolResult {
                         call_id: call_id.clone(),
@@ -8531,7 +8544,7 @@ impl RunnerTask {
         arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
         let result = self
-            .execute_call_inner(agent, call_id, name, arguments, true, false)
+            .execute_call_inner(agent, call_id, name, arguments, true, None)
             .await;
         if let Err(error) = &result {
             record_span_error(&tracing::Span::current(), error);
@@ -8546,7 +8559,9 @@ impl RunnerTask {
         name: &str,
         mut arguments: serde_json::Value,
         require_advertised: bool,
-        _definition_shell: bool,
+        // A definition's `!` snippet: what its shell reads its placeholders
+        // from.
+        definition_env: Option<&std::collections::BTreeMap<String, String>>,
     ) -> CoreResult<ToolOutput> {
         let resolved = self.resolve_tool_name(name);
         let name = resolved.as_str();
@@ -8805,6 +8820,14 @@ impl RunnerTask {
             && let Some(hooks) = &self.hooks
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
+        }
+        if name == "bash"
+            && let Some(env) = definition_env
+        {
+            execution.shell_env.extend(
+                env.iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)

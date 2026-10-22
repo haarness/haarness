@@ -572,7 +572,9 @@ pub async fn prepare(
             true,
             false,
         );
-        let result = invoker.definition_shell(command).await?;
+        let result = invoker
+            .definition_shell(command, snippet_environment(execution, session, &workspace))
+            .await?;
         if result
             .metadata
             .get("exit")
@@ -755,6 +757,40 @@ fn delegation_hint(agent: &str) -> String {
         serde_json::to_string(agent).unwrap_or_default()
     )
 }
+/// The values a definition's placeholders stand for, by variable name: the
+/// session, the project folder, the skill's folder and the plugin's root.
+fn placeholder_values<'a>(
+    execution: &'a DefinitionExecution,
+    session: &'a str,
+    workspace: &'a str,
+) -> Vec<(&'static str, &'a str)> {
+    let root = execution.plugin_root.as_deref();
+    [
+        ("CLAUDE_SESSION_ID", Some(session)),
+        ("CLAUDE_PROJECT_DIR", Some(workspace)),
+        ("CLAUDE_SKILL_DIR", execution.directory.as_deref()),
+        ("CLAUDE_PLUGIN_ROOT", root),
+        ("HAARNESS_PLUGIN_ROOT", root),
+        ("OPENCODE_PLUGIN_ROOT", root),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| Some((name, value?)))
+    .collect()
+}
+
+/// The environment a `!` snippet runs with, where its shell reads the
+/// placeholders the snippet keeps as written.
+fn snippet_environment(
+    execution: &DefinitionExecution,
+    session: &str,
+    workspace: &str,
+) -> std::collections::BTreeMap<String, String> {
+    placeholder_values(execution, session, workspace)
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
 fn substitutions(
     template: &str,
     input: &str,
@@ -765,18 +801,7 @@ fn substitutions(
     _append: bool,
 ) -> String {
     // Do not let supplied arguments be reinterpreted as template substitutions.
-    let root = execution.plugin_root.as_deref();
-    let values: Vec<(&str, &str)> = [
-        ("CLAUDE_SESSION_ID", Some(session)),
-        ("CLAUDE_PROJECT_DIR", Some(workspace)),
-        ("CLAUDE_SKILL_DIR", execution.directory.as_deref()),
-        ("CLAUDE_PLUGIN_ROOT", root),
-        ("HAARNESS_PLUGIN_ROOT", root),
-        ("OPENCODE_PLUGIN_ROOT", root),
-    ]
-    .into_iter()
-    .filter_map(|(name, value)| Some((name, value?)))
-    .collect();
+    let values = placeholder_values(execution, session, workspace);
     let find = |rest: &str| {
         values
             .iter()
@@ -790,15 +815,15 @@ fn substitutions(
             .map_or_else(String::new, |(_, value)| (*value).to_owned())
     };
     // A snippet runs in the agent's shell (`sh` here, `cmd` on Windows, which
-    // gets the values as they are): each value goes in quoted for where it
-    // stands, so a folder named `a b` stays one word and one named
-    // `p$(touch x)` never runs `touch`.
+    // gets the values as they are). Its placeholders stay as written and the
+    // shell reads them from the snippet's environment, so a folder named
+    // `a b` or `p$(touch x)` is a value, never shell text; inside single
+    // quotes a reference is opened for the shell.
     let template = if shell && cfg!(not(windows)) {
         crate::shell_text::place_placeholders(
             crate::shell_text::ShellKind::Posix,
             template,
             &find,
-            crate::shell_text::Placeholders::Fill,
             &value,
         )
     } else {
@@ -1087,9 +1112,14 @@ mod tests {
         fn workspace(&self) -> Option<String> {
             Some(self.workspace.clone())
         }
-        async fn definition_shell(&self, command: String) -> CoreResult<crate::ToolOutput> {
+        async fn definition_shell(
+            &self,
+            command: String,
+            env: std::collections::BTreeMap<String, String>,
+        ) -> CoreResult<crate::ToolOutput> {
             let output = tokio::process::Command::new("sh")
                 .args(["-c", &command])
+                .envs(env)
                 .output()
                 .await
                 .unwrap();
@@ -1130,9 +1160,36 @@ mod tests {
         )
         .await
         .unwrap();
+        // Bare, the shell splits the value into words, as any reference; it
+        // never runs it. Quoted, and in single quotes, it is one word.
         assert_eq!(
             text,
-            format!("Dirs: {workspace}|{workspace}|{workspace}|/skills/my skill/x|/plugins/a\"b|")
+            format!(
+                "Dirs: /work/p|q|$(printf|INJECTED)|it's|{workspace}|{workspace}|/skills/my|skill/x|/plugins/a\"b|"
+            )
+        );
+
+        // A command substitution's own quotes, a non-ASCII name, and an
+        // apostrophe in an earlier comment.
+        let invoker = ShellInvoker {
+            workspace: workspace.clone(),
+        };
+        let execution = DefinitionExecution {
+            directory: Some("/skills/José skills/my skill".into()),
+            ..DefinitionExecution::default()
+        };
+        let text = prepare(
+            "Up: !`printf '[%s]' \"$(dirname \"${CLAUDE_SKILL_DIR}\")\"` Here: !`true # it's the project\nprintf '[%s]' \"${CLAUDE_PROJECT_DIR}\"`",
+            "",
+            &execution,
+            "session",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            format!("Up: [/skills/José skills] Here: [{workspace}]")
         );
 
         let invoker = ShellInvoker {
