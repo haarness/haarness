@@ -15,6 +15,7 @@ import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
 import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
 import {
+  answeredByHook,
   batchLabel,
   batchSteps,
   batchTarget,
@@ -161,6 +162,9 @@ export function ToolActivity(props: {
         </Shimmer>
         <Show when={ranInChrome(props.name, props.args, props.result)}>
           <span class="tool-chip">{t("Chrome")}</span>
+        </Show>
+        <Show when={answeredByHook(props.name, props.result)}>
+          <span class="tool-chip">{t("Answered by hook")}</span>
         </Show>
         <Show when={live()}>
           <span class="sr-only">

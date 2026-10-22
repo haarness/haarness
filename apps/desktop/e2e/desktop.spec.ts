@@ -11678,12 +11678,21 @@ test("hooks settings execute configured commands and preserve stale editor draft
     await settings.getByRole("button", { name: "Hooks", exact: true }).click();
     await settings.getByRole("button", { name: "Add hook", exact: true }).click();
     const form = page.getByRole("dialog", { name: "Add hook", exact: true });
+    // The matcher suggests what the chosen event can match.
+    const matcher = form.getByRole("combobox", { name: "Hook matcher", exact: true });
     await selectValue(form.getByRole("combobox", { name: "Hook event", exact: true }), "PostCompact");
-    await expect(form).toContainText("manual, automatic, or *");
+    await matcher.press("ArrowDown");
+    await expect(page.getByRole("option", { name: /^manual/ })).toBeVisible();
+    await expect(page.getByRole("option", { name: /^automatic/ })).toBeVisible();
+    await matcher.press("Escape");
     await selectValue(form.getByRole("combobox", { name: "Hook event", exact: true }), "StopFailure");
-    await expect(form).toContainText("incomplete, content_filter, provider, tool, other, or *");
+    await matcher.press("ArrowDown");
+    await expect(page.getByRole("option", { name: /^rate_limit/ })).toBeVisible();
+    await expect(page.getByRole("option", { name: /^content_filter/ })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("failure-hook-editor.png") });
+    await matcher.press("Escape");
     await selectValue(form.getByRole("combobox", { name: "Hook event", exact: true }), "Stop");
+    await expect(matcher).toHaveCount(0);
     const command = "printf desktop-hook-proof > desktop-hook-proof.txt";
     await form.getByLabel("Hook command", { exact: true }).fill(command);
     changedAt = Date.now();

@@ -137,6 +137,7 @@ impl HookPort for Hooks {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
         HookDecision::default()
@@ -446,6 +447,7 @@ impl HookPort for StampHooks {
         _: ThreadId,
         _: &str,
         _: &[String],
+        _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
         HookDecision::default()
