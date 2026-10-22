@@ -138,6 +138,8 @@ Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), s
 ```sh
 python3 scripts/test-release-package.py              # bundled CLI, Bun, Chrome extension
 python3 scripts/release.py collect --binary "$HAARNESS_BIN"
+python3 scripts/release.py collect-extension         # Haarness for Chrome: zip + signed CRX (release key needed)
+python3 scripts/test-release-extension.py            # its packaging and every refusal
 python3 scripts/test-release-install.py              # install.sh faults (macOS, Linux)
 python3 scripts/test-release-install-ps1.py          # install.ps1 under pwsh, every OS
 python3 scripts/test-release-linux.py                # Linux only
@@ -145,7 +147,19 @@ python3 scripts/test-release-quarantine.py           # macOS only
 ```
 
 - `collect` stages checksummed artifacts and one platform index under `dist/releases`; keep it
-  unchanged for idempotent retries. electron-builder names Linux packages `linux-x86_64.AppImage`
+  unchanged for idempotent retries.
+- `collect-extension` packages Haarness for Chrome once per release (one build for every
+  platform, product `chrome-extension`, `os`/`arch` `any`): `haarness-chrome-<v>.zip`, the folder
+  people load unpacked, and `haarness-chrome-<v>.crx`, the same zip signed with the release key
+  (`../.chrome-extension-key/key.pem`, never in a repository) for policy installs through
+  `/api/v1/releases/<channel>/chrome-extension/updates.xml`. It refuses a folder of another
+  version, a manifest key that is not the signing key's, or source files. Publish its
+  `index-chrome-extension.json` with the platform indexes. To add it to a release already
+  published, package the folder the released CLI writes (`haarness browser setup` with an
+  isolated `HAARNESS_DATA_DIR` and `--manifest-dir`) with `--revision <the release's commit>` and
+  publish that index alone: the service adds a product to the channel's current release of the
+  same commit and changes nothing else. GitHub releases are immutable, so skip `release.py
+  github` for such an addition. electron-builder names Linux packages `linux-x86_64.AppImage`
   and `linux-amd64.deb`; `collect` publishes both as `linux-x64`. Windows reports `ARM64`.
 - `test-release-linux.py`: glibc floor and linked libraries; both packages carry the release
   CLI, package `haarness-desktop` with maintainer/homepage, a launcher entry owning
@@ -156,6 +170,10 @@ python3 scripts/test-release-quarantine.py           # macOS only
 - `test-release-install-ps1.py`: corrupt/missing checksum, plain-HTTP origin, unknown channel and
   a download that cannot run are all refused with the folder untouched; on Windows with
   `HAARNESS_BIN` the real binary installs over a previous copy.
+- Both installer tests cover the release domain: the file comes from the `Content-Location` the
+  service names to `HEAD` (resuming there too, for install.sh) and must match the service's
+  SHA-256; a release domain that does not deliver, or a plain-HTTP address, leaves the service to
+  send it. Without `pwsh`, run the PowerShell one in `mcr.microsoft.com/powershell` with python3.
 
 ## 4. Signing
 
