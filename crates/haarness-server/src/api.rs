@@ -2302,8 +2302,16 @@ async fn events(
 ) -> impl IntoResponse {
     // nosniff: Apple's URL loading holds a response until 512 bytes arrive
     // while it sniffs the MIME type, which would stall the first events.
+    // X-Accel-Buffering: nginx (and proxies that follow it) in front of a
+    // server would otherwise collect the stream before passing it on.
     (
-        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        [
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (
+                axum::http::HeaderName::from_static("x-accel-buffering"),
+                "no",
+            ),
+        ],
         event_stream(state, shutdown, headers),
     )
 }
