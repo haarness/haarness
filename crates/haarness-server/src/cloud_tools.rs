@@ -404,6 +404,7 @@ mod tests {
             _: ThreadId,
             _: &str,
             _: &[String],
+            _: Option<&[String]>,
             _: &Value,
         ) -> HookDecision {
             HookDecision {

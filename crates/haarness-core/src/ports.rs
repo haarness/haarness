@@ -800,6 +800,10 @@ pub struct HookDecision {
     pub permission: Option<crate::PermissionDecision>,
     /// Replacement tool input returned by a PreToolUse hook.
     pub updated_input: Option<Value>,
+    /// A `PermissionRequest` allow that answers Always: the runtime
+    /// remembers what Always in the prompt remembers, where the request
+    /// offered it to hooks.
+    pub always: bool,
 }
 
 /// Claude-Code-compatible lifecycle hooks. Implemented by the composition
@@ -828,12 +832,15 @@ pub trait HookPort: Send + Sync {
     /// A prompt is about to be shown for `permission` and the `patterns` it
     /// asks about. `detail` is the tool's arguments; when a pattern names
     /// where a file path really leads (a link's target), the runtime asks
-    /// about it alone, with the arguments' path replaced by it.
+    /// about it alone, with the arguments' path replaced by it. `always` is
+    /// what an Always answer would remember, given only when the hook may
+    /// answer Always for this request (see [`HookDecision::always`]).
     async fn permission_request(
         &self,
         thread: ThreadId,
         permission: &str,
         patterns: &[String],
+        always: Option<&[String]>,
         detail: &Value,
     ) -> HookDecision;
     async fn stop(&self, thread: ThreadId);

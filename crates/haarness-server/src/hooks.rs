@@ -11,7 +11,9 @@
 //! Stdin payload: `{"hook_event_name", "session_id", "cwd", "tool_name",
 //! "tool_input", "prompt", "tool_response"}` (fields per event). Stdout may
 //! carry `{"decision": "block", "reason", "additionalContext",
-//! "hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask"}}`.
+//! "hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask"}}`; a
+//! `PermissionRequest` hook answers with `hookSpecificOutput.decision`
+//! (`{"behavior": "allow", "always": true}` answers Always).
 //!
 //! Events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
 //! `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionStart`,
@@ -321,7 +323,11 @@ impl ConfiguredHooks {
                     .and_then(|decision| decision.get("behavior"))
                     .and_then(Value::as_str)
                 {
-                    Some("allow") => outcome.permission = Some(PermissionDecision::Allow),
+                    Some("allow") => {
+                        outcome.permission = Some(PermissionDecision::Allow);
+                        outcome.always = entry.event == "PermissionRequest"
+                            && specific.get("decision").is_some_and(answers_always);
+                    }
                     Some("deny") => {
                         outcome.permission = Some(PermissionDecision::Deny);
                         outcome.block = specific
@@ -342,6 +348,7 @@ impl ConfiguredHooks {
             }
             outcome.updated_input = None;
             outcome.context = None;
+            outcome.always = false;
         }
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
@@ -359,6 +366,8 @@ impl ConfiguredHooks {
 
     async fn run_event(&self, event: &str, tool: Option<&str>, payload: &Value) -> HookOutcome {
         let mut combined = HookOutcome::default();
+        // Always holds only when every hook that allowed answered Always.
+        let mut always = None;
         for entry in self.matching(event, tool) {
             let outcome = self.run(entry, payload).await;
             if outcome.block.is_some() && combined.block.is_none() {
@@ -381,10 +390,15 @@ impl ConfiguredHooks {
                 (None, decision) => combined.permission = decision,
                 _ => {}
             }
+            if outcome.permission == Some(PermissionDecision::Allow) {
+                always = Some(always.unwrap_or(true) && outcome.always);
+            }
             if outcome.updated_input.is_some() {
                 combined.updated_input = outcome.updated_input;
             }
         }
+        combined.always =
+            combined.permission == Some(PermissionDecision::Allow) && always == Some(true);
         combined
     }
 }
@@ -558,6 +572,7 @@ struct HookOutcome {
     context: Option<String>,
     permission: Option<PermissionDecision>,
     updated_input: Option<Value>,
+    always: bool,
 }
 
 impl From<HookOutcome> for HookDecision {
@@ -567,8 +582,31 @@ impl From<HookOutcome> for HookDecision {
             context: outcome.context,
             permission: outcome.permission,
             updated_input: outcome.updated_input,
+            always: outcome.always,
         }
     }
+}
+
+/// Whether a `PermissionRequest` allow answers Always: `"always": true`, or
+/// Claude Code's `updatedPermissions` with a rule that allows. Haarness
+/// remembers what its own Always remembers, never the rules or destination
+/// the hook names, so a hook cannot widen what it was asked about.
+fn answers_always(decision: &Value) -> bool {
+    decision.get("always").and_then(Value::as_bool) == Some(true)
+        || decision
+            .get("updatedPermissions")
+            .and_then(Value::as_array)
+            .is_some_and(|updates| {
+                updates
+                    .iter()
+                    .any(|update| match update.get("type").and_then(Value::as_str) {
+                        Some("addRules" | "replaceRules") => {
+                            update.get("behavior").and_then(Value::as_str) == Some("allow")
+                        }
+                        Some("toolAlwaysAllow") => true,
+                        _ => false,
+                    })
+            })
 }
 
 /// Longest program name, failure stderr and block reason a log line carries.
@@ -1053,22 +1091,36 @@ impl HookPort for ConfiguredHooks {
         thread: ThreadId,
         permission: &str,
         patterns: &[String],
+        always: Option<&[String]>,
         detail: &Value,
     ) -> HookDecision {
-        self.run_event(
-            "PermissionRequest",
-            Some(permission),
-            &json!({
-                "hook_event_name": "PermissionRequest",
-                "session_id": thread,
-                "cwd": self.workspace,
-                "tool_name": permission,
-                "tool_input": detail,
-                "permission_patterns": patterns,
-            }),
-        )
-        .await
-        .into()
+        let mut payload = json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": thread,
+            "cwd": self.workspace,
+            "tool_name": permission,
+            "tool_input": detail,
+            "permission_patterns": patterns,
+            "allow_always": always.is_some(),
+        });
+        // What Always would remember, as Haarness's own patterns and as the
+        // `permission_suggestions` a Claude Code hook echoes back in
+        // `updatedPermissions`.
+        if let Some(always) = always {
+            payload["always_patterns"] = json!(always);
+            payload["permission_suggestions"] = json!([{
+                "type": "addRules",
+                "rules": always
+                    .iter()
+                    .map(|pattern| json!({"toolName": permission, "ruleContent": pattern}))
+                    .collect::<Vec<_>>(),
+                "behavior": "allow",
+                "destination": "session",
+            }]);
+        }
+        self.run_event("PermissionRequest", Some(permission), &payload)
+            .await
+            .into()
     }
 
     async fn post_compact(&self, thread: ThreadId, trigger: &str, item: &haarness_protocol::Item) {
@@ -1595,11 +1647,144 @@ mod tests {
                 ThreadId::new(),
                 "bash",
                 &["cargo test".to_owned()],
+                None,
                 &json!({"command": "cargo test"}),
             )
             .await;
         assert_eq!(decision.permission, Some(PermissionDecision::Allow));
         assert!(decision.block.is_none());
+    }
+
+    /// Asks a `PermissionRequest` hook that prints `answer` about
+    /// `git status --short`, offering `always`; returns its decision and the
+    /// input it was given.
+    async fn permission_answer(answer: Value, always: Option<&[String]>) -> (HookDecision, Value) {
+        let root =
+            std::env::temp_dir().join(format!("haarness-permission-hook-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.json");
+        let reply = root.join("reply.json");
+        std::fs::write(&reply, answer.to_string()).unwrap();
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PermissionRequest": [{"matcher": "bash", "hooks": [{
+                    "command": format!("cat > '{}'; cat '{}'", input.display(), reply.display())
+                }]}]
+            })),
+            root.clone(),
+        );
+        let decision = hooks
+            .permission_request(
+                ThreadId::new(),
+                "bash",
+                &["git status --short".to_owned()],
+                always,
+                &json!({"command": "git status --short"}),
+            )
+            .await;
+        let seen = serde_json::from_str(&std::fs::read_to_string(&input).unwrap()).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        (decision, seen)
+    }
+
+    fn permission_reply(decision: Value) -> Value {
+        json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}})
+    }
+
+    #[tokio::test]
+    async fn a_permission_request_hook_can_answer_always() {
+        let always = ["git status *".to_owned()];
+        let (decision, seen) = permission_answer(
+            permission_reply(json!({"behavior": "allow", "always": true})),
+            Some(&always),
+        )
+        .await;
+        assert_eq!(decision.permission, Some(PermissionDecision::Allow));
+        assert!(decision.always);
+        // The hook is told it may answer Always and what that remembers, in
+        // Haarness's words and as Claude Code's suggestions.
+        assert_eq!(seen["allow_always"], true);
+        assert_eq!(seen["always_patterns"], json!(["git status *"]));
+        assert_eq!(
+            seen["permission_suggestions"],
+            json!([{"type": "addRules", "rules": [{"toolName": "bash", "ruleContent": "git status *"}],
+                "behavior": "allow", "destination": "session"}])
+        );
+        // Claude Code's shape: the suggestions handed back.
+        let (decision, _) = permission_answer(
+            permission_reply(
+                json!({"behavior": "allow", "updatedPermissions": seen["permission_suggestions"]}),
+            ),
+            Some(&always),
+        )
+        .await;
+        assert!(decision.always);
+        // A plain allow, or an update that is not an allow rule, is once.
+        for answer in [
+            json!({"behavior": "allow"}),
+            json!({"behavior": "allow", "always": false}),
+            json!({"behavior": "allow", "updatedPermissions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}),
+            json!({"behavior": "allow", "updatedPermissions": [{"type": "addRules", "rules": [], "behavior": "deny", "destination": "session"}]}),
+        ] {
+            let (decision, _) =
+                permission_answer(permission_reply(answer.clone()), Some(&always)).await;
+            assert_eq!(
+                decision.permission,
+                Some(PermissionDecision::Allow),
+                "{answer}"
+            );
+            assert!(!decision.always, "{answer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_offers_no_always_says_so_to_the_hook() {
+        let (decision, seen) = permission_answer(
+            permission_reply(json!({"behavior": "allow", "always": true})),
+            None,
+        )
+        .await;
+        assert_eq!(seen["allow_always"], false);
+        assert!(seen.get("always_patterns").is_none());
+        assert!(seen.get("permission_suggestions").is_none());
+        // The runtime ignores `always` here; the hook still allowed.
+        assert_eq!(decision.permission, Some(PermissionDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn always_needs_every_allowing_hook_and_a_successful_one() {
+        let run = |commands: Vec<&str>| {
+            let hooks = ConfiguredHooks::new(
+                ConfiguredHooks::parse_block(&json!({
+                    "PermissionRequest": [{"matcher": "bash", "hooks": commands
+                        .iter()
+                        .map(|command| json!({"command": command}))
+                        .collect::<Vec<_>>()}]
+                })),
+                std::env::temp_dir(),
+            );
+            async move {
+                hooks
+                    .permission_request(
+                        ThreadId::new(),
+                        "bash",
+                        &["git status".to_owned()],
+                        Some(&["git status *".to_owned()]),
+                        &json!({"command": "git status"}),
+                    )
+                    .await
+            }
+        };
+        let always =
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"allow","always":true}}}'"#;
+        let once = r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#;
+        assert!(run(vec![always, always]).await.always);
+        assert!(run(vec![always, "true"]).await.always);
+        let mixed = run(vec![always, once]).await;
+        assert_eq!(mixed.permission, Some(PermissionDecision::Allow));
+        assert!(!mixed.always);
+        let failed = run(vec![&format!("{always}; exit 1")]).await;
+        assert!(failed.permission.is_none() && !failed.always);
     }
 
     #[tokio::test]
@@ -1617,6 +1802,7 @@ mod tests {
                 ThreadId::new(),
                 "bash",
                 &["npm install".to_owned()],
+                None,
                 &json!({"command": "npm install"}),
             )
             .await;
@@ -1640,6 +1826,7 @@ mod tests {
                         ThreadId::new(),
                         "bash",
                         &["rm -rf build".to_owned()],
+                        None,
                         &json!({"command": "rm -rf build"}),
                     )
                     .await;
