@@ -278,8 +278,15 @@ test("side chats keep their threads per chat, across a reload, and come and go f
   await expect(panel()).toBeHidden();
   await expect(composer()).toBeFocused();
 
+  // The session menu opens it too; the new-chat screen has nothing to ask about.
+  await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open side chat", exact: true }).click();
+  await expect(column()).toBeVisible();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(column()).toBeHidden();
+
   // Back on the first chat, its threads are there; the palette starts another.
-  await page.locator(".workspace-tabs [role=tab]").first().click();
+  await page.getByRole("region", { name: "Project workspace", exact: true }).getByRole("button", { name: /Plan the release notes/ }).first().click();
   await expect(page.locator(".transcript")).toContainText("Echo: Plan the release notes");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
@@ -290,8 +297,12 @@ test("side chats keep their threads per chat, across a reload, and come and go f
   await expect(threadTabs()).toHaveCount(3);
   await expect(box()).toBeFocused();
 
+  // ⌘W in the side chat closes its thread in front, not the window.
+  await box().press(`${mod}+W`);
+  await expect(threadTabs()).toHaveCount(2);
+  expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1);
   // Closing a tab discards its thread; closing the last puts the panel away.
-  for (let count = 3; count > 0; count--) {
+  for (let count = 2; count > 0; count--) {
     await panel().getByRole("button", { name: /^Close / }).last().click();
     if (count > 1) await expect(threadTabs()).toHaveCount(count - 1);
   }
@@ -306,5 +317,88 @@ test("a /btw on a chat not started yet says how to begin, and leaves the draft",
   await expect(page.getByText("Send a first message, then ask side questions with /btw.")).toBeVisible();
   await expect(composer()).toHaveValue("/btw anything?");
   await expect(panel()).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("answers keep streaming across chats and page loads, and the side chat shares its place sensibly", async () => {
+  test.setTimeout(300000);
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await send("Another place");
+  await expect(page.locator(".transcript")).toContainText("Echo: Another place");
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await send("Shared place");
+  await expect(page.locator(".transcript")).toContainText("Echo: Shared place");
+
+  // An answer keeps streaming while another chat is shown and while frames
+  // in the page load (a preview, an MCP app): only a reload ends it.
+  await send("/btw !linger 4000 across chats");
+  await expect(panel().getByText("Thinking…")).toBeVisible();
+  const chats = page.getByRole("region", { name: "Project workspace", exact: true });
+  await chats.getByRole("button", { name: /Another place/ }).first().click();
+  await expect(page.locator(".transcript")).toContainText("Echo: Another place");
+  await page.evaluate(() => {
+    const frame = document.createElement("iframe");
+    frame.id = "side-chat-probe";
+    frame.style.display = "none";
+    document.body.append(frame);
+    frame.srcdoc = "<p>first</p>";
+    setTimeout(() => (frame.srcdoc = "<p>second</p>"), 300);
+  });
+  await chats.getByRole("button", { name: /Shared place/ }).first().click();
+  await expect(panel()).toContainText("Echo: across chats", { timeout: 30000 });
+  await expect(panel().locator(".side-chat-status")).toHaveCount(0);
+  await page.evaluate(() => document.getElementById("side-chat-probe")?.remove());
+
+  // A window too narrow for the side chat beside the side panel: they share a place.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1250, 860));
+  await expect(column()).toBeVisible();
+  // The agent's preview waits behind the side chat; the one the person opens comes forward.
+  const page_ = '<!doctype html><html><body><h1>Side preview</h1></body></html>';
+  await send("!tool write " + JSON.stringify({ path: "side.html", content: page_ }));
+  await expect(page.locator(".transcript")).toContainText("Tool write");
+  await send('!tool preview {"filePath":"side.html","title":"Side preview"}');
+  await ask("!linger 2500 while it previews");
+  const banner = page.locator(".preview-banner").last();
+  await expect(banner).toContainText("Side preview", { timeout: 30000 });
+  await expect(column()).toBeVisible();
+  await expect(sidePanel()).toBeHidden();
+  await expect(panel()).toContainText("Echo: while it previews", { timeout: 30000 });
+  await banner.getByRole("button", { name: "Open preview", exact: true }).click();
+  await expect(sidePanel()).toBeVisible();
+  await expect(column()).toBeHidden();
+
+  // After a reload, the one in front stays in front.
+  await composer().click();
+  await page.keyboard.press(`${mod}+Shift+J`);
+  await expect(column()).toBeVisible();
+  await page.waitForTimeout(500);
+  await page.reload();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+  await expect(column()).toBeVisible();
+  await expect(sidePanel()).toBeHidden();
+
+  // Not behind an open dialog.
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.locator(".settings-dialog")).toBeVisible();
+  await page.keyboard.press(`${mod}+Shift+J`);
+  await expect(column()).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".settings-dialog")).toBeHidden();
+
+  // In a narrow window it covers the workspace, and Esc in its idle box puts it away.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1000, 800));
+  await expect(page.locator(".workbench")).toHaveClass(/side-over/);
+  await box().focus();
+  await box().press("Escape");
+  await expect(column()).toBeHidden();
+  // The side panel it covered comes back, and expanded it still takes the whole workspace.
+  await expect(sidePanel()).toBeVisible();
+  await page.getByRole("button", { name: "Expand side panel", exact: true }).click();
+  const workbench = await page.locator(".workbench").boundingBox();
+  const expanded = await sidePanel().boundingBox();
+  expect(expanded!.width).toBeGreaterThan(workbench!.width - 4);
+  await page.getByRole("button", { name: "Restore side panel", exact: true }).click();
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1440, 900));
   expect(errors).toEqual([]);
 });

@@ -217,6 +217,12 @@
 .side-chat-answer > .message-footer {
   margin-top: 0;
 }
+.side-chat-note {
+  margin: 0;
+  font-size: var(--ui);
+  color: var(--muted);
+  text-align: center;
+}
 .side-chat-status {
   display: flex;
   align-items: center;

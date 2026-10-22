@@ -46,7 +46,7 @@ import { SelectionBar } from "./SelectionBar";
 import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
-import { SideChatPanel, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
+import { SideChatPanel, closeFrontSideThread, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
 import { SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
 type Dock = "files" | "diff" | "context" | "browser";
 
@@ -179,13 +179,15 @@ export function App() {
     Math.max(min, Math.min(max, value));
   const dockVisible = () =>
     !!state.connection && !!dock() && state.panel === "chat";
-  const sideWanted = () => !!state.connection && sideOpen() && state.panel === "chat";
+  // The new-chat screen has nothing to ask about, so the side chat waits for a chat.
+  const sideWanted = () => !!state.connection && !!state.selected && sideOpen() && state.panel === "chat";
   /** Where the side chat stands beside the conversation and the side panel (see `sidePlace`). */
   const side = createMemo(() =>
     sidePlace({
       width: workbenchWidth(),
       wanted: sideWidth(),
-      dock: !dockVisible() ? "none" : dockExpanded() ? "expanded" : narrow() ? "overlay" : "column",
+      // In a narrow window the side panel lies over everything, expanded or not.
+      dock: !dockVisible() ? "none" : narrow() ? "overlay" : dockExpanded() ? "expanded" : "column",
     }),
   );
   /** Both show side by side, or the one in front does. */
@@ -205,7 +207,7 @@ export function App() {
   }
   createEffect(() => {
     const request = state.fileRequest;
-    if ((request?.preview || request?.link) && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files", !!request.link);
+    if ((request?.preview || request?.link) && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files", !request.automatic);
   });
   /** The agent took the Browser's tab to another page while another panel held the side panel. */
   const [browserMoved, setBrowserMoved] = createSignal(false);
@@ -277,16 +279,29 @@ export function App() {
     }
     void openSideChat({ connection: state.connection.id, chat: state.selected, fresh });
   }
+  /** The message box takes the keyboard, unless something covers it. */
+  const focusComposer = () => {
+    const box = document.querySelector<HTMLElement>("[data-composer-input]");
+    if (box?.checkVisibility({ visibilityProperty: true })) box.focus();
+  };
   /** Puts the side chat away; the keyboard goes back to the message box. */
   function hideSide() {
     setSideOpen(false);
-    document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+    focusComposer();
+  }
+  /** Esc in an idle side chat box: back to the message box, putting the
+   * side chat away when it covers the conversation. */
+  function leaveSide() {
+    if (side().place === "over") hideSide();
+    else focusComposer();
   }
   /**
-   * The side chat's key: brings it on screen with its box focused, and from
-   * that box puts it away again, back to the message box.
+   * The side chat's key (heard by the main process, see `before-input-event`
+   * there, or the View menu): brings it on screen with its box focused, and
+   * from that box puts it away again, back to the message box. Never behind a dialog.
    */
   function toggleSide() {
+    if (state.settings || document.querySelector("dialog[open]")) return;
     if (sideOnScreen() && sideChatFocused()) return hideSide();
     openSide();
   }
@@ -332,8 +347,10 @@ export function App() {
       if (typeof raw.sideChatWidth === "number" && Number.isFinite(raw.sideChatWidth))
         setSideWidth(clamp(raw.sideChatWidth, SIDE_MIN, SIDE_MAX));
       if (raw.sideChat === true) setSideOpen(true);
+      if (typeof raw.sideChatFront === "boolean") setSideFront(raw.sideChatFront);
+      // Restored as it was: neither comes in front of the other.
       if (["files", "diff", "context", "browser"].includes(String(raw.dock)))
-        openDock(raw.dock as Dock);
+        openDock(raw.dock as Dock, false);
       else if (raw.dock === "tools") setDock("tools");
     }
     setLayoutReady(true);
@@ -358,6 +375,7 @@ export function App() {
       sidebarLayout: sidebarLayout(),
       sideChat: sideOpen(),
       sideChatWidth: sideWidth(),
+      sideChatFront: sideFront(),
     };
     const timer = setTimeout(saveLayout, 200);
     onCleanup(() => clearTimeout(timer));
@@ -572,7 +590,7 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected,action:()=>openDock("browser")},
-      {key:"side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
+      {key:"conversation:side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
       {key:"side-chat-new",group:"Project panels",name:t("New side chat"),keywords:"btw side question aside ask thread another",icon:"side-chat",disabled:!connected||!state.selected,action:()=>openSide(true)},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
       {
@@ -915,6 +933,8 @@ export function App() {
     else if (value === "palette") openPalette();
     else if (value === "browser") openDock("browser");
     else if (value === "side-chat") toggleSide();
+    else if (value === "side-chat-close" && state.connection && state.selected)
+      closeFrontSideThread(state.connection.id, state.selected);
     else if (value === "terminal") set("terminal", (v) => !v);
     else if (value === "files" || value === "diff") set("panel", value);
   }
@@ -936,6 +956,8 @@ export function App() {
           ))
       )
         return;
+      // Normally the main process hears the side chat's key first and the page
+      // never does; keys sent to the page directly (tests) arrive here.
       if (matchesShortcut(event, state.preferences.shortcuts.sideChat ?? "", state.platform)) {
         event.preventDefault();
         toggleSide();
@@ -1211,6 +1233,7 @@ export function App() {
               "has-dock": dockOnScreen(),
               "dock-expanded": dockOnScreen() && dockExpanded(),
               "side-over": sideOnScreen() && side().place === "over",
+              "side-column": sideOnScreen() && side().place === "column",
             }}
             style={{ "--side-chat-room": sideRoom() + "px" }}
           >
@@ -1352,7 +1375,7 @@ export function App() {
                 classList={{ over: side().place === "over" }}
                 style={{ width: side().place === "over" ? undefined : side().width + "px" }}
               >
-                <SideChatPanel onHide={hideSide} />
+                <SideChatPanel onHide={hideSide} onEscape={leaveSide} />
               </section>
             </Show>
             <Show when={dockOnScreen() && !dockExpanded()}>

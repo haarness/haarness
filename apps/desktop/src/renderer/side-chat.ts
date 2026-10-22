@@ -34,15 +34,33 @@ export const MAX_THREADS = 12;
 export const MAX_CHATS = 20;
 /** Finished questions a follow-up sends at most: the thread has no compaction. */
 export const MAX_HISTORY = 40;
+/** How many of the oldest go at once when the thread outgrows what is sent. */
+export const HISTORY_BLOCK = 20;
+/** Characters of earlier questions and answers a follow-up sends at most
+ * (the server refuses more than 1 MiB). */
+export const HISTORY_SIZE = 256 * 1024;
 /** Stored size of one chat's side chats; the oldest questions give way. */
-export const MAX_STORED = 1024 * 1024;
+export const MAX_STORED = 256 * 1024;
 
-/** The finished questions, which are what a follow-up sends as its thread. */
+/**
+ * The finished questions, which are what a follow-up sends as its thread.
+ * Past {@link MAX_HISTORY} questions or {@link HISTORY_SIZE} characters the
+ * oldest go {@link HISTORY_BLOCK} at a time, so the first question sent stays
+ * the same from one trim to the next: each follow-up then starts with the
+ * previous one's request and reads back its prompt cache, and only the
+ * request after a trim is read afresh.
+ */
 export function sideHistory(turns: readonly SideTurn[]) {
-  return turns
+  const finished = turns
     .filter((turn) => turn.state === "done" && turn.answer.trim() && turn.question.trim())
-    .map((turn) => ({ question: turn.question, answer: turn.answer }))
-    .slice(-MAX_HISTORY);
+    .map((turn) => ({ question: turn.question, answer: turn.answer }));
+  const size = (from: number) =>
+    finished.slice(from).reduce((total, turn) => total + turn.question.length + turn.answer.length, 0);
+  let start = Math.ceil(Math.max(0, finished.length - MAX_HISTORY) / HISTORY_BLOCK) * HISTORY_BLOCK;
+  while (start + HISTORY_BLOCK < finished.length && size(start) > HISTORY_SIZE) start += HISTORY_BLOCK;
+  // A last block still too large gives way one question at a time.
+  while (start < finished.length && size(start) > HISTORY_SIZE) start += 1;
+  return finished.slice(start);
 }
 
 /** A tab's name: its first question, or nothing before one is asked. */
@@ -116,12 +134,17 @@ export function sideRestore(value: unknown): SideChats {
   return { threads, front };
 }
 
-/** What is stored: within {@link MAX_STORED}, the oldest questions of the
- * oldest threads giving way first. */
-export function sideStored(chat: SideChats): SideChats {
+/** What is stored: threads with a question or a draft, within
+ * {@link MAX_STORED}, the oldest questions of the oldest threads giving way
+ * first; null when nothing is worth keeping. */
+export function sideStored(chat: SideChats): SideChats | null {
+  const threads = chat.threads
+    .filter((thread) => thread.turns.length || thread.draft.trim())
+    .map((thread) => ({ ...thread, turns: [...thread.turns] }));
+  if (!threads.length) return null;
   const value: SideChats = {
-    front: chat.front,
-    threads: chat.threads.map((thread) => ({ ...thread, turns: [...thread.turns] })),
+    front: threads.some((thread) => thread.id === chat.front) ? chat.front : undefined,
+    threads,
   };
   while (JSON.stringify(value).length > MAX_STORED) {
     const thread = value.threads.find((item) => item.turns.length > 1) ?? value.threads[0];

@@ -17,13 +17,20 @@ after it are omitted until the result arrives.
 A side question is the start of a side chat: follow-ups keep the thread going,
 so "and why?" or "show me the second one" need no repeating. The server keeps
 no side chat. Each follow-up carries the thread's earlier questions and answers
-(`history`, oldest first, at most 100; clients send the last 40 finished ones),
-and the server sends them after the chat's own history: the first question with
-the side-question instructions, its answer, the next question, and so on. A
-follow-up therefore starts with the previous question's request bytes and reads
-back the prompt cache it wrote. Only the first question carries the
-instructions, which allow follow-ups and a longer answer when a question needs
-one. A side chat always asks with the chat's own provider, model and agent.
+(`history`, oldest first, at most 100 and 1 MiB), and the server sends them
+after the chat's own history: the first question with the side-question
+instructions, its answer, the next question, and so on. A follow-up therefore
+starts with the previous question's request bytes and reads back the prompt
+cache it wrote. Only the first question carries the instructions, which allow
+follow-ups and a longer answer when a question needs one. A side chat always
+asks with the chat's own provider, model and agent.
+
+Clients send the finished questions, up to 40 of them and 256 KiB of text. A
+longer thread loses its oldest questions 20 at a time, so the first question
+sent stays the same from one trim to the next and the prompt cache still holds
+between trims; the request right after a trim starts the side chat's part of
+the cache afresh (the chat's own part is unaffected), and the side chat no
+longer remembers what was dropped.
 
 ## API
 
@@ -35,8 +42,9 @@ one. A side chat always asks with the chat's own provider, model and agent.
   answer), `text` (replaces it; an attempt after a refused tool call starts
   over with an empty one), and then `done` (`answer`, `inputTokens`,
   `outputTokens`) or `error` (`code`, `message`, `retryable`, as a failed
-  `POST /btw` answers). A missing chat (404), an empty question or a thread
-  with an empty question or answer (400) fail before the stream starts. A
+  `POST /btw` answers). A missing chat (404), an empty question, or a thread
+  with an empty question or answer, more than 100 questions or more than 1 MiB
+  of text (400, saying so) fail before the stream starts. A
   client that goes away ends the provider request. A keepalive comment comes
   every 15 seconds. The SDKs read it with `btwStream` (TypeScript) and
   `btw_stream` (Python); servers that have the route list `btw.stream.v1` in
@@ -63,9 +71,10 @@ of its own for the next question at the bottom.
 
 Each chat has one side chat for as long as the TUI runs; leaving it keeps the
 thread and what you typed. Asking while an answer is still being written is
-refused with a notice, and a `/btw <question>` from the chat meanwhile leaves
-the question in the box. Against a server without `btw.stream.v1` the answer
-arrives in one piece.
+refused with a notice, and a `/btw <question>` from the chat meanwhile adds the
+question to what the box holds. Against a server without `btw.stream.v1` the
+answer arrives in one piece and each question is answered on its own, which
+the thread says once.
 
 ## Desktop
 
@@ -82,28 +91,35 @@ and whether it is open are remembered.
 | Action | How |
 | --- | --- |
 | Ask | `/btw <question>` in the message box: the side chat opens with its box focused. A bare `/btw` just opens it |
-| Open the side chat | **⇧⌘J** (Ctrl+Shift+J elsewhere; change it in **Settings → Keyboard shortcuts**), **Open side chat** in **Search**, the side panel's launcher, or **View → Side chat** |
-| Put it away | **×** at the end of its header, or **⇧⌘J** again from its box; either way the keyboard goes back to the message box. `esc` in an idle box goes back without closing it |
+| Open the side chat | **⇧⌘J** (Ctrl+Shift+J elsewhere; change it in **Settings → Keyboard shortcuts**; it works from a page in the Browser too, never behind an open dialog), **Open side chat** in **Search** or at the top of the chat's **⋯** menu, the side panel's launcher, or **View → Side chat** |
+| Put it away | **×** at the end of its header, or **⇧⌘J** again from its box; either way the keyboard goes back to the message box. `esc` in an idle box goes back without closing it, or puts it away where it covers the workspace |
 | Another thread | **+** in its header, or **New side chat** in **Search** |
 | Stop an answer | The stop key, or `esc` in its box |
-| Close a thread | Its tab's ×, or a middle click. Closing the last one puts the side chat away |
+| Close a thread | Its tab's ×, a middle click, or **⌘W** (Ctrl+W elsewhere) while the keyboard is in the side chat (elsewhere ⌘W still closes the window). Closing the last one puts the side chat away |
 
 The conversation keeps at least 480 pixels and the side panel 360; the side
 chat gives way first, down to 300. Where the three do not fit, the side chat
 and the side panel take turns in one place: whichever was asked for last is in
 front (opening the side panel, or a file from a link, brings it forward;
 `/btw` or ⇧⌘J bring the side chat back), and the other returns when there is
-room. In a window too narrow for the conversation and the side chat, the side
-chat takes the whole workspace, as the side panel does there, until it is put
-away. Previews the agent opens never take its place.
+room. A reload keeps which one was in front. In a window too narrow for the
+conversation and the side chat, the side chat takes the whole workspace, as the
+side panel does there, until it is put away. A preview the agent opens never
+takes its place; one you open yourself does. The new-chat screen has no side
+chat: it comes back with the chat.
 
-Threads are kept per chat (at most 12 per chat, for the 20 chats used most
-recently) and survive a reload, as does what was typed in each box; an answer
-still being written when the window reloads comes back stopped, with Retry.
-An answer keeps streaming while another chat is shown, and the side chat shows
-the chat in front. A chat that has not been started yet has nothing to ask
-about: `/btw` there says to send a first message. Against a server without
-`btw.stream.v1` the answer arrives in one piece.
+Threads are kept per chat and survive a reload, as does what was typed in each
+box; an answer still being written when the window reloads comes back stopped,
+with Retry. They live in files of their own beside Desktop's preferences
+(`side-chats/` in its data folder): at most 12 threads and 256 KiB per chat,
+the oldest questions giving way first, for the 20 chats whose side chats were
+used most recently. Threads with nothing asked and nothing typed are not kept,
+and removing a project forgets its side chats. An answer keeps streaming while
+another chat is shown and while previews or MCP apps load, and the side chat
+shows the chat in front. A chat that has not been started yet has nothing to
+ask about: `/btw` there says to send a first message. Against a server without
+`btw.stream.v1` the answer arrives in one piece and each question is answered
+on its own, which the thread says once.
 
 ## Isolation
 

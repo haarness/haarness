@@ -15,7 +15,6 @@ import {
   sideAdd,
   sideBusy,
   sideHistory,
-  sideRecent,
   sideRemove,
   sideRestore,
   sideStored,
@@ -40,7 +39,6 @@ const loads = new Map<string, Promise<void>>();
 const streams = new Map<string, { key: string; thread: string }>();
 const running = new Map<string, string>();
 const saves = new Map<string, ReturnType<typeof setTimeout>>();
-let recent: Promise<string[]> | undefined;
 /** Which thread's box takes the keyboard next, and when that was asked. */
 const [want, setWant] = createSignal<{ id: string; at: number }>();
 /** Bumped when something asks for the side chat to come on screen. */
@@ -50,7 +48,6 @@ const [emptied, setEmptied] = createSignal(0);
 export const sideChatRequested = shown;
 export const sideChatEmptied = emptied;
 
-const storageKey = (key: string) => "side-chat:" + key;
 /** One chat's side chats: its project connection and the chat. */
 export const sideChatKey = (connection: string, thread: string) => connection + ":" + thread;
 
@@ -95,12 +92,13 @@ function save(key: string) {
     }, 300),
   );
 }
+/** Saving counts as using the chat: the main process keeps the side chats of
+ * the chats used most recently (see main/side-chat-storage.ts). */
 function write(key: string) {
   const chat = store.chats[key];
   if (!chat) return;
   // The store's own objects: its proxies cannot cross to the main process.
-  const value = chat.threads.length ? sideStored(unwrap(chat)) : null;
-  void window.haarness.storage(storageKey(key), value).catch(() => {});
+  void window.haarness.sideChats(key, sideStored(unwrap(chat))).catch(() => {});
 }
 window.addEventListener("pagehide", () => {
   for (const [key, timer] of saves) {
@@ -115,7 +113,7 @@ function load(key: string) {
   let pending = loads.get(key);
   if (!pending) {
     pending = window.haarness
-      .storage(storageKey(key))
+      .sideChats(key)
       .catch(() => null)
       .then((value) => {
         if (!store.chats[key]) setStore("chats", key, sideRestore(value));
@@ -123,18 +121,6 @@ function load(key: string) {
     loads.set(key, pending);
   }
   return pending;
-}
-
-/** Chat `key` was used: it stays among the kept chats, and the oldest beyond them are forgotten. */
-async function used(key: string) {
-  recent ??= window.haarness
-    .storage("side-chat:recent")
-    .then((value) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []))
-    .catch(() => []);
-  const next = sideRecent(await recent, key);
-  recent = Promise.resolve(next.order);
-  void window.haarness.storage("side-chat:recent", next.order).catch(() => {});
-  for (const dropped of next.dropped) void window.haarness.storage(storageKey(dropped), null).catch(() => {});
 }
 
 const index = (key: string, id: string) => store.chats[key]?.threads.findIndex((item) => item.id === id) ?? -1;
@@ -179,7 +165,6 @@ async function ask(key: string, id: string, question: string) {
   const current = thread(key, id);
   if (!current || sideBusy(current)) return;
   listen();
-  void used(key);
   const history = sideHistory(current.turns);
   const at = index(key, id);
   setStore("chats", key, "threads", at, "turns", current.turns.length, { question, answer: "", state: "pending" });
@@ -230,8 +215,17 @@ const answer = (id: string, turn: SideTurn) => (turn.state === "pending" ? (stor
 /** Within this many pixels of the bottom, a growing answer keeps the view pinned to it. */
 const PIN = 32;
 
-/** The side chat: one tab per thread, the thread in front, and its box. */
-export function SideChatPanel(props: { onHide: () => void }) {
+/** Closes the thread in front of chat `connection`/`chat`'s side chat (⌘W inside it). */
+export function closeFrontSideThread(connection: string, chat: string) {
+  const key = sideChatKey(connection, chat);
+  const value = store.chats[key];
+  const id = value?.threads.find((item) => item.id === value.front)?.id ?? value?.threads.at(-1)?.id;
+  if (id) close(key, id);
+}
+
+/** The side chat: one tab per thread, the thread in front, and its box.
+ * `onEscape` is Esc in an idle box. */
+export function SideChatPanel(props: { onHide: () => void; onEscape: () => void }) {
   const app = useApp();
   const key = createMemo(() =>
     app.state.connection && app.state.selected ? sideChatKey(app.state.connection.id, app.state.selected) : undefined,
@@ -287,7 +281,23 @@ export function SideChatPanel(props: { onHide: () => void }) {
     );
   };
   return (
-    <section class="side-chat-panel" data-cycle-panel="side-chat" aria-label={t("Side chat")}>
+    <section
+      class="side-chat-panel"
+      data-cycle-panel="side-chat"
+      aria-label={t("Side chat")}
+      // The window's ⌘W closes the thread in front while the keyboard is here.
+      onFocusIn={() => void window.haarness.sideChatFocus(true).catch(() => {})}
+      onFocusOut={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          void window.haarness.sideChatFocus(false).catch(() => {});
+      }}
+      onKeyDown={(event) => {
+        const mod = app.state.platform === "darwin" ? event.metaKey : event.ctrlKey;
+        if (!mod || event.shiftKey || event.altKey || event.key.toLowerCase() !== "w" || !key()) return;
+        event.preventDefault();
+        closeFrontSideThread(app.state.connection!.id, app.state.selected!);
+      }}
+    >
       <Show
         when={key()}
         fallback={
@@ -352,7 +362,7 @@ export function SideChatPanel(props: { onHide: () => void }) {
               <Hide />
             </header>
             <Show when={front()} keyed>
-              {(id) => <SideThreadView chat={value()} id={id} />}
+              {(id) => <SideThreadView chat={value()} id={id} onEscape={props.onEscape} />}
             </Show>
           </>
         )}
@@ -361,7 +371,10 @@ export function SideChatPanel(props: { onHide: () => void }) {
   );
 }
 
-function SideThreadView(props: { chat: string; id: string }) {
+function SideThreadView(props: { chat: string; id: string; onEscape: () => void }) {
+  const app = useApp();
+  // A server from before side chats answers each question without the ones before it.
+  const alone = () => !app.state.connection?.info.capabilities.includes("btw.stream.v1");
   const current = () => thread(props.chat, props.id);
   const turns = () => current()?.turns ?? [];
   const busy = () => sideBusy(current());
@@ -464,6 +477,9 @@ function SideThreadView(props: { chat: string; id: string }) {
               </div>
             }
           >
+            <Show when={alone()}>
+              <p class="side-chat-note">{t("This server answers each question on its own")}</p>
+            </Show>
             <For each={turns()}>
               {(turn, at) => (
                 <SideTurnView
@@ -513,7 +529,7 @@ function SideThreadView(props: { chat: string; id: string }) {
               event.preventDefault();
               event.stopPropagation();
               if (busy()) stop(props.chat, props.id);
-              else document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+              else props.onEscape();
               return;
             }
             if (event.key !== "Enter" || event.shiftKey || event.altKey) return;

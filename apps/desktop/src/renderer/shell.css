@@ -880,6 +880,10 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   display: none;
 }
 .dock-expanded .side-panel {
+  width: 100%;
+}
+/* Expanded beside the side chat's column, it takes the rest of the row. */
+.workbench.side-column.dock-expanded .side-panel {
   width: auto;
   flex: 1;
 }
