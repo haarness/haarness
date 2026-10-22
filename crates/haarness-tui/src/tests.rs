@@ -2286,6 +2286,48 @@ fn multi_line_tool_output_collapses_without_preview_or_line_count() {
 }
 
 #[test]
+fn a_question_a_hook_answered_says_so_on_its_row() {
+    let thread = fixture_thread();
+    let question = |id: &str, metadata: serde_json::Value, sequence: u64| {
+        vec![
+            message_item(
+                sequence,
+                &thread,
+                ItemData::ToolCall {
+                    call_id: id.into(),
+                    name: "question".into(),
+                    arguments: serde_json::json!({"prompt": format!("Which suite for {id}?")}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            message_item(
+                sequence + 1,
+                &thread,
+                ItemData::ToolResult {
+                    call_id: id.into(),
+                    name: "question".into(),
+                    output: "Unit tests".into(),
+                    is_error: false,
+                    metadata,
+                },
+            ),
+        ]
+    };
+    let mut items = question("hooked", serde_json::json!({"answeredBy": "hook"}), 1);
+    items.extend(question("asked", serde_json::Value::Null, 3));
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text: Vec<String> = app.lines((120, 45)).iter().map(line_text).collect();
+    let row = |id: &str| {
+        text.iter()
+            .find(|line| line.contains(&format!("for {id}?")))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(row("hooked").contains("·  Answered by hook"), "{text:#?}");
+    assert!(!row("asked").contains("Answered by hook"), "{text:#?}");
+}
+
+#[test]
 fn exploratory_results_are_compact_and_expand_beside_their_call() {
     let thread = fixture_thread();
     // Providers can emit all calls first and all results second. The UI must

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item } from "@haarness/sdk";
 import {
+  answeredByHook,
   toolFailed,
   describeTool,
   errorRecovery,
@@ -40,6 +41,14 @@ test("shell exit status is reflected in tool presentation without interpreting o
   assert.equal(toolFailed("read", result), false);
   assert.equal(toolFailed("bash", { ...result, metadata: null }), false);
   assert.equal(toolFailed("read", { ...result, is_error: true }), true);
+});
+
+test("a question a hook answered says so, and only then", () => {
+  const hook = { output: "Unit tests", is_error: false, metadata: { answeredBy: "hook" } };
+  assert.equal(answeredByHook("question", hook), true);
+  assert.equal(answeredByHook("question", { output: "Unit tests", is_error: false }), false);
+  assert.equal(answeredByHook("question", undefined), false);
+  assert.equal(answeredByHook("bash", hook), false);
 });
 
 test("a step's verb never claims it is done before it is", () => {

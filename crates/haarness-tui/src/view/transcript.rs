@@ -1542,8 +1542,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                             _ => None,
                         },
                     ) == Some("chrome");
+                // A question a hook answered was never put to the person,
+                // which the row says as quietly as where a browser step ran.
+                let answered_by_hook = name == "question"
+                    && result.is_some_and(|item| {
+                        matches!(&item.data, ItemData::ToolResult { metadata, .. }
+                            if metadata.get("answeredBy").and_then(serde_json::Value::as_str) == Some("hook"))
+                    });
                 let browser = if chrome {
                     format!("  ·  {}", app.language.text("Chrome"))
+                } else if answered_by_hook {
+                    format!("  ·  {}", app.language.text("Answered by hook"))
                 } else {
                     String::new()
                 };

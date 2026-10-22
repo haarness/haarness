@@ -2227,6 +2227,7 @@
   "Could not open a browser here": "تعذّر فتح متصفح هنا",
   "Haarness browser": "متصفح Haarness",
   "Chrome": "Chrome",
+  "Answered by hook": "أجاب عنه خطاف",
   "Not available in this chat": "غير متاح في هذه المحادثة",
   "Chrome works with projects on the computer where Chrome runs. Open this project on that computer to use it.": "يعمل Chrome مع المشاريع الموجودة على الحاسوب الذي يعمل عليه Chrome. افتح هذا المشروع على ذلك الحاسوب لاستخدامه.",
   "This server cannot use Chrome": "لا يستطيع هذا الخادم استخدام Chrome",

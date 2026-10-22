@@ -534,8 +534,8 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui-xs);
   font-variant-numeric: tabular-nums;
 }
-/* A browser step in the user's own Chrome says so; it sits outside the
-   sweep, so it rests while the step runs. */
+/* A browser step in the user's own Chrome says so, as does a question a
+   hook answered; it sits outside the sweep, so it rests while the step runs. */
 .tool-chip {
   flex: none;
   padding: 0 var(--s1);

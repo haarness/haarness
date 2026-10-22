@@ -157,7 +157,7 @@ The same rule covers the other shell text Haarness runs from configuration. An M
 | --- | --- | --- | --- |
 | `SessionStart` | a chat is created; not a chat started inside another (a task subagent, a workflow's thread or agent), so a slow hook never holds up their first prompt | `source` (`startup`), `agent` | `source` |
 | `UserPromptSubmit` | a root turn starts | `prompt` | — |
-| `PreToolUse` / `PermissionRequest` | before a tool runs / before the user is prompted | `tool_name`, `tool_input`; `PermissionRequest` adds `permission_patterns`, `allow_always` and, when that is true, `always_patterns` and `permission_suggestions` | tool name (Claude aliases accepted) |
+| `PreToolUse` / `PermissionRequest` | before a tool runs (the `question` tool too) / before the user is prompted | `tool_name`, `tool_input`; `PermissionRequest` adds `permission_patterns`, `allow_always` and, when that is true, `always_patterns` and `permission_suggestions` | tool name (Claude aliases accepted) |
 | `PostToolUse` / `PostToolUseFailure` | after a tool finishes | `tool_name`, `tool_input`, `tool_response`, `error` | tool name |
 | `FileChanged` | after a successful `write`, `edit`, `multiedit` or notebook edit | `tool_name`, `tool_input`, `file_path` | tool name |
 | `Stop` | a root turn completed | — | — |
@@ -171,6 +171,16 @@ The same rule covers the other shell text Haarness runs from configuration. An M
 `additionalContext` (top level or in `hookSpecificOutput`) from `UserPromptSubmit` reaches the model with that prompt: it is stored with the turn as a hidden message after the prompt, and later turns replay it as history. It is not added to the system prompt, so a hook that answers differently every turn does not rewrite the provider's cached prompt.
 
 `tool_input` carries the tool's own arguments (`path`, `command`, …). For `PermissionRequest`, `tool_name` is the permission asked (`read`, `edit`, `bash`, `external_directory`, …) and `permission_patterns` what the prompt asks about. A file tool also asks about the file it really opens when links or `..` lead elsewhere, and the hook is asked about that file in a run of its own, with `tool_input.path` set to it: for a link `notes.txt -> .env`, the hook sees `.env`, not `notes.txt`. The prompt is answered only when every run allows it, and a deny in any run refuses it. For the same reason a `PreToolUse` allow, given for the path the tool names, never answers an ask about where that path leads. See [where a file really is](PERMISSIONS-AND-EXECUTION.md#secret-files). A `PermissionRequest` allow that carries an `updatedInput` (in `hookSpecificOutput`, or in `decision` as Claude Code writes it) approves other input than the call asked about, so it does not answer the prompt: the person is asked, and the call runs as the model wrote it if they allow it. Rewrite input in `PreToolUse`, which runs before the rules are checked.
+
+A `PreToolUse` hook with the `question` matcher can answer the agent's question instead of you: it hands back the question's input with `answers` added in `updatedInput`, nobody is asked, and the agent gets that answer as if you had given it. The transcript shows the question with its answer and a quiet **Answered by hook** note, in Desktop and the TUI. A question call asks one question, so `answers` is `[["Unit tests"]]` (one list per question), `["Unit tests"]`, or Claude Code's object keyed by the question text (`{"Which test suite should I run?": "Unit tests"}`). A question that takes several answers takes several (`[["Cheese", "Basil"]]`, or `"Cheese, Basil"` in the object form), and they reach the agent joined with `, ` as Desktop joins them. Return `{}`, or nothing, to leave the question to the person; answers that do not fit (none, several for a question that takes one, more than one list, or one that is not a choice when the question allows no typed answer) are ignored with a log line, and the person is asked. Exit code 2 or a `deny` blocks the question as it blocks any tool. `answers` is never part of the question tool's own input, so the model cannot answer itself. An answer from a hook does not approve anything; use `PermissionRequest` for that.
+
+```bash
+# .haarness/answer-questions.sh, registered for PreToolUse with matcher "question"
+jq 'if .tool_input.prompt == "Which test suite should I run?"
+    then {hookSpecificOutput: {hookEventName: "PreToolUse",
+          updatedInput: (.tool_input + {answers: [["Unit tests"]]})}}
+    else {} end'
+```
 
 A `PermissionRequest` hook answers in `hookSpecificOutput.decision`: `{"behavior": "allow"}` allows once, `{"behavior": "deny", "message": "…"}` refuses, and `{"behavior": "allow", "always": true}` answers **Always**. Claude Code's form of Always is accepted too: an allow whose `updatedPermissions` holds an `addRules` entry with `"behavior": "allow"`, such as the `permission_suggestions` the hook was given handed back unchanged. Print nothing, or `{}`, to leave the prompt to the person; the prompt waits while the hook runs, so give a hook that asks someone elsewhere a `timeout` long enough.
 
