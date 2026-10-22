@@ -2227,6 +2227,7 @@
   "Could not open a browser here": "Не удалось открыть браузер здесь",
   "Haarness browser": "Браузер Haarness",
   "Chrome": "Chrome",
+  "Answered by hook": "Ответ дал хук",
   "Not available in this chat": "Недоступно в этом чате",
   "Chrome works with projects on the computer where Chrome runs. Open this project on that computer to use it.": "Chrome работает с проектами на том компьютере, где запущен Chrome. Чтобы использовать его, откройте этот проект на том компьютере.",
   "This server cannot use Chrome": "Этот сервер не может использовать Chrome",

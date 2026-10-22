@@ -397,6 +397,10 @@ export function ranInChrome(name: string, args: unknown, result?: ToolResult) {
   if (result && !result.is_error) return false;
   return object(args)?.browser === "chrome";
 }
+/** A question a `PreToolUse` hook answered, so nobody was asked. */
+export function answeredByHook(name: string, result?: ToolResult) {
+  return toolName(name) === "question" && object(result?.metadata)?.answeredBy === "hook";
+}
 export function toolFailed(name: string, result?: ToolResult) {
   if (!result) return false;
   if (result.is_error) return true;

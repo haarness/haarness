@@ -6040,6 +6040,51 @@ struct QuestionRequest<'a> {
     custom: bool,
 }
 
+/// A hook's `answers` to one question, as a person's reply reads: the
+/// choices or text it gives, joined with ", " as Desktop joins the answers to
+/// a question that takes several. A question call asks one question, so
+/// `answers` is one list per question (`[["Blue"]]`), the question's answers
+/// (`["Blue"]`) or an object keyed by the question's text (`{"Which color?":
+/// "Blue"}`, several comma-separated). `None` when it does not fit: no
+/// answer, several for a question that takes one, or one that is not a
+/// choice of a question that takes no typed answer.
+fn hook_question_answer(
+    request: &QuestionRequest<'_>,
+    answers: &serde_json::Value,
+) -> Option<String> {
+    let texts = |value: &serde_json::Value| -> Option<Vec<String>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|answer| answer.as_str().map(str::to_owned))
+            .collect()
+    };
+    let given = match answers {
+        serde_json::Value::Array(lists) if lists.len() == 1 && lists[0].is_array() => {
+            texts(&lists[0])?
+        }
+        serde_json::Value::Array(_) => texts(answers)?,
+        serde_json::Value::Object(answers) => match answers.get(request.prompt)? {
+            serde_json::Value::String(text) if request.multiple => {
+                text.split(',').map(str::to_owned).collect()
+            }
+            serde_json::Value::String(text) => vec![text.clone()],
+            list => texts(list)?,
+        },
+        _ => return None,
+    };
+    let given: Vec<String> = given
+        .iter()
+        .map(|answer| answer.trim())
+        .filter(|answer| !answer.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let fits = !given.is_empty()
+        && (request.multiple || given.len() == 1)
+        && (request.custom || given.iter().all(|answer| request.choices.contains(answer)));
+    fits.then(|| given.join(", "))
+}
+
 fn question_request(arguments: &serde_json::Value) -> CoreResult<QuestionRequest<'_>> {
     let prompt = arguments
         .get("prompt")
@@ -8702,14 +8747,7 @@ impl RunnerTask {
             let _ = self.promote_tools([name.to_owned()]);
         }
         if name == "question" {
-            let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
-            let _execution_authority = execution_gate.read().await;
-            if !self.tool_enabled(name) {
-                return Err(CoreError::PermissionDenied(format!(
-                    "tool {name} was disabled by workspace tool availability before execution"
-                )));
-            }
-            return self.ask_question(&arguments).await.map(plain_tool_output);
+            return self.question_call(call_id, arguments).await;
         }
         if name == "task" {
             let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
@@ -9454,6 +9492,82 @@ impl RunnerTask {
         );
         Ok(format!("Todo list updated ({count} items)"))
     }
+    /// The question tool. A `PreToolUse` hook runs first, as for other
+    /// tools: it may block the question, or answer it with `answers` in its
+    /// `updatedInput`, and then nobody is asked and the result records that
+    /// the hook answered (`answeredBy: "hook"`).
+    async fn question_call(
+        &self,
+        call_id: &str,
+        mut arguments: serde_json::Value,
+    ) -> CoreResult<ToolOutput> {
+        let mut answers = None;
+        let mut hook_context = None;
+        if let Some(hooks) = &self.hooks {
+            self.set_status("tool", Some(("question", call_id)));
+            let decision = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                decision = hooks.pre_tool_use(self.thread.id, "question", &arguments) => decision,
+            };
+            if let Some(reason) = decision.block {
+                return Err(CoreError::PermissionDenied(format!(
+                    "blocked by a PreToolUse hook: {reason}"
+                )));
+            }
+            if decision.permission == Some(PermissionDecision::Deny) {
+                return Err(CoreError::PermissionDenied(
+                    "denied by a PreToolUse hook".into(),
+                ));
+            }
+            hook_context = decision.context;
+            if let Some(mut updated) = decision.updated_input {
+                // Only a hook supplies `answers`; the question's own input,
+                // the one the model writes, has no such field.
+                answers = updated
+                    .as_object_mut()
+                    .and_then(|input| input.remove("answers"));
+                self.validate_tool_arguments("question", &updated)?;
+                arguments = updated;
+            }
+        }
+        let execution_gate = tool_execution_gate(&self.tool_execution_gates, "question");
+        let _execution_authority = execution_gate.read().await;
+        if !self.tool_enabled("question") {
+            return Err(CoreError::PermissionDenied(
+                "tool question was disabled by workspace tool availability before execution".into(),
+            ));
+        }
+        let answered = match &answers {
+            Some(answers) => hook_question_answer(&question_request(&arguments)?, answers),
+            None => None,
+        };
+        let mut output = if let Some(answer) = answered {
+            tracing::info!(thread = %self.thread.id, call_id, "a PreToolUse hook answered a question");
+            ToolOutput {
+                text: answer,
+                metadata: json!({"answeredBy": "hook"}),
+            }
+        } else {
+            if answers.is_some() {
+                tracing::warn!(
+                    thread = %self.thread.id,
+                    call_id,
+                    "a PreToolUse hook's answers do not fit the question; asking instead"
+                );
+            }
+            plain_tool_output(self.ask_question(&arguments).await?)
+        };
+        if let Some(context) = hook_context {
+            use std::fmt::Write as _;
+            let _ = write!(
+                output.text,
+                "\n\n<hook-context>\n{context}\n</hook-context>"
+            );
+        }
+        Ok(output)
+    }
+
     async fn ask_question(&self, arguments: &serde_json::Value) -> CoreResult<String> {
         let QuestionRequest {
             prompt,
@@ -12833,8 +12947,8 @@ mod tests {
 
     use super::{
         CoreError, EventBus, GoalLogicalTurnGuard, Item, ItemData, PendingQuestion,
-        ProviderMessage, parse_goal_criteria_selection, provider_messages, question_request,
-        resolve_pending_question, subagent_title,
+        ProviderMessage, hook_question_answer, parse_goal_criteria_selection, provider_messages,
+        question_request, resolve_pending_question, subagent_title,
     };
 
     #[test]
@@ -12912,6 +13026,61 @@ mod tests {
             question_request(&json!({"choices": ["Green"]})),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_hooks_answers_must_fit_the_question() {
+        let single = json!({"prompt": "Which suite?", "choices": ["Unit tests", "Full suite"]});
+        let single = question_request(&single).unwrap();
+        for answers in [
+            json!([["Unit tests"]]),
+            json!(["Unit tests"]),
+            json!({"Which suite?": "Unit tests"}),
+            json!({"Which suite?": ["Unit tests"]}),
+            json!([[" Unit tests "]]),
+        ] {
+            assert_eq!(
+                hook_question_answer(&single, &answers).as_deref(),
+                Some("Unit tests"),
+                "{answers}"
+            );
+        }
+        // Free-form answers are open unless the question turns them off.
+        assert_eq!(
+            hook_question_answer(&single, &json!([["Only the parser"]])).as_deref(),
+            Some("Only the parser")
+        );
+        for answers in [
+            json!([]),
+            json!([[]]),
+            json!([[""]]),
+            json!([["Unit tests"], ["Full suite"]]),
+            json!(["Unit tests", "Full suite"]),
+            json!([[1]]),
+            json!("Unit tests"),
+            json!({"Another question?": "Unit tests"}),
+            json!(null),
+        ] {
+            assert_eq!(hook_question_answer(&single, &answers), None, "{answers}");
+        }
+        let closed = json!({"prompt": "Color?", "choices": ["Red", "Blue"], "custom": false});
+        let closed = question_request(&closed).unwrap();
+        assert_eq!(hook_question_answer(&closed, &json!([["Green"]])), None);
+        assert_eq!(
+            hook_question_answer(&closed, &json!([["Blue"]])).as_deref(),
+            Some("Blue")
+        );
+        let several =
+            json!({"prompt": "Toppings?", "choices": ["Cheese", "Basil"], "multiple": true});
+        let several = question_request(&several).unwrap();
+        assert_eq!(
+            hook_question_answer(&several, &json!([["Cheese", "Basil"]])).as_deref(),
+            Some("Cheese, Basil")
+        );
+        assert_eq!(
+            hook_question_answer(&several, &json!({"Toppings?": "Cheese, Basil"})).as_deref(),
+            Some("Cheese, Basil")
+        );
     }
 
     #[test]

@@ -2227,6 +2227,7 @@
   "Could not open a browser here": "無法在此開啟瀏覽器",
   "Haarness browser": "Haarness 瀏覽器",
   "Chrome": "Chrome",
+  "Answered by hook": "由掛鉤回答",
   "Not available in this chat": "此對話中無法使用",
   "Chrome works with projects on the computer where Chrome runs. Open this project on that computer to use it.": "Chrome 只能搭配執行 Chrome 的那台電腦上的專案使用。請在那台電腦上開啟此專案來使用。",
   "This server cannot use Chrome": "此伺服器無法使用 Chrome",

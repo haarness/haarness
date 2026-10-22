@@ -1012,3 +1012,153 @@ async fn a_permission_request_hook_cannot_answer_always_for_an_edit_of_haarness_
     .expect("the turn ends");
     assert!(!fixture.root.join("haarness.json").exists());
 }
+
+/// A `PreToolUse` hook that answers every question with `answers`, copying
+/// the question's input as a real hook does.
+struct AnswersQuestions(Value);
+#[async_trait]
+impl HookPort for AnswersQuestions {
+    async fn pre_tool_use(&self, _: ThreadId, tool: &str, arguments: &Value) -> HookDecision {
+        if tool != "question" {
+            return HookDecision::default();
+        }
+        let mut updated = arguments.clone();
+        updated["answers"] = self.0.clone();
+        HookDecision {
+            updated_input: Some(updated),
+            context: Some("answered from the project's policy".into()),
+            ..HookDecision::default()
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+fn question() -> ProviderEvent {
+    call(
+        "ask",
+        "question",
+        json!({"prompt": "Which test suite should I run?", "choices": ["Unit tests", "Full suite"]}),
+    )
+}
+
+#[tokio::test]
+async fn a_pre_tool_use_hook_answers_a_question_without_asking() {
+    let fixture = Fixture::with_hooks(
+        RuntimeConfig::default(),
+        Some(Arc::new(AnswersQuestions(json!([["Unit tests"]])))),
+    );
+    let items = fixture.run(vec![vec![question()]]).await;
+    let result = items
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::ToolResult {
+                name,
+                output,
+                is_error: false,
+                metadata,
+                ..
+            } if name == "question" => Some((output.clone(), metadata.clone())),
+            _ => None,
+        })
+        .expect("the question has a result");
+    assert!(result.0.starts_with("Unit tests"), "{}", result.0);
+    assert!(result.0.contains("answered from the project's policy"));
+    assert_eq!(result.1, json!({"answeredBy": "hook"}));
+    // Nobody was asked: no question was recorded or left waiting.
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Question { .. })),
+        "{items:?}"
+    );
+    assert!(fixture.runtime.pending_questions().is_empty());
+}
+
+#[tokio::test]
+async fn answers_that_do_not_fit_leave_the_question_to_the_person() {
+    let fixture = Fixture::with_hooks(
+        RuntimeConfig::default(),
+        Some(Arc::new(AnswersQuestions(json!([
+            ["Unit tests"],
+            ["Full suite"]
+        ])))),
+    );
+    *fixture.provider.rounds.lock().unwrap() = vec![vec![question()]].into();
+    let thread = fixture.thread().await;
+    fixture
+        .runtime
+        .start_turn(
+            thread,
+            StartTurnRequest {
+                request_id: RequestId::new(),
+                text: "Ask which suite".into(),
+                attachments: vec![],
+                synthetic: false,
+                auto_approve: false,
+                agent: None,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                tools: None,
+                command: None,
+            },
+        )
+        .await
+        .unwrap();
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pending) = fixture.runtime.pending_questions().pop() {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the person is asked");
+    fixture
+        .runtime
+        .reply_question(
+            &pending.question_id,
+            haarness_protocol::QuestionReply {
+                answer: "Full suite".into(),
+            },
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+    let items = fixture.runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            ItemData::ToolResult { name, output, metadata, .. }
+                if name == "question" && output.starts_with("Full suite") && metadata.is_null())),
+        "{items:?}"
+    );
+}
