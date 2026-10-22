@@ -2326,13 +2326,14 @@ fn event_stream(
         // from a cursor with nothing to replay would wait for the keepalive.
         yield Ok(Event::default().comment("connected"));
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
-        for event in subscription.replay { if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); } }
+        let mut scope = crate::remote_scope::EventScope::new(root);
+        for event in subscription.replay { if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); } }
         let mut live=BroadcastStream::new(subscription.receiver);
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 event = live.next() => match event {
-                    Some(Ok(event)) => if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); },
+                    Some(Ok(event)) => if scope.allows(&event, &state.runtime).await { yield Ok(to_sse(&event)); },
                     Some(Err(_)) => yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}")),
                     None => break,
                 }
