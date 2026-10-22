@@ -67,6 +67,8 @@ export function SessionActions(props: {
             ? app
                 .searchCommands()
                 .filter((entry) => entry.key.startsWith("conversation:"))
+                // The side chat leads, as it does in the header's menu elsewhere.
+                .sort((a, b) => Number(b.key === "conversation:side-chat") - Number(a.key === "conversation:side-chat"))
                 .map((entry) => ({
                   label: entry.name,
                   icon: entry.icon,

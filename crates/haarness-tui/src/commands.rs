@@ -2735,19 +2735,8 @@ impl App {
                 self.execute_workflow_command(arguments, client).await?;
             }
             "btw" => {
-                if arguments.is_empty() {
-                    self.notice = "Usage: /btw <side question>".into();
-                } else {
-                    let response = client.btw(self.thread.id, arguments.to_owned()).await?;
-                    self.open_overlay(Overlay::Panel {
-                        title: "BTW · isolated read-only answer".into(),
-                        lines: response.answer.lines().map(str::to_owned).collect(),
-                    });
-                    self.notice = format!(
-                        "BTW answer · transcript unchanged · {} input / {} output tokens",
-                        response.input_tokens, response.output_tokens
-                    );
-                }
+                // A bare /btw opens the side chat, where the question is typed.
+                self.open_side_chat(Some(arguments.to_owned()), client);
             }
             "themes" => {
                 if arguments.is_empty() {

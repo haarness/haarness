@@ -3,7 +3,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
-from haarness_sdk import Haarness, AsyncHaarness, ApiError, attachments
+from haarness_sdk import Haarness, AsyncHaarness, ApiError, TransportError, attachments
 
 
 def test_media_twenty_mib_aggregate_boundary(tmp_path):
@@ -67,6 +67,21 @@ def endpoint():
         def do_POST(self):
             data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             calls.append((self.path, dict(self.headers), data))
+            if self.path.endswith("/btw/stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                frames = (
+                    ': connected\n\ndata: {"type":"delta","text":"An "}\r\n\r\n'
+                    'data: {"type":"delta","text":"answer"}\n\n'
+                    'data: {"type":"done","answer":"An answer","inputTokens":7,"outputTokens":3}\n\n'
+                )
+                if json.loads(data)["question"] == "half":
+                    frames = 'data: {"type":"delta","text":"half"}\n\n'
+                for byte in frames.encode():
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                return
             self.send_response(204)
             self.end_headers()
 
@@ -280,3 +295,23 @@ def test_a_pty_ping_says_whether_the_server_answers():
         assert pty.ping(2)
         pty.close()
         server.shutdown()
+
+
+def test_streamed_side_questions(endpoint):
+    url, calls = endpoint
+    history = [{"question": "What?", "answer": "That."}]
+    with Haarness(url, token="fixture") as client:
+        events = list(client.btw_stream("t/1", {"question": "Why?", "history": history}))
+        assert [event["type"] for event in events] == ["delta", "delta", "done"]
+        assert events[-1]["answer"] == "An answer"
+        assert calls[-1][0] == "/v1/threads/t%2F1/btw/stream"
+        assert json.loads(calls[-1][2])["history"] == history
+        with pytest.raises(TransportError, match="ended before it finished"):
+            list(client.btw_stream("t", {"question": "half"}))
+
+    async def scenario():
+        async with AsyncHaarness(url, token="fixture") as client:
+            events = [event async for event in client.btw_stream("t", {"question": "Why?"})]
+            assert events[-1] == {"type": "done", "answer": "An answer", "inputTokens": 7, "outputTokens": 3}
+
+    asyncio.run(scenario())

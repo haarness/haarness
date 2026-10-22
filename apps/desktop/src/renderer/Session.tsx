@@ -40,6 +40,7 @@ import {
   remoteAliases,
   remoteCommand,
 } from "./remote-control";
+import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
@@ -413,6 +414,7 @@ export function Session() {
           { name: "language", description: t("select_language"), template: "" },
           { name: "settings", description: t("Open settings"), template: "" },
           { name: "input-mode", description: `${t("Toggle project Steer/Queue")} · /input-mode [steer|queue|toggle|reset]`, template: "" },
+          { name: "btw", description: t("Ask a read-only side question without changing this transcript"), template: "" },
           {
             name: "remote-control",
             description: `${t("Continue this chat from your phone or any browser")} · /rc`,
@@ -423,7 +425,7 @@ export function Session() {
           ...state.commands.filter(
             (item) =>
               item.name !== "language" && item.name !== "memory" && item.name !== "settings" && item.name !== "input-mode" &&
-              item.name !== "remote-control" &&
+              item.name !== "remote-control" && item.name !== "btw" &&
               !historyCommands.some((command) => command.name === item.name),
           ),
         ]
@@ -1386,6 +1388,17 @@ export function Session() {
         throw new Error(t("Share the chat that started this agent; its agents come with it."));
       change("");
       app.openRemoteControl(action);
+      return;
+    }
+    // /btw asks in the side chat, its own panel beside the chat; a bare
+    // /btw just opens it. The chat itself never sees either.
+    const side = btwQuestion(draft());
+    if (side !== undefined) {
+      if (!state.connection) return;
+      if (!state.selected)
+        throw new Error(t("Send a first message, then ask side questions with /btw."));
+      change("");
+      await openSideChat({ connection: state.connection.id, chat: state.selected, question: side });
       return;
     }
     const localCommand = /^\/(settings|input-mode|language)(?:\s+([\s\S]*))?$/.exec(draft().trim());

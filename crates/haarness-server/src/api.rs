@@ -19,18 +19,18 @@ use futures::Stream;
 use haarness_core::{AgentRuntime, CoreError, McpRegistry, SkillRegistry};
 use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
-    AgentProfile, ApiDoc, ApiError, BackgroundTaskInfo, BtwRequest, BtwResponse, CloudAgentInput,
-    CloudChatInput, CloudScheduleInput, CloudSessionInput, CommandExecutionResponse,
-    CompactRequest, CreateThreadRequest, EventEnvelope, ExecuteCommandRequest, FileDiff,
-    ForkThreadRequest, GoalActionRequest, GoalActionResponse, LazyToolSettingsUpdate,
-    McpConfigureRequest, McpServerInfo, PTY_CAPABILITY, PendingPermissionInfo, PendingQuestionInfo,
-    PermissionReply, PluginActionRequest, PluginInfo, ProviderInfo, PtyCreateRequest, PtyId,
-    PtyInfo, PtyUpdateRequest, QuestionReply, QueueInputRequest, QueueInputResponse, ReviewFile,
-    SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY, ServerInfo, SessionArchive,
-    SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo, StartTurnRequest, Thread,
-    ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId,
-    UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId,
-    WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
+    AgentProfile, ApiDoc, ApiError, BTW_STREAM_CAPABILITY, BackgroundTaskInfo, BtwEvent,
+    BtwRequest, BtwResponse, CloudAgentInput, CloudChatInput, CloudScheduleInput,
+    CloudSessionInput, CommandExecutionResponse, CompactRequest, CreateThreadRequest,
+    EventEnvelope, ExecuteCommandRequest, FileDiff, ForkThreadRequest, GoalActionRequest,
+    GoalActionResponse, LazyToolSettingsUpdate, McpConfigureRequest, McpServerInfo, PTY_CAPABILITY,
+    PendingPermissionInfo, PendingQuestionInfo, PermissionReply, PluginActionRequest, PluginInfo,
+    ProviderInfo, PtyCreateRequest, PtyId, PtyInfo, PtyUpdateRequest, QuestionReply,
+    QueueInputRequest, QueueInputResponse, ReviewFile, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
+    ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo,
+    StartTurnRequest, Thread, ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate,
+    Turn, TurnId, UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY,
+    WorkflowId, WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
     WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
     WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
     WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
@@ -269,7 +269,16 @@ pub async fn serve_with_access(
             "/threads/{id}/input/queue",
             get(input_queue).post(change_input_queue),
         )
-        .route("/threads/{id}/btw", post(btw))
+        // Room for a side chat's whole thread, so one that has grown too long
+        // is refused with a reason (400) rather than for its size alone (413).
+        .route(
+            "/threads/{id}/btw",
+            post(btw).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/threads/{id}/btw/stream",
+            post(btw_stream).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/threads/{id}/compact", post(compact))
         .route("/threads/{id}/goal", get(get_goal).post(set_goal))
         .route(
@@ -778,6 +787,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             "skills".into(),
             "subagents".into(),
             "btw.v1".into(),
+            BTW_STREAM_CAPABILITY.into(),
             "projects.v1".into(),
             "workspaces.v1".into(),
             WORKSPACE_CLEANUP_CAPABILITY.into(),
@@ -1466,6 +1476,72 @@ async fn btw(
     Json(request): Json<BtwRequest>,
 ) -> ApiResult<Json<BtwResponse>> {
     Ok(Json(state.runtime.btw(id, request).await?))
+}
+/// A side question whose answer streams as it is written (see [`BtwEvent`]).
+/// A missing chat or a bad request fails before the stream starts; a client
+/// that goes away ends the provider request.
+async fn btw_stream(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+    Json(request): Json<BtwRequest>,
+) -> ApiResult<Response> {
+    state.runtime.check_btw(id, &request).await?;
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let runtime = Arc::clone(&state.runtime);
+    let token = cancel.clone();
+    let work = tokio::spawn(async move {
+        let progress = sender.clone();
+        let result = runtime
+            .btw_streaming(id, request, token, move |event| {
+                let _ = progress.send(event);
+            })
+            .await;
+        let _ = sender.send(match result {
+            Ok(answer) => BtwEvent::Done {
+                answer: answer.answer,
+                input_tokens: answer.input_tokens,
+                output_tokens: answer.output_tokens,
+            },
+            Err(error) => {
+                let (_, code, retryable) = failure_parts(&error);
+                BtwEvent::Error {
+                    code: code.into(),
+                    message: error.to_string(),
+                    retryable,
+                }
+            }
+        });
+    });
+    let guard = (AbortOnDrop(work), cancel.drop_guard());
+    let output = stream! {
+        let _guard = guard;
+        // A first byte at once, as on /v1/events: some clients and proxies
+        // hold a streaming response until its body starts.
+        yield Ok::<_, Infallible>(Event::default().comment("connected"));
+        while let Some(event) = receiver.recv().await {
+            let last = matches!(event, BtwEvent::Done { .. } | BtwEvent::Error { .. });
+            yield Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default()));
+            if last {
+                break;
+            }
+        }
+    };
+    Ok((
+        [
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (
+                axum::http::HeaderName::from_static("x-accel-buffering"),
+                "no",
+            ),
+        ],
+        Sse::new(output).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        ),
+    )
+        .into_response())
 }
 async fn active_turn(
     State(state): State<ServerState>,
@@ -2516,25 +2592,25 @@ impl From<CoreError> for ApiFailure {
         Self(value, None)
     }
 }
+/// The status, code and retryable flag a request failing with `error` answers with.
+fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
+    match error {
+        CoreError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found", false),
+        CoreError::Conflict(_) => (StatusCode::CONFLICT, "conflict", true),
+        CoreError::PermissionDenied(_) => (StatusCode::FORBIDDEN, "permission_denied", false),
+        CoreError::PermissionRejected(_) => (StatusCode::FORBIDDEN, "permission_rejected", false),
+        CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
+        CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
+        CoreError::ProviderBlocked(_) => (StatusCode::BAD_GATEWAY, "provider_blocked", false),
+        CoreError::ProviderIncomplete(_) => (StatusCode::BAD_GATEWAY, "provider_incomplete", true),
+        CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
+        CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
+        CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),
+    }
+}
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
-        let (status, code, retryable) = match &self.0 {
-            CoreError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found", false),
-            CoreError::Conflict(_) => (StatusCode::CONFLICT, "conflict", true),
-            CoreError::PermissionDenied(_) => (StatusCode::FORBIDDEN, "permission_denied", false),
-            CoreError::PermissionRejected(_) => {
-                (StatusCode::FORBIDDEN, "permission_rejected", false)
-            }
-            CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
-            CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
-            CoreError::ProviderBlocked(_) => (StatusCode::BAD_GATEWAY, "provider_blocked", false),
-            CoreError::ProviderIncomplete(_) => {
-                (StatusCode::BAD_GATEWAY, "provider_incomplete", true)
-            }
-            CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
-            CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
-            CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),
-        };
+        let (status, code, retryable) = failure_parts(&self.0);
         (
             status,
             Json(ApiError {

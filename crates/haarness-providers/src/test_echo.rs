@@ -112,13 +112,33 @@ impl ModelProvider for EchoProvider {
         }
 
         let mut events = Vec::new();
+        // A side question scripts against the question itself, and its reply
+        // names the side chat's previous question, so a client test can see
+        // that a follow-up carried its thread.
+        let side = side_question(&prompt).map(|question| {
+            let earlier = request
+                .messages
+                .iter()
+                .rev()
+                .skip(1)
+                .find_map(|message| match message {
+                    ProviderMessage::Text { role, content } if role == "user" => {
+                        side_question(content)
+                    }
+                    _ => None,
+                });
+            (question, earlier)
+        });
         // Goal pursuit prepends a hidden user-role doctrine to the real user
         // text. A real model follows the trailing request; keep the
         // deterministic provider equally useful for goal/tmux coverage by
         // scripting against that request instead of the doctrine envelope.
-        let directive = prompt
-            .rsplit_once("</goal-harness>\n\n")
-            .map_or_else(|| prompt.trim_start(), |(_, request)| request.trim_start());
+        let directive = match &side {
+            Some((question, _)) => question.as_str(),
+            None => prompt
+                .rsplit_once("</goal-harness>\n\n")
+                .map_or_else(|| prompt.trim_start(), |(_, request)| request.trim_start()),
+        };
         // `!linger <ms> <directive>` keeps the turn running that long before
         // its final reply, so a client can observe live state (a plan, an
         // activity line) without parking the turn on a prompt.
@@ -305,6 +325,11 @@ impl ModelProvider for EchoProvider {
                 let _ = writeln!(body, "line {line} marker-{line}");
             }
             events.push(Ok(ProviderEvent::TextDelta(body)));
+        } else if let Some((_, earlier)) = &side {
+            events.push(Ok(ProviderEvent::TextDelta(match earlier {
+                Some(earlier) => format!("Echo: {directive} (after: {earlier})"),
+                None => format!("Echo: {directive}"),
+            })));
         } else {
             events.push(Ok(ProviderEvent::TextDelta(format!("Echo: {prompt}"))));
         }
@@ -336,6 +361,13 @@ impl ModelProvider for EchoProvider {
         }
         Ok(Box::pin(stream::iter(events)))
     }
+}
+
+/// The question of a side question's prompt (`<btw-side-question>`).
+fn side_question(prompt: &str) -> Option<String> {
+    let rest = prompt.strip_prefix("<btw-side-question>\n")?;
+    let (question, _) = rest.split_once("\n</btw-side-question>")?;
+    Some(question.to_owned())
 }
 
 fn parse_tool_script(script: &str) -> (String, serde_json::Value) {
@@ -533,6 +565,38 @@ mod tests {
         assert!(matches!(
             &reasoned[1],
             ProviderEvent::TextDelta(text) if text == "Reasoned reply"
+        ));
+    }
+
+    #[tokio::test]
+    async fn side_questions_echo_the_question_and_name_the_one_before() {
+        let first = "<btw-side-question>\nWhat changed?\n</btw-side-question>\n\nAnswer using…";
+        let alone = events(vec![user("main prompt"), user(first)]).await;
+        assert!(matches!(
+            &alone[0],
+            ProviderEvent::TextDelta(text) if text == "Echo: What changed?"
+        ));
+        let follow = events(vec![
+            user(first),
+            ProviderMessage::Text {
+                role: "assistant".into(),
+                content: "Echo: What changed?".into(),
+            },
+            user("<btw-side-question>\n::md\n</btw-side-question>"),
+        ])
+        .await;
+        assert!(matches!(
+            &follow[0],
+            ProviderEvent::TextDelta(text) if text.contains("**bold**")
+        ));
+        let again = events(vec![
+            user(first),
+            user("<btw-side-question>\nAnd why?\n</btw-side-question>"),
+        ])
+        .await;
+        assert!(matches!(
+            &again[0],
+            ProviderEvent::TextDelta(text) if text == "Echo: And why? (after: What changed?)"
         ));
     }
 

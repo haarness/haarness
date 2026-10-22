@@ -11,7 +11,7 @@ from typing import Any, Iterator, AsyncIterator
 from urllib.parse import quote, urlsplit
 import httpx
 from typing_extensions import TypedDict, Self
-from .types import EventEnvelope
+from .types import BtwEvent, BtwRequest, EventEnvelope
 
 _MISSING = object()
 
@@ -274,6 +274,45 @@ class Transport(Base):
                 return
             time.sleep(max(0.01, retry_seconds))
 
+    def btw_stream(
+        self, id: str, body: BtwRequest, *, idle_timeout: float = 45.0
+    ) -> Iterator[BtwEvent]:
+        """POST /v1/threads/{id}/btw/stream: a side question whose answer
+        streams as it is written. ``delta`` extends the answer, ``text``
+        replaces it, and the iterator ends after ``done`` or ``error``. Closing
+        it stops the answer. A connection that sends nothing for
+        ``idle_timeout`` seconds (three of the server's keepalives) fails with
+        a ``TransportError``. The request is never sent twice.
+        """
+        try:
+            with self._http.stream(
+                "POST",
+                self.base_url + f"/v1/threads/{self.segment(id)}/btw/stream",
+                headers={**self._headers(), "Accept": "text/event-stream"},
+                json=body,
+                timeout=httpx.Timeout(self._timeout, read=idle_timeout),
+            ) as response:
+                if not response.is_success:
+                    response.read()
+                    decode(response)
+                data: list[str] = []
+                for line in response.iter_lines():
+                    if line.startswith("data:"):
+                        data.append(line[5:].removeprefix(" "))
+                    elif not line and data:
+                        event = json.loads("\n".join(data))
+                        data = []
+                        yield event
+                        if event["type"] in ("done", "error"):
+                            return
+        except httpx.ReadTimeout as error:
+            raise TransportError(
+                f"The side question sent nothing for {idle_timeout} s"
+            ) from error
+        except httpx.HTTPError as error:
+            raise TransportError("Side question stream failed") from error
+        raise TransportError("The answer ended before it finished")
+
 
 class AsyncTransport(Base):
     def __init__(
@@ -397,3 +436,36 @@ class AsyncTransport(Base):
             if not reconnect:
                 return
             await asyncio.sleep(max(0.01, retry_seconds))
+
+    async def btw_stream(
+        self, id: str, body: BtwRequest, *, idle_timeout: float = 45.0
+    ) -> AsyncIterator[BtwEvent]:
+        """See ``Transport.btw_stream``."""
+        try:
+            async with self._http.stream(
+                "POST",
+                self.base_url + f"/v1/threads/{self.segment(id)}/btw/stream",
+                headers={**self._headers(), "Accept": "text/event-stream"},
+                json=body,
+                timeout=httpx.Timeout(self._timeout, read=idle_timeout),
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    decode(response)
+                data: list[str] = []
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        data.append(line[5:].removeprefix(" "))
+                    elif not line and data:
+                        event = json.loads("\n".join(data))
+                        data = []
+                        yield event
+                        if event["type"] in ("done", "error"):
+                            return
+        except httpx.ReadTimeout as error:
+            raise TransportError(
+                f"The side question sent nothing for {idle_timeout} s"
+            ) from error
+        except httpx.HTTPError as error:
+            raise TransportError("Side question stream failed") from error
+        raise TransportError("The answer ended before it finished")

@@ -3,8 +3,8 @@
 use anyhow::{Context as _, Result};
 use futures::{SinkExt, StreamExt};
 use haarness_protocol::{
-    AgentProfile, BtwRequest, BtwResponse, CommandExecutionResponse, CompactRequest,
-    CreateThreadRequest, EventEnvelope, ExecuteCommandRequest, FileDiff, Item,
+    AgentProfile, BtwEvent, BtwRequest, BtwResponse, BtwTurn, CommandExecutionResponse,
+    CompactRequest, CreateThreadRequest, EventEnvelope, ExecuteCommandRequest, FileDiff, Item,
     LazyToolSettingsUpdate, McpServerInfo, PermissionReply, PtyCreateRequest, PtyId, PtyInfo,
     PtyStatus, PtyUpdateRequest, QuestionReply, ReviewFile, SessionArchive,
     SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo, StartTurnRequest, Thread,
@@ -300,6 +300,19 @@ fn parse_sse_frame(frame: &[u8]) -> Option<SubscriptionEvent> {
         .ok()
         .map(Box::new)
         .map(SubscriptionEvent::Event)
+}
+
+/// The event of one streamed side question frame; comments and keepalives
+/// carry none.
+fn btw_frame(frame: &[u8]) -> Option<BtwEvent> {
+    let frame = String::from_utf8_lossy(frame);
+    let data = frame
+        .lines()
+        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_json::from_str(&data).ok()
 }
 
 fn encode_url_component(value: &str) -> String {
@@ -1406,12 +1419,17 @@ impl ApiClient {
         &self,
         id: haarness_protocol::ThreadId,
         question: String,
+        history: Vec<BtwTurn>,
     ) -> Result<BtwResponse> {
         Ok(checked_response(
             self.request(reqwest::Method::POST, &format!("/v1/threads/{id}/btw"))
+                // A side question waits for the whole answer, which takes
+                // longer than the usual request deadline.
+                .timeout(Duration::from_secs(310))
                 .json(&BtwRequest {
                     question,
                     request_id: haarness_protocol::RequestId::new(),
+                    history,
                 })
                 .send()
                 .await?,
@@ -1419,6 +1437,64 @@ impl ApiClient {
         .await?
         .json()
         .await?)
+    }
+
+    /// A side question whose answer streams as it is written: `delta` and
+    /// `text` events, then `done` or `error`. Dropping the stream stops the
+    /// answer. A connection silent for three keepalives counts as lost.
+    pub async fn btw_stream(
+        &self,
+        id: haarness_protocol::ThreadId,
+        question: String,
+        history: Vec<BtwTurn>,
+    ) -> Result<futures::stream::BoxStream<'static, Result<BtwEvent>>> {
+        let endpoint = self.endpoint();
+        let response = checked_response(
+            endpoint
+                .stream_client
+                .post(format!("{}/v1/threads/{id}/btw/stream", endpoint.base))
+                .headers(trace_headers())
+                .json(&BtwRequest {
+                    question,
+                    request_id: haarness_protocol::RequestId::new(),
+                    history,
+                })
+                .send()
+                .await?,
+        )
+        .await?;
+        let idle = self.stream_idle;
+        let state = (response.bytes_stream().boxed(), Vec::new(), false);
+        Ok(
+            futures::stream::unfold(state, move |(mut bytes, mut buffer, ended)| async move {
+                if ended {
+                    return None;
+                }
+                loop {
+                    if let Some(index) = buffer.windows(2).position(|window| window == b"\n\n") {
+                        let frame: Vec<u8> = buffer.drain(..index + 2).collect();
+                        if let Some(event) = btw_frame(&frame) {
+                            let last =
+                                matches!(event, BtwEvent::Done { .. } | BtwEvent::Error { .. });
+                            return Some((Ok(event), (bytes, buffer, last)));
+                        }
+                        continue;
+                    }
+                    let failure = match tokio::time::timeout(idle, bytes.next()).await {
+                        Ok(Some(Ok(chunk))) => {
+                            buffer.extend_from_slice(&chunk);
+                            continue;
+                        }
+                        Ok(Some(Err(error))) => anyhow::Error::new(error.without_url())
+                            .context("The side question's connection failed"),
+                        Ok(None) => anyhow::anyhow!("The answer ended before it finished."),
+                        Err(_) => anyhow::anyhow!("The side question's connection went quiet."),
+                    };
+                    return Some((Err(failure), (bytes, buffer, true)));
+                }
+            })
+            .boxed(),
+        )
     }
     pub async fn skills(&self) -> Result<Vec<SkillInfo>> {
         self.get("/v1/skills").await

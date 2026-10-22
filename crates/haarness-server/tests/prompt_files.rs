@@ -279,6 +279,7 @@ async fn prompt_files_reach_every_request_that_sends_their_prompt() {
             BtwRequest {
                 request_id: RequestId::new(),
                 question: "Why?".into(),
+                history: Vec::new(),
             },
         )
         .await;

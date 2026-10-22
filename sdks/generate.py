@@ -304,7 +304,7 @@ def specification():
             "connect_browser_extension_host",
         ):
             operation["stream"] = "websocket"
-        if name == "events":
+        if name in ("events", "btw_stream"):
             operation["stream"] = "sse"
         operations.append(operation)
         entry = {
@@ -374,6 +374,11 @@ def specification():
                 "101" if name == "connect_pty" else "200": {
                     "description": operation["stream"] + " stream"
                 }
+            }
+        if name == "btw_stream":
+            # One BtwEvent per event, ending with done or error.
+            entry["responses"]["200"]["content"] = {
+                "text/event-stream": {"schema": ref("BtwEvent")}
             }
         status = {
             "create_thread": "201",

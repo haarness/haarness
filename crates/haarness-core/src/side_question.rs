@@ -91,6 +91,19 @@ pub(crate) fn settled(mut messages: Vec<ProviderMessage>) -> Vec<ProviderMessage
     messages
 }
 
+/// A side question as the model reads it. The first question of a side chat
+/// carries the instructions; its follow-ups are the question alone, since the
+/// instructions are already in the request before them.
+pub(crate) fn prompt(question: &str, first: bool) -> String {
+    let question = question.trim();
+    if !first {
+        return format!("<btw-side-question>\n{question}\n</btw-side-question>");
+    }
+    format!(
+        "<btw-side-question>\n{question}\n</btw-side-question>\n\nAnswer using the supplied conversation snapshot. This is an isolated read-only side question. Tool schemas describe the main task but every tool call here is refused. Do not invoke tools or continue the main task. Return only the answer, concise unless the question needs more. More side questions may follow; earlier ones and your answers are context for the next."
+    )
+}
+
 /// The system prompt: the agent's scaffold plus standing instructions, with
 /// `ultracode` the Ultracode section of an Ultracode turn. The memory index
 /// and hook context change between turns, so they reach the model as stored
@@ -144,6 +157,17 @@ mod tests {
             attachments: vec![],
         }
     }
+    #[test]
+    fn only_a_side_chats_first_question_carries_the_instructions() {
+        let first = prompt("  What changed?\n", true);
+        assert!(first.starts_with("<btw-side-question>\nWhat changed?\n</btw-side-question>\n\n"));
+        assert!(first.contains("every tool call here is refused"));
+        assert_eq!(
+            prompt("And why?", false),
+            "<btw-side-question>\nAnd why?\n</btw-side-question>"
+        );
+    }
+
     #[test]
     fn side_snapshot_stops_at_the_first_unfinished_call_and_retains_settled_pairs() {
         let settled_prefix = vec![text("User instruction"), call("done"), result("done")];

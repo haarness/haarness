@@ -66,6 +66,7 @@ import Link from "lucide-solid/icons/link-2";
 import List from "lucide-solid/icons/list";
 import ListTodo from "lucide-solid/icons/list-todo";
 import Maximize from "lucide-solid/icons/maximize-2";
+import MessageCircle from "lucide-solid/icons/message-circle";
 import MessageSquare from "lucide-solid/icons/message-square";
 import MonitorSmartphone from "lucide-solid/icons/monitor-smartphone";
 import Monitor from "lucide-solid/icons/monitor";
@@ -131,6 +132,7 @@ const catalog = {
   // Projects, conversations and history
   compose: SquarePen,
   chat: MessageSquare,
+  "side-chat": MessageCircle,
   folder: Folder,
   "folder-open": FolderOpen,
   "folder-new": FolderPlus,

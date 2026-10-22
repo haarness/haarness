@@ -446,8 +446,17 @@ def scenario(mode):
             c("resume_workflow_run", run["id"])
             c("cancel_workflow_run", run["id"])
             c("delete_workflow_run", run["id"])
-            # Isolated side question.
-            assert c("btw", tid, {"question": "Side question"})["answer"]
+            # Isolated side question, and a streamed follow-up that carries it.
+            side = c("btw", tid, {"question": "Side question"})
+            assert side["answer"] == "Echo: Side question", side
+            streamed = c(
+                "btw_stream",
+                tid,
+                {"question": "And then?", "history": [{"question": "Side question", "answer": side["answer"]}]},
+            )
+            assert streamed[-1]["type"] == "done", streamed
+            assert streamed[-1]["answer"] == "Echo: And then? (after: Side question)", streamed
+            assert "".join(e["text"] for e in streamed if e["type"] == "delta") == streamed[-1]["answer"]
             # Cancellation closes the workflow first, then its in-flight provider turn.
             runner.until("active_turn", tid, predicate=lambda value: value is None)
             # Background child lifecycle.
