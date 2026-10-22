@@ -2649,5 +2649,6 @@
   "Store in Keychain": "التخزين في سلسلة المفاتيح",
   "Store in Credential Manager": "التخزين في مدير بيانات الاعتماد",
   "Store in keyring": "التخزين في حلقة المفاتيح",
-  "Saved there when you add the server; the settings keep only a reference.": "يُحفظ هناك عند إضافة الخادم؛ ولا تحتفظ الإعدادات إلا بمرجع إليه."
+  "Saved there when you add the server; the settings keep only a reference.": "يُحفظ هناك عند إضافة الخادم؛ ولا تحتفظ الإعدادات إلا بمرجع إليه.",
+  "Set outside your settings": "مضبوط خارج إعداداتك"
 }

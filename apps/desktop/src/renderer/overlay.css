@@ -1006,6 +1006,11 @@ dialog .notifications {
   color: var(--muted);
   cursor: pointer;
 }
+/* A plugin's server (or one set elsewhere) shows its state, not a control. */
+.setting-block .mcp-apps-switch.locked {
+  cursor: default;
+  opacity: 0.6;
+}
 /* Why an MCP server failed, under its name: a sentence, never a log dump. */
 .setting-block > .mcp-server-detail {
   margin: 0;

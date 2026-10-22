@@ -2649,5 +2649,6 @@
   "Store in Keychain": "存储到钥匙串",
   "Store in Credential Manager": "存储到凭据管理器",
   "Store in keyring": "存储到密钥环",
-  "Saved there when you add the server; the settings keep only a reference.": "添加服务器时保存在那里；设置中只保留引用。"
+  "Saved there when you add the server; the settings keep only a reference.": "添加服务器时保存在那里；设置中只保留引用。",
+  "Set outside your settings": "在你的设置之外设定"
 }

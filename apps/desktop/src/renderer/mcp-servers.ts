@@ -15,6 +15,10 @@ import type * as T from "@haarness/sdk";
 const [reported, setReported] = createSignal<Record<string, Record<string, boolean>>>({});
 /** Switches flipped here that the server has not reported back yet, by connection and server. */
 const [flipped, setFlipped] = createSignal<Record<string, boolean>>({});
+/** Servers whose settings Haarness does not edit (a plugin's, or set
+ * outside the person's own files), per connection: their switch is shown
+ * but cannot be flipped, and pages offer no off item. */
+const [locked, setLocked] = createSignal<Record<string, Set<string>>>({});
 /** The list asked for, once per connection and catalog generation. */
 const asked = new Set<string>();
 
@@ -37,14 +41,42 @@ export function noteMcpServers(connection: string, servers: T.McpServerInfo[]) {
   });
 }
 
+/** Record which servers are read-only, from the management list (`readOnly`). */
+export function noteReadOnlyServers(connection: string, entries: { name?: unknown; readOnly?: unknown }[]) {
+  setLocked((all) => ({
+    ...all,
+    [connection]: new Set(entries.filter((entry) => entry.readOnly === true).map((entry) => String(entry.name))),
+  }));
+}
+
+/** The management list says which of `names` are read-only; it needs the local installation. */
+export async function loadReadOnlyServers(connection: string, names: string[]) {
+  const entries = await window.haarness.native<{ name?: unknown; readOnly?: unknown }[]>(connection, {
+    action: "asset",
+    kind: "mcp",
+    input: { action: "list", names },
+  });
+  if (Array.isArray(entries)) noteReadOnlyServers(connection, entries);
+}
+
+/** Whether Haarness cannot change `server`'s settings on this connection. */
+export const readOnlyServer = (connection: string, server: string) => !!locked()[connection]?.has(server);
+
 /** Ask the server once for this catalog generation (`version` changes when its configuration reloads). */
-export function loadMcpServers(connection: string, version: number) {
+export function loadMcpServers(connection: string, version: number, local = false) {
   const id = `${connection}\u0000${version}`;
   if (!connection || asked.has(id)) return;
   asked.add(id);
   void window.haarness
     .api<T.McpServerInfo[]>(connection, "mcpServers", [])
-    .then((servers) => noteMcpServers(connection, servers))
+    .then((servers) => {
+      noteMcpServers(connection, servers);
+      if (local)
+        void loadReadOnlyServers(
+          connection,
+          servers.map((server) => server.name),
+        ).catch(() => undefined);
+    })
     .catch(() => {
       asked.delete(id);
       // Without a list, rows still show their pages, as before this setting.

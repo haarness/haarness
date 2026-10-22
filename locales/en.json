@@ -2649,5 +2649,6 @@
   "Store in Keychain": "Store in Keychain",
   "Store in Credential Manager": "Store in Credential Manager",
   "Store in keyring": "Store in keyring",
-  "Saved there when you add the server; the settings keep only a reference.": "Saved there when you add the server; the settings keep only a reference."
+  "Saved there when you add the server; the settings keep only a reference.": "Saved there when you add the server; the settings keep only a reference.",
+  "Set outside your settings": "Set outside your settings"
 }

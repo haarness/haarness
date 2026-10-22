@@ -2649,5 +2649,6 @@
   "Store in Keychain": "เก็บในพวงกุญแจ",
   "Store in Credential Manager": "เก็บในตัวจัดการข้อมูลประจำตัว",
   "Store in keyring": "เก็บในคีย์ริง",
-  "Saved there when you add the server; the settings keep only a reference.": "บันทึกไว้ที่นั่นเมื่อเพิ่มเซิร์ฟเวอร์ การตั้งค่าเก็บไว้เพียงการอ้างอิง"
+  "Saved there when you add the server; the settings keep only a reference.": "บันทึกไว้ที่นั่นเมื่อเพิ่มเซิร์ฟเวอร์ การตั้งค่าเก็บไว้เพียงการอ้างอิง",
+  "Set outside your settings": "ตั้งค่าไว้นอกการตั้งค่าของคุณ"
 }
