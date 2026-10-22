@@ -568,7 +568,10 @@ async fn run_with_client(
     let (workspace_mutation_tx, mut workspace_mutation_rx) = tokio::sync::mpsc::channel(1);
     let (workspace_ref_tx, mut workspace_ref_rx) = tokio::sync::mpsc::channel(1);
     let mut pty_rx = client.subscribe_ptys();
-    let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(1);
+    // Provider catalogs read off the loop (the server may wait up to 10 s
+    // for a list), applied when they come.
+    let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
+    app.catalog_tx = Some(catalog_tx.clone());
     if app.models_loading {
         let client = client.clone();
         tokio::spawn(async move {
@@ -603,6 +606,11 @@ async fn run_with_client(
                         .map(|info| (info.server_instance_id, info.event_cursor));
                     (event_rx, event_task) = client.subscribe(initial);
                     pty_rx = client.subscribe_ptys();
+                    // A catalog still on its way from the server left is not
+                    // this one's.
+                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                    catalog_rx = receiver;
+                    app.catalog_tx = Some(sender);
                     force_redraw = true;
                 }
                 Err(error) => {
@@ -948,7 +956,10 @@ async fn run_with_client(
             Some(listed) = catalog_rx.recv() => {
                 match listed {
                     Some(providers) => app.catalog_arrived(providers, &client).await,
-                    None => app.catalog_arrived(app.providers.clone(), &client).await,
+                    None if app.models_loading => {
+                        app.catalog_arrived(app.providers.clone(), &client).await;
+                    }
+                    None => {}
                 }
             },
             Some(completion) = workspace_mutation_rx.recv() => {

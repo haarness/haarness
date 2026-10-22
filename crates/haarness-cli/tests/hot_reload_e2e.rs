@@ -874,3 +874,103 @@ async fn a_reload_does_not_wait_for_a_provider_slow_to_list_its_models() {
     process.wait().await.expect("reap server");
     drop(silent);
 }
+
+/// A reload once replaced every provider, its loaded model list with it: a
+/// provider with no built-in list (Haarness Cloud) had none until it was
+/// fetched again, and a read meanwhile waited for that. A provider defined
+/// as before keeps the list it has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_keeps_the_model_list_of_a_provider_defined_as_before() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create project config root");
+    std::fs::create_dir_all(&home).expect("create isolated home");
+    let lists = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let endpoint = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind model endpoint");
+    let endpoint_address = endpoint.local_addr().unwrap();
+    let models = tokio::spawn({
+        let lists = lists.clone();
+        async move {
+            loop {
+                let (mut socket, _) = endpoint.accept().await.unwrap();
+                let mut request = vec![0_u8; 4096];
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                if String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/models") {
+                    lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let body = r#"{"object":"list","data":[{"id":"live-model","object":"model"}]}"#;
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        }
+    });
+    let reloads = directory.0.join("reloads");
+    std::fs::write(
+        workspace.join(".haarness/haarness.json"),
+        serde_json::to_string_pretty(&json!({
+            "providers": {"listed": {
+                "protocol": "openai-chat-completions",
+                "base_url": format!("http://{endpoint_address}/v1"),
+                "api_key_env": "LISTED_KEY"
+            }},
+            "hooks": {"ConfigChange": [{"hooks": [{
+                "type": "command",
+                "command": format!("printf 'reload\\n' >> '{}'", reloads.display())
+            }]}]}
+        }))
+        .expect("serialize project config"),
+    )
+    .expect("write project config");
+    let agents = workspace.join("AGENTS.md");
+    std::fs::write(&agents, "Use tabs.\n").expect("write instructions");
+    let address = unused_address().await;
+    let mut process = server_command(&workspace, &data, &home, address)
+        .env("LISTED_KEY", "fixture-key")
+        .spawn()
+        .expect("launch Haarness server");
+    wait_until_listening(address).await;
+    let client = Client::new();
+    let listed = |providers: &Value| {
+        providers.as_array().is_some_and(|providers| {
+            providers.iter().any(|provider| {
+                provider["id"] == "listed"
+                    && provider["models"].as_array().is_some_and(|models| {
+                        models.iter().any(|model| model["id"] == "live-model")
+                    })
+            })
+        })
+    };
+    assert!(listed(&get_json(&client, address, "/providers").await));
+    assert_eq!(lists.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    std::fs::write(&agents, "Use spaces.\n").expect("edit instructions");
+    for _ in 0..200 {
+        if line_count(&reloads) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(line_count(&reloads), 1, "the edit did not reload");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(listed(&get_json(&client, address, "/providers").await));
+    assert_eq!(
+        lists.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the reload fetched the list again"
+    );
+    process.kill().await.expect("stop server");
+    process.wait().await.expect("reap server");
+    models.abort();
+}
