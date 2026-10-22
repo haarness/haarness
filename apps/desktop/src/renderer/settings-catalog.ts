@@ -42,7 +42,7 @@ export const settingsKeywords: Record<string, string> = {
   commands: "slash custom prompt template command",
   skills: "skill instructions knowledge enable disable",
   tools: "tool loading lazy schemas enable disable permission",
-  mcp: "model context protocol integrations servers oauth authentication",
+  mcp: "model context protocol integrations servers oauth authentication interactive apps pages keychain secrets",
   plugins: "marketplace install uninstall extensions bundles",
   marketplace: "public private account catalog install update versions skills agents mcp plugins extensions",
   extensions: "javascript typescript hooks events scripts enable scope",
