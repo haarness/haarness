@@ -2845,66 +2845,44 @@ impl Tool for BuiltinTool {
                     .workspace
                     .canonicalize()
                     .unwrap_or_else(|_| self.workspace.clone());
-                let mut folders = HashMap::<PathBuf, bool>::new();
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
                     .as_ref()
                     .and_then(|invoker| invoker.read_rules());
                 let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
-                let mut values = Vec::new();
-                let mut skipped = Skipped::default();
-                let mut partial = false;
-                for path in glob::glob(&pattern)
-                    .map_err(tool_error)?
-                    .filter_map(Result::ok)
-                    // A part starting with `.`, such as `.*`, also matches
-                    // `.` and `..`.
-                    .filter(|path| {
-                        path.strip_prefix(&root).is_ok_and(|relative| {
-                            !relative
-                                .components()
-                                .any(|part| part == std::path::Component::ParentDir)
-                        })
-                    })
-                {
-                    if values.len() == 10_000 {
-                        partial = true;
-                        break;
-                    }
-                    // `**` follows linked folders: a match in a folder a link
-                    // takes out of the project and the searched folder is
-                    // left out, as a list of that folder would ask first.
-                    let parent = path.parent().unwrap_or(&root).to_path_buf();
-                    let inside = *folders.entry(parent).or_insert_with_key(|parent| {
-                        parent.canonicalize().is_ok_and(|real| {
-                            real.starts_with(&root) || real.starts_with(&workspace)
-                        })
-                    });
-                    if !inside {
-                        skipped.outside += 1;
-                        continue;
-                    }
-                    // `*` matches dotfiles and `**` follows linked folders, so
-                    // each file is checked by where it really leads as well.
-                    if !path.is_dir()
-                        && let Some(hidden) = secrets.hides(&path)
-                    {
-                        skipped.count(hidden);
-                        continue;
-                    }
-                    values.push(
-                        path.strip_prefix(&self.workspace)
-                            .unwrap_or(&path)
-                            .display()
-                            .to_string(),
-                    );
-                }
-                Ok(with_skipped(
-                    truncate_output(values.join("\n")).await?,
-                    skipped,
-                    partial,
-                ))
+                let named = self.workspace.clone();
+                let cancel = context.cancel.clone();
+                // The walk reads folders synchronously and `**` follows links
+                // (one to `/` reaches everything), so it runs off the async
+                // workers, stops on Stop and at a budget of matches looked at.
+                let walk = tokio::task::spawn_blocking(move || {
+                    glob_walk(
+                        &pattern,
+                        &GlobScope {
+                            root,
+                            workspace,
+                            named,
+                        },
+                        &secrets,
+                        &cancel,
+                        GLOB_LOOK_LIMIT,
+                    )
+                });
+                let found = tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    found = walk => found.map_err(tool_error)??,
+                };
+                let output = with_skipped(
+                    truncate_output(found.values.join("\n")).await?,
+                    found.skipped,
+                    found.partial,
+                );
+                Ok(if found.stopped {
+                    with_stop(output, GLOB_LOOK_LIMIT)
+                } else {
+                    output
+                })
             }
             Kind::Grep => {
                 let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
@@ -3483,8 +3461,112 @@ impl SecretFilter {
     }
 }
 
-/// Whether two paths name one existing file: the same device and inode on
-/// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
+/// How many matches a glob looks at, those it leaves out included, before it
+/// stops: `**` through a link to `/` or the home folder would otherwise walk
+/// everything there.
+const GLOB_LOOK_LIMIT: usize = 100_000;
+
+/// What a glob found: its matches, what it left out, and whether it stopped
+/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`]).
+#[derive(Default)]
+struct GlobFound {
+    values: Vec<String>,
+    skipped: Skipped,
+    partial: bool,
+    stopped: bool,
+}
+
+/// Where a glob looks: the canonical folder it searches, the canonical
+/// workspace, and the workspace as configured, which its output is written
+/// relative to.
+struct GlobScope {
+    root: PathBuf,
+    workspace: PathBuf,
+    named: PathBuf,
+}
+
+/// Walk `pattern` (already joined to the scope's root), looking at no more
+/// than `limit` matches. Runs synchronously; the caller keeps it off the async
+/// workers.
+fn glob_walk(
+    pattern: &str,
+    scope: &GlobScope,
+    secrets: &SecretFilter,
+    cancel: &tokio_util::sync::CancellationToken,
+    limit: usize,
+) -> CoreResult<GlobFound> {
+    let mut folders = HashMap::<PathBuf, bool>::new();
+    let mut found = GlobFound::default();
+    let mut looked = 0usize;
+    for path in glob::glob(pattern)
+        .map_err(tool_error)?
+        .filter_map(Result::ok)
+    {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        if found.values.len() == 10_000 {
+            found.partial = true;
+            break;
+        }
+        if looked == limit {
+            found.partial = true;
+            found.stopped = true;
+            break;
+        }
+        looked += 1;
+        // A part starting with `.`, such as `.*`, also matches `.` and `..`.
+        if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
+            !relative
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        }) {
+            continue;
+        }
+        // `**` follows linked folders: a match in a folder a link takes out
+        // of the project and the searched folder is left out, as a list of
+        // that folder would ask first.
+        let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
+        let inside = *folders.entry(parent).or_insert_with_key(|parent| {
+            parent.canonicalize().is_ok_and(|real| {
+                real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
+            })
+        });
+        if !inside {
+            found.skipped.outside += 1;
+            continue;
+        }
+        // `*` matches dotfiles and `**` follows linked folders, so each file
+        // is checked by where it really leads as well.
+        if !path.is_dir()
+            && let Some(hidden) = secrets.hides(&path)
+        {
+            found.skipped.count(hidden);
+            continue;
+        }
+        found.values.push(
+            path.strip_prefix(&scope.named)
+                .unwrap_or(&path)
+                .display()
+                .to_string(),
+        );
+    }
+    Ok(found)
+}
+
+/// Ends a glob's output saying it stopped at its budget, so an empty or short
+/// list is not read as everything there is.
+fn with_stop(mut output: ToolOutput, limit: usize) -> ToolOutput {
+    let note =
+        format!("(stopped after looking at {limit} matches; narrow the pattern or the path)");
+    output.text = if output.text.is_empty() {
+        note
+    } else {
+        format!("{}\n\n{note}", output.text)
+    };
+    output
+}
+
 /// Whether a glob pattern has a `..` part.
 fn climbs(pattern: &str) -> bool {
     pattern.split(['/', '\\']).any(|part| part == "..")
@@ -6313,6 +6395,50 @@ export default workflow({
             .await
             .unwrap();
         assert_eq!(nested.text, "src/docs/guide.md");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_glob_through_a_link_out_of_the_project_stops_at_its_budget_and_on_stop() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-budget-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        for index in 0..30 {
+            std::fs::write(root.join(format!("outside/{index}.txt")), "").unwrap();
+        }
+        std::fs::write(workspace.join("inside.txt"), "").unwrap();
+        std::os::unix::fs::symlink("../outside", workspace.join("escape")).unwrap();
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let pattern = workspace.join("**/*").to_string_lossy().into_owned();
+        let cancel = CancellationToken::new();
+        // Matches left out count against the budget too.
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, 10).unwrap();
+        assert!(found.stopped && found.partial);
+        assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
+        assert!(found.values.len() + found.skipped.outside <= 10);
+        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, 1_000).unwrap();
+        assert!(!everything.stopped && !everything.partial);
+        assert_eq!(everything.skipped.outside, 30);
+        cancel.cancel();
+        assert!(matches!(
+            glob_walk(&pattern, &scope, &secrets, &cancel, 1_000),
+            Err(CoreError::Cancelled)
+        ));
+        let stopped = with_stop(output(String::new()), 10);
+        assert_eq!(
+            stopped.text,
+            "(stopped after looking at 10 matches; narrow the pattern or the path)"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
