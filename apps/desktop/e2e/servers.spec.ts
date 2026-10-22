@@ -19,7 +19,12 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
-import { createServer, request } from "node:http";
+import {
+  createServer,
+  request,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
@@ -302,6 +307,174 @@ async function endpoint(name: string) {
   );
   return { path, url: result.url as string, token: result.token as string };
 }
+/** An HTTP proxy in front of `target` that a test can make refuse, hold or
+ * cut requests, as a flaky network or a proxy in between would. `intercept`
+ * answers a request itself (`true`), lets it through (`false`), or holds it
+ * until a promise settles. */
+async function relay(target: string) {
+  const streams = new Set<ServerResponse>();
+  const seen: string[] = [];
+  const answered: string[] = [];
+  let intercept:
+    | ((req: IncomingMessage, res: ServerResponse) => boolean | Promise<void>)
+    | undefined;
+  const forward = (req: IncomingMessage, res: ServerResponse, line: string) => {
+    if (req.url?.startsWith("/v1/events")) {
+      streams.add(res);
+      res.on("close", () => streams.delete(res));
+    }
+    res.on("finish", () => answered.push(line));
+    const upstream = request(
+      new URL(req.url!, target),
+      { method: req.method, headers: req.headers },
+      (incoming) => {
+        res.writeHead(incoming.statusCode!, incoming.headers);
+        incoming.pipe(res);
+      },
+    );
+    upstream.on("error", () => {
+      if (res.headersSent) res.destroy();
+      else {
+        res.writeHead(502);
+        res.end();
+      }
+    });
+    res.on("close", () => upstream.destroy());
+    req.pipe(upstream);
+  };
+  const server = createServer((req, res) => {
+    const line = req.method + " " + new URL(req.url!, target).pathname;
+    seen.push(line);
+    const decision = intercept?.(req, res) ?? false;
+    if (decision === true) return;
+    void Promise.resolve(decision).then(() => forward(req, res, line));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    /** How many requests named `line` (`GET /v1/threads`) arrived. */
+    count: (line: string) => seen.filter((item) => item === line).length,
+    /** How many of them were answered by the server behind. */
+    answered: (line: string) => answered.filter((item) => item === line).length,
+    intercept(next: typeof intercept) {
+      intercept = next;
+    },
+    /** Ends the event streams in flight, as a dropped connection does. */
+    cut() {
+      for (const stream of streams) stream.destroy();
+    },
+    async close() {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+test("a project whose event stream is refused waits longer each time instead of reading every chat again twice a second", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("refused-stream");
+  const proxy = await relay(remote.url);
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    await launch();
+    await addServer("Refusing server", proxy.url, remote.token);
+    // Everything but the event stream is answered.
+    proxy.intercept((req, res) => {
+      if (!req.url?.startsWith("/v1/events")) return false;
+      req.resume();
+      res.writeHead(502);
+      res.end();
+      return true;
+    });
+    const before = proxy.count("GET /v1/threads");
+    proxy.cut();
+    await page.waitForTimeout(6000);
+    // Waits of 0.5, 1, 2 and then 4 s: three reads of every chat in six
+    // seconds, where a wait that started over each time the stream opened
+    // read them about ten times.
+    const reads = proxy.count("GET /v1/threads") - before;
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(reads).toBeLessThanOrEqual(4);
+    // Accepted again, the stream connects at the next attempt and carries
+    // changes: a chat created on the server shows without another read.
+    proxy.intercept(undefined);
+    const refused = proxy.count("GET /v1/threads");
+    await expect
+      .poll(() => proxy.count("GET /v1/threads"), { timeout: 15000 })
+      .toBeGreaterThan(refused);
+    await expect(page.locator(".application")).toHaveAttribute(
+      "data-project-ready",
+      "true",
+    );
+    await page.waitForTimeout(1000);
+    const settled = proxy.count("GET /v1/threads");
+    await client.createThread({
+      title: "Arrived over the stream",
+      provider: "echo",
+      model: "echo-1",
+    });
+    await expect(
+      page.getByRole("button", { name: "Arrived over the stream", exact: true }),
+    ).toBeVisible();
+    expect(proxy.count("GET /v1/threads")).toBe(settled);
+  } finally {
+    client.close();
+    await app?.close();
+    await proxy.close();
+  }
+});
+
+test("a project waiting to reconnect connects within 2 s of a wake or the network coming back, and a connected one is left alone", async () => {
+  test.setTimeout(120000);
+  const remote = await endpoint("outage");
+  const proxy = await relay(remote.url);
+  const ready = () => page.locator(".application");
+  // Nine seconds without the server: attempts after 0.5, 1, 2 and 4 s leave
+  // an 8 s wait before the next.
+  const outage = async () => {
+    proxy.intercept((req) => {
+      req.socket.destroy();
+      return true;
+    });
+    proxy.cut();
+    await expect(ready()).toHaveAttribute("data-project-ready", "false");
+    await page.waitForTimeout(9000);
+    proxy.intercept(undefined);
+  };
+  try {
+    await launch();
+    await addServer("Outage server", proxy.url, remote.token);
+    await outage();
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", {
+        kind: "connection",
+        data: "resume",
+      }),
+    );
+    await expect(ready()).toHaveAttribute("data-project-ready", "true", {
+      timeout: 2000,
+    });
+    await outage();
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(ready()).toHaveAttribute("data-project-ready", "true", {
+      timeout: 2000,
+    });
+    // A connected project is not disturbed by the network or the window
+    // coming back: nothing is read again.
+    await page.waitForTimeout(1000);
+    const reads = proxy.count("GET /v1/threads");
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForTimeout(1500);
+    expect(proxy.count("GET /v1/threads")).toBe(reads);
+    await expect(ready()).toHaveAttribute("data-project-ready", "true");
+  } finally {
+    await app?.close();
+    await proxy.close();
+  }
+});
 
 test.beforeEach(async () => {
   temporary = await realpath(

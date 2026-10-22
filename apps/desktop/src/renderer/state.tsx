@@ -1,4 +1,5 @@
 import { previewInfo } from "./preview-actions";
+import { createReconnectWait, onReconnectHint } from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
@@ -225,8 +226,10 @@ function createApp() {
   let navigation = 0;
   let hydration = 0,
     connectAttempt = 0,
-    reconnectAttempt = 0,
     stopped = false;
+  const reconnectWait = createReconnectWait();
+  /** A reconnect waits for its timer. */
+  let retryPending = false;
   const journals = new Set<T.EventEnvelope[]>();
   // The latest history read of the open chat after a revert or compaction;
   // an older one landing later is dropped.
@@ -604,27 +607,39 @@ function createApp() {
         await window.haarness.storage("session:" + state.connection.id, "");
     }
   }
-  function reconnect() {
+  /** Connects the open project again after `reconnectWait`'s wait. One wait
+   * at a time: the end of a stream and the server's resync ask for the same
+   * reconnect. `restart` begins a new wait, after a wake or a reset. */
+  function reconnect(restart = false) {
     if (stopped || !state.connection) return;
     set("connectionStatus", "Reconnecting…");
+    if (retryPending && !restart) return;
     clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(
-      () => {
-        void hydrate().catch((error) => {
-          set("error", String(error));
-          reconnectAttempt++;
-          reconnect();
-        });
-      },
-      Math.min(30000, 500 * 2 ** Math.min(reconnectAttempt, 6)),
-    );
+    retryPending = true;
+    reconnectTimer = setTimeout(() => {
+      retryPending = false;
+      void hydrate().catch((error) => {
+        set("error", String(error));
+        reconnect();
+      });
+    }, reconnectWait.next());
   }
+  // A project waiting to reconnect tries again soon when the network comes
+  // back or the window shows again; a connected one is left alone.
+  onCleanup(
+    onReconnectHint(() => {
+      if (!retryPending) return;
+      reconnectWait.reset();
+      reconnect(true);
+    }),
+  );
   async function hydrate(knownInfo?: T.ServerInfo) {
     const current = generation,
       operation = ++hydration;
     const valid = () =>
       current === generation && operation === hydration && !stopped;
     clearTimeout(reconnectTimer);
+    retryPending = false;
     set("connectionStatus", "Connecting…");
     const previous = subscription;
     subscription = "";
@@ -666,7 +681,7 @@ function createApp() {
       return;
     }
     subscription = id;
-    reconnectAttempt = 0;
+    reconnectWait.opened();
     set("connectionStatus", "Connected");
   }
   createEffect(() => applyLanguage(state.preferences.language));
@@ -771,6 +786,7 @@ function createApp() {
     ++hydration;
     activation = undefined;
     clearTimeout(reconnectTimer);
+    retryPending = false;
     const previous = subscription;
     subscription = "";
     tabHistory = [];
@@ -1338,6 +1354,7 @@ function createApp() {
       forceSnapshot = true;
       lastCursor = 0;
       lastInstance = "";
+      reconnectWait.reset();
       selection++;
       batch(() => {
         set("ready", false);
@@ -1827,7 +1844,11 @@ function createApp() {
       (!event.connection || event.connection === state.connection?.id)
     ) {
       if (event.id && event.id !== subscription) return;
-      reconnect();
+      // The stream ended, or (with no stream named) the computer woke: a
+      // wake begins the wait again.
+      if (event.id) reconnectWait.ended();
+      else reconnectWait.reset();
+      reconnect(!event.id);
       return;
     }
     if (event.kind !== "server" || event.connection !== state.connection?.id)
@@ -1835,12 +1856,14 @@ function createApp() {
     const item = event.data as T.EventEnvelope | { type: "resync_required" };
     if (item.type === "resync_required") {
       forceSnapshot = true;
+      reconnectWait.ended();
       reconnect();
       return;
     }
     const envelope = item as T.EventEnvelope;
     if (envelope.serverInstanceId !== lastInstance) {
       forceSnapshot = true;
+      reconnectWait.ended();
       reconnect();
       return;
     }
