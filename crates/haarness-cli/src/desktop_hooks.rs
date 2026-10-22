@@ -50,8 +50,8 @@ fn rows(source: &jsonconfig::HookSource, workspace: &Path) -> Result<Vec<Value>>
                         "matcher": matcher, "neverRuns": haarness_server::hooks::never_runs(event, matcher),
                         "handler": hook,
                         "revision": revision, "groupDisabled": group["disabled"].as_bool().unwrap_or(false),
-                        "source": {"path": source.path, "editable": !source.plugin,
-                            "scope": if source.plugin {"plugin"} else if workspace.starts_with(source.path.parent().unwrap_or(workspace)) || source.path.starts_with(workspace) {"local"} else {"global"},
+                        "source": {"path": source.path, "editable": !source.plugin && !source.base,
+                            "scope": if source.plugin {"plugin"} else if source.base {"base"} else if workspace.starts_with(source.path.parent().unwrap_or(workspace)) || source.path.starts_with(workspace) {"local"} else {"global"},
                             "trusted": source.trusted}}));
                 }
             }
@@ -198,6 +198,10 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
             ensure!(
                 !source.plugin,
                 "Plugin hooks are read-only; manage the contributing plugin instead"
+            );
+            ensure!(
+                !source.base,
+                "Hooks from the base folder are read-only; Haarness does not change that folder"
             );
             haarness_profiles::check_path(&source.path)?;
             ensure!(
@@ -445,18 +449,30 @@ mod tests {
             plugin: true,
             trusted: true,
             block: json!({"Stop":[{"hooks":[{"command":"echo plugin"}]}]}),
+            base: false,
         };
         let row = rows(&source, Path::new("/project")).unwrap().remove(0);
         assert_eq!(row["source"]["editable"], false);
         assert_eq!(row["source"]["scope"], "plugin");
         let never = jsonconfig::HookSource {
+            path: path.clone(),
+            plugin: true,
+            trusted: true,
             block: json!({"SessionEnd":[{"matcher":"clear","hooks":[{"command":"echo never"}]}]}),
-            ..source
+            base: false,
         };
         assert_eq!(
             rows(&never, Path::new("/project")).unwrap()[0]["neverRuns"],
             true
         );
+        let base = jsonconfig::HookSource {
+            plugin: false,
+            base: true,
+            ..source
+        };
+        let row = rows(&base, Path::new("/project")).unwrap().remove(0);
+        assert_eq!(row["source"]["editable"], false);
+        assert_eq!(row["source"]["scope"], "base");
         fs::remove_file(path).unwrap();
     }
 }

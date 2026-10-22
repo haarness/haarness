@@ -63,7 +63,7 @@ Primary resources:
 - CLI-hosted daemons also expose authenticated remote project discovery and routing: `GET /v1/host/projects`, `GET /v1/host/directories?path=...`, `POST /v1/host/open`, `DELETE /v1/host/projects/{workspaceId}` (closes a project for remote access), and `/v1/host/workspaces/{workspaceId}/v1/...`. Both take the catalog's workspace id (`workspaces[].id`), not `projects[].id`. These optional host routes are separate from the directory SDK/OpenAPI contract; the routed directory API uses the normal SDK with a project base URL. See [remote host architecture](DESKTOP-PROJECT-MODEL.md#remote-hosts-with-multiple-projects).
 
 - `POST /v1/providers/refresh` refreshes connected model catalogs (same response as `GET /v1/providers`; `providers.refresh.v1` capability). See [Model catalogs](MODELS.md).
-- `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/plugins`, `/v1/mcp`, `/v1/tools[?threadId=...]`
+- `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/plugins`, `/v1/mcp`, `/v1/tools[?threadId=...]`; a `/v1/mcp` server of the [base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` (absent otherwise)
 - `GET /v1/lsp` for configured server lifecycle/availability and `GET /v1/formatter` for configured formatter availability (`lsp.v1` and `formatter.v1` capabilities)
 - `POST /v1/tools/{name}` with `{enabled:true|false|null}` for a durable workspace override; `POST /v1/tools/lazy` with `{mode:"off"|"auto"|"always"|null}` (null or omitted resets to configured/default mode)
 - `GET /v1/projects`; `GET|POST /v1/workspaces`; `GET /v1/workspaces/refs`; `POST /v1/workspaces/resolve-ref`; `GET|DELETE /v1/workspaces/{reference}`; `POST /v1/workspaces/{reference}/open`, `/reset`, and `/cleanup`
@@ -460,7 +460,9 @@ model tool execution. Errors leave the client draft intact.
 (`agent`, `command`, or `skill`) and `action` (`list`, `get`, `create`, `edit`,
 `customize`, or `delete`). It returns definition rows/details or a mutation result,
 rather than a `ManagementView`. Writes use the connected server's configuration;
-`scope` is `global` or `local`. `customize` creates a same-name override from a
+`scope` is `global` or `local`. A listed row from the
+[base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` and is
+read-only; sent back as a request's scope, `base` reads as no scope. `customize` creates a same-name override from a
 built-in or inherited definition, retains agent permissions and skill support
 files, and refuses to overwrite an existing custom definition. Returned
 `customized` metadata identifies overrides; deleting one restores the underlying

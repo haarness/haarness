@@ -65,6 +65,9 @@ pub struct RuntimeConfig {
     pub default_ultracode: bool,
     /// Optional response-format guidance loaded by the composition root.
     pub output_style: Option<OutputStyle>,
+    /// The built-in prompts, changed by the prompt files the composition root
+    /// read (none: every prompt is its built-in text).
+    pub prompts: crate::Prompts,
     /// Optional provider/tool round guard. `None` is unbounded;
     /// a configured value asks for a final tool-free reply
     /// instead of failing the turn.

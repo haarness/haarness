@@ -276,6 +276,7 @@ impl McpRegistry for NativeMcpRegistry {
             }
             .into(),
             detail: None,
+            scope: None,
         };
         self.servers.write().insert(
             name.into(),
@@ -553,6 +554,14 @@ impl NativeMcpRegistry {
         }
     }
 
+    /// Record where `name`'s configuration comes from, for clients to show
+    /// (`base` for the base configuration folder).
+    pub fn set_scope(&self, name: &str, scope: Option<String>) {
+        if let Some(entry) = self.servers.write().get_mut(name) {
+            entry.info.scope = scope;
+        }
+    }
+
     /// Atomically replace the complete configured server generation. The
     /// candidate registry is composed and connected before this call, so API
     /// readers never observe a partly-added/partly-removed MCP set.
@@ -568,8 +577,11 @@ impl NativeMcpRegistry {
             {
                 // The connection the candidate reused may have moved on since
                 // (a recovery, a catalog change, a disconnect). This registry's
-                // entry and its watcher stay authoritative for it.
+                // entry and its watcher stay authoritative for it; where its
+                // configuration comes from is the candidate's.
+                let scope = entry.info.scope.take();
                 *entry = live.clone();
+                entry.info.scope = scope;
                 continue;
             }
             if entry.info.status == "connected" {

@@ -16,6 +16,7 @@ import {
   type MatcherTarget,
 } from "./hook-matcher";
 import { confirm, Empty } from "./ui";
+import { BaseTag } from "./SettingRow";
 import "./management.css";
 
 interface Hook {
@@ -208,11 +209,18 @@ export function Hooks() {
                     {hook.handler.command}
                   </code>
                   <small class="muted management-source">
-                    {hook.source.scope === "local"
-                      ? t("This project")
-                      : hook.source.scope === "global"
-                        ? t("All projects")
-                        : t("Plugin (read-only)")}{" "}
+                    <Show
+                      when={hook.source.scope === "base"}
+                      fallback={
+                        hook.source.scope === "local"
+                          ? t("This project")
+                          : hook.source.scope === "global"
+                            ? t("All projects")
+                            : t("Plugin (read-only)")
+                      }
+                    >
+                      <BaseTag />
+                    </Show>{" "}
                     · {hook.source.path}
                   </small>
                   <Show when={!hook.source.trusted}>

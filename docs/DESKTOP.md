@@ -340,6 +340,12 @@ restores the original. Skills retain their supporting files, and agent edits
 retain their permission rules. These editors also work on a connected remote
 server; changes are saved on that server.
 
+Definitions, MCP servers, hooks and plugins from a
+[base folder](CONFIGURATION-SCOPES.md#base-folder) (`HAARNESS_BASE_CONFIG_DIR`)
+carry a small **Base** tag ("From the base folder") and have no Remove: Edit
+saves your own version as for a built-in, an MCP server's Enable, Disable and
+Edit save a copy in your configuration, and base hooks open read-only.
+
 Internal agents used for conversation titles and compaction are hidden from
 Settings and search, and cannot be edited through definition management.
 

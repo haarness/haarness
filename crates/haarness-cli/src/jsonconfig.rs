@@ -1,6 +1,8 @@
 //! JSON/JSONC configuration and ecosystem-format compatibility.
 //!
 //! Haarness reads, in ascending precedence:
+//!   0. the base folder's `haarness.json{,c}` (`HAARNESS_BASE_CONFIG_DIR`,
+//!      read only, when set)
 //!   1. global `haarness.json{,c}` (including legacy aliases) (config dir)
 //!   2. project `haarness.json{,c}` (including legacy aliases) (workspace root)
 //!   3. project `.haarness/config.toml` (legacy, trust-gated — handled by
@@ -18,7 +20,7 @@
 //! `compatibility`) including the legacy JSON format. A
 //! legacy `config.toml` is migrated to `haarness.json` once.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,6 +48,8 @@ pub struct JsonLayers {
     pub rules: Vec<PermissionRule>,
     /// MCP servers by name (trust-gated ones only included when trusted).
     pub mcp: BTreeMap<String, McpConfigureRequest>,
+    /// The servers of `mcp` whose entry in effect is the base folder's.
+    pub base_mcp: BTreeSet<String>,
     pub commands: Vec<CommandInfo>,
     pub agents: Vec<CustomAgent>,
     /// Lifecycle hook entries from every config layer.
@@ -79,10 +83,23 @@ pub struct HookSource {
     pub block: Value,
     pub trusted: bool,
     pub plugin: bool,
+    /// A file of the base folder, which Haarness never changes.
+    pub base: bool,
 }
 
+/// The JSON and JSONC files a configuration folder holds, in the order they
+/// merge.
+const CONFIG_JSON: [&str; 4] = [
+    "opencode.jsonc",
+    "opencode.json",
+    "haarness.jsonc",
+    "haarness.json",
+];
+
 /// Load every JSON/compat layer. `config_dir` is the directory holding the
-/// global haarness config; `home` is the user's home directory.
+/// global haarness config; `home` is the user's home directory. The base
+/// folder `HAARNESS_BASE_CONFIG_DIR` names, when set, is read below every
+/// other layer.
 pub fn load_layers(
     config_dir: &Path,
     home: Option<&Path>,
@@ -90,8 +107,45 @@ pub fn load_layers(
     trust: bool,
     plugin_roots: &[PathBuf],
 ) -> JsonLayers {
+    let base = crate::layout::BaseFolder::for_workspace(workspace);
+    load_layers_with_base(
+        config_dir,
+        base.as_ref(),
+        home,
+        workspace,
+        trust,
+        plugin_roots,
+    )
+}
+
+/// [`load_layers`] with the base folder given rather than read from the
+/// environment.
+pub fn load_layers_with_base(
+    config_dir: &Path,
+    base: Option<&crate::layout::BaseFolder>,
+    home: Option<&Path>,
+    workspace: &Path,
+    trust: bool,
+    plugin_roots: &[PathBuf],
+) -> JsonLayers {
     let mut layers = JsonLayers::default();
 
+    // The base folder: settings a team or device management ships, which
+    // every other layer overrides. Only with one, so loading without it takes
+    // exactly the steps it always has.
+    if let Some(base) = base {
+        if !base.root().is_dir() {
+            layers.notices.push(format!(
+                "base config folder {} not found",
+                base.root().display()
+            ));
+        }
+        for name in CONFIG_JSON {
+            if let Some(path) = base.entry(name) {
+                apply_json_layer(&mut layers, &path, true, true);
+            }
+        }
+    }
     apply_toml(&mut layers, &config_dir.join("config.toml"));
     // Global JSON configuration.
     for name in [
@@ -144,6 +198,7 @@ pub fn load_layers(
                 block: block.clone(),
                 trusted: true,
                 plugin: true,
+                base: false,
             });
             layers
                 .hooks
@@ -159,6 +214,11 @@ pub fn load_layers(
     // Resource overrides use the same global -> ancestor -> project ordering.
     let resources = crate::layout::resource_roots(config_dir, home, workspace, trust);
     let compat = super::claude_compat(&layers.native);
+    // The base folder's commands, skills and agents come first, so every
+    // other root replaces one of the same name.
+    if let Some(base) = base {
+        discover_base_resources(&mut layers, base);
+    }
     // Claude Code roots are compatibility imports: they load before native
     // roots so a Haarness resource with the same name wins.
     if compat.any() {
@@ -285,6 +345,9 @@ pub fn load_layers(
     // worktree root down, then configured `instructions` entries and URLs.
     let claude = compat.instructions();
     let mut local_files: Vec<(PathBuf, bool)> = Vec::new();
+    if let Some(file) = base.and_then(|base| base.entry("AGENTS.md")) {
+        local_files.push((file, true));
+    }
     local_files.push((config_dir.join("AGENTS.md"), true));
     if claude && let Some(home) = home {
         local_files.push((home.join(".claude/CLAUDE.md"), true));
@@ -383,6 +446,56 @@ pub fn load_layers(
     layers.agents.retain(|agent| !disabled.contains(&agent.id));
     layers.disabled_agents = disabled;
     layers
+}
+
+/// The base folder's commands, skills and agents, each file read where it
+/// is unless a link leads it into the project.
+fn discover_base_resources(layers: &mut JsonLayers, base: &crate::layout::BaseFolder) {
+    for name in ["command", "commands"] {
+        let directory = base.root().join(name);
+        for file in base.files(name) {
+            discover_commands(
+                &mut layers.commands,
+                &mut layers.notices,
+                &file,
+                &directory,
+                None,
+            );
+        }
+    }
+    for name in ["skill", "skills"] {
+        for file in base.files(name) {
+            if file.file_name().is_some_and(|file| file == "SKILL.md") {
+                discover_skill_commands(&mut layers.commands, &mut layers.notices, &file, None);
+            }
+        }
+    }
+    for name in ["agent", "agents"] {
+        let directory = base.root().join(name);
+        layers.agent_directories.push(directory.clone());
+        for file in base.files(name) {
+            discover_agents(
+                &mut layers.agents,
+                &mut layers.notices,
+                &file,
+                &directory,
+                None,
+            );
+        }
+    }
+}
+
+/// The agents and commands the base folder alone defines, in its settings
+/// and its folders, so a list of the merged ones can tell which come from it.
+pub fn base_definitions(base: &crate::layout::BaseFolder) -> (Vec<CustomAgent>, Vec<CommandInfo>) {
+    let mut layers = JsonLayers::default();
+    for name in CONFIG_JSON {
+        if let Some(path) = base.entry(name) {
+            apply_json_layer(&mut layers, &path, true, true);
+        }
+    }
+    discover_base_resources(&mut layers, base);
+    (layers.agents, layers.commands)
 }
 
 /// `~/.claude` and every project `.claude` directory (worktree root first).
@@ -726,6 +839,9 @@ fn apply_toml(layers: &mut JsonLayers, path: &Path) {
                 .rules
                 .extend(super::compile_permissions(permissions)?);
         }
+        for name in config.mcp.keys() {
+            layers.base_mcp.remove(name);
+        }
         layers.mcp.extend(config.mcp.clone());
         super::merge_file_config(&mut layers.native, config);
         Ok(())
@@ -761,6 +877,14 @@ fn read_json_recording(layers: &mut JsonLayers, path: &Path) -> Option<Value> {
 /// JSON config: `model`, `small_model`, `default_agent`,
 /// `permission`, `mcp`, `agent`, `command`, `instructions`.
 fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
+    apply_json_layer(layers, path, trusted, false);
+}
+
+/// [`apply_json_config`] for a file of any layer. A `base` file (one of the
+/// base folder's) is read as a global one is, except that its hooks are
+/// marked read-only and its extension and plugin declarations, which only
+/// the global and project layers make, are not reported.
+fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: bool) {
     let Some(value) = read_json_recording(layers, path) else {
         return;
     };
@@ -851,6 +975,7 @@ fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
             block: hooks.clone(),
             trusted,
             plugin: false,
+            base,
         });
         if trusted {
             layers
@@ -861,13 +986,20 @@ fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
     // Haarness `plugin`, `plugins` and `extensions`: registration
     // happens in `extensions::sources` and the plugin registry
     // (`config_specs`); the loader only reports entries it cannot map.
-    layers
-        .notices
-        .extend(crate::config_specs::describe(&value, path, trusted));
+    if !base {
+        layers
+            .notices
+            .extend(crate::config_specs::describe(&value, path, trusted));
+    }
     if trusted {
         if let Some(mcp) = value.get("mcp").and_then(Value::as_object) {
             for (name, entry) in mcp {
                 if let Some(request) = loaded_mcp_entry(entry, None) {
+                    if base {
+                        layers.base_mcp.insert(name.clone());
+                    } else {
+                        layers.base_mcp.remove(name);
+                    }
                     layers.mcp.insert(name.clone(), request);
                 }
             }
@@ -2064,6 +2196,245 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    /// Every file under `root` with its bytes, to prove nothing was written.
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                stack.extend(
+                    fs::read_dir(&path)
+                        .unwrap()
+                        .flatten()
+                        .map(|entry| entry.path()),
+                );
+            } else if let Ok(bytes) = fs::read(&path) {
+                files.insert(path, bytes);
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn the_base_folder_is_the_lowest_layer_and_is_never_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-base-layer-{}", uuid::Uuid::now_v7()));
+        let base_dir = root.join("team");
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        for dir in [
+            base_dir.join("agents"),
+            base_dir.join("commands/git"),
+            base_dir.join("skills/release-check"),
+            config.join("agents"),
+            workspace.join(".git"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            base_dir.join("haarness.jsonc"),
+            r#"{
+                // Team defaults
+                "model": "team/base-model",
+                "small_model": "team/base-small",
+                "mcp": {"docs": {"url": "https://docs.example/mcp"}},
+                "hooks": {"Stop": [{"hooks": [{"command": "echo base"}]}]},
+                "instructions": ["/opt/team/rules.md"]
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("AGENTS.md"),
+            "Team rule: run the release checklist.",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("agents/reviewer.md"),
+            "---\ndescription: Team reviewer\n---\nReview like the team.",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("agents/release.md"),
+            "---\ndescription: Release helper\n---\nCheck the release.",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("commands/git/ship.md"),
+            "---\ndescription: Ship it\n---\nShip $ARGUMENTS",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("skills/release-check/SKILL.md"),
+            "---\nname: release-check\ndescription: The team checklist\n---\n1. Changelog.",
+        )
+        .unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"model":"mine/global-model"}"#,
+        )
+        .unwrap();
+        fs::write(
+            config.join("agents/reviewer.md"),
+            "---\ndescription: My reviewer\n---\nReview my way.",
+        )
+        .unwrap();
+        let before = snapshot(&base_dir);
+        let base = crate::layout::BaseFolder::at(base_dir.clone(), &workspace);
+        let layers = load_layers_with_base(&config, Some(&base), None, &workspace, true, &[]);
+        assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+        // The global layer overrides the base folder key by key.
+        assert_eq!(layers.model.as_deref(), Some("global-model"));
+        assert_eq!(layers.small_model.as_deref(), Some("team/base-small"));
+        assert_eq!(
+            layers.mcp["docs"].url.as_deref(),
+            Some("https://docs.example/mcp")
+        );
+        assert!(layers.base_mcp.contains("docs"));
+        let hook = layers
+            .hook_sources
+            .iter()
+            .find(|source| source.path.starts_with(&base_dir))
+            .expect("the base folder's hooks are listed");
+        assert!(hook.base && hook.trusted && !hook.plugin);
+        assert_eq!(layers.hooks.len(), 1);
+        assert_eq!(layers.instruction_sources, ["/opt/team/rules.md"]);
+        let reviewer = layers
+            .agents
+            .iter()
+            .find(|agent| agent.id == "reviewer")
+            .unwrap();
+        assert_eq!(reviewer.prompt.trim(), "Review my way.");
+        assert!(layers.agents.iter().any(|agent| agent.id == "release"));
+        assert!(
+            layers
+                .commands
+                .iter()
+                .any(|command| command.name == "git/ship")
+        );
+        assert!(
+            layers
+                .commands
+                .iter()
+                .any(|command| command.name == "release-check")
+        );
+        let instructions = layers.instructions.unwrap();
+        assert!(instructions.contains("Team rule: run the release checklist."));
+        assert_eq!(snapshot(&base_dir), before, "the base folder was written");
+        // Without a base folder nothing of it is read.
+        let without = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert!(without.agents.iter().all(|agent| agent.id != "release"));
+        assert!(!without.mcp.contains_key("docs"));
+        assert!(without.instructions.is_none());
+        let (agents, commands) = base_definitions(&base);
+        assert_eq!(agents.len(), 2);
+        assert!(commands.iter().any(|command| command.name == "git/ship"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_from_the_base_folder_into_the_project_is_not_followed() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-base-link-{}", uuid::Uuid::now_v7()));
+        let base_dir = root.join("team");
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        for dir in [
+            base_dir.join("agents"),
+            config.clone(),
+            workspace.join(".git"),
+            workspace.join("planted/agents"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            workspace.join("planted/haarness.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"command":"echo planted"}]}]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("planted/agents/planted.md"),
+            "---\ndescription: Planted\n---\nPlanted.",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("planted/haarness.json"),
+            base_dir.join("haarness.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("planted/agents/planted.md"),
+            base_dir.join("agents/planted.md"),
+        )
+        .unwrap();
+        // A plugin and a skill the repository planted, linked into the base
+        // folder's plugins and skills.
+        fs::create_dir_all(workspace.join("planted/plugin/.claude-plugin")).unwrap();
+        fs::write(
+            workspace.join("planted/plugin/.claude-plugin/plugin.json"),
+            r#"{"name":"planted-plugin"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("planted/skill")).unwrap();
+        fs::write(
+            workspace.join("planted/skill/SKILL.md"),
+            "---\nname: planted-skill\ndescription: Planted\n---\nPLANTED",
+        )
+        .unwrap();
+        fs::create_dir_all(base_dir.join("plugins/local")).unwrap();
+        fs::create_dir_all(base_dir.join("skills/team")).unwrap();
+        fs::create_dir_all(base_dir.join("plugins/local/team/.claude-plugin")).unwrap();
+        fs::write(
+            base_dir.join("plugins/local/team/.claude-plugin/plugin.json"),
+            r#"{"name":"team-plugin"}"#,
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("skills/team/SKILL.md"),
+            "---\nname: team-skill\ndescription: Team\n---\nTEAM",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("planted/plugin"),
+            base_dir.join("plugins/local/planted"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("planted/skill"),
+            base_dir.join("skills/planted"),
+        )
+        .unwrap();
+        let base = crate::layout::BaseFolder::at(base_dir.clone(), &workspace);
+        // Project configuration off: nothing of the project may load.
+        let layers = load_layers_with_base(&config, Some(&base), None, &workspace, false, &[]);
+        assert!(layers.hooks.is_empty());
+        assert!(layers.agents.iter().all(|agent| agent.id != "planted"));
+        assert!(
+            layers
+                .commands
+                .iter()
+                .any(|command| command.name == "team-skill")
+        );
+        assert!(
+            layers
+                .commands
+                .iter()
+                .all(|command| command.name != "planted-skill")
+        );
+        // The base folder's own plugin and skill load; the linked ones never do.
+        assert_eq!(
+            crate::plugins::base_plugin_roots_in(&base),
+            [base_dir.join("plugins/local/team")]
+        );
+        assert_eq!(base.skill_folders("skills"), [base_dir.join("skills/team")]);
+        // A base folder the person points into the project stays theirs.
+        let inside = crate::layout::BaseFolder::at(workspace.join("planted"), &workspace);
+        let layers = load_layers_with_base(&config, Some(&inside), None, &workspace, false, &[]);
+        assert_eq!(layers.hooks.len(), 1);
+        assert!(layers.agents.iter().any(|agent| agent.id == "planted"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

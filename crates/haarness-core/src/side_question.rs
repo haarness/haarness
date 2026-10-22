@@ -91,17 +91,23 @@ pub(crate) fn settled(mut messages: Vec<ProviderMessage>) -> Vec<ProviderMessage
     messages
 }
 
-/// The system prompt: the agent's scaffold plus standing instructions. The
-/// memory index and hook context change between turns, so they reach the
-/// model as stored turn reminders instead (see `turn_context`).
-pub(crate) fn system(mut base: String, project: &str, ultracode: bool, structured: bool) -> String {
+/// The system prompt: the agent's scaffold plus standing instructions, with
+/// `ultracode` the Ultracode section of an Ultracode turn. The memory index
+/// and hook context change between turns, so they reach the model as stored
+/// turn reminders instead (see `turn_context`).
+pub(crate) fn system(
+    mut base: String,
+    project: &str,
+    ultracode: Option<&str>,
+    structured: bool,
+) -> String {
     if !project.is_empty() {
         base.push_str("\n\nProject and global instructions:\n");
         base.push_str(project);
     }
-    if ultracode {
+    if let Some(section) = ultracode {
         base.push_str("\n\n");
-        base.push_str(crate::ULTRACODE_SYSTEM_SECTION);
+        base.push_str(section);
     }
     if structured {
         base.push_str("\n\nIMPORTANT: This turn requires structured output. Use the StructuredOutput tool for the final answer. Do not finish with plain text; other tools may be used first when needed.");

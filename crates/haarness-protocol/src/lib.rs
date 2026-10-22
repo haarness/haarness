@@ -19,7 +19,9 @@ pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
-pub use home::home_dir;
+pub use home::{
+    BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, base_config_dir_problem, home_dir,
+};
 pub use input::*;
 pub use management::*;
 pub use model_names::{
@@ -916,7 +918,9 @@ pub struct PluginInfo {
     pub name: String,
     pub spec: String,
     /// `haarness` for installed bundles; `haarness-global` or
-    /// `haarness-local` for directly loaded Haarness plugin directories.
+    /// `haarness-local` for directly loaded Haarness plugin directories, and
+    /// `haarness-base` for those of the base configuration folder, which
+    /// Haarness does not change (`managed` is false).
     pub source: String,
     #[serde(default)]
     pub marketplace: Option<String>,
@@ -954,6 +958,12 @@ pub struct McpServerInfo {
     pub transport: String,
     pub status: String,
     pub detail: Option<String>,
+    /// `base` for a server of the base configuration folder
+    /// (`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes:
+    /// an edit saves the person's own copy. Absent for every other server and
+    /// from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

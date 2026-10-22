@@ -1599,6 +1599,8 @@
   "Video": "Видео",
   "Reasoning": "Рассуждения",
   "Built-in / plugin": "Встроенный / плагин",
+  "Base": "Базовая",
+  "From the base folder": "Из базовой папки",
   "Model default": "По умолчанию для модели",
   "Minimal": "Минимальный",
   "Low": "Низкий",

@@ -3173,6 +3173,13 @@
           "name": {
             "type": "string"
           },
+          "scope": {
+            "description": "`base` for a server of the base configuration folder\n(`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes:\nan edit saves the person's own copy. Absent for every other server and\nfrom older servers.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "type": "string"
           },
@@ -3701,7 +3708,7 @@
             "type": "string"
           },
           "source": {
-            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories.",
+            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories, and\n`haarness-base` for those of the base configuration folder, which\nHaarness does not change (`managed` is false).",
             "type": "string"
           },
           "spec": {
