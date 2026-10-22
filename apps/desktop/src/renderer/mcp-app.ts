@@ -250,11 +250,11 @@ const attribute = (text: string) =>
  * them for the conversation to scroll; it reports the document going away with this
  * render's `token`, so a page that leaves is closed rather than left showing something else;
  * it reports each press of the person's (a trusted pointer or key event, which page script
- * cannot make) with the token, so one press allows one link or message; and it says when the
- * pointer comes into the page and leaves it, which the window cannot see past the frame, so the
- * page's options show while it is pointed at (a page saying so itself only shows them). The
- * script removes itself before the page runs, so the page cannot read the token and speak for
- * the person.
+ * cannot make) with the token, so one press allows one link or message; and it says, with the
+ * token, when the pointer comes into the page and leaves it, which the window cannot see past the
+ * frame, so the page's options show while it is pointed at and a page can neither show nor hide
+ * them itself. The script removes itself before the page runs, so the page cannot read the token
+ * and speak for the person.
  */
 export function document(html: string, meta: Meta | undefined, token: string) {
   const secret = JSON.stringify(token).replace(/</g, "\\u003c");
@@ -264,7 +264,7 @@ export function document(html: string, meta: Meta | undefined, token: string) {
     `addEventListener("pagehide",function(){p.postMessage({${LEFT}:s},"*")});` +
     `function press(e){if(e.isTrusted&&!e.repeat)p.postMessage({${INPUT}:s},"*")}` +
     `addEventListener("pointerdown",press,true);addEventListener("keydown",press,true);` +
-    `var h=0;function hover(v){if(h!==v){h=v;p.postMessage({${HOVER}:v},"*")}}` +
+    `var h=0;function hover(v){if(h!==v){h=v;p.postMessage({${HOVER}:[v,s]},"*")}}` +
     `addEventListener("pointerover",function(){hover(1)},{passive:true,capture:true});` +
     `addEventListener("pointerout",function(e){if(!e.relatedTarget)hover(0)},{passive:true,capture:true});` +
     `document.currentScript&&document.currentScript.remove()})(parent,${secret})</script>`;

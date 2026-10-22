@@ -715,12 +715,21 @@ impl NativeMcpRegistry {
             .then(|| live.servers.read().get(name).cloned())
             .flatten()
             .filter(|entry| {
-                config.enabled
-                    && entry.info.status == "connected"
+                // A server stopped for an oversized reply stays stopped
+                // through a reload that leaves its settings as they were:
+                // only Reconnect, or an edit of its own settings, starts it.
+                let stopped = entry.info.status == "failed"
+                    && entry
+                        .oversized
+                        .as_ref()
+                        .is_some_and(|passed| passed.load(Ordering::Acquire));
+                let connected = entry.info.status == "connected"
                     && entry
                         .worker
                         .as_ref()
-                        .is_some_and(|worker| !worker.is_closed())
+                        .is_some_and(|worker| !worker.is_closed());
+                config.enabled
+                    && (connected || stopped)
                     && credential_valid(entry.credential.as_ref())
                     && same_effective_config(&entry.config, &config)
             });
@@ -2005,15 +2014,18 @@ async fn resolve_headers(
     };
     let env = resolve_references(&config.env, limit).await?;
     let url = config.url.as_deref().unwrap_or_default();
-    // cmd.exe reads its own command line and expands `%NAME%`, not
-    // `${NAME}`: hand it the helper with its references filled in.
+    // cmd.exe expands `%NAME%`, not `${NAME}`: the helper's references are
+    // written that way and their values set in its environment, so no value
+    // (a secret least of all) is written into a command line other programs
+    // can read.
     #[cfg(windows)]
     let mut command = {
-        let helper = expand_env_reference_with(helper, &|name| {
+        let (helper, values) = cmd_helper(helper, &|name| {
             env.get(name).cloned().or_else(|| std::env::var(name).ok())
         });
         let mut command = tokio::process::Command::new("cmd.exe");
         command.raw_arg(format!("/d /s /c \"{helper}\""));
+        command.envs(values);
         command
     };
     // `sh` reads each `${NAME}` from the environment set below, so a value
@@ -2091,6 +2103,53 @@ async fn resolve_headers(
         headers.insert(name, value);
     }
     Ok(headers)
+}
+
+/// A headers helper as `cmd.exe` runs it: each `${NAME}` or
+/// `${NAME:-fallback}` written `%NAME%`, and the values to set in its
+/// environment for them (the fallback where `lookup` has none). Anything else
+/// in `${…}` is left as written.
+#[cfg(any(test, windows))]
+fn cmd_helper(
+    helper: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> (String, Vec<(String, String)>) {
+    let variable = |name: &str| {
+        name.bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    let mut output = String::with_capacity(helper.len());
+    let mut values = Vec::new();
+    let mut rest = helper;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            output.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let token = &after[..end];
+        let (name, fallback) = token
+            .split_once(":-")
+            .map_or((token, None), |(name, fallback)| (name, Some(fallback)));
+        if variable(name) {
+            let value = lookup(name).unwrap_or_else(|| fallback.unwrap_or_default().to_owned());
+            values.push((name.to_owned(), value));
+            output.push('%');
+            output.push_str(name);
+            output.push('%');
+        } else {
+            output.push_str(&rest[start..=start + 2 + end]);
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    (output, values)
 }
 
 fn refreshable_helper_error(error: &CoreError) -> bool {
@@ -3181,6 +3240,30 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_headers_helper_reads_its_values_from_its_environment() {
+        let lookup = |name: &str| match name {
+            "TOKEN" => Some("s3cret & \"quoted\"".to_owned()),
+            _ => None,
+        };
+        let (helper, values) = cmd_helper(
+            "fetch.cmd --token ${TOKEN} --team ${TEAM:-core} ${keychain:x} ${a b} ${OPEN",
+            &lookup,
+        );
+        assert_eq!(
+            helper,
+            "fetch.cmd --token %TOKEN% --team %TEAM% ${keychain:x} ${a b} ${OPEN"
+        );
+        assert_eq!(
+            values,
+            [
+                ("TOKEN".to_owned(), "s3cret & \"quoted\"".to_owned()),
+                ("TEAM".to_owned(), "core".to_owned())
+            ]
+        );
+        assert!(!helper.contains("s3cret"));
+    }
+
+    #[test]
     fn keychain_references_stay_as_written_wherever_settings_are_compared() {
         assert_eq!(
             expand_env_reference("Bearer ${keychain:github-token}"),
@@ -4045,7 +4128,16 @@ mod recovery_tests {
         assert_eq!(info.detail.as_deref(), Some(OVERSIZED_STATUS));
         #[cfg(unix)]
         stopped(&dir).await;
-        // Neither the watcher nor a call starts it again.
+        // Neither the watcher, a call nor a reload that leaves its settings
+        // as they were starts it again.
+        let candidate = NativeMcpRegistry::default();
+        let reloaded = candidate
+            .configure_reusing(&registry, "flood", flood_config(&dir, false))
+            .await
+            .unwrap();
+        registry.replace_from(&candidate);
+        assert_eq!(reloaded.status, "failed");
+        assert_eq!(reloaded.detail.as_deref(), Some(OVERSIZED_STATUS));
         tokio::time::sleep(Duration::from_millis(1_500)).await;
         let again = registry
             .call("flood", "mcp__flood__ping", serde_json::json!({}))
