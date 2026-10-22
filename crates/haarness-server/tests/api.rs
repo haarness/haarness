@@ -7145,6 +7145,68 @@ async fn background_subagent_returns_immediately_then_delivers_into_the_parent()
             if text == "include this follow-up context in the same child")));
 }
 
+#[tokio::test]
+async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    runtime.replace_custom_agents(vec![reviewer("reviewer", false)]);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            agent: Some("reviewer".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let prompt = serde_json::json!({
+        "prompt": "!tool bash {\"command\":\"sleep 1\"}",
+        "agent": "general",
+        "description": "slow independent check",
+        "background": true,
+    });
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&format!("!tool task {prompt}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let child = runtime.background_tasks(thread.id).await.unwrap()[0].child_thread_id;
+    // The chat's agent goes away while its subagent works, so the result
+    // can no longer start a turn there.
+    runtime.replace_custom_agents(Vec::new());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !runtime
+            .background_tasks(thread.id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background task ends and its delivery settles");
+    assert_eq!(runtime.background_results_owed(thread.id), 0);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, queued: false, .. }
+                if text.contains(&child.to_string()) && text.contains("state=\"completed\""))),
+        "the result is kept as a hidden message: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, retryable: false }
+                if message.contains("\u{201c}slow independent check\u{201d} could not start a turn in this chat (Unknown agent: reviewer)")
+                    && message.ends_with("your next message passes it to the agent."))),
+        "a notice says why: {items:#?}"
+    );
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+}
+
 /// A server for `runtime` with the routes under test and nothing else.
 async fn activity_server(
     runtime: Arc<AgentRuntime>,
@@ -7401,6 +7463,108 @@ export default workflow({
         0,
         delivered.turn_id,
     );
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn a_workflow_result_its_chat_cannot_take_is_kept_for_the_next_message() {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-workflow-refused-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let events = EventBus::new(256);
+    let runtime = Arc::new(AgentRuntime::with_workspace(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        workspace.clone(),
+    ));
+    let host = WorkflowRuntimeAdapter::new();
+    host.attach(&runtime);
+    let executor = WorkflowExecutor::new(ExecutorConfig::default());
+    if !executor.capability().executable {
+        eprintln!("skipping refused workflow result fixture: Bun is unavailable");
+        let _ = std::fs::remove_dir_all(workspace);
+        return;
+    }
+    let workflows = Arc::new(WorkflowCoordinator::new(
+        store,
+        Arc::new(WorkflowCatalog::for_workspace(&workspace)),
+        executor,
+        host,
+        events,
+        workspace.clone(),
+        true,
+    ));
+    let handle = activity_server(runtime.clone(), Some(workflows), &workspace).await;
+    let base = format!("http://{}", handle.address);
+    runtime.replace_custom_agents(vec![reviewer("reviewer", false)]);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            agent: Some("reviewer".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let run: WorkflowRun = reqwest::Client::new()
+        .post(format!("{base}/v1/workflows/run"))
+        .bearer_auth("activity-token")
+        .json(&serde_json::json!({
+            // Portable workflows have no timers: a counting loop keeps the
+            // run busy for a moment, well past the agent's removal below.
+            "source": r#"export const meta = { name: "refused-result" }
+let total = 0
+for (let i = 0; i < 300000000; i++) total += i % 7
+return { total }
+"#,
+            "threadId": thread.id,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run.status, WorkflowRunStatus::Running);
+    // The chat's agent goes away while the run works.
+    runtime.replace_custom_agents(Vec::new());
+    let items = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let items = runtime.items(thread.id, None).await.unwrap();
+            if items
+                .iter()
+                .any(|item| matches!(item.data, haarness_protocol::ItemData::Error { .. }))
+            {
+                return items;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the refused result is kept with a notice");
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, queued: false, .. }
+                if text.contains("name=\"refused-result\" state=\"completed\""))),
+        "the result is kept as a hidden message: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, .. }
+                if message.contains("\u{201c}refused-result\u{201d} could not start a turn in this chat (Unknown agent: reviewer)"))),
+        "{items:#?}"
+    );
+    assert_activity(&settled_activity(&base, thread.id).await, 0, None);
     handle.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(workspace);
 }
