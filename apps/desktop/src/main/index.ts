@@ -5,6 +5,7 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { exportLogs, logLevel } from "./logs";
+import { releaseNotesText } from "../release-notes";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
@@ -1446,7 +1447,12 @@ function installHandlers() {
       throw new Error(
         "This build has no configured update feed. Install a newer signed release manually.",
       );
-    const { autoUpdater } = await import("electron-updater");
+    // End-to-end tests stand in for the feed with `haarnessUpdater`.
+    const fake = (globalThis as { haarnessUpdater?: typeof import("electron-updater").autoUpdater }).haarnessUpdater;
+    const { autoUpdater } =
+      process.env.HAARNESS_DESKTOP_TEST === "1" && fake
+        ? { autoUpdater: fake }
+        : await import("electron-updater");
     if (action === "install") {
       if (!updateReady)
         throw new Error("Download the update before installing.");
@@ -1465,7 +1471,7 @@ function installHandlers() {
         updateReady = true;
         broadcast({
           kind: "update",
-          data: { status: "ready", version: value.version },
+          data: { status: "ready", version: value.version, notes: releaseNotesText(value.releaseNotes) },
         });
       });
       autoUpdater.on("error", (error) =>
@@ -1489,7 +1495,11 @@ function installHandlers() {
     autoUpdater.autoDownload = false;
     const result = await autoUpdater.checkForUpdates();
     updateAvailable = result?.isUpdateAvailable ?? false;
-    return { available: updateAvailable, info: result?.updateInfo };
+    return {
+      available: updateAvailable,
+      info: result?.updateInfo,
+      notes: releaseNotesText(result?.updateInfo.releaseNotes),
+    };
   });
 }
 /**
