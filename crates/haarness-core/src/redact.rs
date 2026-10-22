@@ -87,37 +87,66 @@ fn words(name: &str) -> Vec<String> {
     words
 }
 
+/// Whether a URL query or fragment parameter of this name carries a
+/// credential: any [`secret_name`], and also a whole `code` (an OAuth code,
+/// a function key), `jwt`, `ticket`, `otp` or `totp`, an `auth`, `access` or
+/// `mfa` code, and a name holding `hmac` or `passcode`.
+fn secret_parameter(name: &str) -> bool {
+    let joined = words(name).concat();
+    secret_name(name)
+        || ["code", "jwt", "ticket", "otp", "totp"].contains(&joined.as_str())
+        || ["authcode", "accesscode", "mfacode"]
+            .iter()
+            .any(|end| joined.ends_with(end))
+        || ["hmac", "passcode"]
+            .iter()
+            .any(|part| joined.contains(part))
+}
+
+/// `pairs` (`a=1&b=2`, a query or fragment) with the value of each
+/// credential-named parameter hidden. Borrowed when nothing is hidden.
+fn parameters(pairs: &str) -> Cow<'_, str> {
+    let mut hidden = false;
+    let shown: Vec<Cow<'_, str>> = pairs
+        .split('&')
+        .map(|pair| {
+            let Some((raw_name, value)) = pair.split_once('=') else {
+                return Cow::Borrowed(pair);
+            };
+            let name = url::form_urlencoded::parse(raw_name.as_bytes())
+                .next()
+                .map(|(name, _)| name.into_owned())
+                .unwrap_or_default();
+            if value.is_empty() || value == REDACTED || !secret_parameter(&name) {
+                return Cow::Borrowed(pair);
+            }
+            hidden = true;
+            Cow::Owned(format!("{raw_name}={REDACTED}"))
+        })
+        .collect();
+    if hidden {
+        Cow::Owned(shown.join("&"))
+    } else {
+        Cow::Borrowed(pairs)
+    }
+}
+
 /// A URL with its user name, password and the values of credential-named
-/// query parameters hidden; its scheme, host, path and other parameters
-/// stay readable, so it still shows which server a setting points at.
-/// Text that is not a URL is returned as it is.
+/// query and fragment parameters hidden; its scheme, host, path and other
+/// parameters stay readable, so it still shows which server a setting points
+/// at. A URL the parser refuses (a password holding a raw `/`, a bad port)
+/// is hidden from after `://` up to its last `@`. Other text is returned as
+/// it is.
 #[must_use]
 pub fn url(text: &str) -> Cow<'_, str> {
     let Ok(parsed) = url::Url::parse(text) else {
-        return Cow::Borrowed(text);
+        return unparsed_url(text);
     };
     let userinfo = !parsed.username().is_empty() || parsed.password().is_some();
-    let query = parsed.query().map(|query| {
-        query
-            .split('&')
-            .map(|pair| {
-                let name = url::form_urlencoded::parse(pair.as_bytes())
-                    .next()
-                    .map(|(name, _)| name.into_owned())
-                    .unwrap_or_default();
-                if secret_name(&name) {
-                    let raw_name = pair.split_once('=').map_or(pair, |(name, _)| name);
-                    Cow::Owned(format!("{raw_name}={REDACTED}"))
-                } else {
-                    Cow::Borrowed(pair)
-                }
-            })
-            .collect::<Vec<_>>()
-    });
-    let hides_query = query
-        .as_ref()
-        .is_some_and(|pairs| pairs.iter().any(|pair| matches!(pair, Cow::Owned(_))));
-    if !userinfo && !hides_query {
+    let query = parsed.query().map(parameters);
+    let fragment = parsed.fragment().map(parameters);
+    let hides = |part: &Option<Cow<'_, str>>| matches!(part, Some(Cow::Owned(_)));
+    if !userinfo && !hides(&query) && !hides(&fragment) {
         return Cow::Borrowed(text);
     }
     let mut shown = format!("{}:", parsed.scheme());
@@ -129,21 +158,129 @@ pub fn url(text: &str) -> Cow<'_, str> {
         shown.push('@');
     }
     shown.push_str(&parsed[url::Position::BeforeHost..url::Position::AfterPath]);
-    if let Some(pairs) = query {
+    if let Some(query) = query {
         shown.push('?');
-        shown.push_str(&pairs.join("&"));
+        shown.push_str(&query);
     }
-    if let Some(fragment) = parsed.fragment() {
+    if let Some(fragment) = fragment {
         shown.push('#');
-        shown.push_str(fragment);
+        shown.push_str(&fragment);
     }
     Cow::Owned(shown)
 }
 
+/// A `scheme://…@…` text the URL parser refused, hidden from after `://` up
+/// to its last `@`; anything else as it is.
+fn unparsed_url(text: &str) -> Cow<'_, str> {
+    let Some(start) = text.find("://") else {
+        return Cow::Borrowed(text);
+    };
+    let scheme = &text[..start];
+    let rest = &text[start + 3..];
+    match rest.rfind('@') {
+        Some(at)
+            if at > 0
+                && scheme.starts_with(|character: char| character.is_ascii_alphabetic())
+                && scheme.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+                })
+                && !rest[..at].contains(char::is_whitespace) =>
+        {
+            Cow::Owned(format!("{scheme}://{REDACTED}{}", &rest[at..]))
+        }
+        _ => Cow::Borrowed(text),
+    }
+}
+
+/// `text` with each `url::Url` written the way Rust's `{:?}` writes one
+/// (`Url { scheme: "https", …, username: "u", password: Some("p"), … }`, as
+/// libraries log it) hidden as [`url`] hides a URL: the user name and
+/// password, and credential-named query and fragment parameters.
+fn debug_urls(text: &str) -> Cow<'_, str> {
+    static FIELDS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"\b(username: |password: Some\(|query: Some\(|fragment: Some\()"((?:[^"\\]|\\.)*)""#,
+        )
+        .expect("static debug URL pattern")
+    });
+    if !text.contains("Url {") {
+        return Cow::Borrowed(text);
+    }
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("Url {") {
+        let end = start + debug_struct_end(&rest[start..]);
+        shown.push_str(&rest[..start]);
+        shown.push_str(
+            &FIELDS.replace_all(&rest[start..end], |captures: &regex::Captures<'_>| {
+                let (field, value) = (&captures[1], &captures[2]);
+                let value = if field.starts_with("username") || field.starts_with("password") {
+                    if value.is_empty() {
+                        Cow::Borrowed(value)
+                    } else {
+                        Cow::Borrowed(REDACTED)
+                    }
+                } else {
+                    parameters(value)
+                };
+                format!("{field}\"{value}\"")
+            }),
+        );
+        rest = &rest[end..];
+    }
+    shown.push_str(rest);
+    if shown == text {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(shown)
+    }
+}
+
+/// Where the `{ … }` that `text` opens ends, past its closing brace, reading
+/// quoted strings as Rust's `{:?}` writes them; the text's end when it was
+/// cut off.
+fn debug_struct_end(text: &str) -> usize {
+    let mut depth = 0_usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in text.char_indices() {
+        if quoted {
+            match character {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    text.len()
+}
+
 /// `text` with every URL in it shown as [`url`] shows it, for error messages
-/// that quote the address they could not reach.
+/// that quote the address they could not reach. A URL written as Rust's
+/// `{:?}` writes a `url::Url` is hidden the same way.
 #[must_use]
 pub fn urls_in(text: &str) -> Cow<'_, str> {
+    let debug = debug_urls(text);
+    match urls_in_text(&debug) {
+        Cow::Owned(shown) => Cow::Owned(shown),
+        Cow::Borrowed(_) => debug,
+    }
+}
+
+fn urls_in_text(text: &str) -> Cow<'_, str> {
     let mut shown = String::new();
     let mut rest = text;
     let mut changed = false;
@@ -274,7 +411,8 @@ fn bearer_or_jwt(text: &str) -> bool {
 #[must_use]
 pub fn text(text: &str) -> String {
     const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
-    const VALUE: &str = r#""[^"\r\n]*"?|'[^'\r\n]*'?"#;
+    // A quoted value, or one written as Rust's `{:?}` writes `Some("…")`.
+    const VALUE: &str = r#"Some\("(?:[^"\\\r\n]|\\.)*"?\)?|"[^"\r\n]*"?|'[^'\r\n]*'?"#;
     static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         [
             // A cookie header can hold several credentials; drop the rest of its line.
@@ -305,7 +443,6 @@ pub fn text(text: &str) -> String {
                 format!(r#"(?i)(^|[^\w-])(--?[\w.-]*(?:{KEYS})[\w.-]*)[ \t]+({VALUE}|[^\s"',;&-][^\s"',;&]*)"#),
                 "${1}${2} [redacted]",
             ),
-            (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@".to_owned(), "${1}[redacted]@"),
             (r"\beyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]*".to_owned(), "[redacted]"),
             (
                 r"\b(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-(?:ant-|proj-)?|AKIA|ASIA)[A-Za-z0-9_-]{12,}".to_owned(),
@@ -320,13 +457,97 @@ pub fn text(text: &str) -> String {
         })
         .collect()
     });
-    let mut text = text.to_owned();
+    let mut text = userinfo(text).into_owned();
     for (pattern, replacement) in RULES.iter() {
         if pattern.is_match(&text) {
             text = pattern.replace_all(&text, *replacement).into_owned();
         }
     }
     text
+}
+
+/// `text` with each URL's user name and password replaced by `[redacted]`:
+/// everything after `//` (or a JSON-escaped `\/\/`) up to the last `@`
+/// before the host, as URL parsers read it, so a raw `@` in a password goes
+/// too, and so does a backslash-escaped space. The host part ends at a
+/// space, `/`, `?` or `#`, so the text is read in linear time.
+///
+/// A user name with no password counts only after a scheme other than
+/// ssh's (where it names the account git logs in as), and only when it reads
+/// as one word: a token can be one (`https://<token>@host`), while
+/// `a//pkg@1.0` is a path and `"https://h","me@x"` a URL quoted beside an
+/// address.
+fn userinfo(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut shown = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while at + 1 < bytes.len() {
+        let slashes = if bytes[at..].starts_with(b"//") {
+            2
+        } else if bytes[at..].starts_with(br"\/\/") {
+            4
+        } else {
+            at += 1;
+            continue;
+        };
+        let start = at + slashes;
+        let mut end = start;
+        while let Some(&byte) = bytes.get(end) {
+            match byte {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+                b'/' | b'?' | b'#' => break,
+                _ if byte.is_ascii_whitespace() => break,
+                _ => end += 1,
+            }
+        }
+        let authority = &text[start..end];
+        if let Some(name_end) = authority.rfind('@')
+            && !authority.starts_with('@')
+            && user_credential(scheme_before(text, at), &authority[..name_end])
+        {
+            shown.push_str(&text[copied..start]);
+            shown.push_str("[redacted]");
+            copied = start + name_end;
+        }
+        at = end.max(at + 1);
+    }
+    if copied == 0 {
+        return Cow::Borrowed(text);
+    }
+    shown.push_str(&text[copied..]);
+    Cow::Owned(shown)
+}
+
+/// The scheme written right before the `//` at `slashes`, read only where a
+/// run of scheme characters starts with a letter.
+fn scheme_before(text: &str, slashes: usize) -> Option<&str> {
+    let head = text[..slashes].strip_suffix(':')?;
+    let start = head
+        .rfind(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
+        })
+        .map_or(0, |index| index + 1);
+    let scheme = &head[start..];
+    scheme
+        .starts_with(|character: char| character.is_ascii_alphabetic())
+        .then_some(scheme)
+}
+
+/// Whether the user part `name` of a URL holds a credential (see
+/// [`userinfo`]). What the URL display already hid stays as written.
+fn user_credential(scheme: Option<&str>, name: &str) -> bool {
+    if name.is_empty() || name == "[redacted]" || name == REDACTED {
+        return false;
+    }
+    name.contains(':')
+        || (scheme.is_some_and(|scheme| {
+            !["ssh", "git+ssh", "ssh+git"]
+                .iter()
+                .any(|ssh| scheme.eq_ignore_ascii_case(ssh))
+        }) && !name.contains([
+            '"', '\'', '<', '>', ',', ';', '(', ')', '[', ']', '{', '}', '|', '`', '\\',
+        ]))
 }
 
 /// At most `max` characters, ending with `…` when cut. Never splits a char.
@@ -537,6 +758,144 @@ mod tests {
         assert_eq!(
             text("--token=a\n--token b"),
             "--token=[redacted]\n--token [redacted]"
+        );
+    }
+
+    #[test]
+    fn free_text_hides_a_url_user_and_password_up_to_the_last_at_before_the_host() {
+        for (input, output) in [
+            ("http://user:p@ss3cret@proxy", "http://[redacted]@proxy"),
+            (
+                "upstream http://user:p@ss@w0rd@proxy.fixture.test:3128/x failed",
+                "upstream http://[redacted]@proxy.fixture.test:3128/x failed",
+            ),
+            (
+                "https://me@corp.fixture.test:pw@h.fixture.test/x",
+                "https://[redacted]@h.fixture.test/x",
+            ),
+            (
+                "socks5://:fake-pw-0000@proxy.fixture.test:1080",
+                "socks5://[redacted]@proxy.fixture.test:1080",
+            ),
+            (
+                "https://fake-tok-0000@h.fixture.test/org/repo.git",
+                "https://[redacted]@h.fixture.test/org/repo.git",
+            ),
+            (
+                "http://user:p@ss@[::1]:8080/x",
+                "http://[redacted]@[::1]:8080/x",
+            ),
+            (
+                "//user:p@ss@h.fixture.test/",
+                "//[redacted]@h.fixture.test/",
+            ),
+            (
+                r#"{"url":"https:\/\/u:p@ss@h.fixture.test\/x"}"#,
+                r#"{"url":"https:\/\/[redacted]@h.fixture.test\/x"}"#,
+            ),
+            (
+                r"git clone https://u:pa\ ss@h.fixture.test/r",
+                "git clone https://[redacted]@h.fixture.test/r",
+            ),
+            (
+                "ssh://git:p@ss@h.fixture.test/r.git",
+                "ssh://[redacted]@h.fixture.test/r.git",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "mailto:a@b",
+            "npm:pkg@1.0",
+            "someone@h.fixture.test",
+            "http://@h.fixture.test/",
+            "://@",
+            "https://h.fixture.test/a//pkg@1.0/x",
+            "cache//bun-darwin-aarch64@1.4.2@@@1/bin/bun",
+            "https://registry.fixture.test/@scope%2fpkg",
+            // The account git logs in as, never a credential.
+            "ssh://git@h.fixture.test/org/repo.git",
+            "git+ssh://git@h.fixture.test/org/repo.git",
+            // A URL quoted beside an address.
+            r#"["https://h.fixture.test","me@x.fixture.test"]"#,
+            // What the URL display already hid.
+            "https://<redacted>@h.fixture.test/x",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+    }
+
+    #[test]
+    fn free_text_reads_long_runs_of_slashes_and_authorities_quickly() {
+        let started = std::time::Instant::now();
+        for run in [
+            "//a".repeat(100_000),
+            format!("https://{}", "a:".repeat(100_000)),
+            format!("https://{}", "\\ ".repeat(100_000)),
+            format!("{}://x", "z".repeat(200_000)),
+        ] {
+            let run = format!("{run} @");
+            assert_eq!(userinfo(&run), run.as_str());
+        }
+        assert_eq!(
+            userinfo(&format!("https://{}h.fixture.test/", "a@".repeat(100_000))),
+            "https://[redacted]@h.fixture.test/"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_url_hides_credential_parameters_in_its_query_and_fragment_and_a_url_that_does_not_parse() {
+        assert_eq!(
+            url(
+                "https://h.fixture.test/x?pw=1&code=2&jwt=3&otp=4&mfa_code=5&x-hmac=6&passcode=7&state=s"
+            ),
+            "https://h.fixture.test/x?pw=<redacted>&code=<redacted>&jwt=<redacted>&otp=<redacted>&mfa_code=<redacted>&x-hmac=<redacted>&passcode=<redacted>&state=s"
+        );
+        assert_eq!(
+            url("https://h.fixture.test/cb#access_token=PRIVATE&state=s"),
+            "https://h.fixture.test/cb#access_token=<redacted>&state=s"
+        );
+        for kept in [
+            "https://h.fixture.test/docs#install",
+            "https://h.fixture.test/?keyword=hello&compass=2",
+        ] {
+            assert!(matches!(url(kept), Cow::Borrowed(_)), "{kept}");
+        }
+        // A raw `/` in the password ends the host part for the parser, which
+        // then refuses the port.
+        assert_eq!(
+            url("https://user:pa/ss@h.fixture.test/x"),
+            "https://<redacted>@h.fixture.test/x"
+        );
+        assert_eq!(
+            urls_in("cannot reach https://user:pa/ss@h.fixture.test/x: refused"),
+            "cannot reach https://<redacted>@h.fixture.test/x: refused"
+        );
+    }
+
+    #[test]
+    fn a_url_written_as_rust_debug_output_hides_its_credentials() {
+        let line = r#"discovery url: Url { scheme: "https", cannot_be_a_base: false, username: "PRIVATE_USER", password: Some("PRIVATE_PASS"), host: Some(Domain("mcp.fixture.test")), port: None, path: "/.well-known/oauth-authorization-server", query: Some("api_key=PRIVATE_KEY&region=eu"), fragment: None } next"#;
+        let shown = urls_in(line);
+        for secret in ["PRIVATE_USER", "PRIVATE_PASS", "PRIVATE_KEY"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(
+            shown.contains(r#"username: "<redacted>", password: Some("<redacted>"), host: Some(Domain("mcp.fixture.test"))"#),
+            "{shown}"
+        );
+        assert!(
+            shown.contains(r#"query: Some("api_key=<redacted>&region=eu"), fragment: None } next"#),
+            "{shown}"
+        );
+        let plain = r#"Url { scheme: "https", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("h")), port: None, path: "/", query: None, fragment: None }"#;
+        assert!(matches!(urls_in(plain), Cow::Borrowed(_)));
+        // The free-text masker hides a debug-written password whole too.
+        assert_eq!(
+            text(r#"password: Some("PRIVATE PASS"), host"#),
+            "password: [redacted], host"
         );
     }
 
