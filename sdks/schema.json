@@ -3701,7 +3701,7 @@
             "type": "string"
           },
           "source": {
-            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories.",
+            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories, and\n`haarness-base` for those of the base configuration folder, which\nHaarness does not change (`managed` is false).",
             "type": "string"
           },
           "spec": {

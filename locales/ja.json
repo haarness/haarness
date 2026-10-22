@@ -1575,6 +1575,8 @@
   "Video": "動画",
   "Reasoning": "推論",
   "Built-in / plugin": "組み込み / プラグイン",
+  "Base": "ベース",
+  "From the base folder": "ベースフォルダーから",
   "Model default": "モデルの既定",
   "Minimal": "最小",
   "Low": "低",

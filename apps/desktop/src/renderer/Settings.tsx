@@ -1,7 +1,7 @@
 import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
-import { SettingRow as Row } from "./SettingRow";
+import { BaseTag, SettingRow as Row } from "./SettingRow";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
@@ -1153,7 +1153,8 @@ function Assets(props: { kind: string; cli: Cli }) {
       action: on ? "enable" : "disable",
       kind: kind(),
       name: item.name,
-      scope: item.scope === "global" ? "global" : "local",
+      // A base folder item is shared by every project, as a global one is.
+      scope: item.scope === "global" || item.scope === "base" ? "global" : "local",
     });
     await app.catalogs();
     await refresh();
@@ -1219,10 +1220,13 @@ function Assets(props: { kind: string; cli: Cli }) {
                 ? t("This project")
                 : item.scope === "global"
                   ? t("All projects")
-                  : t("Built-in / plugin"),
+                  : item.scope === "base"
+                    ? undefined
+                    : t("Built-in / plugin"),
             ]
               .filter(Boolean)
               .join(" · ")}
+            tag={item.scope === "base" ? <BaseTag /> : undefined}
             target={props.kind + ":" + item.name}
           >
             <Show when={item.name in enabled()}>
@@ -1360,8 +1364,25 @@ function Tools() {
 function Mcp(props: { cli: Cli }) {
   const app = useApp();
   const [rows, setRows] = createSignal<T.McpServerInfo[]>([]);
+  // Servers of the base folder, which Haarness lists but never changes.
+  const [base, setBase] = createSignal<ReadonlySet<string>>(new Set());
   async function refresh() {
-    setRows(await app.api("mcpServers"));
+    const [servers, configured] = await Promise.all([
+      app.api<T.McpServerInfo[]>("mcpServers"),
+      app.state.connection?.remote
+        ? undefined
+        : app
+            .native<{ name: string; scope?: string }[]>({
+              action: "asset",
+              kind: "mcp",
+              input: { action: "list" },
+            })
+            .catch(() => undefined),
+    ]);
+    setRows(servers);
+    setBase(
+      new Set((configured ?? []).filter((row) => row.scope === "base").map((row) => row.name)),
+    );
   }
   createEffect(() => {
     app.state.catalogVersion;
@@ -1393,6 +1414,9 @@ function Mcp(props: { cli: Cli }) {
           <div class="setting-block">
             <header>
               <h3 data-setting={"mcp:" + server.name}>{server.name}</h3>
+              <Show when={base().has(server.name)}>
+                <BaseTag />
+              </Show>
               <span class="badge">{server.status}</span>
             </header>
             <div class="toolbar">
@@ -1430,7 +1454,8 @@ function Mcp(props: { cli: Cli }) {
                   items={[
                     { label: "Enable", command: "enable" },
                     { label: "Disable", command: "disable" },
-                    { label: "Remove", command: "remove" },
+                    // The base folder's servers are turned off, not removed.
+                    ...(base().has(server.name) ? [] : [{ label: "Remove", command: "remove" }]),
                     { label: "Sign out", command: "logout" },
                   ].map((item) => ({
                     label: t(item.label),
@@ -1526,6 +1551,7 @@ function Plugins() {
             title={plugin.name}
             target={"plugin:" + plugin.name}
             description={plugin.description || plugin.source}
+            tag={plugin.source === "haarness-base" ? <BaseTag /> : undefined}
           >
             <Show when={plugin.managed}>
               <input

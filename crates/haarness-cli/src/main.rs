@@ -2576,7 +2576,7 @@ async fn skill_manage_command(
     }
 }
 
-/// Ordered skill roots: plugins, Agent Skills homes, Claude Code roots when
+/// Ordered skill roots: the base folder's, plugins, Agent Skills homes, Claude Code roots when
 /// `compatibility.claude_code.skills` opts in, native global/project roots,
 /// then `skills.paths` folders and cached `skills.urls` indexes. Later roots
 /// win on name collisions.
@@ -2593,14 +2593,22 @@ fn skill_roots(
         .unwrap_or_else(|| PathBuf::from("."));
     let home = haarness_protocol::home_dir();
     let plugins = plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
-    let mut roots = plugins
+    // The base folder's skills come first, so every other root replaces one
+    // of the same name.
+    let mut roots = layout::BaseFolder::for_workspace(workspace)
         .into_iter()
-        .flat_map(|root| {
-            haarness_core::definitions::component_paths(&root, "skills")
+        .flat_map(|base| {
+            ["skill", "skills"]
                 .into_iter()
-                .map(move |path| (path, true, Some(root.clone())))
+                .filter_map(move |name| base.entry(name))
         })
+        .map(|path| (path, true, None))
         .collect::<Vec<_>>();
+    roots.extend(plugins.into_iter().flat_map(|root| {
+        haarness_core::definitions::component_paths(&root, "skills")
+            .into_iter()
+            .map(move |path| (path, true, Some(root.clone())))
+    }));
     if let Some(home) = home.as_deref() {
         roots.push((home.join(".agents/skills"), true, None));
     }
@@ -6239,7 +6247,13 @@ fn load_output_style(
     {
         anyhow::bail!("defaults.output_style must be a simple style name");
     }
-    let mut candidates = vec![config_dir.join("output-styles").join(format!("{id}.md"))];
+    // The base folder's style is the lowest candidate: a global or project
+    // style of the same name replaces it.
+    let mut candidates = layout::BaseFolder::for_workspace(workspace)
+        .and_then(|base| base.entry(&format!("output-styles/{id}.md")))
+        .into_iter()
+        .collect::<Vec<_>>();
+    candidates.push(config_dir.join("output-styles").join(format!("{id}.md")));
     if trust {
         candidates.push(
             workspace
@@ -6692,6 +6706,25 @@ fn runtime_source_fingerprint(controller: &HotReloadController) -> Result<Source
     )
 }
 
+/// What Haarness reads from the base folder, which hot reload watches as it
+/// does the global folder's.
+const BASE_CONFIG_ENTRIES: [&str; 14] = [
+    "haarness.json",
+    "haarness.jsonc",
+    "opencode.json",
+    "opencode.jsonc",
+    "AGENTS.md",
+    "commands",
+    "command",
+    "agents",
+    "agent",
+    "skills",
+    "skill",
+    "output-styles",
+    "prompts",
+    "plugins/local",
+];
+
 /// A digest of the content of every runtime source. It changes only when a
 /// source's content does: timestamps, folder metadata, editor scratch files
 /// and OAuth token refreshes leave it alone.
@@ -6724,9 +6757,13 @@ fn runtime_source_fingerprint_for(
         config_dir.join("command"),
         config_dir.join("agents"),
         config_dir.join("output-styles"),
+        config_dir.join("prompts"),
         config_dir.join("extensions.json"),
         config_dir.join("extensions"),
     ];
+    if let Some(base) = haarness_protocol::base_config_dir() {
+        roots.extend(BASE_CONFIG_ENTRIES.iter().map(|name| base.join(name)));
+    }
     roots.extend(capability_state::sources(paths, workspace, trust));
     for name in [
         "haarness.json",
@@ -7667,8 +7704,8 @@ async fn mcp_command(
             no_browser,
             callback_port,
         } => {
-            let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
+            let (target, entry) = mcp_entry_or_base(paths, workspace, project, &name)?;
+            let entry = loaded_mcp_entry(&target, entry);
             let registry = oauth_registry(paths, &name, &entry, true).await?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, callback_port))
                 .await
@@ -7697,8 +7734,8 @@ async fn mcp_command(
             println!("{}: {}", server.name, server.status);
         }
         McpCommand::Logout { name, project } => {
-            let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
+            let (target, entry) = mcp_entry_or_base(paths, workspace, project, &name)?;
+            let entry = loaded_mcp_entry(&target, entry);
             let registry = oauth_registry(paths, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
             let server = client.configure_mcp(&name, &entry).await?;
@@ -7712,14 +7749,15 @@ async fn mcp_command(
             project,
             show_secrets,
         } => {
-            let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = read_mcp_entry(&target, &name)?;
+            let (target, entry) = mcp_entry_or_base(paths, workspace, project, &name)?;
             let config = mcp_config_for_display(&entry, show_secrets)?;
+            let from_base =
+                base_mcp_entry(workspace, &name).is_some_and(|(path, _)| path == target);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "name": name,
-                    "scope": if project { "project" } else { "global" },
+                    "scope": if from_base { "base" } else if project { "project" } else { "global" },
                     "file": target,
                     "config": config,
                 }))?
@@ -7834,6 +7872,7 @@ async fn mcp_command(
             println!("{}: {}", server.name, server.status);
         }
         McpCommand::Remove { name, project } => {
+            refuse_base_mcp_removal(paths, workspace, &name, project)?;
             let target = mcp_entry_target(paths, workspace, project, &name);
             let mut entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             entry.enabled = false;
@@ -8061,6 +8100,7 @@ fn set_mcp_enabled(
     project: bool,
     enabled: bool,
 ) -> Result<McpConfigureRequest> {
+    adopt_base_mcp_entry(paths, workspace, name, project)?;
     let target = mcp_entry_target(paths, workspace, project, name);
     let before = read_mcp_entry(&target, name)?;
     let mut entry = before.clone();
@@ -8211,6 +8251,88 @@ fn mcp_entry_target(paths: &Paths, workspace: &Path, project: bool, name: &str) 
 
 fn mcp_config_target(paths: &Paths, workspace: &Path, project: bool) -> PathBuf {
     scoped_config_target(paths, workspace, project)
+}
+
+/// MCP server `name` as written in the global (or project) configuration,
+/// else in the base folder, for a command that only reads it.
+fn mcp_entry_or_base(
+    paths: &Paths,
+    workspace: &Path,
+    project: bool,
+    name: &str,
+) -> Result<(PathBuf, McpConfigureRequest)> {
+    let target = mcp_entry_target(paths, workspace, project, name);
+    match read_mcp_entry(&target, name) {
+        Ok(entry) => Ok((target, entry)),
+        Err(error) => base_mcp_entry(workspace, name).ok_or(error),
+    }
+}
+
+/// A server only the base folder defines cannot be removed: say how to stop
+/// using it instead.
+fn refuse_base_mcp_removal(
+    paths: &Paths,
+    workspace: &Path,
+    name: &str,
+    project: bool,
+) -> Result<()> {
+    let defined = scoped_config_files(paths, workspace, project)
+        .iter()
+        .any(|path| read_mcp_entry(path, name).is_ok());
+    if let Some((source, _)) = base_mcp_entry(workspace, name).filter(|_| !defined) {
+        anyhow::bail!(
+            "MCP server '{name}' comes from the base folder ({}), which Haarness does not change. Turn it off instead: haarness mcp disable {name}",
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+/// The base folder's file that defines MCP server `name`, the one loading
+/// reads last, and the entry as written there.
+fn base_mcp_entry(workspace: &Path, name: &str) -> Option<(PathBuf, McpConfigureRequest)> {
+    let base = layout::BaseFolder::for_workspace(workspace)?;
+    [
+        "haarness.json",
+        "haarness.jsonc",
+        "opencode.json",
+        "opencode.jsonc",
+    ]
+    .into_iter()
+    .filter_map(|file| base.entry(file))
+    .find_map(|path| {
+        read_mcp_entry(&path, name)
+            .ok()
+            .map(|entry| (path.clone(), entry))
+    })
+}
+
+/// Before an edit of MCP server `name` in the global (or, with `project`,
+/// the project) configuration: when that layer does not define it but the
+/// base folder does, copy the base folder's entry, as written, into the
+/// layer's file, which then overrides it. Haarness never changes the base
+/// folder, so an edit of its server is the person's own version.
+fn adopt_base_mcp_entry(paths: &Paths, workspace: &Path, name: &str, project: bool) -> Result<()> {
+    let defined = scoped_config_files(paths, workspace, project)
+        .iter()
+        .any(|path| read_mcp_entry(path, name).is_ok());
+    if defined {
+        return Ok(());
+    }
+    let Some((source, entry)) = base_mcp_entry(workspace, name) else {
+        return Ok(());
+    };
+    let target = scoped_config_target(paths, workspace, project);
+    if target.extension().is_some_and(|value| value != "toml") {
+        jsonconfig::write_entry(
+            &target,
+            "mcp",
+            name,
+            Some(raw_config_entry(&source, "mcp", name)?),
+        )
+    } else {
+        write_mcp_entry(&target, name, Some(&entry))
+    }
 }
 
 /// The `section.name` entry of a configuration file as written, as JSON.
@@ -8681,6 +8803,16 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("rg: {}", ripgrep.display());
     println!("rg sha256: {}", haarness_ripgrep::SHA256);
     println!("data: {}", paths.data.display());
+    println!("config: {}", paths.config_dir().display());
+    if let Some(base) = haarness_protocol::base_config_dir() {
+        // Read below the global folder, never written: see
+        // docs/CONFIGURATION-SCOPES.md#base-folder.
+        if base.is_dir() {
+            println!("base config: {}", base.display());
+        } else {
+            println!("base config: {} (not found)", base.display());
+        }
+    }
     #[cfg(all(unix, not(target_vendor = "apple")))]
     match system_certificate_count() {
         0 => println!("certificates: none found (install ca-certificates or set SSL_CERT_FILE)"),

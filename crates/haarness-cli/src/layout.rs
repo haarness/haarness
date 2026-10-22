@@ -212,6 +212,104 @@ pub fn project_directories(workspace: &Path) -> Vec<PathBuf> {
     vec![workspace.to_path_buf()]
 }
 
+/// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) as one
+/// workspace reads it: the lowest configuration layer, below the global
+/// folder, which a team or device management ships. Haarness only reads it,
+/// and never through a link that leads into the project, where a cloned
+/// repository puts what it likes. A base folder the person points into the
+/// project stays theirs, so everything in it is read.
+#[derive(Clone, Debug)]
+pub struct BaseFolder {
+    root: PathBuf,
+    /// The project's real roots, unless the folder itself is inside them.
+    project: Vec<PathBuf>,
+}
+
+impl BaseFolder {
+    /// The folder `HAARNESS_BASE_CONFIG_DIR` names, for `workspace`; `None`
+    /// when the variable is unset or blank.
+    pub fn for_workspace(workspace: &Path) -> Option<Self> {
+        haarness_protocol::base_config_dir().map(|root| Self::at(root, workspace))
+    }
+
+    pub fn at(root: PathBuf, workspace: &Path) -> Self {
+        let mut project: Vec<PathBuf> = [
+            project_directories(workspace).first().cloned(),
+            Some(workspace.to_path_buf()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+        project.dedup();
+        if root
+            .canonicalize()
+            .is_ok_and(|real| project.iter().any(|dir| real.starts_with(dir)))
+        {
+            project.clear();
+        }
+        Self { root, project }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Whether `path` really is inside the project, through a link.
+    pub fn leads_into_project(&self, path: &Path) -> bool {
+        !self.project.is_empty()
+            && path
+                .canonicalize()
+                .is_ok_and(|real| self.project.iter().any(|dir| real.starts_with(dir)))
+    }
+
+    /// `name` in the folder, unless a link leads it into the project (which is
+    /// logged and left out).
+    pub fn entry(&self, name: &str) -> Option<PathBuf> {
+        let path = self.root.join(name);
+        if self.leads_into_project(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                "config: base folder entry not read: a link leads it into the project"
+            );
+            return None;
+        }
+        Some(path)
+    }
+
+    /// The files under the folder's `name`, at any depth, leaving out each one
+    /// a link leads into the project.
+    pub fn files(&self, name: &str) -> Vec<PathBuf> {
+        fn walk(base: &BaseFolder, path: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+            if depth > 16 {
+                return;
+            }
+            if base.leads_into_project(path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    "config: base folder entry not read: a link leads it into the project"
+                );
+                return;
+            }
+            if path.is_file() {
+                out.push(path.to_path_buf());
+                return;
+            }
+            let Ok(entries) = fs::read_dir(path) else {
+                return;
+            };
+            let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+            children.sort();
+            for child in children {
+                walk(base, &child, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &self.root.join(name), 0, &mut out);
+        out
+    }
+}
+
 pub fn resource_roots(
     config: &Path,
     home: Option<&Path>,

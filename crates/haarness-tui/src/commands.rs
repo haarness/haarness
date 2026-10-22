@@ -2865,9 +2865,20 @@ impl App {
                             "Add one in .haarness/skills/<name>/SKILL.md".into(),
                         ]
                     } else {
+                        // Skills of the base folder this TUI started with
+                        // (`HAARNESS_BASE_CONFIG_DIR`) say so.
+                        let base = haarness_protocol::base_config_dir();
                         skills
                             .into_iter()
-                            .map(|skill| format!("{}  {}", skill.name, skill.description))
+                            .map(|skill| {
+                                if base.as_ref().is_some_and(|base| {
+                                    std::path::Path::new(&skill.path).starts_with(base)
+                                }) {
+                                    format!("{}  base  {}", skill.name, skill.description)
+                                } else {
+                                    format!("{}  {}", skill.name, skill.description)
+                                }
+                            })
                             .collect()
                     },
                 });
