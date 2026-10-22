@@ -1092,10 +1092,22 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
         })
         .unwrap_or(true);
     let expand = |value: &str| plugin_placeholders(value, plugin_root);
+    // opencode writes `timeout` in milliseconds (its entries say `type:
+    // "local"` or `"remote"`); a Claude Code or plugin entry writes seconds.
+    let opencode = matches!(
+        entry.get("type").and_then(Value::as_str),
+        Some("local" | "remote")
+    );
     let timeout_ms = entry
         .get("timeout")
         .and_then(Value::as_u64)
-        .map(|seconds| seconds.saturating_mul(1_000))
+        .map(|timeout| {
+            if opencode {
+                timeout
+            } else {
+                timeout.saturating_mul(1_000)
+            }
+        })
         .or_else(|| entry.get("timeoutMs").and_then(Value::as_u64));
     if let Some(url) = entry.get("url").and_then(Value::as_str) {
         let kind = entry
@@ -3458,5 +3470,39 @@ mod tests {
             Some(r#"get-token --home "${HOME}" --scope ${HAARNESS_FIXTURE_SCOPE:-all}"#)
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// opencode's `timeout` is milliseconds, a Claude Code or plugin entry's
+    /// seconds, and Haarness's own `timeoutMs` milliseconds.
+    #[test]
+    fn an_mcp_timeout_is_read_in_the_unit_its_entry_writes() {
+        for (entry, expected) in [
+            (
+                serde_json::json!({"type": "local", "command": ["server"], "timeout": 9000}),
+                9_000,
+            ),
+            (
+                serde_json::json!({"type": "remote", "url": "https://example.test/mcp", "timeout": 5000}),
+                5_000,
+            ),
+            (
+                serde_json::json!({"type": "stdio", "command": "server", "timeout": 12}),
+                12_000,
+            ),
+            (
+                serde_json::json!({"type": "http", "url": "https://example.test/mcp", "timeout": 12}),
+                12_000,
+            ),
+            (
+                serde_json::json!({"transport": "stdio", "command": "server", "timeoutMs": 7000}),
+                7_000,
+            ),
+        ] {
+            assert_eq!(
+                mcp_entry(&entry).unwrap().timeout_ms,
+                Some(expected),
+                "{entry}"
+            );
+        }
     }
 }

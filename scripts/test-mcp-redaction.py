@@ -145,6 +145,9 @@ try:
         assert 'outer-' not in saved and 'fixture-inner-secret' not in saved, saved
     assert until(received_token, 'enabling did not start the MCP server') == 'outer-${FIXTURE_INNER}', received.read_text()
     check("an MCP environment reference is resolved once for the server and stays in the file through disable/enable, which write only the flag")
+    # opencode writes `timeout` in milliseconds.
+    assert json.loads(cli('mcp', 'get', 'refs'))['config']['timeoutMs'] == 9000
+    check("an opencode entry's timeout of 9000 is 9 seconds, not 9000")
 
     sent = until(lambda: next((headers for headers in seen_headers if 'x-fixture' in headers), None),
                  'the helper server got no headers from its headersHelper')
