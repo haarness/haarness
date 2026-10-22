@@ -3094,16 +3094,17 @@ mod tests {
         State((state, field)): State<(FixtureState, &'static str)>,
         Json(request): Json<Value>,
     ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        use std::fmt::Write as _;
         state.0.lock().push(request);
-        let stream = [
+        let mut stream = String::new();
+        for chunk in [
             json!({"choices":[{"delta":{field: "Look at "}}]}),
             json!({"choices":[{"delta":{field: "the file first."}}]}),
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}),
             json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
-        ]
-        .iter()
-        .map(|chunk| format!("data: {chunk}\n\n"))
-        .collect();
+        ] {
+            let _ = write!(stream, "data: {chunk}\n\n");
+        }
         ([(CONTENT_TYPE, "text/event-stream")], stream)
     }
 
