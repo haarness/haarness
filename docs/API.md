@@ -326,7 +326,10 @@ the public OAuth authorization-code + PKCE flow. `disconnect` drops the live
 worker and advertised tools without deleting configuration; `reconnect`
 performs initialization and capability discovery again.
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
-discovery as one deadline, plus a `headersHelper` run. It does not bound tool
+discovery as one deadline, plus a `headersHelper` run. In a JSON file a
+`timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
+entry (`type: "local"` or `"remote"`), seconds in a Claude Code or plugin
+entry; edits leave the key and its unit as written. It does not bound tool
 calls or the Streamable HTTP response streams that carry their results; a
 timed-out connection names its limit ("MCP connection timed out after 30 s").
 Tool descriptions are capped at 2048 characters, ending in `… [truncated]`;

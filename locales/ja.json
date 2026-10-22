@@ -914,6 +914,7 @@
   "Memory for {project}. Stored outside the repository.": "{project} のメモリです。リポジトリの外に保存されます。",
   "Loading memory…": "メモリを読み込み中…",
   "Memory could not be loaded.": "メモリを読み込めませんでした。",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "設定ファイルを読み込めなかったため、メモリはオフになっています。保存すると置き換えられます。",
   "Include the memory index in prompts and make memory tools available.": "メモリのインデックスをプロンプトに含め、メモリツールを利用できるようにします。",
   "Index limit must be between 1 and 1000.": "インデックス上限は 1〜1000 の範囲で指定してください。",
   "Memory settings saved. Runtime changes apply when idle.": "メモリ設定を保存しました。ランタイムの変更はアイドル時に適用されます。",

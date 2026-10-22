@@ -914,6 +914,7 @@
   "Memory for {project}. Stored outside the repository.": "{project} 的記憶。儲存在程式庫之外。",
   "Loading memory…": "正在載入記憶…",
   "Memory could not be loaded.": "無法載入記憶。",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "無法讀取記憶的設定檔，因此記憶已關閉。儲存會取代該檔案。",
   "Include the memory index in prompts and make memory tools available.": "在提示中包含記憶索引，並啟用記憶工具。",
   "Index limit must be between 1 and 1000.": "索引上限必須介於 1 到 1000 之間。",
   "Memory settings saved. Runtime changes apply when idle.": "記憶設定已儲存。執行環境的變更會在閒置時生效。",

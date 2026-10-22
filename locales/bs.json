@@ -914,6 +914,7 @@
   "Memory for {project}. Stored outside the repository.": "Memorija za {project}. Pohranjuje se izvan repozitorija.",
   "Loading memory…": "Učitavanje memorije…",
   "Memory could not be loaded.": "Memoriju nije moguće učitati.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Memorija je isključena jer njenu datoteku postavki nije moguće pročitati. Spremanje je zamjenjuje.",
   "Include the memory index in prompts and make memory tools available.": "Uključuje indeks memorije u upite i omogućuje alate memorije.",
   "Index limit must be between 1 and 1000.": "Ograničenje indeksa mora biti između 1 i 1000.",
   "Memory settings saved. Runtime changes apply when idle.": "Postavke memorije spremljene. Promjene izvršnog okruženja primjenjuju se kada je neaktivno.",

@@ -11615,6 +11615,26 @@ test("memory dialog manages project files, retains conflicting edits and reloads
   await expect(memory.getByRole("button", { name: "Edit memory desktop-memory-proof", exact: true })).not.toBeVisible();
   expect(await readFile(path, "utf8").catch(() => "missing")).toBe("missing");
   await memory.getByRole("button", { name: "Close", exact: true }).click();
+
+  // A settings file Haarness cannot read keeps memory off, and says so.
+  const settings = join(status.directory, "settings.json");
+  await writeFile(settings, '{"enabled": true,}');
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill("Manage memory");
+  await page.getByRole("option", { name: "Manage memory", exact: true }).click();
+  const unreadable = "Memory is off because its settings file could not be read. Saving replaces it.";
+  await expect(memory.getByRole("status")).toHaveText(unreadable);
+  await expect(memory.getByRole("switch", { name: "Enable project memory" })).not.toBeChecked();
+  await page.screenshot({ path: test.info().outputPath("memory-dialog-unreadable.png") });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.screenshot({ path: test.info().outputPath("memory-dialog-unreadable-dark.png") });
+  await page.emulateMedia({ colorScheme: null });
+  await memory.getByRole("switch", { name: "Enable project memory" }).check();
+  await memory.getByRole("button", { name: "Save memory settings", exact: true }).click();
+  await expect(memory.getByRole("status")).toContainText("Memory settings saved");
+  await expect(memory).not.toContainText(unreadable);
+  expect(JSON.parse(await readFile(settings, "utf8")).enabled).toBe(true);
+  await memory.getByRole("button", { name: "Close", exact: true }).click();
   expect(errors).toEqual([]);
 });
 

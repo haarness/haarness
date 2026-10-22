@@ -18181,3 +18181,24 @@ fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
     app.providers[1].authenticated = true;
     assert!(!home(&app).contains("Replies come from"));
 }
+
+/// The composer's temporary file reaches `$EDITOR` as one word, however its
+/// folder is named.
+#[cfg(unix)]
+#[test]
+fn the_external_editor_gets_its_file_as_one_word() {
+    let root = std::env::temp_dir().join(format!(
+        "haarness-editor-{} a b $(touch marker) it's",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("compose.md");
+    let status = crate::editor_command("printf '%s' edited >", &file)
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited");
+    assert!(!root.join("marker").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -603,8 +603,18 @@ pub trait ToolInvoker: Send + Sync {
     /// call ids of the steps after it (`<batch call id>:N`) stay their place
     /// in the batch, which is how clients pair a delegation with its step.
     fn skip_call(&self) {}
-    async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {
-        self.invoke("bash", serde_json::json!({"command":command}))
+    /// Runs a definition's `!` snippet in the agent's shell. Permissions,
+    /// hooks and the approval card see `shown`, the snippet with its folders
+    /// filled in; the shell runs `run`, which keeps the placeholders as
+    /// written, with `env` (the values they stand for) in its environment.
+    /// An invoker without its own shell runs `shown`.
+    async fn definition_shell(
+        &self,
+        shown: String,
+        _run: String,
+        _env: std::collections::BTreeMap<String, String>,
+    ) -> CoreResult<ToolOutput> {
+        self.invoke("bash", serde_json::json!({"command":shown}))
             .await
     }
     fn side_effectful_for(&self, name: &str, arguments: &Value) -> CoreResult<bool>;

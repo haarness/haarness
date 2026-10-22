@@ -44,6 +44,13 @@ write(plugins/'a/skills/readonly/SKILL.md','---\nname: readonly\ndescription: Re
 write(plugins/'a/commands/named.md','---\narguments: [file, target, missing]\n---\nNAMED $file to $target ($missing) MISSING $5\nPROJECT ${CLAUDE_PROJECT_DIR}\n')
 write(plugins/'a/commands/failed-context.md','---\ndescription: Failed context\n---\nNEVER_RENDER !`exit 2`\n')
 write(workspace/'.haarness/skills/standalone/SKILL.md','---\nname: standalone\ndescription: Local skill\n---\nSTANDALONE_BODY $ARGUMENTS\n')
+# Projects whose folder names hold shell syntax and a snippet: the names must stay plain text.
+odd=root/'odd $(printf INJECTED) folder';odd_snippet=root/'w !`printf SNIPPET`'
+write(odd/'.haarness/commands/where.md','---\ndescription: Folder in a snippet\n---\nWHERE !`printf \'[%s]\' "${CLAUDE_PROJECT_DIR}" \'${CLAUDE_PROJECT_DIR}\' "$(dirname "${CLAUDE_PROJECT_DIR}")"`\n')
+write(odd_snippet/'.haarness/commands/where.md','---\ndescription: Folder in the text\n---\nPROJECT ${CLAUDE_PROJECT_DIR}\n')
+def run_in(folder,command):
+ p=subprocess.run([binary,'--workspace',str(folder),'--trust-project','run','','--command',command,'--provider','echo','--model','echo-1'],env=env,text=True,capture_output=True,timeout=60)
+ return {'code':p.returncode,'out':p.stdout,'err':p.stderr}
 write(plugins/'custom-paths/.claude-plugin/plugin.json',json.dumps({'name':'custom-paths','commands':['./extra/check.md'],'agents':['./extra/reader.md'],'skills':['./extra/research']}))
 write(plugins/'custom-paths/extra/check.md','---\ndescription: Custom command\n---\nCUSTOM_COMMAND\n')
 write(plugins/'custom-paths/extra/reader.md','---\nname: reader\ndescription: Custom agent\n---\nCUSTOM_AGENT\n')
@@ -84,6 +91,10 @@ try:
  check('skill restrictions expire next message',(workspace/'next-turn.txt').exists(),result)
  result=run('"two words" last','--command','a:named')
  check('named missing and project substitutions','NAMED two words to last () MISSING $5' in result['out'] and str(workspace) in result['out'],result)
+ result=run_in(odd,'where')
+ check('a folder name is plain text in a command snippet',f'WHERE [{odd}][{odd}][{odd.parent}]' in result['out'],result)
+ result=run_in(odd_snippet,'where')
+ check('a folder name in the text never starts a snippet',f'PROJECT {odd_snippet}' in result['out'],result)
  result=run('','--command','a:failed-context')
  check('failed context aborts invocation',result['code']!=0 and 'NEVER_RENDER' not in result['out'],result)
  result=run('!tool write {"path":"unknown-breach.txt","content":"bad"}','--agent','a:missing')
@@ -102,4 +113,6 @@ try:
  print('Haarness plugin compatibility E2E passed.',flush=True)
 finally:
  print('Server cleanup:',cli('serve','--stop')['code'],flush=True)
+ for folder in [odd,odd_snippet]:
+  subprocess.run([binary,'--workspace',str(folder),'--trust-project','serve','--stop'],env=env,capture_output=True,timeout=60)
  e2e_scratch.settle(root)
