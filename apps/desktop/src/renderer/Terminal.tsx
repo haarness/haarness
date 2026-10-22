@@ -372,11 +372,13 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     let live = false;
     let order = 0;
     const waiting = inputQueue();
-    const send = (bytes: Uint8Array) => {
+    // An answer to a program's query goes on from one window only, when
+    // the terminal is shown in several (see main's terminalAnswers).
+    const send = (bytes: Uint8Array, answer = false) => {
       const position = order++;
       if (!live) return waiting.add(position, bytes);
       void window.haarness
-        .terminal(connection, "write", props.id, Array.from(bytes))
+        .terminal(connection, answer ? "answer" : "write", props.id, Array.from(bytes))
         .then((sent) => {
           if (sent !== false) return;
           live = false;
@@ -385,9 +387,10 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         .catch((error) => app.set("error", String(error)));
     };
     const input = terminal.onData((data) => {
-      if (!typing() && !stream.open()) return;
+      const answer = !typing();
+      if (answer && !stream.open()) return;
       // A long paste goes in several writes; IPC keeps them in order.
-      for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk);
+      for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk, answer);
     });
     // The PTY learns every size xterm takes: a panel resize, and a font size
     // change, which refits without the panel changing size. A push waits for
