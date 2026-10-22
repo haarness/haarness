@@ -31,7 +31,7 @@ pub use agents::{
 };
 pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
-pub use events::{EventBus, EventSubscription};
+pub use events::{EventBus, EventSubscription, JoinedEvents, LiveEvent, join_delta, join_deltas};
 pub use execution::ExecutionSettings;
 pub use goal::{MAX_GOAL_CHARS, apply_goal_action, goal_line, legacy_goal_state, new_goal_state};
 pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only;

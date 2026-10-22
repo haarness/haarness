@@ -7244,6 +7244,72 @@ async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message()
     assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn a_reconnecting_event_stream_gets_waiting_deltas_joined() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let (thread, turn) = (
+        haarness_protocol::ThreadId::new(),
+        haarness_protocol::TurnId::new(),
+    );
+    let events = runtime.events();
+    let before = events.cursor();
+    for word in ["Hel", "lo", " wor", "ld"] {
+        events.publish(
+            "turn.text_delta",
+            Some(thread),
+            Some(turn),
+            None,
+            serde_json::json!({"delta": word}),
+        );
+    }
+    events.publish(
+        "turn.finished",
+        Some(thread),
+        Some(turn),
+        None,
+        serde_json::json!({}),
+    );
+    let response = reqwest::Client::new()
+        .get(format!("{base}/v1/events"))
+        .bearer_auth("activity-token")
+        .header("last-event-id", before.to_string())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !text.contains("event: turn.finished") {
+            text.push_str(&String::from_utf8_lossy(
+                &stream.next().await.unwrap().unwrap(),
+            ));
+        }
+    })
+    .await
+    .expect("the replay arrives");
+    let deltas: Vec<Value> = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: turn.text_delta"))
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            serde_json::from_str(data).unwrap()
+        })
+        .collect();
+    assert_eq!(deltas.len(), 1, "{text}");
+    assert_eq!(deltas[0]["payload"]["delta"], "Hello world");
+    assert_eq!(deltas[0]["eventId"], before + 4);
+    handle.shutdown().await.unwrap();
+}
+
 /// A server for `runtime` with the routes under test and nothing else.
 async fn activity_server(
     runtime: Arc<AgentRuntime>,
