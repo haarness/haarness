@@ -12,6 +12,7 @@ mod input;
 mod input_queue;
 mod keybindings;
 mod locale;
+mod logs;
 mod management;
 mod markdown;
 mod media;
@@ -1044,6 +1045,7 @@ async fn run_with_client(
                 }
                 app.poll_remote_control(&client);
                 app.poll_chrome(&client);
+                app.poll_logs();
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;
                     app.reveal_goal_completion();

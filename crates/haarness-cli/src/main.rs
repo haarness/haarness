@@ -1443,6 +1443,29 @@ async fn cli_main() -> Result<()> {
         Some(Command::Telemetry(args)) => {
             return usage_stats::run(&base_paths.data, base_paths.config_dir(), args).await;
         }
+        // Logs belong to the data folder, not to a project: `haarness logs`
+        // run from anywhere (Desktop runs it from the home folder, the TUI
+        // from wherever it started) must not register that folder.
+        Some(Command::Logs { tail, action }) => {
+            return match action {
+                None => logs_command(&base_paths, *tail),
+                Some(LogsCommand::Level {
+                    level,
+                    window,
+                    until_stopped,
+                    json,
+                }) => logs::level_command(
+                    &base_paths.data,
+                    level.as_deref(),
+                    *window,
+                    *until_stopped,
+                    *json,
+                ),
+                Some(LogsCommand::Export { output, full, json }) => {
+                    logs::export_command(&base_paths.data, output.clone(), *full, *json)
+                }
+            };
+        }
         Some(Command::Browser(args)) => {
             return browser::run(
                 &base_paths.data,
@@ -1470,8 +1493,9 @@ async fn cli_main() -> Result<()> {
     } else {
         StderrLogs::Off
     };
-    // Read-only commands stay out of the log files they inspect.
-    let file_logs = !matches!(cli.command, Some(Command::Logs { .. } | Command::Doctor));
+    // Read-only commands stay out of the log files they inspect (`logs`
+    // returned above, before logging starts).
+    let file_logs = !matches!(cli.command, Some(Command::Doctor));
     // Processes that live as long as a window or a server get no command span:
     // one span lasting hours is lost when the process is killed, and every
     // request would nest under it. Their traces start per request instead.
@@ -1693,17 +1717,7 @@ async fn cli_main() -> Result<()> {
             .await
         }
         Some(Command::Doctor) => doctor(&paths),
-        Some(Command::Logs { tail, action }) => match action {
-            None => logs_command(&paths, tail),
-            Some(LogsCommand::Level {
-                level,
-                window,
-                until_stopped,
-            }) => logs::level_command(&paths.data, level.as_deref(), window, until_stopped),
-            Some(LogsCommand::Export { output, full }) => {
-                logs::export_command(&paths.data, output, full)
-            }
-        },
+        Some(Command::Logs { .. }) => unreachable!("logs handled before project setup"),
         Some(Command::Upgrade(args)) => upgrade::run(args),
         }
     }
@@ -1738,6 +1752,9 @@ enum LogsCommand {
         /// Keep the level until `haarness logs level stop`, across restarts.
         #[arg(long)]
         until_stopped: bool,
+        /// Print the level in force afterwards as JSON, for Desktop and the TUI.
+        #[arg(long)]
+        json: bool,
     },
     /// Pack the log files into a zip with known secret shapes removed.
     Export {
@@ -1747,6 +1764,9 @@ enum LogsCommand {
         /// Pack the files as they are, removing nothing.
         #[arg(long)]
         full: bool,
+        /// Print what was written as JSON, for Desktop and the TUI.
+        #[arg(long)]
+        json: bool,
     },
 }
 

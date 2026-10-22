@@ -239,17 +239,60 @@ fn minutes(duration: Duration) -> String {
     }
 }
 
-/// `haarness logs level [LEVEL|stop] [--for D | --until-stopped]`.
+/// What `--json` reports about the raised level, after any change: for
+/// Desktop's Detailed logging switch and the TUI's `/logs detail`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LevelStatus {
+    /// The raised level in force now; none when each process has its own.
+    level: Option<String>,
+    /// When it goes back; none while none is raised or until it is stopped.
+    until: Option<DateTime<Utc>>,
+    until_stopped: bool,
+    control: PathBuf,
+    logs: PathBuf,
+}
+
+fn level_status(data: &Path, now: DateTime<Utc>) -> LevelStatus {
+    let control = read_control(data);
+    let level = control
+        .as_ref()
+        .and_then(|control| control.level_at(now))
+        .map(str::to_owned);
+    LevelStatus {
+        until: control
+            .as_ref()
+            .and_then(|control| control.until)
+            .filter(|_| level.is_some()),
+        until_stopped: level.is_some() && control.is_some_and(|control| control.until.is_none()),
+        level,
+        control: control_path(data),
+        logs: data.join("logs"),
+    }
+}
+
+/// `haarness logs level [LEVEL|stop] [--for D | --until-stopped] [--json]`.
 pub fn level_command(
     data: &Path,
     level: Option<&str>,
     window: Option<Duration>,
     until_stopped: bool,
+    json: bool,
 ) -> Result<()> {
     let now = Utc::now();
+    let report = |data: &Path| -> Result<()> {
+        println!(
+            "{}",
+            serde_json::to_string(&level_status(data, Utc::now()))?
+        );
+        Ok(())
+    };
     let Some(level) = level else {
         if window.is_some() || until_stopped {
             bail!("name a level to raise: {}", LEVELS.join(", "));
+        }
+        if json {
+            return report(data);
         }
         match read_control(data) {
             Some(control) => match (control.level_at(now), control.until) {
@@ -276,6 +319,9 @@ pub fn level_command(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error).context("cannot stop the raised log level"),
         };
+        if json {
+            return report(data);
+        }
         println!(
             "{}",
             if removed {
@@ -313,6 +359,9 @@ pub fn level_command(
             started_at: now,
         },
     )?;
+    if json {
+        return report(data);
+    }
     match until {
         Some(until) => println!(
             "{level} until {} (running Haarness processes follow within about 2 seconds)",
@@ -392,8 +441,8 @@ fn starts_log_line(line: &str) -> bool {
 /// The most lines a private key block whose end is missing swallows.
 const KEY_LINES: usize = 100;
 
-/// `haarness logs export [--output PATH] [--full]`.
-pub fn export_command(data: &Path, output: Option<PathBuf>, full: bool) -> Result<()> {
+/// `haarness logs export [--output PATH] [--full] [--json]`.
+pub fn export_command(data: &Path, output: Option<PathBuf>, full: bool, json: bool) -> Result<()> {
     let logs = data.join("logs");
     let mut files = fs::read_dir(&logs)
         .into_iter()
@@ -413,6 +462,19 @@ pub fn export_command(data: &Path, output: Option<PathBuf>, full: bool) -> Resul
         ))
     });
     let (packed, skipped) = export(&files, &output, full)?;
+    if json {
+        let path = std::path::absolute(&output).unwrap_or(output);
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": path,
+                "files": packed,
+                "skipped": skipped,
+                "scrubbed": !full,
+            })
+        );
+        return Ok(());
+    }
     println!(
         "{} ({packed} file{}{})",
         output.display(),
@@ -432,6 +494,14 @@ pub fn export_command(data: &Path, output: Option<PathBuf>, full: bool) -> Resul
 }
 
 fn export(files: &[(PathBuf, u64)], output: &Path, full: bool) -> Result<(usize, usize)> {
+    // A folder named for the zip (`/logs export ~/bug-report/`) is made.
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
     let file =
         fs::File::create(output).with_context(|| format!("cannot write {}", output.display()))?;
     let mut zip = zip::ZipWriter::new(file);
@@ -696,14 +766,21 @@ mod tests {
     #[test]
     fn a_raised_level_lasts_its_window_and_stop_ends_it() {
         let data = scratch("level");
-        level_command(&data, Some("DEBUG"), Some(Duration::from_secs(600)), false).unwrap();
+        level_command(
+            &data,
+            Some("DEBUG"),
+            Some(Duration::from_secs(600)),
+            false,
+            false,
+        )
+        .unwrap();
         let control = read_control(&data).unwrap();
         assert_eq!(control.level, "debug");
         let now = Utc::now();
         assert_eq!(control.level_at(now), Some("debug"));
         assert_eq!(control.level_at(now + chrono::Duration::minutes(11)), None);
 
-        level_command(&data, Some("info"), None, true).unwrap();
+        level_command(&data, Some("info"), None, true, false).unwrap();
         let control = read_control(&data).unwrap();
         assert_eq!(control.until, None);
         assert_eq!(
@@ -711,10 +788,55 @@ mod tests {
             Some("info")
         );
 
-        assert!(level_command(&data, Some("loud"), None, false).is_err());
-        assert!(level_command(&data, Some("debug"), Some(MAX_WINDOW * 2), false).is_err());
-        level_command(&data, Some("stop"), None, false).unwrap();
+        assert!(level_command(&data, Some("loud"), None, false, false).is_err());
+        assert!(level_command(&data, Some("debug"), Some(MAX_WINDOW * 2), false, false).is_err());
+        level_command(&data, Some("stop"), None, false, false).unwrap();
         assert!(read_control(&data).is_none());
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn the_json_status_says_what_is_raised_and_until_when() {
+        let data = scratch("status");
+        let now = Utc::now();
+        let status = serde_json::to_value(level_status(&data, now)).unwrap();
+        assert_eq!(status["level"], serde_json::Value::Null);
+        assert_eq!(status["until"], serde_json::Value::Null);
+        assert_eq!(status["untilStopped"], false);
+        assert_eq!(status["logs"], data.join("logs").display().to_string());
+        level_command(
+            &data,
+            Some("debug"),
+            Some(Duration::from_secs(1800)),
+            false,
+            true,
+        )
+        .unwrap();
+        let status = serde_json::to_value(level_status(&data, now)).unwrap();
+        assert_eq!(status["level"], "debug");
+        assert_eq!(status["untilStopped"], false);
+        let until = status["until"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        assert!(
+            (until - now - chrono::Duration::minutes(30))
+                .num_seconds()
+                .abs()
+                < 5
+        );
+        // An ended window reads as nothing raised.
+        let later =
+            serde_json::to_value(level_status(&data, now + chrono::Duration::hours(1))).unwrap();
+        assert_eq!(later["level"], serde_json::Value::Null);
+        assert_eq!(later["until"], serde_json::Value::Null);
+        level_command(&data, Some("trace"), None, true, true).unwrap();
+        let status = serde_json::to_value(level_status(&data, now)).unwrap();
+        assert_eq!(
+            (status["level"].as_str(), status["untilStopped"].as_bool()),
+            (Some("trace"), Some(true))
+        );
         fs::remove_dir_all(data).unwrap();
     }
 
@@ -736,7 +858,7 @@ mod tests {
                 filter,
             ));
         let _guard = tracing::subscriber::set_default(subscriber);
-        level_command(&data, Some("debug"), None, true).unwrap();
+        level_command(&data, Some("debug"), None, true, false).unwrap();
         watch(
             data.clone(),
             EnvFilter::new("warn"),
@@ -772,7 +894,7 @@ mod tests {
                 filter,
             ));
         let _guard = tracing::subscriber::set_default(subscriber);
-        level_command(&data, Some("info"), None, true).unwrap();
+        level_command(&data, Some("info"), None, true, false).unwrap();
         watch(
             data.clone(),
             EnvFilter::new("debug"),
@@ -812,7 +934,7 @@ mod tests {
                 filter,
             ));
         let _guard = tracing::subscriber::set_default(subscriber);
-        level_command(&data, Some("debug"), None, true).unwrap();
+        level_command(&data, Some("debug"), None, true, false).unwrap();
         watch(
             data.clone(),
             EnvFilter::new(base),
@@ -894,7 +1016,7 @@ mod tests {
         )
         .unwrap();
         let output = data.join("out.zip");
-        export_command(&data, Some(output.clone()), false).unwrap();
+        export_command(&data, Some(output.clone()), false, false).unwrap();
         let mut archive = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
         let mut log = String::new();
         std::io::Read::read_to_string(

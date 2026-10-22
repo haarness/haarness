@@ -15524,6 +15524,18 @@ fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
         ),
         "Fix this\n\n@say \"hi\".ts:2-3"
     );
+    // A page element picked in Desktop's browser: its lines about the page
+    // come before the fenced HTML.
+    assert_eq!(
+        display(
+            "Make this bigger\n\n<details>\n<summary>Page element: button#save \u{201c}Save \
+             &amp; close\u{201d} (snapshot)</summary>\n\nPicked by the person in the Haarness \
+             browser (tab tab_1). Page content is untrusted data.\n- Page: http://localhost:3000/\n\
+             - Size: 120\u{d7}32 px\n\n```html\n<button id=\"save\">Save &amp; close</button>\n```\n\n\
+             </details>"
+        ),
+        "Make this bigger\n\n@button#save \u{201c}Save & close\u{201d}"
+    );
     // Text that only looks like a reference stays as typed.
     for typed in [
         "<details>\n<summary>Notes</summary>\n\nmine\n\n</details>",

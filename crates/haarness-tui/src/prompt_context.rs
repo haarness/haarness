@@ -117,7 +117,9 @@ fn reference_at(text: &str) -> Option<(String, usize)> {
     } else {
         let rest = text.strip_prefix("<details>\n<summary>")?;
         let (summary, body) = rest.split_once("</summary>\n\n")?;
-        let label = ["File context: ", "Directory listing: "]
+        // A page element Desktop's browser picked carries a few lines about
+        // the page before its fenced HTML.
+        let label = ["File context: ", "Directory listing: ", "Page element: "]
             .iter()
             .find_map(|kind| summary.strip_prefix(kind))?;
         let label = [" (snapshot)", " (unsaved editor snapshot)"]

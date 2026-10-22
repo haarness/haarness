@@ -4,6 +4,8 @@ import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
+import { exportLogs, logLevel } from "./logs";
+import { releaseNotesText } from "../release-notes";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
@@ -38,6 +40,7 @@ import {
   nativeImage,
   globalShortcut,
   net,
+  type BaseWindow,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -573,6 +576,14 @@ function installHandlers() {
   handle("browserCommand", (win, connection:string, thread:string, action:unknown) => browserHost.command(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread), action));
   handle("browserLayout", (win, connection:string, thread:string, raw:unknown) => browserHost.layout(win, connection, thread, z.object({visible:z.boolean(),bounds:z.object({x:z.number().finite(),y:z.number().finite(),width:z.number().finite(),height:z.number().finite()})}).parse(raw)));
   handle("browserSnapshot", (win, connection:string, thread:string) => browserHost.snapshot(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread)));
+  handle("browserPick", (win, connection: string, thread: string, raw: unknown) =>
+    browserHost.pick(
+      win,
+      z.string().max(2048).parse(connection),
+      z.string().max(128).parse(thread),
+      z.object({ hint: z.string().max(400), accent: z.string().max(64) }).nullable().parse(raw),
+    ),
+  );
   handle("projects", () => refreshProjects());
   handle(
     "remoteProjects",
@@ -1382,6 +1393,11 @@ function installHandlers() {
     chromeSetup(z.enum(["setup", "status"]).parse(action)),
   );
   handle("chromeReveal", () => revealChromeExtension());
+  // This computer's logs: Detailed logging, and the zip to share.
+  handle("logLevel", (_, action: unknown) =>
+    logLevel(z.enum(["status", "detail-on", "detail-off"]).parse(action)),
+  );
+  handle("exportLogs", (win) => exportLogs(win, say));
   // An image a reply links to on another host, once the person asks for it.
   // End-to-end tests pin fixture host names with `haarnessImageHosts`.
   handle("remoteImage", (_, raw: unknown) =>
@@ -1431,7 +1447,12 @@ function installHandlers() {
       throw new Error(
         "This build has no configured update feed. Install a newer signed release manually.",
       );
-    const { autoUpdater } = await import("electron-updater");
+    // End-to-end tests stand in for the feed with `haarnessUpdater`.
+    const fake = (globalThis as { haarnessUpdater?: typeof import("electron-updater").autoUpdater }).haarnessUpdater;
+    const { autoUpdater } =
+      process.env.HAARNESS_DESKTOP_TEST === "1" && !app.isPackaged && fake
+        ? { autoUpdater: fake }
+        : await import("electron-updater");
     if (action === "install") {
       if (!updateReady)
         throw new Error("Download the update before installing.");
@@ -1450,7 +1471,7 @@ function installHandlers() {
         updateReady = true;
         broadcast({
           kind: "update",
-          data: { status: "ready", version: value.version },
+          data: { status: "ready", version: value.version, notes: releaseNotesText(value.releaseNotes) },
         });
       });
       autoUpdater.on("error", (error) =>
@@ -1474,7 +1495,11 @@ function installHandlers() {
     autoUpdater.autoDownload = false;
     const result = await autoUpdater.checkForUpdates();
     updateAvailable = result?.isUpdateAvailable ?? false;
-    return { available: updateAvailable, info: result?.updateInfo };
+    return {
+      available: updateAvailable,
+      info: result?.updateInfo,
+      notes: releaseNotesText(result?.updateInfo.releaseNotes),
+    };
   });
 }
 /**
@@ -1658,8 +1683,9 @@ function createWindow() {
 }
 function menu() {
   const t = (key: string) => translate(data().preferences.language, key);
-  const action = (name: string) => {
-    const win = BrowserWindow.getFocusedWindow();
+  // Electron names the window a menu item was chosen for; the focused one otherwise.
+  const action = (name: string, target?: BaseWindow) => {
+    const win = target instanceof BrowserWindow ? target : BrowserWindow.getFocusedWindow();
     if (win) send(win, { kind: "menu", data: name });
   };
   Menu.setApplicationMenu(
@@ -1768,6 +1794,14 @@ function menu() {
             ),
             click: () => action("browser"),
           },
+          {
+            label: t("Pick an element"),
+            accelerator: (data().preferences.shortcuts.pick ?? "").replace(
+              /\bMod\b/g,
+              "CmdOrCtrl",
+            ),
+            click: (_item, win) => action("pick", win),
+          },
           { type: "separator" },
           { label: t("Actual size"), role: "resetZoom" },
           { label: t("Zoom in"), role: "zoomIn" },
@@ -1781,6 +1815,7 @@ function menu() {
         label: t("Help"),
         submenu: [
           { label: t("Keyboard shortcuts"), click: () => action("shortcuts") },
+          { label: t("Export logs") + "…", click: (_item, win) => action("export-logs", win) },
           { label: t("About Haarness"), click: () => action("about") },
         ],
       },

@@ -423,6 +423,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         &[],
         "Write this thread's transcript to a markdown file",
     ),
+    command(
+        "logs",
+        &["log"],
+        "This computer's logs · /logs export [path] · /logs detail [on|off] for 30 minutes",
+    ),
     command("editor", &["edit"], "Compose the prompt in $EDITOR"),
     command("cancel", &["stop"], "Interrupt the active turn"),
     command(
@@ -3222,6 +3227,7 @@ impl App {
                     Err(error) => self.notice = format!("Export failed: {error}"),
                 }
             }
+            "logs" => self.logs_command(arguments),
             "editor" => return Ok(AppAction::OpenEditor),
             "tasks" => self.open_tasks_overlay(),
             "background" => {
