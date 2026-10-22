@@ -98,3 +98,18 @@
   margin: var(--s2);
   font-size: var(--ui-xs);
 }
+/* A picked element's preview: where it was, then its captured HTML. */
+.prompt-context-element {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s0) var(--s3);
+  margin: var(--s2) 0 0;
+  font-size: var(--ui-xs);
+}
+.prompt-context-element dt {
+  color: var(--muted);
+}
+.prompt-context-element dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

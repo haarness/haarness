@@ -24,6 +24,7 @@ const bridge: Bridge = {
   browserCommand:(connection,thread,action)=>invoke("browserCommand",connection,thread,action),
   browserLayout:(connection,thread,layout)=>invoke("browserLayout",connection,thread,layout),
   browserSnapshot:(connection,thread)=>invoke("browserSnapshot",connection,thread),
+  browserPick: (connection, thread, request) => invoke("browserPick", connection, thread, request),
   notificationReady: () => invoke("notificationReady"),
   notificationHandled: (target) => invoke("notificationHandled", target),
   windowAction: (action) => invoke("windowAction", action),

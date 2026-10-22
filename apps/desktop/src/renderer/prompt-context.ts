@@ -1,4 +1,12 @@
 import type { AgentProfile } from "@haarness/sdk";
+import {
+  elementKey,
+  elementLabel,
+  elementPrompt,
+  fence,
+  isElementContext,
+  type ElementContext,
+} from "./element-context";
 
 export type PromptContext =
   | {
@@ -9,19 +17,24 @@ export type PromptContext =
       endLine?: number;
       unsaved?: boolean;
     }
-  | { kind: "agent"; name: string };
+  | { kind: "agent"; name: string }
+  | ElementContext;
 const MAX_CONTEXT_BYTES = 128 * 1024;
 export const contextKey = (item: PromptContext) =>
   item.kind === "agent"
     ? JSON.stringify([item.kind, item.name])
-    : JSON.stringify([item.kind, item.path, item.startLine, item.endLine]);
+    : item.kind === "element"
+      ? elementKey(item)
+      : JSON.stringify([item.kind, item.path, item.startLine, item.endLine]);
 export const contextLabel = (item: PromptContext) =>
   item.kind === "agent"
     ? "@" + item.name
-    : item.path +
-      (item.startLine
-        ? `:${item.startLine}${item.endLine !== item.startLine ? "-" + item.endLine : ""}`
-        : "");
+    : item.kind === "element"
+      ? elementLabel(item)
+      : item.path +
+        (item.startLine
+          ? `:${item.startLine}${item.endLine !== item.startLine ? "-" + item.endLine : ""}`
+          : "");
 export const mentionAgents = (agents: AgentProfile[]) =>
   agents.filter((agent) => !agent.hidden && agent.mode !== "primary");
 function checkContext(items: PromptContext[]) {
@@ -40,6 +53,7 @@ export function readContext(value: unknown): PromptContext[] {
     if (!item || typeof item !== "object") return false;
     if (item.kind === "agent")
       return typeof item.name === "string" && !!item.name;
+    if (item.kind === "element") return isElementContext(item);
     return (
       item.kind === "file" &&
       typeof item.path === "string" &&
@@ -122,13 +136,9 @@ export function promptWithContext(text: string, items: PromptContext[]) {
   const parts = items.map((item) => {
     if (item.kind === "agent")
       return `Delegate the relevant work from this message and attached context using the task tool with agent ${JSON.stringify(item.name)}. Keep normal permissions in effect.`;
-    const fence = "`".repeat(
-      Array.from(item.content.matchAll(/`+/g)).reduce(
-        (size, match) => Math.max(size, match[0].length + 1),
-        3,
-      ),
-    );
-    return `<details>\n<summary>File context: ${escapeHtml(contextLabel(item))}${item.unsaved ? " (unsaved editor snapshot)" : " (snapshot)"}</summary>\n\n${fence}\n${item.content}\n${fence}\n\n</details>`;
+    if (item.kind === "element") return elementPrompt(item, escapeHtml);
+    const marks = fence(item.content);
+    return `<details>\n<summary>File context: ${escapeHtml(contextLabel(item))}${item.unsaved ? " (unsaved editor snapshot)" : " (snapshot)"}</summary>\n\n${marks}\n${item.content}\n${marks}\n\n</details>`;
   });
   return [text.trimEnd(), ...parts].filter(Boolean).join("\n\n");
 }

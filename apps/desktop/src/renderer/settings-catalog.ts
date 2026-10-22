@@ -111,6 +111,7 @@ export const shortcutTitles: Record<string, string> = {
   diff: "Review changes",
   terminal: "Toggle terminal",
   browser: "Open browser",
+  pick: "Pick an element",
   agentNext: "Next agent",
   agentPrev: "Previous agent",
   tabNext: "Next tab",
@@ -125,6 +126,7 @@ export const shortcutTitles: Record<string, string> = {
 };
 /** Composer keys work only in the message box; Tab elsewhere moves focus. */
 export const shortcutDescriptions: Record<string, string> = {
+  pick: "Adds part of the browser's page to your message",
   agentNext: "While the message box has focus",
   agentPrev: "While the message box has focus",
   tabNext: "In the chats, terminal, files, browser or side panel that has the keyboard",

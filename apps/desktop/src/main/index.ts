@@ -38,6 +38,7 @@ import {
   nativeImage,
   globalShortcut,
   net,
+  type BaseWindow,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -573,6 +574,14 @@ function installHandlers() {
   handle("browserCommand", (win, connection:string, thread:string, action:unknown) => browserHost.command(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread), action));
   handle("browserLayout", (win, connection:string, thread:string, raw:unknown) => browserHost.layout(win, connection, thread, z.object({visible:z.boolean(),bounds:z.object({x:z.number().finite(),y:z.number().finite(),width:z.number().finite(),height:z.number().finite()})}).parse(raw)));
   handle("browserSnapshot", (win, connection:string, thread:string) => browserHost.snapshot(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread)));
+  handle("browserPick", (win, connection: string, thread: string, raw: unknown) =>
+    browserHost.pick(
+      win,
+      z.string().max(2048).parse(connection),
+      z.string().max(128).parse(thread),
+      z.object({ hint: z.string().max(400), accent: z.string().max(64) }).nullable().parse(raw),
+    ),
+  );
   handle("projects", () => refreshProjects());
   handle(
     "remoteProjects",
@@ -1658,8 +1667,9 @@ function createWindow() {
 }
 function menu() {
   const t = (key: string) => translate(data().preferences.language, key);
-  const action = (name: string) => {
-    const win = BrowserWindow.getFocusedWindow();
+  // Electron names the window a menu item was chosen for; the focused one otherwise.
+  const action = (name: string, target?: BaseWindow) => {
+    const win = target instanceof BrowserWindow ? target : BrowserWindow.getFocusedWindow();
     if (win) send(win, { kind: "menu", data: name });
   };
   Menu.setApplicationMenu(
@@ -1767,6 +1777,14 @@ function menu() {
               "CmdOrCtrl",
             ),
             click: () => action("browser"),
+          },
+          {
+            label: t("Pick an element"),
+            accelerator: (data().preferences.shortcuts.pick ?? "").replace(
+              /\bMod\b/g,
+              "CmdOrCtrl",
+            ),
+            click: (_item, win) => action("pick", win),
           },
           { type: "separator" },
           { label: t("Actual size"), role: "resetZoom" },
