@@ -1395,6 +1395,10 @@ function Mcp(props: { cli: Cli }) {
               <h3 data-setting={"mcp:" + server.name}>{server.name}</h3>
               <span class="badge">{server.status}</span>
             </header>
+            {/* Why a server failed is what decides the next step (reconnect, fix a setting). */}
+            <Show when={server.status === "failed" && server.detail}>
+              <p class="mcp-server-detail">{server.detail}</p>
+            </Show>
             <div class="toolbar">
               <button
                 onClick={() =>

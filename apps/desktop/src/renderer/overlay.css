@@ -989,6 +989,12 @@ dialog .notifications {
   font-size: var(--ui);
   color: var(--muted);
 }
+/* Why an MCP server failed, under its name: a sentence, never a log dump. */
+.setting-block > .mcp-server-detail {
+  margin: 0;
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
+}
 .setting-block pre {
   font-size: var(--ui-sm);
   max-height: 320px;
