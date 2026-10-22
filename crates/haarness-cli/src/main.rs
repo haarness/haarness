@@ -10968,7 +10968,10 @@ mod tests {
         let (sender, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::BufRead as _;
-            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
                 let _ = sender.send(line);
             }
         });
