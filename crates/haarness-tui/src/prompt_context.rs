@@ -78,21 +78,55 @@ const DELEGATION_END: &str = ". Keep normal permissions in effect.";
 
 /// Split a prompt into typed text and the references the TUI, Desktop and
 /// server expand `@` mentions into, so they can be shown as the chips they
-/// were typed as while the model still receives the full text.
+/// were typed as while the model still receives the full text. A reference
+/// is taken whole, so one quoted inside a file snapshot stays part of that
+/// file, and nothing inside a code fence the person typed counts; Desktop
+/// reads a message the same way (`sentParts` in `prompt-context.ts`).
 pub(crate) fn parts(text: &str) -> Vec<Part<'_>> {
     let mut parts = Vec::new();
     let mut typed = 0;
     let mut cursor = 0;
+    let mut line_start = true;
+    let mut fence: Option<&str> = None;
     while cursor < text.len() {
-        let rest = &text[cursor..];
-        let next = [rest.find("<details>\n<summary>"), rest.find(DELEGATION)]
-            .into_iter()
-            .flatten()
-            .min();
-        let Some(offset) = next else {
-            break;
+        let end = text[cursor..]
+            .find('\n')
+            .map_or(text.len(), |offset| cursor + offset);
+        let line = &text[cursor..end];
+        if line_start {
+            if let Some(open) = fence {
+                if fence_marker(line).is_some_and(|(marker, rest)| {
+                    marker.as_bytes()[0] == open.as_bytes()[0]
+                        && marker.len() >= open.len()
+                        && rest.trim().is_empty()
+                }) {
+                    fence = None;
+                }
+                cursor = end + 1;
+                continue;
+            }
+            // A backtick fence's info string holds no backtick.
+            if let Some((marker, rest)) = fence_marker(line)
+                && !(marker.starts_with('`') && rest.contains('`'))
+            {
+                fence = Some(marker);
+                cursor = end + 1;
+                continue;
+            }
+        }
+        // The next reference on this line: a delegation anywhere in it, or a
+        // block that opens at its end (`<details>`, then its summary).
+        let block = line
+            .ends_with("<details>")
+            .then(|| end - "<details>".len())
+            .filter(|start| text[*start..].starts_with("<details>\n<summary>"));
+        let delegation = line.find(DELEGATION).map(|offset| cursor + offset);
+        let Some(start) = [delegation, block].into_iter().flatten().min() else {
+            cursor = end + 1;
+            line_start = true;
+            continue;
         };
-        let start = cursor + offset;
+        line_start = false;
         match reference_at(&text[start..]) {
             Some((part, length)) => {
                 if typed < start {
@@ -110,6 +144,22 @@ pub(crate) fn parts(text: &str) -> Vec<Part<'_>> {
         parts.push(Part::Text(&text[typed..]));
     }
     parts
+}
+
+/// The marker a typed line opens or closes a Markdown code fence with
+/// (three or more backticks or tildes, indented at most three spaces), and
+/// what follows it.
+fn fence_marker(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let mark = *trimmed
+        .as_bytes()
+        .first()
+        .filter(|b| matches!(b, b'`' | b'~'))?;
+    let count = trimmed.bytes().take_while(|b| *b == mark).count();
+    (count >= 3).then(|| trimmed.split_at(count))
 }
 
 /// The reference `text` starts with, and its byte length.

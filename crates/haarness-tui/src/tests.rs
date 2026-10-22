@@ -15730,7 +15730,7 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
 
 #[test]
 fn a_paste_desktop_sent_as_a_chip_folds_under_its_label_until_the_prompt_opens() {
-    use crate::prompt_context::{Part, display, parts, plain};
+    use crate::prompt_context::{Part, display, parts, plain, snapshot};
     let pasted = (1..=20)
         .map(|index| format!("log line {index} with ``` fence"))
         .collect::<Vec<_>>()
@@ -15754,6 +15754,35 @@ fn a_paste_desktop_sent_as_a_chip_folds_under_its_label_until_the_prompt_opens()
     // A summary that only starts like one, without its fence, stays typed.
     let lookalike = "<details>\n<summary>Pasted text</summary>\n\nmine\n\n</details>";
     assert_eq!(display(lookalike), lookalike);
+    // Quoted inside a file snapshot (a TUI /export, a doc of the format), it
+    // stays part of that file; typed in a code fence, it stays typed.
+    let file = snapshot(
+        "docs/format.md",
+        &format!("# Format\n\n{block}\n\nend"),
+        None,
+    )
+    .unwrap();
+    let quoted = format!("Look at\n\n{file}");
+    assert!(matches!(
+        parts(&quoted).as_slice(),
+        [Part::Text("Look at\n\n"), Part::Reference { body, .. }] if *body == file
+    ));
+    assert_eq!(plain(&quoted), quoted);
+    for fence in ["````md", "~~~"] {
+        let close = if fence.starts_with('~') {
+            "~~~"
+        } else {
+            "````"
+        };
+        let typed = format!("Example:\n\n{fence}\n{block}\n{close}\nthanks");
+        assert_eq!(parts(&typed), [Part::Text(&typed)]);
+        // After the fence closes, a paste counts again.
+        let after = format!("{typed}\n\n{block}");
+        assert!(matches!(
+            parts(&after).as_slice(),
+            [Part::Text(_), Part::Paste { content, .. }] if *content == pasted
+        ));
+    }
 
     let thread = fixture_thread();
     let items = vec![message_item(
