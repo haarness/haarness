@@ -7,8 +7,9 @@ import { execFileSync } from "node:child_process";
 
 // MCP servers in Desktop: a server that failed says why under its name, the model's resource tools read in
 // plain words, a server's interactive apps turn off from its page's options or its row in Settings (and back
-// on with Undo), and a secret-looking value is kept in the keychain with a click. The keychain is a test file
-// (HAARNESS_TEST_KEYCHAIN_FILE, which only debug builds read).
+// on with Undo) unless the server comes from a plugin, and a secret-looking value is kept in the keychain with
+// a click, never replacing another entry and taken out again when the server cannot be added. The keychain is
+// a test file (HAARNESS_TEST_KEYCHAIN_FILE, which only debug builds read), so the system's is never touched.
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page, client: Haarness;
@@ -30,6 +31,12 @@ test.beforeAll(async () => {
     args: [join(fixtures, fixture)],
     ...extra,
   });
+  // A project plugin's server: Haarness does not edit its settings.
+  await mkdir(join(workspace, ".haarness/plugins/kit/.claude-plugin"), { recursive: true });
+  await writeFile(
+    join(workspace, ".haarness/plugins/kit/.claude-plugin/plugin.json"),
+    JSON.stringify({ name: "kit", description: "Plugin fixture", mcpServers: { weather: server("app.py") } }),
+  );
   await writeFile(
     settingsFile(),
     JSON.stringify(
@@ -79,7 +86,7 @@ test.beforeAll(async () => {
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect
     .poll(async () => Object.fromEntries((await client.mcpServers()).map((server) => [server.name, server.status])), { timeout: 30000 })
-    .toEqual({ app: "connected", docs: "connected", flood: "failed" });
+    .toEqual({ app: "connected", docs: "connected", flood: "failed", weather: "connected" });
   thread = (await client.createThread({ title: "MCP servers", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "MCP servers", exact: true }).click();
 });
@@ -211,7 +218,49 @@ test("a server's interactive apps turn off from its page, with Undo, and from it
   await expect(page.locator(".mcp-app[data-mcp-app]").last()).toHaveAttribute("data-state", "ready", { timeout: 30000 });
 });
 
+test("a plugin's server shows its apps state but neither its switch nor its page turns them off", async () => {
+  await openMcpSettings();
+  const toggle = block("weather").getByRole("switch", { name: "Interactive apps for weather", exact: true });
+  await expect(toggle).toBeChecked();
+  await expect(toggle).toBeDisabled();
+  await expect(block("weather").locator(".mcp-apps-switch")).toHaveAttribute("title", "Set outside your settings");
+  await pictures(block("weather"), "mcp-apps-switch-read-only");
+  await closeSettings();
+  await tool('mcp__weather__show_weather {"city":"Faro"}');
+  const view = page.locator(".mcp-app[data-mcp-app]").last();
+  await expect(view).toHaveAttribute("data-state", "ready", { timeout: 30000 });
+  await view.locator("iframe").hover();
+  await expect(view.locator(".mcp-app-menu")).toHaveCount(0);
+  // The app server's own page still offers it.
+  await expect(page.locator(".mcp-app[data-mcp-app]").first().locator(".mcp-app-menu")).toHaveCount(1);
+});
+
+test("a server that cannot be added takes the secrets it stored out again", async () => {
+  await writeFile(keychain, JSON.stringify({ kept: "unrelated" }));
+  await openMcpSettings();
+  await settings().getByRole("button", { name: "Add MCP server", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "Add MCP server", exact: true });
+  // `app` is already a server of this project.
+  await form.getByRole("textbox", { name: "Name", exact: true }).fill("app");
+  await form.getByRole("textbox", { name: "Executable", exact: true }).fill("python3");
+  const scope = form.getByRole("combobox", { name: "Available in" });
+  await scope.click();
+  await form.getByRole("option", { name: "This project", exact: true }).click();
+  await form.getByRole("button", { name: "Add environment variable", exact: true }).click();
+  await form.getByRole("textbox", { name: "Variable name 1", exact: true }).fill("API_KEY");
+  await form.getByLabel("environment variable 1 value", { exact: true }).fill("never-kept");
+  await form.getByRole("button", { name: /^Store in (Keychain|Credential Manager|keyring): API_KEY$/ }).click();
+  await form.getByRole("button", { name: "Add server", exact: true }).click();
+  await expect(form.getByRole("alert")).toContainText("already exists");
+  expect(JSON.parse(await readFile(keychain, "utf8"))).toEqual({ kept: "unrelated" });
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
+  await closeSettings();
+});
+
 test("a secret-looking value is kept in the keychain and the settings name it", async () => {
+  // Another server's entry by the same name stays as it is.
+  await writeFile(keychain, JSON.stringify({ "keyed-GITHUB_TOKEN": "another-server" }));
+  const secret = 'ghp_desk"top\\e2e-secret';
   await openMcpSettings();
   await settings().getByRole("button", { name: "Add MCP server", exact: true }).click();
   const form = page.getByRole("dialog", { name: "Add MCP server", exact: true });
@@ -230,22 +279,25 @@ test("a secret-looking value is kept in the keychain and the settings name it", 
   await expect(form.locator("[data-mcp-pair] .mcp-keep")).toHaveCount(0);
   await form.getByRole("button", { name: "Add environment variable", exact: true }).click();
   await form.getByRole("textbox", { name: "Variable name 2", exact: true }).fill("GITHUB_TOKEN");
-  await form.getByLabel("environment variable 2 value", { exact: true }).fill("ghp_desktop-e2e-secret");
+  await form.getByLabel("environment variable 2 value", { exact: true }).fill(secret);
   await expect(keep).toHaveAttribute("aria-pressed", "false");
   await keep.click();
   await expect(keep).toHaveAttribute("aria-pressed", "true");
   await pictures(form, "mcp-keychain-toggle");
   await form.getByRole("button", { name: "Add server", exact: true }).click();
   await expect(form).toHaveCount(0);
-  expect(JSON.parse(await readFile(keychain, "utf8"))).toEqual({ "keyed-GITHUB_TOKEN": "ghp_desktop-e2e-secret" });
+  expect(JSON.parse(await readFile(keychain, "utf8"))).toEqual({
+    "keyed-GITHUB_TOKEN": "another-server",
+    "keyed-GITHUB_TOKEN-2": secret,
+  });
   const written = JSON.parse(await readFile(settingsFile(), "utf8")).mcp.keyed;
-  expect(written.env ?? written.environment).toEqual({ LOG_LEVEL: "debug", GITHUB_TOKEN: "${keychain:keyed-GITHUB_TOKEN}" });
-  expect(await readFile(settingsFile(), "utf8")).not.toContain("ghp_desktop-e2e-secret");
+  expect(written.env ?? written.environment).toEqual({ LOG_LEVEL: "debug", GITHUB_TOKEN: "${keychain:keyed-GITHUB_TOKEN-2}" });
+  expect(await readFile(settingsFile(), "utf8")).not.toContain("ghp_desk");
   await expect
     .poll(async () => (await client.mcpServers()).find((server) => server.name === "keyed")?.status, { timeout: 30000 })
     .toBe("connected");
   const output = await client.callMcpTool("keyed", "env", { name: "GITHUB_TOKEN" });
-  expect(output.text).toBe("ghp_desktop-e2e-secret");
+  expect(output.text).toBe(secret);
   await closeSettings();
   expect(errors).toEqual([]);
 });
