@@ -2654,5 +2654,6 @@
   "Open side chat": "Открыть побочный чат",
   "Ask about this chat without adding to it": "Спросите об этом чате, ничего в него не добавляя",
   "Hide side chat": "Скрыть побочный чат",
-  "Resize side chat": "Изменить размер побочного чата"
+  "Resize side chat": "Изменить размер побочного чата",
+  "This server answers each question on its own": "Этот сервер отвечает на каждый вопрос отдельно"
 }

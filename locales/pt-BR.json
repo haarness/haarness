@@ -2654,5 +2654,6 @@
   "Open side chat": "Abrir conversa paralela",
   "Ask about this chat without adding to it": "Pergunte sobre esta conversa sem acrescentar nada a ela",
   "Hide side chat": "Ocultar conversa paralela",
-  "Resize side chat": "Redimensionar conversa paralela"
+  "Resize side chat": "Redimensionar conversa paralela",
+  "This server answers each question on its own": "Este servidor responde a cada pergunta separadamente"
 }

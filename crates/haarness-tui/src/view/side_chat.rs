@@ -57,24 +57,19 @@ pub fn frame(app: &App, width: usize, height: usize) -> (Vec<Line>, Vec<HitRegio
     (lines, Vec::new())
 }
 
+/// What the view is. "esc back" is in the hints below, once.
 fn header(app: &App, width: usize) -> Line {
     let theme = &app.theme;
-    let back = app.language.text("esc back");
     let detail = format!(
         " {} · {}",
         app.language.text("Side chat"),
         app.language.text("reads this chat, never changes it")
     );
     let title = " /btw ";
-    let room = width.saturating_sub(title.width() + back.width() + 2);
-    let detail = single_line(&detail, room);
-    let pad = width.saturating_sub(title.width() + detail.width() + back.width() + 1);
+    let detail = single_line(&detail, width.saturating_sub(title.width() + 1));
     Line::new(vec![
         Span::new(title, theme.primary).with_attributes(attr::BOLD),
         Span::new(detail, theme.muted),
-        Span::new(" ".repeat(pad), theme.muted),
-        Span::new(back.to_owned(), theme.muted),
-        Span::new(" ", theme.muted),
     ])
 }
 
@@ -136,6 +131,24 @@ fn body(app: &App, thread: Option<&Thread>, width: usize) -> Vec<Line> {
         }
         return lines;
     };
+    // A server from before side chats answers each question without the
+    // ones before it; say so once, quietly.
+    let alone = app.server_info.as_ref().is_some_and(|info| {
+        !info
+            .capabilities
+            .iter()
+            .any(|capability| capability == haarness_protocol::BTW_STREAM_CAPABILITY)
+    });
+    if alone {
+        lines.push(Line::new(vec![
+            Span::new("  ", theme.muted),
+            Span::new(
+                language.text("This server answers each question on its own"),
+                theme.muted,
+            ),
+        ]));
+        lines.push(Line::empty());
+    }
     for (index, turn) in thread.turns.iter().enumerate() {
         if index > 0 {
             lines.push(Line::empty());

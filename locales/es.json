@@ -2654,5 +2654,6 @@
   "Open side chat": "Abrir chat lateral",
   "Ask about this chat without adding to it": "Pregunta sobre este chat sin añadirle nada",
   "Hide side chat": "Ocultar chat lateral",
-  "Resize side chat": "Cambiar el tamaño del chat lateral"
+  "Resize side chat": "Cambiar el tamaño del chat lateral",
+  "This server answers each question on its own": "Este servidor responde cada pregunta por separado"
 }

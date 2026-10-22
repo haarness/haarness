@@ -20,6 +20,11 @@ use crate::state::{App, Overlay};
 /// A follow-up carries at most this many of the side chat's last finished
 /// questions: the side chat has no compaction.
 const HISTORY: usize = 40;
+/// How many of the oldest go at once when the thread outgrows what is sent.
+const HISTORY_BLOCK: usize = 20;
+/// Bytes of earlier questions and answers a follow-up carries at most (the
+/// server refuses more than 1 MiB).
+const HISTORY_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TurnState {
@@ -52,7 +57,11 @@ impl Thread {
             .is_some_and(|turn| turn.state == TurnState::Pending)
     }
 
-    /// The finished questions, which are what a follow-up sends as its thread.
+    /// The finished questions, which are what a follow-up sends as its
+    /// thread. Past [`HISTORY`] questions or [`HISTORY_BYTES`] the oldest go
+    /// [`HISTORY_BLOCK`] at a time, so the first question sent stays the same
+    /// from one trim to the next and each follow-up reads back the previous
+    /// one's prompt cache.
     fn history(&self) -> Vec<BtwTurn> {
         let finished = self
             .turns
@@ -63,7 +72,25 @@ impl Thread {
                 answer: turn.answer.clone(),
             })
             .collect::<Vec<_>>();
-        finished[finished.len().saturating_sub(HISTORY)..].to_vec()
+        let size = |from: usize| -> usize {
+            finished[from..]
+                .iter()
+                .map(|turn| turn.question.len() + turn.answer.len())
+                .sum()
+        };
+        let mut start = finished
+            .len()
+            .saturating_sub(HISTORY)
+            .div_ceil(HISTORY_BLOCK)
+            * HISTORY_BLOCK;
+        while start + HISTORY_BLOCK < finished.len() && size(start) > HISTORY_BYTES {
+            start += HISTORY_BLOCK;
+        }
+        // A last block still too large gives way one question at a time.
+        while start < finished.len() && size(start) > HISTORY_BYTES {
+            start += 1;
+        }
+        finished[start.min(finished.len())..].to_vec()
     }
 
     /// The last answer that finished.
@@ -168,7 +195,13 @@ impl App {
             return;
         };
         if self.side.busy(chat) {
-            self.side.composer.set_text(question);
+            // Kept with whatever the box already holds.
+            let draft = self.side.composer.text().trim_end().to_owned();
+            self.side.composer.set_text(if draft.is_empty() {
+                question
+            } else {
+                format!("{draft}\n{question}")
+            });
             self.notice = self
                 .language
                 .text("Still answering · your question is in the box")
@@ -432,5 +465,56 @@ impl App {
     /// Text pasted while the side chat is open goes into its box.
     pub(crate) fn paste_side_chat(&mut self, text: &str) {
         self.side.composer.paste(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(count: usize, answer: &str) -> Thread {
+        Thread {
+            turns: (0..count)
+                .map(|at| Turn {
+                    question: format!("q{at}"),
+                    answer: answer.to_owned(),
+                    state: TurnState::Done,
+                })
+                .collect(),
+            ..Thread::default()
+        }
+    }
+
+    #[test]
+    fn a_long_side_chat_drops_its_oldest_questions_in_blocks() {
+        let first = |count: usize, answer: &str| {
+            thread(count, answer)
+                .history()
+                .first()
+                .map(|turn| turn.question.clone())
+        };
+        assert_eq!(thread(HISTORY, "a").history().len(), HISTORY);
+        assert_eq!(first(HISTORY, "a").as_deref(), Some("q0"));
+        // Between two trims the first question sent stays put.
+        for count in [HISTORY + 1, HISTORY + 7, HISTORY + HISTORY_BLOCK] {
+            assert_eq!(first(count, "a").as_deref(), Some("q20"), "{count}");
+        }
+        assert_eq!(
+            first(HISTORY + HISTORY_BLOCK + 1, "a").as_deref(),
+            Some("q40")
+        );
+        // Long answers give way by size, a block at a time too.
+        let long = "x".repeat(HISTORY_BYTES / 25);
+        assert_eq!(first(30, &long).as_deref(), Some("q20"));
+        // An answer larger than the whole budget is not sent at all.
+        assert!(
+            thread(1, &"x".repeat(HISTORY_BYTES + 1))
+                .history()
+                .is_empty()
+        );
+        // Unfinished questions are never part of the thread.
+        let mut unfinished = thread(2, "a");
+        unfinished.turns[1].state = TurnState::Stopped;
+        assert_eq!(unfinished.history().len(), 1);
     }
 }

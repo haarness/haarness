@@ -2654,5 +2654,6 @@
   "Open side chat": "사이드 채팅 열기",
   "Ask about this chat without adding to it": "이 채팅에 추가하지 않고 질문하기",
   "Hide side chat": "사이드 채팅 숨기기",
-  "Resize side chat": "사이드 채팅 크기 조절"
+  "Resize side chat": "사이드 채팅 크기 조절",
+  "This server answers each question on its own": "이 서버는 질문마다 따로 답합니다"
 }
