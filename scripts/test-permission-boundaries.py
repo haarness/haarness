@@ -422,6 +422,7 @@ def case_links():
     (links / 'escape').symlink_to(outside)
     output = haarness(links, 'run', '!tool glob {"pattern":"**/*"}').stdout
     assert 'kept.txt' not in output and 'real.txt' in output and 'escape' in output, output
+    assert '(skipped 1 match inside links that lead outside the project)' in output, output
     passed('glob refuses a .. pattern and leaves out what ** finds through a link out of the project')
     output = haarness(links, 'run', '!tool read ' + json.dumps({'path': str(outside / 'kept.txt')}), check=False)
     shown = output.stdout + output.stderr
