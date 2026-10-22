@@ -71,6 +71,17 @@
 .project-home-row svg {
   flex: none;
 }
+/* Another computer's projects: reading them, or why they could not be. */
+.project-home-status {
+  padding-inline: var(--s3);
+  color: var(--muted);
+}
+.project-home .project-home-status p {
+  margin: 0 0 var(--s3);
+}
+.project-home-more {
+  margin: var(--s2) var(--s3) 0;
+}
 .chat-loading {
   display: flex;
   flex: 1;

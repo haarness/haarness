@@ -68,6 +68,7 @@ import ListTodo from "lucide-solid/icons/list-todo";
 import Maximize from "lucide-solid/icons/maximize-2";
 import MessageSquare from "lucide-solid/icons/message-square";
 import MonitorSmartphone from "lucide-solid/icons/monitor-smartphone";
+import Monitor from "lucide-solid/icons/monitor";
 import Mic from "lucide-solid/icons/mic";
 import Minimize from "lucide-solid/icons/minimize-2";
 import PanelLeft from "lucide-solid/icons/panel-left";
@@ -198,6 +199,8 @@ const catalog = {
   start: Play,
   billing: CreditCard,
   computer: Laptop,
+  /** Another of your computers, opened through Haarness Cloud. */
+  host: Monitor,
   server: Server,
   remote: MonitorSmartphone,
 } satisfies Record<string, Glyph>;

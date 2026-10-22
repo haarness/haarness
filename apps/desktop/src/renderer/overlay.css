@@ -1707,3 +1707,61 @@ dialog .notifications {
   gap: var(--s2);
   margin-block-start: var(--s5);
 }
+/* Your other computers, below the servers you added. */
+.settings-computers {
+  margin-block-start: var(--s7);
+}
+.settings-computers > header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--hairline);
+}
+.settings-computers > header > div {
+  flex: 1;
+  min-width: 0;
+}
+.settings-computers > header p,
+.settings-computers-note p,
+p.settings-computers-note {
+  margin: 2px 0 0;
+  font-size: var(--ui);
+  color: var(--muted);
+  max-width: 480px;
+}
+.settings-computers-note {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  justify-content: space-between;
+  padding: var(--s4) 0;
+}
+/* Signed out, one line under the servers says computers can be opened here. */
+.settings-computers-signed-out {
+  margin-block-start: var(--s6);
+  border-top: 1px solid var(--hairline);
+}
+.settings-computers-note p[role="alert"] {
+  color: var(--danger);
+}
+.computer-row > svg {
+  flex: none;
+  color: var(--muted);
+}
+.computer-row > div {
+  flex: 1;
+  min-width: 0;
+  margin-inline-end: var(--s2);
+}
+.computer-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A computer that is away is listed, quieter, until it is back. */
+.computer-row.away > svg,
+.computer-row.away strong {
+  opacity: 0.55;
+}

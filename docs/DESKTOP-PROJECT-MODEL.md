@@ -81,6 +81,8 @@ An authenticated host exposes `/v1/host/projects`, `/v1/host/directories?path=..
 
 New remote connections are keyed by server origin plus opaque workspace ID. The existing origin-only default connection is retained when reopening its canonical folder. Server identity, credentials and last-project state remain separate from each location's drafts, event cursor and conversation state. Removing one desktop project preserves the host connection and server-side history.
 
+Your other computers, opened through Haarness Cloud's relay ([Desktop](DESKTOP.md#servers-and-projects)), use the same host API under `/api/v1/remote-hosts/{hostId}/runtime`. Their server is `host:{hostId}` and each folder is keyed `host:{hostId}/workspaces/{workspaceId}`, whichever Cloud address relays it; the saved location keeps the Cloud address it came from, and the folder's project from the host's catalog as `host-project:{hostId}:{projectId}`, so linked checkouts of one repository group as they do locally. No credential is saved: Electron main asks the account for the current sign-in when it needs one.
+
 Opening and routing inspect only the selected workspace. Startup reads registry metadata for migration and snapshot policy without probing every saved folder. The full catalog refresh is reserved for listing projects. Desktop reuses the connection's verified server information and loads chat state and model choices concurrently; it becomes ready only after both complete. Opening failures preserve the path and distinguish slow servers, access problems and missing folders in plain language.
 
 

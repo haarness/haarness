@@ -34,6 +34,7 @@ const bridge: Bridge = {
   forget: (id) => invoke("forget", id),
   server: (input) => invoke("server", input),
   projects: () => invoke("projects"),
+  remoteCatalog: (server) => invoke("remoteCatalog", server),
   remoteProjects: (server, path, options) =>
     invoke("remoteProjects", server, path, options),
   api: (connection, method, args = []) =>

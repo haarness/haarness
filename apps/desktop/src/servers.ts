@@ -12,8 +12,12 @@ export function serverKey(location: {
   url?: string;
   cloudAccount?: string;
   cloudApiUrl?: string;
+  remoteHost?: string;
 }) {
   if (!location.remote) return localServer.id;
+  // Each of your other computers is a place of its own, whichever Cloud
+  // address relays it.
+  if (location.remoteHost) return "host:" + location.remoteHost;
   // Every Cloud session of one account is one place to switch to. Sessions are
   // reached through the Cloud gateway's URL, but that origin is not a server
   // the user added and must not become one.
@@ -72,4 +76,19 @@ export function migrateServers(recent: Recent[], saved: SavedServer[] = []) {
 
 export function serverProjects(recent: Recent[], server: string) {
   return recent.filter((location) => serverKey(location) === server);
+}
+
+/** Your other computers to show: online ones first, by name, then the ones
+ * that are away, most recently seen first. */
+export function sortComputers<T extends { name: string; connected: boolean; lastSeenAt?: string | null }>(
+  computers: T[],
+  locale?: string,
+) {
+  const seen = (item: T) => Date.parse(item.lastSeenAt ?? "") || 0;
+  return [...computers].sort(
+    (a, b) =>
+      Number(b.connected) - Number(a.connected) ||
+      (a.connected ? 0 : seen(b) - seen(a)) ||
+      a.name.localeCompare(b.name, locale, { sensitivity: "base" }),
+  );
 }

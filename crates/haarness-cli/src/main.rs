@@ -1429,7 +1429,9 @@ async fn cli_main() -> Result<()> {
     match &cli.command {
         Some(Command::Login(args)) => return account::login(args).await,
         Some(Command::Logout) => return account::logout().await,
-        Some(Command::Account(args)) => return account::account(args).await,
+        Some(Command::Account(args)) => {
+            return account::account(args, base_paths.config_dir()).await;
+        }
         Some(Command::Cloud(args)) => return account::cloud(args).await,
         Some(Command::Profile(args)) => {
             return profile::run(&base_paths, &cli.workspace, args).await;
