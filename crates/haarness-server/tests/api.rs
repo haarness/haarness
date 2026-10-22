@@ -7490,6 +7490,71 @@ async fn a_client_too_far_behind_is_told_to_resync_and_its_stream_ends() {
     handle.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_event_larger_than_a_connections_queue_reaches_a_client_that_reads() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let thread = haarness_protocol::ThreadId::new();
+    let response = reqwest::Client::new()
+        .get(format!("http://{}/v1/events", handle.address))
+        .bearer_auth("activity-token")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // A message with several large screenshots: more than a connection's
+    // whole queue.
+    let text = "x".repeat(haarness_core::PENDING_EVENTS_LIMIT + 4 * 1024 * 1024);
+    runtime.events().publish(
+        "item.created",
+        Some(thread),
+        None,
+        None,
+        serde_json::json!({"text": text}),
+    );
+    runtime.events().publish(
+        "turn.finished",
+        Some(thread),
+        None,
+        None,
+        serde_json::json!({}),
+    );
+    let mut stream = response.bytes_stream();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let marker = b"event: turn.finished";
+        loop {
+            let chunk = stream.next().await.expect("the stream goes on").unwrap();
+            raw.extend_from_slice(&chunk);
+            let tail = &raw[raw.len().saturating_sub(chunk.len() + marker.len())..];
+            if tail.windows(marker.len()).any(|window| window == marker) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the stream reaches the next event");
+    let sent = String::from_utf8(raw).unwrap();
+    assert!(
+        !sent.contains("resync_required"),
+        "the client lost its place"
+    );
+    let item: Value = sent
+        .split("\n\n")
+        .find(|frame| frame.contains("event: item.created"))
+        .and_then(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .expect("the large event arrives");
+    assert_eq!(
+        item["payload"]["text"].as_str().map(str::len),
+        Some(text.len())
+    );
+    handle.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_published_chats_stream_joins_its_deltas_across_other_chats_events() {
     let workspace = std::env::temp_dir();
