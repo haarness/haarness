@@ -1494,10 +1494,19 @@ async fn start_turn(
         ))
         .into());
     }
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(state.runtime.start_turn(id, request).await?),
-    ))
+    let turn = state
+        .runtime
+        .start_turn(id, request)
+        .await
+        .map_err(|error| match error {
+            // A chat busy elsewhere is said as a sentence, without the
+            // category the error type adds ("conflict: …").
+            CoreError::Conflict(message) => {
+                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+            }
+            other => other.into(),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(turn)))
 }
 async fn execute_command(
     State(state): State<ServerState>,
