@@ -151,6 +151,9 @@ interface State extends Live {
   } | null;
   terminal: boolean;
   ready: boolean;
+  /** The project's model choices are still on their way: the server may
+   * wait up to 10 s for a signed-in provider's list. */
+  catalogLoading: boolean;
   openingProject: string;
   /** A switch to another project or checkout is under way, from the click
    * on, before `openingProject` names it. */
@@ -219,6 +222,7 @@ function createApp(saved?: Preferences) {
     fileRequest: null,
     terminal: false,
     ready: false,
+    catalogLoading: false,
     openingProject: "",
     switching: false,
     openingChat: 0,
@@ -495,7 +499,24 @@ function createApp(saved?: Preferences) {
     },
   });
   let catalogRequest = 0;
-  async function catalogs(force = false, knownInfo?: T.ServerInfo) {
+  /** The newest catalog read, settled or not. */
+  let latestCatalog: Promise<void> = Promise.resolve();
+  /** The catalog an opening project is still loading. */
+  let catalogLoad: Promise<void> | undefined;
+  function catalogs(force = false, knownInfo?: T.ServerInfo) {
+    const read = readCatalogs(force, knownInfo);
+    latestCatalog = read.catch(() => {});
+    return read;
+  }
+  /** Settles once the newest catalog read has: a read overtaken by a later
+   * one (an `assets.updated` meanwhile) sets nothing itself. */
+  async function catalogsIn() {
+    for (let seen; seen !== latestCatalog; ) {
+      seen = latestCatalog;
+      await seen;
+    }
+  }
+  async function readCatalogs(force: boolean, knownInfo?: T.ServerInfo) {
     const request = ++catalogRequest;
     const current = generation;
     const values = await Promise.all([
@@ -1508,9 +1529,25 @@ function createApp(saved?: Preferences) {
       if (state.expandedProjects[projectKey(view)] === undefined)
         await expandProject(projectKey(view), true);
       if (!valid()) return false;
-      // establish() has just verified this connection. Reuse that snapshot
-      // and load chat state and model choices together on remote connections.
-      await Promise.all([hydrate(view.info), catalogs(false, view.info)]);
+      // establish() has just verified this connection. Reuse that snapshot.
+      // The model choices come when they come: the project opens without
+      // them, and the composer says it is loading models meanwhile.
+      set("catalogLoading", true);
+      const loading: Promise<void> = (catalogLoad = catalogs(false, view.info)
+        .then(catalogsIn)
+        .catch((error) => {
+          if (valid()) set("error", String(error));
+        })
+        .finally(() => {
+          if (catalogLoad === loading) set("catalogLoading", false);
+        }));
+      await hydrate(view.info);
+      // On a quick network the choices are in by now: the composer shows the
+      // model at once, as before, instead of a "Loading models…" flash.
+      await Promise.race([
+        loading,
+        new Promise((resolve) => setTimeout(resolve, 300)),
+      ]);
       if (!valid()) return false;
       const remembered = await rememberedTabs;
       if (!valid()) return false;
@@ -2156,6 +2193,8 @@ function createApp(saved?: Preferences) {
     hydrate,
     rememberModel,
     catalogs,
+    /** Settles once an opening project's model choices are in. */
+    catalogsSettled: () => catalogLoad ?? Promise.resolve(),
     settings,
     boot,
     ordered,

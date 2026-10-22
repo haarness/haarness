@@ -9,8 +9,10 @@ import { Haarness, type Thread } from "@haarness/sdk";
 import { mkdtemp, mkdir, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { connect, createServer, type Server, type Socket } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 
 // A server connection that dies without closing: the machine slept, the
 // network changed, a proxy froze. Desktop notices it and connects again by
@@ -115,14 +117,20 @@ async function addServer(name: string, url: string, token: string) {
   await page.getByRole("button", { name: "Close settings", exact: true }).click();
 }
 
-async function endpoint(name: string) {
+async function endpoint(
+  name: string,
+  config = '[defaults]\nprovider="echo"\nmodel="echo-1"\n',
+  extra: Record<string, string> = {},
+) {
   const path = join(temporary, name);
   await mkdir(join(path, ".haarness"), { recursive: true });
-  await writeFile(join(path, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await writeFile(join(path, ".haarness/config.toml"), config);
   workspaces.push(path);
   const secret = "health-e2e-" + name;
-  execFileSync(binary, ["--workspace", path, "serve", "--daemon", "--port", "0"], {
-    env: { ...env, HAARNESS_SERVER_TOKEN: secret, HAARNESS_SERVER_PASSWORD: secret },
+  // Not synchronously: a fake endpoint this test serves answers the
+  // server's model list while it starts.
+  await promisify(execFile)(binary, ["--workspace", path, "serve", "--daemon", "--port", "0"], {
+    env: { ...env, ...extra, HAARNESS_SERVER_TOKEN: secret, HAARNESS_SERVER_PASSWORD: secret },
     encoding: "utf8",
     timeout: 30000,
   });
@@ -305,5 +313,86 @@ test("a wake follows a notification stream again that still looks open but died 
     client.close();
     await app?.close().catch(() => {});
     await front.close();
+  }
+});
+
+/** An Anthropic-format endpoint that lists its models in four pages of
+ * 2.2 s each (inside the server's 3 s for a page and 10 s for the list), and
+ * answers a message with "late hello". */
+async function lateModels() {
+  let listed = 0;
+  const server = createHttpServer((request, response) => {
+    if (request.method === "POST") {
+      request.resume();
+      const events = [
+        ["message_start", { type: "message_start", message: { id: "msg_fixture", type: "message", role: "assistant", model: "late-model-1", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } }],
+        ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+        ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "late hello" } }],
+        ["content_block_stop", { type: "content_block_stop", index: 0 }],
+        ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } }],
+        ["message_stop", { type: "message_stop" }],
+      ];
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join(""));
+      return;
+    }
+    const after = /after_id=page-(\d)/.exec(request.url ?? "");
+    const page = after ? Number(after[1]) + 1 : 1;
+    setTimeout(() => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          data: [{ id: `late-model-${page}`, display_name: `Late model ${page}`, type: "model" }],
+          has_more: page < 4,
+          last_id: `page-${page}`,
+        }),
+      );
+      if (page === 4) listed = Date.now();
+    }, 2200);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`,
+    /** When the whole list was answered, or 0. */
+    listed: () => listed,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+test("a project whose model list is slow opens at once, and a message sent meanwhile goes to the model that list offers", async () => {
+  test.setTimeout(150000);
+  const models = await lateModels();
+  let client: Haarness | undefined;
+  try {
+    await launch();
+    // The server's list is in about 9 s after it starts.
+    const remote = await endpoint(
+      "slow-models",
+      '[defaults]\nprovider="slowlist"\nmodel="late-model-1"\n' +
+        `[providers.slowlist]\nprotocol="anthropic-messages"\nname="Slow list"\nbase_url="${models.url}"\napi_key_env="SLOWLIST_KEY"\n`,
+      { SLOWLIST_KEY: "fixture-key" },
+    );
+    client = new Haarness({ baseUrl: remote.url, token: remote.token });
+    await addServer("Slow models", remote.url, remote.secret);
+    const ready = Date.now();
+    const pill = page.locator(".composer-model");
+    await expect(pill).toHaveText("Loading models…");
+    // Sent while the list loads: it goes out once the list is in, rather
+    // than to the first model another provider offers.
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    await composer.fill("hello slow list");
+    await composer.press("Enter");
+    await composer.press("Enter");
+    expect(models.listed()).toBe(0);
+    await expect(page.locator(".transcript")).toContainText("late hello", { timeout: 30000 });
+    // The project was ready while the list was still on its way.
+    expect(models.listed()).toBeGreaterThan(ready);
+    await expect(pill).toContainText("Late model 1");
+    const threads = await client.listThreads();
+    expect(threads.map((thread) => `${thread.provider}/${thread.model}`)).toEqual(["slowlist/late-model-1"]);
+  } finally {
+    client?.close();
+    await app?.close().catch(() => {});
+    await models.close();
   }
 });
