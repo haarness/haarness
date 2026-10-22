@@ -1,9 +1,20 @@
-import { t } from "./i18n";
-import { For, Show, createSignal, onMount } from "solid-js";
+import { language, t } from "./i18n";
+import { For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { createStore } from "solid-js/store";
+import type { ToolCatalogResponse } from "@haarness/sdk";
 import { useApp } from "./state";
 import { FormDialog } from "./FormDialog";
 import { Select } from "./Select";
+import { Combobox, type ComboboxOption } from "./Combobox";
+import { Icon } from "./icons";
+import {
+  lastAlternative,
+  matcherKind,
+  neverRuns,
+  permissionNames,
+  valueLabel,
+  type MatcherTarget,
+} from "./hook-matcher";
 import { confirm, Empty } from "./ui";
 import "./management.css";
 
@@ -12,6 +23,8 @@ interface Hook {
   revision: string;
   event: string;
   matcher: string;
+  /** Its matcher matches nothing its event sends, so it never runs. */
+  neverRuns?: boolean;
   groupDisabled: boolean;
   handler: {
     command: string;
@@ -31,8 +44,15 @@ interface Hook {
 interface Catalog {
   items: Hook[];
   events: string[];
+  /** What each event's matcher is compared with. */
+  matchers?: Record<string, MatcherTarget>;
   errors: string[];
   projectTrusted: boolean;
+}
+/** Why a hook for an event compared with `target` never runs. */
+function neverRunsText(target: MatcherTarget | undefined) {
+  const values = new Intl.ListFormat(language(), { type: "disjunction" }).format(target?.values ?? []);
+  return t("Never runs: this event only matches {values}.", { values });
 }
 export function Hooks() {
   const app = useApp();
@@ -148,6 +168,14 @@ export function Hooks() {
                   <div class="management-card-heading">
                     <strong>{hook.event}</strong>
                     <span class="muted">{hook.matcher}</span>
+                    <Show when={hook.neverRuns}>
+                      <span
+                        class="hook-never-tag"
+                        title={neverRunsText(catalog()?.matchers?.[hook.event])}
+                      >
+                        {t("Never runs")}
+                      </span>
+                    </Show>
                     <label class="management-toggle">
                       <span>{t("Enabled")}</span>
                       <input
@@ -238,6 +266,7 @@ export function Hooks() {
             <HookForm
               item={value.item}
               events={catalog()?.events ?? []}
+              matchers={catalog()?.matchers ?? {}}
               close={() => setEditor(undefined)}
               save={async (input) => {
                 await request(input);
@@ -253,11 +282,23 @@ export function Hooks() {
 function HookForm(props: {
   item?: Hook;
   events: string[];
+  matchers: Record<string, MatcherTarget>;
   close: () => void;
   save: (input: Record<string, unknown>) => Promise<void>;
 }) {
+  const app = useApp();
   const item = props.item;
   const readonly = !!item && !item.source.editable;
+  // Tool names to suggest, from the tools this server offers, loaded when
+  // the form opens; without them the field still takes any name.
+  const [tools, setTools] = createSignal<ToolCatalogResponse["tools"]>([]);
+  onMount(() => {
+    if (!readonly)
+      void app
+        .api<ToolCatalogResponse>("toolCatalog")
+        .then((data) => setTools(data.tools))
+        .catch(() => {});
+  });
   const [form, setForm] = createStore({
     event: item?.event ?? "PreToolUse",
     scope: "local",
@@ -267,6 +308,31 @@ function HookForm(props: {
     args: item?.handler.args?.join("\n") ?? "",
     shell: item?.handler.shell ?? "",
     async: item?.handler.async ?? false,
+  });
+  const target = (): MatcherTarget | undefined => props.matchers[form.event];
+  const compares = () => matcherKind(target());
+  const matcherSet = () => !["", "*"].includes(form.matcher.trim());
+  // An event with nothing to match asks for no matcher; one already written
+  // stays visible, so it can be seen to be ignored and cleared.
+  const showMatcher = () => compares() !== "nothing" || matcherSet();
+  const matcherOptions = createMemo<ComboboxOption[]>(() => {
+    const every = { value: "*", label: t("Runs every time") };
+    switch (compares()) {
+      case "tool":
+        return [every, ...tools().map((tool) => ({ value: tool.id, label: tool.groupTitle }))];
+      case "permission":
+        return [every, ...permissionNames(tools().map((tool) => tool.id)).map((value) => ({ value }))];
+      case "value":
+        return [
+          every,
+          ...(target()?.values ?? []).map((value) => {
+            const label = valueLabel(value);
+            return { value, label: label && t(label) };
+          }),
+        ];
+      default:
+        return [];
+    }
   });
   return (
     <FormDialog
@@ -321,23 +387,46 @@ function HookForm(props: {
                 </label>
               </Show>
             </div>
-            <label class="field">
-              <span>{t("Matcher")}</span>
-              <input
-                aria-label={t("Hook matcher")}
-                value={form.matcher}
-                onInput={(e) => setForm("matcher", e.currentTarget.value)}
-              />
-              <small class="muted">
-                {t(
-                  form.event === "PostCompact"
-                    ? "Use manual, automatic, or * for every compaction."
-                    : form.event === "StopFailure"
-                      ? "Use incomplete, content_filter, provider, tool, other, or * for every failure."
-                      : "Use * for every event, tool names such as Bash|Edit, or the event source or reason.",
-                )}
-              </small>
-            </label>
+            <Show when={showMatcher()}>
+              <label class="field">
+                <span>
+                  {compares() === "tool"
+                    ? t("Tools")
+                    : compares() === "permission"
+                      ? t("Permissions")
+                      : t("Matcher")}
+                </span>
+                <Combobox
+                  aria-label={t("Hook matcher")}
+                  value={form.matcher}
+                  onInput={(value) => setForm("matcher", value)}
+                  options={matcherOptions()}
+                  complete={lastAlternative}
+                  disabled={readonly || busy()}
+                />
+                <Show
+                  when={neverRuns(target(), form.matcher)}
+                  fallback={
+                    <small class="muted">
+                      {compares() === "tool"
+                        ? t("Tool names such as bash or read|edit, or a pattern.")
+                        : compares() === "permission"
+                          ? t("Permission names such as bash or edit, or a pattern.")
+                          : compares() === "value"
+                            ? t("Pick from the list, or type a pattern.")
+                            : compares() === "nothing"
+                              ? t("This event has nothing to match, so the matcher is ignored.")
+                              : t("Use * for every tool, or tool names such as Bash|Edit. Events without a tool ignore this field.")}
+                    </small>
+                  }
+                >
+                  <small class="hook-never" role="status">
+                    <Icon name="alert" size="xs" />
+                    {neverRunsText(target())}
+                  </small>
+                </Show>
+              </label>
+            </Show>
             <label class="field">
               <span>{t("Command")}</span>
               <textarea

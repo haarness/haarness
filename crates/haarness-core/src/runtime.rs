@@ -629,6 +629,62 @@ fn parse_goal_criteria_selection(proposed: &[String], answer: &str) -> CoreResul
         .collect())
 }
 
+/// The `StopFailure` categories of a turn's terminal error: `error`, as hook
+/// scripts and extensions have always read it (every provider error is
+/// `provider`), and `error_type`, which names a provider error for what its
+/// message says happened, as Claude Code names it (`unknown` when Haarness
+/// recognises nothing, and for any other failure).
+fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
+    let CoreError::Provider(message) = error else {
+        return match error {
+            CoreError::ProviderIncomplete(_) => ("incomplete", "incomplete"),
+            CoreError::ProviderBlocked(_) => ("content_filter", "content_filter"),
+            CoreError::Tool(_) => ("tool", "tool"),
+            _ => ("other", "unknown"),
+        };
+    };
+    let lower = message.to_ascii_lowercase();
+    let status = http_status(&lower);
+    let kind = if matches!(status, Some(401 | 403))
+        || [
+            "unauthorized",
+            "authentication_error",
+            "invalid_api_key",
+            "api key is not configured",
+            "api_key is not configured",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        "authentication_failed"
+    } else if is_provider_usage_limit(error) {
+        "rate_limit"
+    } else if status == Some(529) || lower.contains("overloaded") || lower.contains("high demand") {
+        "overloaded"
+    } else if status.is_some_and(|status| (500..600).contains(&status)) {
+        "server_error"
+    } else if is_provider_context_overflow(error)
+        || status.is_some_and(|status| (400..500).contains(&status))
+    {
+        "invalid_request"
+    } else {
+        "unknown"
+    };
+    ("provider", kind)
+}
+
+/// The HTTP status a provider error names (`HTTP 429 Too Many Requests`,
+/// `status 503`), already in lower case.
+fn http_status(lower: &str) -> Option<u16> {
+    ["http ", "status "].iter().find_map(|marker| {
+        lower.match_indices(marker).find_map(|(at, _)| {
+            let rest = &lower[at + marker.len()..];
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            (digits == 3).then(|| rest[..3].parse().ok()).flatten()
+        })
+    })
+}
+
 fn is_provider_usage_limit(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
@@ -4394,24 +4450,7 @@ impl AgentRuntime {
                 if !matches!(decision, PermissionReplyDecision::AlwaysRepository) {
                     self.session_rules.lock().extend(rules.iter().cloned());
                 }
-                // Any other pending prompt now covered by the new rules
-                // resolves immediately — three parallel children asking for
-                // the same command need one answer, not three.
-                let covered: Vec<String> = self
-                    .permissions
-                    .iter()
-                    .filter(|entry| entry.value().covered_by(&rules))
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                for other in covered {
-                    if let Some((_, other_pending)) = self.permissions.remove(&other) {
-                        self.publish_permission_resolved(&other, &other_pending, true);
-                        let _ = other_pending.sender.send(PermissionResolution {
-                            allowed: true,
-                            feedback: None,
-                        });
-                    }
-                }
+                release_covered_permissions(&self.permissions, &self.events, &rules);
                 true
             }
             PermissionReplyDecision::Reject => false,
@@ -4529,18 +4568,7 @@ impl AgentRuntime {
     /// covering identical siblings, Reject clearing a root) would otherwise
     /// leave stale prompts in client state.
     fn publish_permission_resolved(&self, id: &str, pending: &PendingPermission, allowed: bool) {
-        self.events.publish_scoped(
-            "permission.resolved",
-            Some(pending.thread_id),
-            Some(pending.root_thread_id),
-            pending.turn_id,
-            None,
-            json!({
-                "permissionId": id,
-                "allowed": allowed,
-                "operation": pending.operation,
-            }),
-        );
+        publish_permission_resolved(&self.events, id, pending, allowed);
     }
     pub fn reply_question(&self, id: &str, reply: QuestionReply) -> CoreResult<()> {
         // Registration inserts the REST-visible entry and publishes
@@ -5999,6 +6027,51 @@ impl PendingQuestion {
     }
 }
 
+/// See [`AgentRuntime::publish_permission_resolved`].
+fn publish_permission_resolved(
+    events: &EventBus,
+    id: &str,
+    pending: &PendingPermission,
+    allowed: bool,
+) {
+    events.publish_scoped(
+        "permission.resolved",
+        Some(pending.thread_id),
+        Some(pending.root_thread_id),
+        pending.turn_id,
+        None,
+        json!({
+            "permissionId": id,
+            "allowed": allowed,
+            "operation": pending.operation,
+        }),
+    );
+}
+
+/// Allows every waiting prompt that newly remembered `rules` cover, at once:
+/// three parallel children asking for the same command need one answer, not
+/// three.
+fn release_covered_permissions(
+    permissions: &DashMap<String, PendingPermission>,
+    events: &EventBus,
+    rules: &[PermissionRule],
+) {
+    let covered: Vec<String> = permissions
+        .iter()
+        .filter(|entry| entry.value().covered_by(rules))
+        .map(|entry| entry.key().clone())
+        .collect();
+    for other in covered {
+        if let Some((_, pending)) = permissions.remove(&other) {
+            publish_permission_resolved(events, &other, &pending, true);
+            let _ = pending.sender.send(PermissionResolution {
+                allowed: true,
+                feedback: None,
+            });
+        }
+    }
+}
+
 fn resolve_pending_question(
     questions: &DashMap<String, PendingQuestion>,
     question_events: &Mutex<()>,
@@ -6021,6 +6094,51 @@ struct QuestionRequest<'a> {
     choices: Vec<String>,
     multiple: bool,
     custom: bool,
+}
+
+/// A hook's `answers` to one question, as a person's reply reads: the
+/// choices or text it gives, joined with ", " as Desktop joins the answers to
+/// a question that takes several. A question call asks one question, so
+/// `answers` is one list per question (`[["Blue"]]`), the question's answers
+/// (`["Blue"]`) or an object keyed by the question's text (`{"Which color?":
+/// "Blue"}`, several comma-separated). `None` when it does not fit: no
+/// answer, several for a question that takes one, or one that is not a
+/// choice of a question that takes no typed answer.
+fn hook_question_answer(
+    request: &QuestionRequest<'_>,
+    answers: &serde_json::Value,
+) -> Option<String> {
+    let texts = |value: &serde_json::Value| -> Option<Vec<String>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|answer| answer.as_str().map(str::to_owned))
+            .collect()
+    };
+    let given = match answers {
+        serde_json::Value::Array(lists) if lists.len() == 1 && lists[0].is_array() => {
+            texts(&lists[0])?
+        }
+        serde_json::Value::Array(_) => texts(answers)?,
+        serde_json::Value::Object(answers) => match answers.get(request.prompt)? {
+            serde_json::Value::String(text) if request.multiple => {
+                text.split(',').map(str::to_owned).collect()
+            }
+            serde_json::Value::String(text) => vec![text.clone()],
+            list => texts(list)?,
+        },
+        _ => return None,
+    };
+    let given: Vec<String> = given
+        .iter()
+        .map(|answer| answer.trim())
+        .filter(|answer| !answer.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let fits = !given.is_empty()
+        && (request.multiple || given.len() == 1)
+        && (request.custom || given.iter().all(|answer| request.choices.contains(answer)));
+    fits.then(|| given.join(", "))
 }
 
 fn question_request(arguments: &serde_json::Value) -> CoreResult<QuestionRequest<'_>> {
@@ -6340,14 +6458,8 @@ impl RunnerTask {
             && !self.cancel.is_cancelled()
             && let Some(hooks) = &self.hooks
         {
-            let category = match error {
-                CoreError::ProviderIncomplete(_) => "incomplete",
-                CoreError::ProviderBlocked(_) => "content_filter",
-                CoreError::Provider(_) => "provider",
-                CoreError::Tool(_) => "tool",
-                _ => "other",
-            };
-            let detail = json!({"error":category,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            let (category, kind) = stop_failure_categories(error);
+            let detail = json!({"error":category,"error_type":kind,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {},
@@ -8685,14 +8797,7 @@ impl RunnerTask {
             let _ = self.promote_tools([name.to_owned()]);
         }
         if name == "question" {
-            let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
-            let _execution_authority = execution_gate.read().await;
-            if !self.tool_enabled(name) {
-                return Err(CoreError::PermissionDenied(format!(
-                    "tool {name} was disabled by workspace tool availability before execution"
-                )));
-            }
-            return self.ask_question(&arguments).await.map(plain_tool_output);
+            return self.question_call(call_id, arguments).await;
         }
         if name == "task" {
             let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
@@ -9112,20 +9217,34 @@ impl RunnerTask {
             });
         }
         if let Some(hooks) = &self.hooks {
-            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, detail).await {
+            // A hook answers Always only where a person's Always would be
+            // offered and kept: not for a request only a person answers, not
+            // in a run nobody watches (which records nothing), and not in a
+            // chat in Auto, which approves once and records nothing either.
+            let always = (!forced
+                && !explicit
+                && !self.unattended
+                && hook_may_remember(plan)
+                && !self.approval_modes.is_auto(self.thread.id).await)
+                .then_some(plan.always.as_slice());
+            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, always, detail).await
+            {
                 HookAnswer::Refused(feedback) => {
                     return Ok(PermissionResolution {
                         allowed: false,
                         feedback: Some(feedback),
                     });
                 }
-                HookAnswer::Allowed if !forced && !explicit => {
+                HookAnswer::Allowed { always } if !forced && !explicit => {
+                    if always {
+                        self.remember_hook_always(&operation, &always_rules);
+                    }
                     return Ok(PermissionResolution {
                         allowed: true,
                         feedback: None,
                     });
                 }
-                HookAnswer::Allowed | HookAnswer::Open => {}
+                HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
@@ -9271,6 +9390,27 @@ impl RunnerTask {
         self.publish_task_update("running");
         resolution
     }
+    /// A `PermissionRequest` hook answered Always: remember what Always in
+    /// the prompt remembers (the request's "always" rules, for every chat on
+    /// this server until it stops), and allow the prompts they now cover.
+    fn remember_hook_always(&self, operation: &str, always_rules: &[String]) {
+        let rules: Vec<PermissionRule> = always_rules
+            .iter()
+            .map(|pattern| PermissionRule {
+                pattern: pattern.clone(),
+                decision: PermissionDecision::Allow,
+            })
+            .collect();
+        self.session_rules.lock().extend(rules.iter().cloned());
+        release_covered_permissions(&self.permissions, &self.events, &rules);
+        tracing::info!(
+            thread = %self.thread.id,
+            operation = %operation_for_log(operation),
+            rules = always_rules.len(),
+            "approved always by a PermissionRequest hook"
+        );
+    }
+
     /// Record this turn's pre-image immediately before its first approved side
     /// effect. Snapshot failures are fail-closed: running the tool without a
     /// trustworthy pre-image would make a later `/undo` actively misleading.
@@ -9402,6 +9542,96 @@ impl RunnerTask {
         );
         Ok(format!("Todo list updated ({count} items)"))
     }
+    /// The question tool. Hooks run as for other tools: a `PreToolUse` hook
+    /// first, which may block the question, or answer it with `answers` in
+    /// its `updatedInput`, and then nobody is asked and the result records
+    /// that the hook answered (`answeredBy: "hook"`); a `PostToolUse` hook
+    /// after it is answered, with the answer as its output.
+    async fn question_call(
+        &self,
+        call_id: &str,
+        mut arguments: serde_json::Value,
+    ) -> CoreResult<ToolOutput> {
+        use std::fmt::Write as _;
+        let mut answers = None;
+        let mut hook_context = None;
+        if let Some(hooks) = &self.hooks {
+            self.set_status("tool", Some(("question", call_id)));
+            let decision = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                decision = hooks.pre_tool_use(self.thread.id, "question", &arguments) => decision,
+            };
+            if let Some(reason) = decision.block {
+                return Err(CoreError::PermissionDenied(format!(
+                    "blocked by a PreToolUse hook: {reason}"
+                )));
+            }
+            if decision.permission == Some(PermissionDecision::Deny) {
+                return Err(CoreError::PermissionDenied(
+                    "denied by a PreToolUse hook".into(),
+                ));
+            }
+            hook_context = decision.context;
+            if let Some(mut updated) = decision.updated_input {
+                // Only a hook supplies `answers`; the question's own input,
+                // the one the model writes, has no such field.
+                answers = updated
+                    .as_object_mut()
+                    .and_then(|input| input.remove("answers"));
+                self.validate_tool_arguments("question", &updated)?;
+                arguments = updated;
+            }
+        }
+        let execution_gate = tool_execution_gate(&self.tool_execution_gates, "question");
+        let _execution_authority = execution_gate.read().await;
+        if !self.tool_enabled("question") {
+            return Err(CoreError::PermissionDenied(
+                "tool question was disabled by workspace tool availability before execution".into(),
+            ));
+        }
+        let answered = match &answers {
+            Some(answers) => hook_question_answer(&question_request(&arguments)?, answers),
+            None => None,
+        };
+        let mut output = if let Some(answer) = answered {
+            tracing::info!(thread = %self.thread.id, call_id, "a PreToolUse hook answered a question");
+            ToolOutput {
+                text: answer,
+                metadata: json!({"answeredBy": "hook"}),
+            }
+        } else {
+            if answers.is_some() {
+                tracing::warn!(
+                    thread = %self.thread.id,
+                    call_id,
+                    "a PreToolUse hook's answers do not fit the question; asking instead"
+                );
+            }
+            plain_tool_output(self.ask_question(&arguments).await?)
+        };
+        if let Some(context) = hook_context {
+            let _ = write!(
+                output.text,
+                "\n\n<hook-context>\n{context}\n</hook-context>"
+            );
+        }
+        if let Some(hooks) = &self.hooks {
+            let context = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => None,
+                context = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => context,
+            };
+            if let Some(context) = context {
+                let _ = write!(
+                    output.text,
+                    "\n\n<hook-context>\n{context}\n</hook-context>"
+                );
+            }
+        }
+        Ok(output)
+    }
+
     async fn ask_question(&self, arguments: &serde_json::Value) -> CoreResult<String> {
         let QuestionRequest {
             prompt,
@@ -11579,7 +11809,11 @@ impl AskPlan {
 /// What `PermissionRequest` hooks and `permission.ask` extensions said about
 /// one prompt.
 enum HookAnswer {
-    Allowed,
+    /// Allowed, and with `always` remembered as Always in the prompt
+    /// remembers it.
+    Allowed {
+        always: bool,
+    },
     Refused(String),
     Open,
 }
@@ -11590,11 +11824,13 @@ enum HookAnswer {
 /// leads is asked about alone, with the arguments' path replaced by it: the
 /// hook would otherwise judge the link it was given (`notes.txt`) and answer
 /// for the file it opens (`.env`). Any refusal refuses the prompt; the hooks
-/// answer it only when every call allowed.
+/// answer it only when every call allowed, and answer Always only when every
+/// call did and `always` offered it.
 async fn permission_hook_answer(
     hooks: &dyn crate::HookPort,
     thread: ThreadId,
     plan: &AskPlan,
+    always: Option<&[String]>,
     detail: &serde_json::Value,
 ) -> HookAnswer {
     let own: Vec<String> = plan
@@ -11611,10 +11847,12 @@ async fn permission_hook_answer(
         calls.push((vec![pattern.clone()], with_target_path(detail, path)));
     }
     let mut allowed = !calls.is_empty();
+    let mut remembered = always.is_some();
     for (patterns, input) in calls {
         let decision = hooks
-            .permission_request(thread, &plan.permission, &patterns, &input)
+            .permission_request(thread, &plan.permission, &patterns, always, &input)
             .await;
+        remembered &= decision.always;
         if let Some(reason) = decision.block {
             return HookAnswer::Refused(reason);
         }
@@ -11643,10 +11881,21 @@ async fn permission_hook_answer(
         }
     }
     if allowed {
-        HookAnswer::Allowed
+        HookAnswer::Allowed { always: remembered }
     } else {
         HookAnswer::Open
     }
+}
+
+/// Whether a hook may answer Always for `plan`: it remembers the plan's
+/// "always" patterns, and never a site rule (the built-in browser's or
+/// Chrome's), which only a person makes last.
+fn hook_may_remember(plan: &AskPlan) -> bool {
+    !plan.always.is_empty()
+        && !matches!(
+            plan.permission.as_str(),
+            "browser" | "browser_site" | "multiple"
+        )
 }
 
 /// Tool arguments with the file path they name replaced by `path`, as a
@@ -12762,8 +13011,8 @@ mod tests {
 
     use super::{
         CoreError, EventBus, GoalLogicalTurnGuard, Item, ItemData, PendingQuestion,
-        ProviderMessage, parse_goal_criteria_selection, provider_messages, question_request,
-        resolve_pending_question, subagent_title,
+        ProviderMessage, hook_question_answer, parse_goal_criteria_selection, provider_messages,
+        question_request, resolve_pending_question, subagent_title,
     };
 
     #[test]
@@ -12841,6 +13090,98 @@ mod tests {
             question_request(&json!({"choices": ["Green"]})),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn stop_failure_categories_name_what_happened() {
+        let provider =
+            |message: &str| super::stop_failure_categories(&CoreError::Provider(message.into()));
+        // `error` stays what it always was; `error_type` says what happened.
+        for (message, kind) in [
+            (
+                "HTTP 401 Unauthorized: invalid x-api-key",
+                "authentication_failed",
+            ),
+            ("HTTP 403 Forbidden", "authentication_failed"),
+            ("openai api_key is not configured", "authentication_failed"),
+            ("HTTP 429 Too Many Requests: rate limit", "rate_limit"),
+            ("[insufficient_quota] You exceeded your quota", "rate_limit"),
+            ("HTTP 529: Overloaded", "overloaded"),
+            ("This model is experiencing high demand", "overloaded"),
+            ("HTTP 502 Bad Gateway", "server_error"),
+            ("HTTP 400 Bad Request: unknown field", "invalid_request"),
+            ("prompt is too long: 250000 tokens", "invalid_request"),
+            ("provider ended the response with an error", "unknown"),
+            ("HTTP 4000 nonsense", "unknown"),
+        ] {
+            assert_eq!(provider(message), ("provider", kind), "{message}");
+        }
+        let other = |error: CoreError| super::stop_failure_categories(&error);
+        assert_eq!(
+            other(CoreError::ProviderIncomplete("length".into())),
+            ("incomplete", "incomplete")
+        );
+        assert_eq!(
+            other(CoreError::ProviderBlocked("refusal".into())),
+            ("content_filter", "content_filter")
+        );
+        assert_eq!(other(CoreError::Tool("x".into())), ("tool", "tool"));
+        assert_eq!(other(CoreError::Storage("x".into())), ("other", "unknown"));
+    }
+
+    #[test]
+    fn a_hooks_answers_must_fit_the_question() {
+        let single = json!({"prompt": "Which suite?", "choices": ["Unit tests", "Full suite"]});
+        let single = question_request(&single).unwrap();
+        for answers in [
+            json!([["Unit tests"]]),
+            json!(["Unit tests"]),
+            json!({"Which suite?": "Unit tests"}),
+            json!({"Which suite?": ["Unit tests"]}),
+            json!([[" Unit tests "]]),
+        ] {
+            assert_eq!(
+                hook_question_answer(&single, &answers).as_deref(),
+                Some("Unit tests"),
+                "{answers}"
+            );
+        }
+        // Free-form answers are open unless the question turns them off.
+        assert_eq!(
+            hook_question_answer(&single, &json!([["Only the parser"]])).as_deref(),
+            Some("Only the parser")
+        );
+        for answers in [
+            json!([]),
+            json!([[]]),
+            json!([[""]]),
+            json!([["Unit tests"], ["Full suite"]]),
+            json!(["Unit tests", "Full suite"]),
+            json!([[1]]),
+            json!("Unit tests"),
+            json!({"Another question?": "Unit tests"}),
+            json!(null),
+        ] {
+            assert_eq!(hook_question_answer(&single, &answers), None, "{answers}");
+        }
+        let closed = json!({"prompt": "Color?", "choices": ["Red", "Blue"], "custom": false});
+        let closed = question_request(&closed).unwrap();
+        assert_eq!(hook_question_answer(&closed, &json!([["Green"]])), None);
+        assert_eq!(
+            hook_question_answer(&closed, &json!([["Blue"]])).as_deref(),
+            Some("Blue")
+        );
+        let several =
+            json!({"prompt": "Toppings?", "choices": ["Cheese", "Basil"], "multiple": true});
+        let several = question_request(&several).unwrap();
+        assert_eq!(
+            hook_question_answer(&several, &json!([["Cheese", "Basil"]])).as_deref(),
+            Some("Cheese, Basil")
+        );
+        assert_eq!(
+            hook_question_answer(&several, &json!({"Toppings?": "Cheese, Basil"})).as_deref(),
+            Some("Cheese, Basil")
+        );
     }
 
     #[test]

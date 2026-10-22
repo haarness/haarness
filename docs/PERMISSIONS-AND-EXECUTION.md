@@ -10,6 +10,7 @@ Haarness uses one runtime policy for Desktop, attached TUI, CLI, workflows and n
 - **Always** in the TUI remembers it for every chat on the running server, until that server stops.
 - **Always for this folder** persists it for the exact workspace.
 - **Always for this repository** explicitly shares it with linked Git worktrees. In the TUI choose **Repository** (`r`), review the displayed rules, then press Enter.
+- A `PermissionRequest` hook can answer **Always** as well; it remembers what the TUI's **Always** remembers, never on disk. See [lifecycle hooks](CONFIGURATION-SCOPES.md#lifecycle-hooks).
 
 A website in the user's Chrome is the exception: it offers only **Allow once** and **Allow in this chat**, which lasts until the server stops and never applies to another chat. See [Chrome approvals](#chrome-approvals).
 

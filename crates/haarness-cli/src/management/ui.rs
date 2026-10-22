@@ -145,6 +145,17 @@ pub(crate) fn qr_rows(text: &str) -> Vec<String> {
 fn output(view: View) -> Result<Value> {
     Ok(serde_json::to_value(view)?)
 }
+/// Why a hook for `event` never runs: the values the event sends, none of
+/// which its matcher matches.
+fn never_runs_line(event: &str) -> String {
+    match haarness_server::hooks::matcher_target(event) {
+        haarness_server::hooks::MatcherTarget::Values(values) => format!(
+            "Never runs: {event} matches only {}, and this matcher matches none of them.",
+            values.join(", ")
+        ),
+        _ => "Never runs: its matcher matches nothing this event sends.".into(),
+    }
+}
 fn row_request(action: &str, row: &Value) -> Value {
     json!({"action":action,"name":row["name"],"id":row["id"],"scope":row["scope"],"revision":row["revision"]})
 }
@@ -1632,7 +1643,7 @@ impl ManagementService {
                 ),
                 field(
                     "matcher",
-                    "Tool matcher",
+                    "Matcher",
                     if id.is_empty() {
                         "*"
                     } else {
@@ -1670,6 +1681,9 @@ impl ManagementService {
                 ],
                 ..View::default()
             };
+            if row["neverRuns"] == true {
+                view.lines.push(never_runs_line(text(&row, "event")));
+            }
             if row["source"]["editable"] == true {
                 view.entries
                     .push(entry("Edit", "", row_request("form", &row)));
@@ -1694,13 +1708,18 @@ impl ManagementService {
             ..View::default()
         };
         for row in status["items"].as_array().into_iter().flatten() {
+            let scope = text(&row["source"], "scope");
             view.entries.push(entry(
                 format!(
                     "{} · {}",
                     text(row, "event"),
                     text(&row["handler"], "command")
                 ),
-                text(&row["source"], "scope"),
+                if row["neverRuns"] == true {
+                    format!("{scope} · never runs")
+                } else {
+                    scope.to_owned()
+                },
                 row_request("inspect", row),
             ));
         }

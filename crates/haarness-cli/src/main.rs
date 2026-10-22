@@ -9035,6 +9035,10 @@ fn provider_instances(
             assume_authenticated: !section.requires_auth,
             headers,
         };
+        // A server the user set up gets the model's reasoning back with its
+        // tool calls; a built-in preset defined again here keeps its own rules.
+        let replay_observed_reasoning =
+            haarness_providers::compatible_preset(&instance.id).is_none();
         instances.push(match protocol {
             haarness_providers::CompatibleProtocol::OpenAiChatCompletions => {
                 haarness_providers::ProviderInstance::OpenAiChatCompletions(
@@ -9046,6 +9050,7 @@ fn provider_instances(
                         models: instance.models,
                         discover_models: instance.discover_models,
                         server_output_limit: section.server_output_limit,
+                        replay_observed_reasoning,
                         model_defaults: instance.model_defaults,
                         assume_authenticated: instance.assume_authenticated,
                         headers: instance.headers,
@@ -12817,6 +12822,39 @@ mod tests {
         assert_eq!(signed_in["xai"], refreshed["xai"]);
         assert_eq!(before["groq"], signed_in["groq"]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_a_custom_chat_completions_server_gets_reasoning_sent_back() {
+        let config: FileConfig = toml::from_str(
+            r#"
+[providers.local-vllm]
+protocol = "openai-chat-completions"
+base_url = "http://127.0.0.1:8000/v1"
+models = ["my-model"]
+requires_auth = false
+
+[providers.openrouter]
+protocol = "openai-chat-completions"
+base_url = "https://openrouter.ai/api/v1"
+models = ["openrouter/auto"]
+"#,
+        )
+        .unwrap();
+        let (instances, _) = provider_instances(&config, &HashMap::new());
+        let replays = |id: &str| {
+            instances.iter().find_map(|instance| match instance {
+                haarness_providers::ProviderInstance::OpenAiChatCompletions(compatible)
+                    if compatible.id == id =>
+                {
+                    Some(compatible.replay_observed_reasoning)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(replays("local-vllm"), Some(true));
+        // A built-in preset defined again keeps its documented fields.
+        assert_eq!(replays("openrouter"), Some(false));
     }
 
     #[test]

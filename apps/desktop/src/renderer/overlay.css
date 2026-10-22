@@ -1256,6 +1256,58 @@ dialog .notifications {
   flex: 1;
 }
 
+/* A text field with suggestions: any text goes, and a quiet caret shows the
+   list by pointer. The list reuses the picker's surface. */
+.combobox {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+.combobox > input {
+  flex: 1;
+  width: 100%;
+  padding-inline-end: var(--control);
+}
+.combobox-toggle {
+  position: absolute;
+  inset-block: 1px;
+  inset-inline-end: 1px;
+  width: calc(var(--control) - 2px);
+  min-height: 0;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--muted);
+}
+.combobox-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: none;
+  border-color: transparent;
+}
+.combobox-toggle:disabled {
+  opacity: 0;
+}
+.combobox-popover .select-option {
+  gap: var(--s4);
+}
+.combobox-value {
+  flex: none;
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+}
+.combobox-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-popover {
   position: fixed;
   z-index: 2000;
