@@ -659,6 +659,9 @@ pub struct App {
     pub(crate) models_loading: bool,
     /// When the "Connection lost" toast was last shown.
     pub(crate) lost_toast_at: Option<std::time::Instant>,
+    /// The task following the server's events kept ending by itself: it
+    /// is tried again in a minute, and nothing retries meanwhile.
+    pub(crate) following_stopped: bool,
     /// The chat this TUI opened on a model it chose while the catalog was
     /// loading: its id and that model, re-chosen once the catalog comes.
     pub(crate) auto_model: Option<(ThreadId, String, String)>,
@@ -986,6 +989,7 @@ impl App {
             connection_lost: None,
             models_loading: false,
             lost_toast_at: None,
+            following_stopped: false,
             auto_model: None,
             server_restart: None,
             overlay: Overlay::None,
@@ -1270,6 +1274,25 @@ impl App {
                 std::time::Duration::from_secs(4),
             );
         }
+    }
+
+    /// The server answers again.
+    pub(crate) fn reconnected(&mut self) {
+        self.connection_lost = None;
+        self.following_stopped = false;
+        self.notice = if self.server_restart.take() == Some(ServerRestart::Starting) {
+            "Server restarted · reconnected"
+        } else {
+            "Reconnected"
+        }
+        .into();
+    }
+
+    /// The task following the server's events kept ending by itself: the
+    /// status line says nothing is retrying, not "reconnecting".
+    pub(crate) fn stopped_following(&mut self) {
+        self.connection_lost = None;
+        self.following_stopped = true;
     }
 
     pub fn show_toast(

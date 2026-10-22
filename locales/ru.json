@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "сервер остановлен · перезапуск",
   "server stopped · restart failed · retrying": "сервер остановлен · перезапуск не удался · повторная попытка",
   "server unreachable · still retrying": "сервер недоступен · попытки продолжаются",
+  "not following the server": "сервер не отслеживается",
+  "not following the server · trying again in a minute, or restart Haarness": "сервер не отслеживается · повтор через минуту, или перезапустите Haarness",
   "Server restarted · reconnected": "Сервер перезапущен · соединение восстановлено",
   "Terminal closed · the shell exited": "Терминал закрыт · оболочка завершилась",
   "Remove server": "Удалить сервер",

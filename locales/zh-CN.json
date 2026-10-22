@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "服务器已停止 · 正在重启",
   "server stopped · restart failed · retrying": "服务器已停止 · 重启失败 · 正在重试",
   "server unreachable · still retrying": "无法连接服务器 · 仍在重试",
+  "not following the server": "未在跟随服务器",
+  "not following the server · trying again in a minute, or restart Haarness": "未在跟随服务器 · 一分钟后重试，或重新启动 Haarness",
   "Server restarted · reconnected": "服务器已重启 · 已重新连接",
   "Terminal closed · the shell exited": "终端已关闭 · Shell 已退出",
   "Remove server": "移除服务器",

@@ -1693,6 +1693,8 @@
   "server stopped · restarting it": "serwer zatrzymany · ponowne uruchamianie",
   "server stopped · restart failed · retrying": "serwer zatrzymany · ponowne uruchomienie nie powiodło się · ponawianie",
   "server unreachable · still retrying": "serwer nieosiągalny · ponawianie trwa",
+  "not following the server": "serwer nie jest śledzony",
+  "not following the server · trying again in a minute, or restart Haarness": "serwer nie jest śledzony · ponowna próba za minutę lub uruchom Haarness ponownie",
   "Server restarted · reconnected": "Serwer uruchomiony ponownie · połączono ponownie",
   "Terminal closed · the shell exited": "Terminal zamknięty · powłoka zakończyła działanie",
   "Remove server": "Usuń serwer",

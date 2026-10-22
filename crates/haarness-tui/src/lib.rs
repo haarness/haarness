@@ -520,6 +520,8 @@ async fn run_with_client(
     // How often the event task may be started again after it ended by
     // itself; past that the indicator stays, rather than a panic looping.
     let mut following = Some(Restarts::default());
+    // While it is stopped, when it is tried again.
+    let mut follow_again_at: Option<std::time::Instant> = None;
     // Open completion only after SSE owns the captured cursor. If a localized
     // completion event raced snapshot hydration, its replay can now replace
     // the fallback dialog without a visible stale-copy window.
@@ -854,10 +856,14 @@ async fn run_with_client(
                     // The task that follows the server's events ended by
                     // itself (it panicked): say so, and follow them again,
                     // from a fresh snapshot.
-                    app.connection_dropped(1);
-                    match following.as_mut().and_then(Restarts::again) {
-                        Some(()) => (event_rx, event_task) = client.subscribe(Some((uuid::Uuid::nil(), 0))),
-                        None => following = None,
+                    if following.as_mut().and_then(Restarts::again).is_some() {
+                        app.connection_dropped(1);
+                        (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
+                    } else {
+                        // Ending over and over: stop for a minute, and say so.
+                        following = None;
+                        follow_again_at = Some(std::time::Instant::now() + Duration::from_secs(60));
+                        app.stopped_following();
                     }
                     continue;
                 };
@@ -913,17 +919,7 @@ async fn run_with_client(
                         }
                         app.server_restart = Some(state::ServerRestart::Failed);
                     }
-                    crate::api::SubscriptionEvent::Reconnected => {
-                        app.connection_lost = None;
-                        app.notice = if app.server_restart.take()
-                            == Some(state::ServerRestart::Starting)
-                        {
-                            "Server restarted · reconnected"
-                        } else {
-                            "Reconnected"
-                        }
-                        .into();
-                    }
+                    crate::api::SubscriptionEvent::Reconnected => app.reconnected(),
                 }
             },
             Ok(event) = pty_rx.recv() => {
@@ -1018,6 +1014,13 @@ async fn run_with_client(
             () = &mut shutdown => break,
             _ = tick.tick() => {
                 app.tick = app.tick.wrapping_add(1);
+                if follow_again_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                    follow_again_at = None;
+                    following = Some(Restarts::default());
+                    app.following_stopped = false;
+                    app.connection_dropped(1);
+                    (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
+                }
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
                 app.expire_notification();
                 app.expire_notice(std::time::Instant::now());

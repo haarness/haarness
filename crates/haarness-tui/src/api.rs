@@ -1788,6 +1788,29 @@ impl ApiClient {
         tokio::sync::mpsc::Receiver<SubscriptionEvent>,
         tokio::task::JoinHandle<()>,
     ) {
+        self.follow(initial, false)
+    }
+
+    /// [`Self::subscribe`] after the previous subscription was lost: the new
+    /// one says `Reconnected` with the first byte the server sends.
+    pub fn subscribe_again(
+        &self,
+        initial: Option<(uuid::Uuid, u64)>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<SubscriptionEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        self.follow(initial, true)
+    }
+
+    fn follow(
+        &self,
+        initial: Option<(uuid::Uuid, u64)>,
+        lost: bool,
+    ) -> (
+        tokio::sync::mpsc::Receiver<SubscriptionEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let this = self.clone();
         let (tx, receiver) = tokio::sync::mpsc::channel(256);
         let task = tokio::spawn(async move {
@@ -1795,7 +1818,7 @@ impl ApiClient {
                 .map(|(instance, cursor)| (Some(instance), Some(cursor)))
                 .unwrap_or((None, None));
             let mut expected_workspace = None;
-            let mut disconnected = false;
+            let mut disconnected = lost;
             let mut attempt = 0_u32;
             loop {
                 let info = match this.info().await {
@@ -3116,6 +3139,54 @@ mod tests {
                 .unwrap(),
             Some(SubscriptionEvent::ResyncRequired)
         ));
+        task.abort();
+        server.abort();
+    }
+
+    /// The event task started again after the previous one ended by itself:
+    /// the indicator that loss raised clears with the server's first byte.
+    #[tokio::test]
+    async fn a_subscription_started_again_says_reconnected_once_the_server_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let info = serde_json::to_string(&fixture_server_info(uuid::Uuid::now_v7(), "/w")).unwrap();
+        let server = tokio::spawn(async move {
+            let mut open_sockets = Vec::new();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let head = request_head(&mut socket).await;
+                if head.starts_with("GET /v1/events ") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n: connected\n\n",
+                        )
+                        .await;
+                    open_sockets.push(socket);
+                } else {
+                    let _ = socket
+                        .write_all(response("application/json", &info).as_bytes())
+                        .await;
+                }
+            }
+        });
+        let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
+        let (mut events, task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
+        let mut seen = Vec::new();
+        while !seen
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Reconnected))
+        {
+            seen.push(
+                tokio::time::timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("never reconnected: {seen:?}"))
+                    .unwrap(),
+            );
+        }
+        assert!(
+            matches!(seen[0], SubscriptionEvent::ResyncRequired),
+            "{seen:?}"
+        );
         task.abort();
         server.abort();
     }
