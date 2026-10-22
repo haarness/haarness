@@ -3074,7 +3074,11 @@ impl Tool for BuiltinTool {
                             self.resolve_entry(path, &context),
                             self.resolve_new(target, &context),
                         )
-                        && same_entry(&source, &destination)
+                        && same_entry(
+                            &source,
+                            &destination,
+                            &haarness_core::resolve_permission_entry(&self.workspace, target),
+                        )
                     {
                         return Err(CoreError::Invalid(format!(
                             "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
@@ -3122,7 +3126,14 @@ impl Tool for BuiltinTool {
                                 let removed = entry_diff_body(&entry).await;
                                 let destination = self.resolve_new(&target, &context)?;
                                 // A file the patch added earlier is checked here.
-                                if same_entry(&entry, &destination) {
+                                if same_entry(
+                                    &entry,
+                                    &destination,
+                                    &haarness_core::resolve_permission_entry(
+                                        &self.workspace,
+                                        &target,
+                                    ),
+                                ) {
                                     return Err(CoreError::Invalid(format!(
                                         "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
                                     )));
@@ -3575,13 +3586,40 @@ fn climbs(pattern: &str) -> bool {
 /// Whether the entry a move removes is the file it writes. A link is its
 /// own entry: moving it onto the file it leads to writes that file and
 /// removes only the link.
-fn same_entry(entry: &Path, destination: &Path) -> bool {
+fn same_entry(entry: &Path, destination: &Path, target_entry: &Path) -> bool {
     if std::fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return entry == destination;
+        // The move would write the file the link leads to and then remove
+        // the link: refused when it names the link itself (`L`, `./L`,
+        // another case on a case-insensitive disk).
+        return same_link(entry, target_entry);
     }
     same_file(entry, destination)
 }
 
+/// Whether two entries are the same, without following a link at either.
+fn same_link(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let (Ok(left), Ok(right)) = (
+            std::fs::symlink_metadata(left),
+            std::fs::symlink_metadata(right),
+        ) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        left == right
+            || left
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+}
+
+/// Whether two paths name one existing file: the same device and inode on
+/// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
 fn same_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -5617,6 +5655,28 @@ export default workflow({
             std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
             "through\n"
         );
+        // A move onto the link's own name would write the file it leads to
+        // and then remove the link, so it is refused as before.
+        symlink("real.txt", workspace.join("alias.txt")).unwrap();
+        let mut targets = vec!["alias.txt", "./alias.txt"];
+        // On a case-insensitive disk another case is the same entry too.
+        if workspace.join("ALIAS.TXT").exists() {
+            targets.push("ALIAS.TXT");
+        }
+        for target in targets {
+            let error = run(&format!(
+                "*** Begin Patch\n*** Update File: alias.txt\n*** Move to: {target}\n@@\n-through\n+lost\n*** End Patch\n"
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("names the same file"), "{target}: {error}");
+            assert!(std::fs::symlink_metadata(workspace.join("alias.txt")).is_ok());
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("real.txt")).unwrap(),
+                "through\n"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
