@@ -249,6 +249,11 @@ test("a page the person loads themself takes the keyboard, and the agent's loads
     }, text);
   const field = async (search: string) =>
     (await tool("evaluate", { tabID: await tab(search), script: "document.activeElement.id + ':' + field.value" })).value;
+  /** Puts the keyboard back in the message box, as a click in it does. */
+  const typeInBox = async () => {
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.focus());
+    await box.focus();
+  };
   await activate();
 
   // Enter in the address bar loads the page, whose field then gets the keys.
@@ -260,7 +265,7 @@ test("a page the person loads themself takes the keyboard, and the agent's loads
   const typed = await tab("?typed");
 
   // Back, from the window's own toolbar, hands the keyboard to the page it loads.
-  await box.focus();
+  await typeInBox();
   expect(await settled()).toMatchObject(inMessageBox);
   await browser.getByRole("button", { name: "Browser back", exact: true }).click();
   const back = await settled();
@@ -268,7 +273,7 @@ test("a page the person loads themself takes the keyboard, and the agent's loads
   expect(back.pages).toHaveLength(1);
 
   // The agent's load right after the person's own still leaves the message box alone.
-  await box.focus();
+  await typeInBox();
   expect(await settled()).toMatchObject(inMessageBox);
   await tool("navigate", { tabID: typed, url: siteURL + "/focus?agent" });
   expect(await settled()).toMatchObject(inMessageBox);
