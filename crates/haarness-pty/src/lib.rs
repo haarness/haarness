@@ -173,6 +173,7 @@ impl PtyManager {
             pid,
             cols,
             rows,
+            created: false,
         };
         let (output, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
         let session = Arc::new(Session {
@@ -189,7 +190,10 @@ impl PtyManager {
         self.publish("pty.created", &info);
         spawn_reader(Arc::clone(&session), reader);
         spawn_waiter(Arc::downgrade(&self.inner), session, child);
-        Ok(info)
+        Ok(PtyInfo {
+            created: true,
+            ..info
+        })
     }
 
     pub fn update(&self, id: PtyId, request: PtyUpdateRequest) -> CoreResult<PtyInfo> {
@@ -737,7 +741,12 @@ mod tests {
         };
         let opened = std::thread::scope(|scope| {
             let windows: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| manager.create(request.clone()).unwrap().id))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let info = manager.create(request.clone()).unwrap();
+                        (info.id, info.created)
+                    })
+                })
                 .collect();
             windows
                 .into_iter()
@@ -745,8 +754,12 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(manager.list().len(), 2, "one shell for every window");
-        assert!(opened.iter().all(|id| *id == opened[0]));
-        assert_ne!(opened[0], ended.id);
+        assert!(opened.iter().all(|(id, _)| *id == opened[0].0));
+        assert_ne!(opened[0].0, ended.id);
+        // Only the window whose create started it is told so: for the others
+        // its output is a shell's they did not start.
+        assert_eq!(opened.iter().filter(|(_, created)| *created).count(), 1);
+        assert!(manager.list().iter().all(|info| !info.created));
         // An explicit New terminal still opens another; "a terminal" then
         // keeps returning the oldest.
         let second = manager
@@ -755,8 +768,10 @@ mod tests {
                 ..request.clone()
             })
             .unwrap();
-        assert_ne!(second.id, opened[0]);
-        assert_eq!(manager.create(request).unwrap().id, opened[0]);
+        assert_ne!(second.id, opened[0].0);
+        assert!(second.created);
+        let again = manager.create(request).unwrap();
+        assert_eq!((again.id, again.created), (opened[0].0, false));
         assert_eq!(manager.list().len(), 3);
         for info in manager.list() {
             manager.delete(info.id).unwrap();

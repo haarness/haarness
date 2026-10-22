@@ -171,7 +171,10 @@ shell. With `ifNone: true` it starts one only when the project has no running
 terminal and otherwise answers with its oldest running one (still `201`), so
 several windows that each open a first terminal at once, as after the server
 was replaced, share one shell: Desktop's terminal panel asks this way when it
-finds none, and so does the terminal UI's first `/terminal`. Patch changes the title and/or resizes using both dimensions. A WebSocket
+finds none, and so does the terminal UI's first `/terminal`. Only the answer
+to the create that started a terminal carries `created: true` (lists, events
+and a handed-back terminal leave it out), so a client knows whether the
+shell's output is all new to it or belongs to a shell another one started. Patch changes the title and/or resizes using both dimensions. A WebSocket
 client sends raw input as binary frames and receives raw output as binary
 frames. JSON text control frames mark replay boundaries and acknowledge the
 monotonic byte `cursor`; reconnecting with the last acknowledged cursor replays

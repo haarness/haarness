@@ -2113,6 +2113,7 @@ mod tests {
             pid: None,
             cols: 80,
             rows: 24,
+            created: false,
         })
         .unwrap();
         let (queries, mut asked) = tokio::sync::mpsc::unbounded_channel::<String>();

@@ -45,6 +45,11 @@ pub struct PtyInfo {
     pub pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
+    /// True only in the answer to the create that started this terminal, so
+    /// a client can tell a shell it started (whose output is all new to it)
+    /// from one an `ifNone` create handed back. Left out everywhere else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

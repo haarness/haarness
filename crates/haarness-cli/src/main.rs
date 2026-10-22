@@ -12689,6 +12689,7 @@ request_timeout = 0
             pid: Some(4243),
             cols: 80,
             rows: 24,
+            created: false,
         })
         .unwrap()
     }
