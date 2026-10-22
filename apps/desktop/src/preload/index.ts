@@ -59,6 +59,8 @@ const bridge: Bridge = {
   openExternal: (url) => invoke("external", url),
   chromeSetup: (action) => invoke("chromeSetup", action),
   chromeReveal: () => invoke("chromeReveal"),
+  logLevel: (action) => invoke("logLevel", action),
+  exportLogs: () => invoke("exportLogs"),
   reveal: (connection, path) => invoke("reveal", connection, path),
   terminal: (connection, action, id, input) =>
     invoke("terminal", connection, action, id, input),

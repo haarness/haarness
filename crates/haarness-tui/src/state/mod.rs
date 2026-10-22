@@ -614,6 +614,8 @@ pub struct App {
     pub(crate) remote: crate::remote_control::RemoteControl,
     /// `/chrome`: whether agents can use the person's own Chrome.
     pub(crate) chrome: crate::chrome::Chrome,
+    /// `/logs`: an export or a change of detailed logging in flight.
+    pub(crate) logs: crate::logs::Logs,
     pub thread: Thread,
     pub threads: Vec<Thread>,
     /// Whether the current session catalog includes archived conversations.
@@ -1050,6 +1052,7 @@ impl App {
             connect: crate::connect::ConnectFlow::default(),
             remote: crate::remote_control::RemoteControl::default(),
             chrome: crate::chrome::Chrome::default(),
+            logs: crate::logs::Logs::default(),
             pending_server: None,
             original_client: None,
             keybindings: crate::keybindings::load().unwrap_or_default(),

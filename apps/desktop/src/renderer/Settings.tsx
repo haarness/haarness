@@ -2,6 +2,7 @@ import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
+import { DiagnosticsSetting } from "./Diagnostics";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
@@ -560,6 +561,7 @@ function General() {
         />
       </Row>
       <UsageStatisticsSetting />
+      <DiagnosticsSetting />
       <p class="muted">
         {t("Drafts, appearance and saved projects are saved on this computer. Chats and tasks are saved separately for each project folder or worktree.")}
       </p>

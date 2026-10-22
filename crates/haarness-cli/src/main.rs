@@ -1657,9 +1657,10 @@ async fn cli_main() -> Result<()> {
                 level,
                 window,
                 until_stopped,
-            }) => logs::level_command(&paths.data, level.as_deref(), window, until_stopped),
-            Some(LogsCommand::Export { output, full }) => {
-                logs::export_command(&paths.data, output, full)
+                json,
+            }) => logs::level_command(&paths.data, level.as_deref(), window, until_stopped, json),
+            Some(LogsCommand::Export { output, full, json }) => {
+                logs::export_command(&paths.data, output, full, json)
             }
         },
         Some(Command::Upgrade(args)) => upgrade::run(args),
@@ -1696,6 +1697,9 @@ enum LogsCommand {
         /// Keep the level until `haarness logs level stop`, across restarts.
         #[arg(long)]
         until_stopped: bool,
+        /// Print the level in force afterwards as JSON, for Desktop and the TUI.
+        #[arg(long)]
+        json: bool,
     },
     /// Pack the log files into a zip with known secret shapes removed.
     Export {
@@ -1705,6 +1709,9 @@ enum LogsCommand {
         /// Pack the files as they are, removing nothing.
         #[arg(long)]
         full: bool,
+        /// Print what was written as JSON, for Desktop and the TUI.
+        #[arg(long)]
+        json: bool,
     },
 }
 
