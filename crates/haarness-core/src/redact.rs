@@ -492,13 +492,29 @@ fn userinfo(text: &str) -> Cow<'_, str> {
             continue;
         };
         let start = at + slashes;
-        let mut end = start;
-        while let Some(&byte) = bytes.get(end) {
-            match byte {
-                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
-                b'/' | b'?' | b'#' => break,
-                _ if byte.is_ascii_whitespace() => break,
-                _ => end += 1,
+        // The host part ends where a URL parser ends it, or where the text
+        // the URL is written in ends (a quote or bracket), so an address
+        // beside it (`"…","me@x"`) is never read as its user name.
+        let mut end = authority_end(bytes, start, b"/?#\"`<>'");
+        if !text[start..end].contains('@') && bytes.get(end) == Some(&b'\'') {
+            // A `'` can belong to the user name (`o'neil`): read on past it.
+            end = authority_end(bytes, start, b"/?#\"`<>");
+        }
+        if !text[start..end].contains('@')
+            && port_is_not_a_number(&text[start..end])
+            && matches!(bytes.get(end), Some(b'/' | b'?' | b'#'))
+        {
+            // `user:pa?ss@host`: a password holding a raw `/`, `?` or `#`
+            // ends the host part early, before a "port" that is no number.
+            // The user part runs to the first `@` after it, and the host to
+            // the next `/`, `?` or `#`.
+            // Read at most 2 KiB on, so a long run of such text stays linear.
+            let region = authority_end(&bytes[..bytes.len().min(end + 2048)], end, b"\"`<>'");
+            if let Some(first) = text[end..region].find('@') {
+                let host = end + first + 1;
+                end = text[host..region]
+                    .find(['/', '?', '#'])
+                    .map_or(region, |index| host + index);
             }
         }
         let authority = &text[start..end];
@@ -517,6 +533,33 @@ fn userinfo(text: &str) -> Cow<'_, str> {
     }
     shown.push_str(&text[copied..]);
     Cow::Owned(shown)
+}
+
+/// Where a URL's host part that starts at `from` ends: at a space (not a
+/// backslash-escaped one), a JSON-escaped `\"`, or one of `stops`.
+fn authority_end(bytes: &[u8], from: usize, stops: &[u8]) -> usize {
+    let mut end = from;
+    while let Some(&byte) = bytes.get(end) {
+        match byte {
+            b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+            b'\\' if bytes.get(end + 1) == Some(&b'"') => break,
+            _ if byte.is_ascii_whitespace() || stops.contains(&byte) => break,
+            _ => end += 1,
+        }
+    }
+    end
+}
+
+/// Whether what follows the last `:` of a host part is something other than
+/// a port number (`user:pa` of `user:pa?ss@host`); an IPv6 address's own
+/// colons do not count.
+fn port_is_not_a_number(authority: &str) -> bool {
+    let host_port = authority
+        .rsplit_once(']')
+        .map_or(authority, |(_, after)| after);
+    host_port.rsplit_once(':').is_some_and(|(_, port)| {
+        !port.is_empty() && !port.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// The scheme written right before the `//` at `slashes`, read only where a
@@ -801,6 +844,28 @@ mod tests {
                 "ssh://git:p@ss@h.fixture.test/r.git",
                 "ssh://[redacted]@h.fixture.test/r.git",
             ),
+            // A raw `?`, `#` or `/` in the password.
+            (
+                "proxy http://user:pa?ss@proxy:3128 refused",
+                "proxy http://[redacted]@proxy:3128 refused",
+            ),
+            (
+                "http://user:pa#ss@proxy:3128/x",
+                "http://[redacted]@proxy:3128/x",
+            ),
+            (
+                "http://user:pa/ss@h.fixture.test/path@v1",
+                "http://[redacted]@h.fixture.test/path@v1",
+            ),
+            // A token in compact JSON, beside an address.
+            (
+                r#"["https://TOKEN123@h.fixture.test/x","me@x.fixture.test"]"#,
+                r#"["https://[redacted]@h.fixture.test/x","me@x.fixture.test"]"#,
+            ),
+            (
+                "https://o'neil:pw@h.fixture.test/x",
+                "https://[redacted]@h.fixture.test/x",
+            ),
         ] {
             assert_eq!(text(input), output, "{input}");
             assert_eq!(text(output), output, "{output}");
@@ -821,6 +886,12 @@ mod tests {
             r#"["https://h.fixture.test","me@x.fixture.test"]"#,
             // What the URL display already hid.
             "https://<redacted>@h.fixture.test/x",
+            // An address beside a URL in compact JSON, and query addresses.
+            r#"{"url":"http://localhost:3000","email":"me@example.com"}"#,
+            r#"{\"url\":\"http://localhost:3000\",\"email\":\"me@example.com\"}"#,
+            "https://h.fixture.test:8080/x?email=a@b",
+            "http://[::1]/x?a@b",
+            "['https://h.fixture.test','me@x.fixture.test']",
         ] {
             assert_eq!(text(kept), kept);
         }
@@ -834,6 +905,7 @@ mod tests {
             format!("https://{}", "a:".repeat(100_000)),
             format!("https://{}", "\\ ".repeat(100_000)),
             format!("{}://x", "z".repeat(200_000)),
+            "//a:b/".repeat(100_000),
         ] {
             let run = format!("{run} @");
             assert_eq!(userinfo(&run), run.as_str());
