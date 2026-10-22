@@ -4423,6 +4423,43 @@ async fn always_workspace_approval_persists_and_stops_prompting() {
 }
 
 #[tokio::test]
+async fn a_compaction_summary_asks_providers_to_write_no_cache_entry() {
+    let provider = Capturing::default();
+    let requests = provider.requests.clone();
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    );
+    let thread = echo_thread(&runtime).await;
+    for prompt in ["first question", "second question"] {
+        let turn = runtime
+            .start_turn(thread.id, turn_request(prompt))
+            .await
+            .unwrap();
+        wait_done(&runtime, &turn).await;
+    }
+    runtime.compact_with_llm(thread.id).await.unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("third question"))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let requests = requests.lock().unwrap();
+    let (summaries, turns): (Vec<_>, Vec<_>) = requests.iter().partition(|request| {
+        matches!(request.messages.last(), Some(ProviderMessage::Text { content, .. })
+            if content.starts_with("Summarize this conversation for continuation"))
+    });
+    assert_eq!(summaries.len(), 1, "{requests:#?}");
+    assert!(summaries[0].parameters.uncached);
+    assert!(turns.len() >= 3, "{requests:#?}");
+    assert!(turns.iter().all(|request| !request.parameters.uncached));
+}
+
+#[tokio::test]
 async fn llm_compaction_shrinks_context_but_retains_recent_turns_and_exact_todos() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let provider = Capturing::default();

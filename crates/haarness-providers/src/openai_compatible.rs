@@ -1275,7 +1275,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         messages.append(&mut tool_media);
-        if self.marks_prompt_cache(&model) {
+        if self.marks_prompt_cache(&model) && !request.parameters.uncached {
             mark_prompt_cache(&mut messages);
         }
         let mut requested_tools = request.tools;
@@ -2080,7 +2080,12 @@ mod tests {
             assume_authenticated: true,
             headers: crate::ProviderHeaders::default(),
         });
-        for model in ["anthropic/claude-sonnet-5.5", "openai/gpt-6.1-sol"] {
+        // The last: a compaction summary, which nothing reads back.
+        for (model, uncached) in [
+            ("anthropic/claude-sonnet-5.5", false),
+            ("openai/gpt-6.1-sol", false),
+            ("anthropic/claude-sonnet-5.5", true),
+        ] {
             let text = |role: &str, content: &str| ProviderMessage::Text {
                 role: role.into(),
                 content: content.into(),
@@ -2097,7 +2102,10 @@ mod tests {
                 tools: vec![],
                 reasoning_effort: None,
                 output_schema: None,
-                parameters: haarness_core::RequestParameters::default(),
+                parameters: haarness_core::RequestParameters {
+                    uncached,
+                    ..haarness_core::RequestParameters::default()
+                },
             };
             let events = provider
                 .stream(request, CancellationToken::new())
@@ -2121,6 +2129,10 @@ mod tests {
         assert!(
             marked(&requests[1]).iter().all(|marked| !marked),
             "only Anthropic accepts cache_control"
+        );
+        assert!(
+            marked(&requests[2]).iter().all(|marked| !marked),
+            "a request nothing reads back writes no cache entry"
         );
         // The runtime holds back concurrent siblings only where markers go out.
         assert!(
@@ -2257,6 +2269,7 @@ mod tests {
                 options: serde_json::Map::from_iter([("seed".to_owned(), json!(7))]),
                 cache_key: None,
                 limits: haarness_core::StreamLimits::default(),
+                uncached: false,
             },
             output_schema: None,
         };

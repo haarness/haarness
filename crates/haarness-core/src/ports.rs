@@ -409,6 +409,12 @@ pub struct RequestParameters {
     /// of the request on the wire.
     #[serde(skip)]
     pub limits: crate::StreamLimits,
+    /// No later request reads this one's prefix (a compaction summary):
+    /// providers that mark prompt-cache breakpoints leave them out, so no
+    /// cache entry is written and paid for. Not part of the request on the
+    /// wire.
+    #[serde(skip)]
+    pub uncached: bool,
 }
 
 #[derive(Debug, Clone)]

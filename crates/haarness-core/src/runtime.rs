@@ -11010,7 +11010,13 @@ async fn summarize_context(
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
-        parameters: crate::RequestParameters::default(),
+        // Its own system prompt and no tools: it shares no cached prefix with
+        // the chat, and nothing reads its prefix back afterwards, so a cache
+        // entry for it would only be paid for.
+        parameters: crate::RequestParameters {
+            uncached: true,
+            ..crate::RequestParameters::default()
+        },
         output_schema: None,
     };
     let mut stream = tokio::select! {
