@@ -98,6 +98,8 @@ pub fn place_placeholders(
     let mut out = String::with_capacity(command.len());
     let mut quote = Quote::None;
     let mut frames: Vec<Frame> = Vec::new();
+    // Here-documents whose bodies start on the next line.
+    let mut pending: Vec<Heredoc> = Vec::new();
     let mut previous: Option<char> = None;
     let mut statement_start = true;
     // After PowerShell's own `&` or `.` the word is already called.
@@ -183,15 +185,74 @@ pub fn place_placeholders(
             }
             // `$'…'` closes only at an unescaped quote and expands nothing.
             if rest.starts_with("$'") {
-                let mut end = 2;
-                let bytes = rest.as_bytes();
-                while end < bytes.len() && bytes[end] != b'\'' {
-                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                let mut characters = rest.char_indices().skip(2);
+                let mut end = rest.len();
+                while let Some((index, character)) = characters.next() {
+                    match character {
+                        '\\' => {
+                            characters.next();
+                        }
+                        '\'' => {
+                            end = index + 1;
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
-                let end = (end + 1).min(rest.len());
                 out.push_str(&rest[..end]);
                 rest = &rest[end..];
                 previous = Some('\'');
+                continue;
+            }
+            // A here-string is no here-document.
+            if rest.starts_with("<<<") {
+                out.push_str("<<<");
+                rest = &rest[3..];
+                previous = Some('<');
+                continue;
+            }
+            // A here-document's body starts on the next line.
+            if rest.starts_with("<<")
+                && let Some((length, heredoc)) = heredoc_operator(rest)
+            {
+                out.push_str(&rest[..length]);
+                rest = &rest[length..];
+                pending.push(heredoc);
+                previous = Some('_');
+                continue;
+            }
+            // Its body is no shell text: a quoted one (`<<'EOF'`) expands
+            // nothing, so a placeholder gets its value there; an unquoted
+            // one expands references but its quotes are text, so it stays as
+            // it is.
+            if character == '\n' && !pending.is_empty() {
+                out.push('\n');
+                rest = &rest[1..];
+                for heredoc in pending.drain(..) {
+                    while !rest.is_empty() {
+                        let end = rest.find('\n').map_or(rest.len(), |index| index + 1);
+                        let line = &rest[..end];
+                        let bare = line.trim_end_matches('\n');
+                        let bare = if heredoc.strip_tabs {
+                            bare.trim_start_matches('\t')
+                        } else {
+                            bare
+                        };
+                        rest = &rest[end..];
+                        if bare == heredoc.delimiter {
+                            out.push_str(line);
+                            break;
+                        }
+                        if heredoc.quoted {
+                            out.push_str(&filled(line, find, value));
+                        } else {
+                            out.push_str(line);
+                        }
+                    }
+                }
+                previous = Some('\n');
+                statement_start = true;
+                called = false;
                 continue;
             }
         }
@@ -284,6 +345,92 @@ pub fn place_placeholders(
     out
 }
 
+/// A here-document's operator: its delimiter, whether that was quoted (so
+/// the body expands nothing) and whether `<<-` strips the body's tabs.
+struct Heredoc {
+    delimiter: String,
+    quoted: bool,
+    strip_tabs: bool,
+}
+
+/// The `<<word` or `<<-word` at the start of `rest`: its length and what it
+/// opens, or `None` when no delimiter follows.
+fn heredoc_operator(rest: &str) -> Option<(usize, Heredoc)> {
+    let mut index = 2;
+    let strip_tabs = rest[index..].starts_with('-');
+    if strip_tabs {
+        index += 1;
+    }
+    index += rest[index..].len() - rest[index..].trim_start_matches([' ', '\t']).len();
+    let mut delimiter = String::new();
+    let mut quoted = false;
+    let mut end = rest.len();
+    let mut characters = rest[index..].char_indices();
+    while let Some((offset, character)) = characters.next() {
+        match character {
+            '\'' | '"' => {
+                quoted = true;
+                let mut closed = false;
+                for (_, inner) in characters.by_ref() {
+                    if inner == character {
+                        closed = true;
+                        break;
+                    }
+                    delimiter.push(inner);
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            '\\' => {
+                quoted = true;
+                if let Some((_, next)) = characters.next() {
+                    delimiter.push(next);
+                }
+            }
+            _ if character.is_whitespace() || ";|&<>()".contains(character) => {
+                end = index + offset;
+                break;
+            }
+            _ => delimiter.push(character),
+        }
+    }
+    (!delimiter.is_empty()).then_some((
+        end,
+        Heredoc {
+            delimiter,
+            quoted,
+            strip_tabs,
+        },
+    ))
+}
+
+/// `text` with each placeholder `find` reports replaced by its value.
+fn filled(
+    text: &str,
+    find: &dyn Fn(&str) -> Option<usize>,
+    value: &dyn Fn(&str) -> String,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        match find(rest) {
+            Some(length) => {
+                out.push_str(&value(placeholder_name(&rest[..length])));
+                rest = &rest[length..];
+            }
+            None => {
+                out.push_str("${");
+                rest = &rest[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +439,29 @@ mod tests {
         place_placeholders(ShellKind::Posix, command, &variable_at, &|_| {
             unreachable!("the shell reads the value")
         })
+    }
+
+    /// A here-document's body is no shell text: a quoted one gets the value,
+    /// an unquoted one stays as it is, quotes included.
+    #[test]
+    fn a_heredoc_body_is_read_as_the_shell_reads_it() {
+        let shown = |command: &str| {
+            place_placeholders(ShellKind::Posix, command, &variable_at, &|_| "/p q".into())
+        };
+        assert_eq!(
+            shown("cat <<'EOF'\npath ${DIR}\nEOF\necho \"${DIR}\""),
+            "cat <<'EOF'\npath /p q\nEOF\necho \"${DIR}\""
+        );
+        assert_eq!(
+            shown("cat <<EOF\nit's ${DIR}\nEOF\nprintf '%s' '${DIR}'"),
+            "cat <<EOF\nit's ${DIR}\nEOF\nprintf '%s' ''\"${DIR}\"''"
+        );
+        assert_eq!(
+            shown("cat <<- \"END\" | sort\n\tin ${DIR}\n\tEND\necho ${DIR}"),
+            "cat <<- \"END\" | sort\n\tin /p q\n\tEND\necho ${DIR}"
+        );
+        // A here-string is no here-document.
+        assert_eq!(shown("cat <<< '${DIR}'"), "cat <<< ''\"${DIR}\"''");
     }
 
     #[test]
@@ -336,6 +506,7 @@ mod tests {
             // `$'…'` ends at its own unescaped quote.
             ("printf $'it\\'s' ${DIR}", "printf $'it\\'s' ${DIR}"),
             ("echo ${#DIR} ${DIR}", "echo ${#DIR} ${DIR}"),
+            ("printf $'\\é' '${DIR}'", "printf $'\\é' ''\"${DIR}\"''"),
         ] {
             assert_eq!(expanded(command), shown, "{command}");
         }
