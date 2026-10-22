@@ -10,6 +10,11 @@ def routes():
     result = []
     filenames = ("api.rs", "profiles.rs", "files.rs", "preview.rs", "browser.rs", "remote.rs", "sharing.rs")
     for source in (ROOT / "crates/haarness-server/src").glob("*.rs"):
+        # The front (`front.rs`) is another address of a project's running
+        # server: it hands every request to that server, whose routes are
+        # covered here; its own `/v1/shutdown` stops only the front.
+        if source.name == "front.rs":
+            continue
         if re.search(r'\.route\(\s*"', source.read_text().split("#[cfg(test)]")[0]):
             assert source.name in filenames, f"New route module needs SDK coverage: {source.name}"
     for filename in filenames:
