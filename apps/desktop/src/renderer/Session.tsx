@@ -19,7 +19,14 @@ import {
 } from "./conversation-controls";
 import { retainedItems } from "./conversation-history";
 import { PromptContextControls } from "./PromptContext";
-import { mentionAgents } from "./prompt-context";
+import {
+  mentionAgents,
+  pasteFolds,
+  pastedText,
+  plainMessage,
+  sentParts,
+} from "./prompt-context";
+import { UserMessageBody } from "./UserMessage";
 import { sessionKey } from "../projects";
 import {
   isLive,
@@ -684,6 +691,8 @@ export function Session() {
     attachments: string;
     baseText: string;
     baseAttachments: { name: string; data: string }[];
+    /** Chips the undone prompt's pastes came back as. */
+    pastes?: string[];
   };
   let restoredDraft: RestoredDraft | undefined;
   const pristineUndoDraft = () =>
@@ -709,7 +718,23 @@ export function Session() {
     openFind,
     restored: (item) => {
       if (item?.data.type !== "user_message") return;
-      const text = item.data.text;
+      // A slash command comes back as the line typed, so sending it again
+      // runs the command; pastes come back as their chips.
+      const parts = sentParts(item.data.command_line || item.data.text);
+      const pastes = parts.flatMap((part) =>
+        part.kind === "paste"
+          ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }]
+          : [],
+      );
+      const text = pastes.length
+        ? parts
+            .flatMap((part) => (part.kind === "text" ? [part.text] : []))
+            .join("")
+            .trimEnd()
+        : parts.map((part) => part.text).join("");
+      const key = app.draftKey();
+      for (const paste of pastes)
+        void app.run(() => app.addPromptContext(paste, key));
       const baseText = pristineUndoDraft()
         ? restoredDraft!.baseText
         : /^\/(undo|redo|compact)\s*$/.test(draft())
@@ -737,6 +762,7 @@ export function Session() {
         attachments: JSON.stringify(attachments()),
         baseText,
         baseAttachments,
+        pastes: pastes.map((paste) => paste.id),
       };
       void window.haarness.storage("history-draft:" + owner(), restoredDraft);
       persistDraft();
@@ -747,6 +773,15 @@ export function Session() {
       if (pristineUndoDraft()) {
         change(restoredDraft!.baseText);
         setAttachments(restoredDraft!.baseAttachments);
+        const pastes = new Set(restoredDraft!.pastes ?? []);
+        const key = app.draftKey();
+        if (pastes.size)
+          void app.run(() =>
+            app.setPromptContext(
+              key,
+              app.promptContext().filter((item) => item.kind !== "paste" || !pastes.has(item.id)),
+            ),
+          );
         persistDraft();
       }
       restoredDraft = undefined;
@@ -834,7 +869,7 @@ export function Session() {
       if (!text || !editable() || !composer?.isConnected || composer.disabled)
         return;
       event.preventDefault();
-      insertText(text);
+      if (!foldPaste(text)) insertText(text);
     };
     document.addEventListener("paste", paste);
     onCleanup(() => document.removeEventListener("paste", paste));
@@ -958,7 +993,7 @@ export function Session() {
         ? [{
             id: item.id,
             index,
-            title: promptTitle(item.data.text, item.data.attachments ?? [], attachmentName, t("Attachment")),
+            title: promptTitle(item.data.command_line || item.data.text, item.data.attachments ?? [], attachmentName, t("Attachment")),
           }]
         : [],
     ),
@@ -1285,6 +1320,22 @@ export function Session() {
       composer.setRangeText(text, composer.selectionStart, composer.selectionEnd, "end");
       change(composer.value);
     }
+  }
+  /**
+   * A long paste becomes one chip beside the message box, at the size the
+   * TUI folds one, and is sent whole. A queued message being edited keeps
+   * only text, so there the paste goes in as text. Says whether it folded.
+   */
+  function foldPaste(raw: string) {
+    const text = pastedText(raw);
+    if (!text || !pasteFolds(text) || queue.editing() || !project() || !editable())
+      return false;
+    const key = app.draftKey();
+    void app.run(() =>
+      app.addPromptContext({ kind: "paste", id: crypto.randomUUID(), text }, key),
+    );
+    composer?.focus({ preventScroll: true });
+    return true;
   }
   function change(text: string, spoken = false) {
     resetRecall();
@@ -1809,6 +1860,7 @@ export function Session() {
                   </Show>
                   <Message
                     item={rows()[row.index]}
+                    matched={rows()[row.index]?.id === findMatch()}
                     task={(() => {
                       const item = rows()[row.index];
                       return item && "call_id" in item.data
@@ -2003,7 +2055,14 @@ export function Session() {
               classList={{ running: !!active(), waiting: pending() }}
               onPaste={(event) => {
                 const files = Array.from(event.clipboardData?.files ?? []);
-                if (!files.length) return;
+                if (!files.length) {
+                  if (
+                    event.target === composer &&
+                    foldPaste(event.clipboardData?.getData("text/plain") ?? "")
+                  )
+                    event.preventDefault();
+                  return;
+                }
                 event.preventDefault();
                 const uris = event.clipboardData?.getData("text/uri-list");
                 void app.run(() => receiveFiles(files, uris));
@@ -2146,6 +2205,7 @@ export function Session() {
                 text={draft()}
                 textarea={() => composer}
                 change={change}
+                insert={insertText}
                 disabled={submitting() || stopping() || !state.ready}
               />
               <Show when={slashOpen()}>
@@ -2406,6 +2466,8 @@ function Message(props: {
   result?: T.Item;
   task?: Task;
   fork: () => Promise<unknown>;
+  /** The message is the current Find match. */
+  matched?: boolean;
 }) {
   const app = useApp();
   const content = () => props.item?.data;
@@ -2441,7 +2503,16 @@ function Message(props: {
         aria-label={copied() ? t("Copied") : t("Copy message")}
         title={copied() ? t("Copied") : t("Copy message")}
         onClick={() =>
-          app.run(() => copy((content() as { text: string }).text))
+          app.run(() => {
+            const data = content();
+            // A slash command copies the line typed, a message with pastes
+            // the text pasted, as the bubble shows them.
+            return copy(
+              data.type === "user_message"
+                ? plainMessage(data.command_line || data.text)
+                : (data as { text: string }).text,
+            );
+          })
         }
       >
         <Icon name={copied() ? "check" : "copy"} size="sm" />
@@ -2476,28 +2547,37 @@ function Message(props: {
           </Match>
           <Match when={content().type === "user_message"}>
             <div class="bubble">
-              <Markdown text={(content() as { text: string }).text} />
-              <For
-                each={
+              <UserMessageBody
+                id={props.item.id}
+                text={(content() as { text: string }).text}
+                commandLine={
                   (content() as Extract<T.ItemData, { type: "user_message" }>)
-                    .attachments
+                    .command_line
                 }
+                revealed={props.matched}
               >
-                {(attachment) => (
-                  <span class="attachment-chip">
-                    {attachment.startsWith("data:image/") ? (
-                      <img src={attachment} alt={t("Attached image")} />
-                    ) : (
-                      <>
-                        <Icon name="file" size="sm" />
-                        <span class="attachment-name">
-                          {attachmentName(attachment)}
-                        </span>
-                      </>
-                    )}
-                  </span>
-                )}
-              </For>
+                <For
+                  each={
+                    (content() as Extract<T.ItemData, { type: "user_message" }>)
+                      .attachments
+                  }
+                >
+                  {(attachment) => (
+                    <span class="attachment-chip">
+                      {attachment.startsWith("data:image/") ? (
+                        <img src={attachment} alt={t("Attached image")} />
+                      ) : (
+                        <>
+                          <Icon name="file" size="sm" />
+                          <span class="attachment-name">
+                            {attachmentName(attachment)}
+                          </span>
+                        </>
+                      )}
+                    </span>
+                  )}
+                </For>
+              </UserMessageBody>
             </div>
             <div class="message-footer">
               <span class="message-time">{time(props.item.createdAt)}</span>

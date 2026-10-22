@@ -15619,6 +15619,147 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
 }
 
 #[test]
+fn a_paste_desktop_sent_as_a_chip_folds_under_its_label_until_the_prompt_opens() {
+    use crate::prompt_context::{Part, display, parts, plain};
+    let pasted = (1..=20)
+        .map(|index| format!("log line {index} with ``` fence"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Desktop's shape (`promptWithContext`): the typed text, then the paste
+    // in a fence longer than any backtick run inside it.
+    let block = format!(
+        "<details>\n<summary>Pasted text · 20 lines</summary>\n\n````\n{pasted}\n````\n\n</details>"
+    );
+    let sent = format!("Why does this fail?\n\n{block}");
+    assert!(matches!(
+        parts(&sent).as_slice(),
+        [Part::Text("Why does this fail?\n\n"), Part::Paste { content, body }]
+            if *content == pasted && *body == block
+    ));
+    assert_eq!(
+        display(&sent),
+        "Why does this fail?\n\n[Pasted text · 20 lines]"
+    );
+    assert_eq!(plain(&sent), format!("Why does this fail?\n\n{pasted}"));
+    // A summary that only starts like one, without its fence, stays typed.
+    let lookalike = "<details>\n<summary>Pasted text</summary>\n\nmine\n\n</details>";
+    assert_eq!(display(lookalike), lookalike);
+
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: sent.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+    )];
+    let id = items[0].id;
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 80))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let folded = text(&app);
+    assert!(folded.contains("▎ Why does this fail?"), "{folded}");
+    assert!(folded.contains("▎ ▸ Pasted text · 20 lines"), "{folded}");
+    for hidden in ["<details>", "log line 1 ", "````"] {
+        assert!(!folded.contains(hidden), "{hidden} leaked: {folded}");
+    }
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| hit.target == crate::view::frame::HitTarget::ToolToggle(id))
+    );
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("▎ ▾ Pasted text · 20 lines"), "{open}");
+    assert!(open.contains("▎ log line 20 with ``` fence"), "{open}");
+    assert!(!open.contains("````"), "{open}");
+
+    // Brought back to the composer, it is a pasted chip that sends the same
+    // block again.
+    let mut composer = crate::input::composer::Composer::default();
+    composer.set_text(sent.clone());
+    assert_eq!(
+        composer.text(),
+        "Why does this fail?\n\n[#1 pasted 20 lines]"
+    );
+    assert_eq!(composer.take(), sent);
+}
+
+#[test]
+fn a_slash_command_reads_as_the_line_typed_with_its_prompt_folded_below() {
+    let thread = fixture_thread();
+    let template = (1..=6)
+        .map(|index| format!("Review step {index} for src/foo.rs"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: template.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: Some("/review src/foo.rs".into()),
+        },
+    )];
+    let id = items[0].id;
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 60))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let folded = text(&app);
+    assert!(folded.contains("▎ /review src/foo.rs"), "{folded}");
+    assert!(folded.contains("▎ ▸ Show prompt · 6 lines"), "{folded}");
+    assert!(!folded.contains("Review step 1"), "{folded}");
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("▎ ▾ Hide prompt"), "{open}");
+    assert!(open.contains("▎ Review step 6 for src/foo.rs"), "{open}");
+
+    // The message browser, a copy and an undo all use the line typed.
+    assert_eq!(
+        crate::messages::message_text(&app.items[0]),
+        Some(("You", "/review src/foo.rs"))
+    );
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 0,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: None,
+    });
+    assert_eq!(
+        app.undone_prompt().map(|(text, _)| text),
+        Some("/review src/foo.rs".into())
+    );
+
+    // Before the command expands, and for a template that is only its
+    // arguments, there is no prompt to show.
+    assert_eq!(
+        crate::prompt_context::command_prompt("/review src/foo.rs", "src/foo.rs"),
+        None
+    );
+    assert_eq!(crate::prompt_context::command_prompt("/compact", ""), None);
+    assert_eq!(
+        crate::prompt_context::command_prompt("/review src/foo.rs", &template),
+        Some(template.as_str())
+    );
+}
+
+#[test]
 fn context_reference_deletion_is_atomic_and_undo_restores_its_payload() {
     let mut composer = crate::input::composer::Composer::default();
     composer

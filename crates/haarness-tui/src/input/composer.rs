@@ -5,6 +5,8 @@
 use crate::width::DisplayWidth as _;
 use unicode_segmentation::UnicodeSegmentation as _;
 
+/// A paste of more lines or bytes than these becomes a chip. Desktop's
+/// composer uses the same sizes (`pasteFolds` in `prompt-context.ts`).
 const PASTE_LINE_THRESHOLD: usize = 8;
 const PASTE_CHAR_THRESHOLD: usize = 1000;
 const UNDO_CAP: usize = 100;
@@ -54,6 +56,11 @@ impl SetAside {
 /// such as `@src/main.rs` or `@explore`.
 fn context_placeholder(label: &str) -> String {
     format!("[{}]", label.replace(['\n', '\r', ']'], " "))
+}
+
+/// The chip a large paste shows as while it is a draft.
+fn paste_placeholder(id: usize, lines: usize) -> String {
+    format!("[#{id} pasted {} lines]", lines.max(1))
 }
 
 fn expand(text: &str, expansions: &[Expansion]) -> String {
@@ -264,17 +271,8 @@ impl Composer {
         let value = value.replace("\r\n", "\n").replace('\r', "\n");
         let lines = value.lines().count();
         if lines > PASTE_LINE_THRESHOLD || value.len() > PASTE_CHAR_THRESHOLD {
-            let id = self
-                .expansions
-                .iter()
-                .filter_map(|e| match e.kind {
-                    ExpansionKind::Paste(id) => Some(id),
-                    ExpansionKind::Context(_) => None,
-                })
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let placeholder = format!("[#{id} pasted {} lines]", lines.max(1));
+            let id = self.next_paste_id();
+            let placeholder = paste_placeholder(id, lines);
             let start = self.edit(self.cursor, self.cursor, &placeholder, LastEdit::Other);
             self.expansions.push(Expansion {
                 start,
@@ -477,6 +475,18 @@ impl Composer {
         Ok(())
     }
 
+    fn next_paste_id(&self) -> usize {
+        self.expansions
+            .iter()
+            .filter_map(|e| match e.kind {
+                ExpansionKind::Paste(id) => Some(id),
+                ExpansionKind::Context(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
     fn next_context_id(&self) -> usize {
         self.expansions
             .iter()
@@ -507,6 +517,20 @@ impl Composer {
                         end: self.text.len(),
                         content: body.to_owned(),
                         kind,
+                    });
+                }
+                // A paste Desktop folded comes back as a pasted chip that
+                // sends its block unchanged.
+                crate::prompt_context::Part::Paste { content, body } => {
+                    let id = self.next_paste_id();
+                    let start = self.text.len();
+                    self.text
+                        .push_str(&paste_placeholder(id, content.lines().count()));
+                    self.expansions.push(Expansion {
+                        start,
+                        end: self.text.len(),
+                        content: body.to_owned(),
+                        kind: ExpansionKind::Paste(id),
                     });
                 }
             }
