@@ -1016,17 +1016,29 @@ async fn bind_loopback(port: u16) -> std::io::Result<Vec<TcpListener>> {
 /// the wait goes on (until [`CALLBACK_TIMEOUT`]), and its text never becomes
 /// the error.
 async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult<BrowserCallback> {
+    answer_until_callback(
+        move || async move {
+            let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
+            futures::future::select_all(accepts).await.0
+        },
+        state,
+    )
+    .await
+}
+
+async fn answer_until_callback<F, A>(mut accept: F, state: &str) -> AuthResult<BrowserCallback>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>>,
+{
     // Each connection is read in a task of its own while the listeners keep
     // accepting, so idle ones (a page's `<link rel=preconnect>`, a browser's
-    // spare socket) never hold up the real return.
+    // spare socket) never hold up the real return. A connection that failed
+    // before it was accepted ends only itself.
     let mut connections = tokio::task::JoinSet::new();
     loop {
-        let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
         tokio::select! {
-            (accepted, _, _) = futures::future::select_all(accepts) => {
-                let (stream, _) = accepted.map_err(|error| {
-                    AuthError::OpenAi(format!("callback listener failed: {error}"))
-                })?;
+            (stream, _) = haarness_account::loopback::next_connection(&mut accept) => {
                 connections.spawn(answer_callback(stream, state.to_owned()));
             }
             // Every finished connection is taken, so one that ended the sign-in is
@@ -1385,7 +1397,8 @@ mod tests {
 
     use super::{
         CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
-        OpenAiOAuthClient, OpenAiOAuthConfig, openai_residency, query, read_callback,
+        OpenAiOAuthClient, OpenAiOAuthConfig, answer_until_callback, openai_residency, query,
+        read_callback,
     };
 
     #[tokio::test]
@@ -1621,6 +1634,45 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("access_denied"), "{error}");
+    }
+
+    /// A connection that failed before it was accepted (reset by its client,
+    /// or no file descriptor left for it) does not end the sign-in.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_browser_login() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let listener = &listener;
+        let mut failures = vec![
+            std::io::Error::other("Too many open files"),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ];
+        let accept = move || {
+            let failure = failures.pop();
+            async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => listener.accept().await,
+                }
+            }
+        };
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(b"GET /auth/callback?state=st-1&code=real HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            stream
+        };
+        let (callback, _stream) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(answer_until_callback(accept, "st-1"), browser)
+        })
+        .await
+        .expect("the browser's return is taken after the failed accepts");
+        assert_eq!(callback.unwrap().code, "real");
     }
 
     #[tokio::test]
