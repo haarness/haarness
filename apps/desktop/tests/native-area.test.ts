@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // Floating layers are placed against a window and a document root.
 const properties = new Map<string, string>();
 Object.assign(globalThis, {
-  window: { innerWidth: 1200 },
+  window: { innerWidth: 1200, innerHeight: 900 },
   document: {
     documentElement: {
       dir: "ltr",
@@ -15,7 +15,7 @@ Object.assign(globalThis, {
     },
   },
 });
-const { floatingBox, floatingSpan, setNativeArea } = await import("../src/renderer/native-area");
+const { floatingBox, floatingSpan, onNativeArea, setNativeArea, toastClearance } = await import("../src/renderer/native-area");
 const rect = (left: number, width: number, top = 40, height = 28) =>
   ({ left, right: left + width, top, bottom: top + height, width, height, x: left, y: top }) as DOMRect;
 
@@ -54,4 +54,44 @@ test("right-to-left windows measure toasts from the left edge", () => {
   setNativeArea(rect(0, 440, 40, 800));
   assert.equal(properties.get("--native-inline-end"), "440px");
   (document.documentElement as { dir: string }).dir = "ltr";
+});
+
+// The toast column: up to 400px, 16px in from the window's inline end.
+test("toasts rise over the message box only while it runs under them", () => {
+  setNativeArea(undefined);
+  // The chat fills the window: the dock's right end is under the column [784, 1184].
+  assert.equal(toastClearance(rect(270, 900, 700, 180)), 200);
+  // A side panel holds the right of the window: the dock ends before the column.
+  assert.equal(toastClearance(rect(270, 480, 700, 180)), undefined);
+  assert.equal(toastClearance(rect(270, 514, 700, 180)), undefined);
+  assert.equal(toastClearance(rect(270, 515, 700, 180)), 200);
+  // An expanded side panel hides the chat, and its dock measures nothing.
+  assert.equal(toastClearance(rect(0, 0, 0, 0)), undefined);
+  assert.equal(toastClearance(rect(270, -40, 0, 0)), undefined);
+});
+
+test("beside the browser, and from the left in right-to-left windows, the column moves with the toasts", () => {
+  // The browser draws over the right 440px, so toasts sit left of it, over the chat.
+  setNativeArea(rect(760, 440, 40, 800));
+  assert.equal(toastClearance(rect(270, 480, 700, 180)), 200);
+  assert.equal(toastClearance(rect(0, 300, 700, 180)), undefined);
+  setNativeArea(undefined);
+  (document.documentElement as { dir: string }).dir = "rtl";
+  // Right to left the column is [16, 416] and a side panel holds the left.
+  assert.equal(toastClearance(rect(420, 600, 700, 180)), undefined);
+  assert.equal(toastClearance(rect(300, 600, 700, 180)), 200);
+  (document.documentElement as { dir: string }).dir = "ltr";
+});
+
+test("a change in where the browser draws is announced once", () => {
+  let calls = 0;
+  const stop = onNativeArea(() => calls++);
+  setNativeArea(undefined);
+  setNativeArea(rect(760, 440, 40, 800));
+  setNativeArea(rect(760, 440, 40, 800));
+  setNativeArea(undefined);
+  stop();
+  setNativeArea(rect(760, 440, 40, 800));
+  setNativeArea(undefined);
+  assert.equal(calls, 2);
 });
