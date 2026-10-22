@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   createReconnectWait,
+  createWakeSlots,
   isWake,
-  wakeDelay,
 } from "../src/renderer/reconnect-wait";
 
 test("a stream that ends as soon as it opens waits longer each time, up to 30 s", () => {
@@ -49,12 +49,16 @@ test("a wake starts the wait over", () => {
 });
 
 test("sidebar projects retry one after another after a wake, behind the open project", () => {
+  const slots = createWakeSlots();
+  // Looking does not take a slot.
+  assert.equal(slots.peek(1000), 750);
+  assert.equal(slots.peek(1000), 750);
   assert.deepEqual(
-    [wakeDelay(1000), wakeDelay(1000), wakeDelay(1100)],
+    [slots.take(1000), slots.take(1000), slots.take(1100)],
     [750, 1000, 1150],
   );
   // A later wake starts again from the first slot.
-  assert.equal(wakeDelay(60_000), 750);
+  assert.equal(slots.take(60_000), 750);
 });
 
 test("only Desktop's wake notice counts as a wake", () => {
