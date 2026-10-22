@@ -4035,12 +4035,15 @@ async fn serve_command(
     // The lease says the folder's previous server is gone. Commands it
     // started and a crash or `kill -9` left running (a dev server holding its
     // port, a `sleep`) stop now; this server then records its own.
-    let groups = paths.server_lock.with_file_name("process-groups");
-    let stopped = haarness_core::process_groups::stop_left_running(&groups);
+    // Dropped before the lease: a server that stops gives its record up
+    // before it lets go of the folder, so what it is still stopping is left
+    // to it.
+    let (stopped, _recording) = haarness_core::process_groups::take_over(
+        paths.server_lock.with_file_name("process-groups"),
+    );
     if stopped > 0 {
         tracing::info!(stopped, "stopped commands the previous server left running");
     }
-    haarness_core::process_groups::record_to(groups);
     let (listener, took_free_port) =
         bind_serve_listener(args.host, args.port, DEFAULT_SERVE_PORT).await?;
     if took_free_port && !args.background_child {

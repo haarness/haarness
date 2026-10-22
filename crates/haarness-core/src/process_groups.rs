@@ -6,188 +6,314 @@
 //! stops nothing, and a command that writes nothing (a dev server holding
 //! its port, a `sleep`, a watcher) runs on under launchd or init. So each
 //! group is written to a small file beside the folder's server lock while it
-//! runs, and the next server, once it holds that lock (so the one that wrote
-//! the file is gone), stops every group still running as it was started. A
-//! group is stopped only while its leader is still the process that was
-//! started, by pid and start time, so a pid the system reused is never hit.
-//! Unix only: elsewhere nothing is recorded.
+//! runs, under the recording server's own pid and start time. The next
+//! server, once it holds that lock, stops each group whose leader is still
+//! the process that was started (same pid, same start time, read the same
+//! way), and only when the recording server itself is gone; a pid the system
+//! reused is never hit. A server that stops normally gives the record up
+//! before it lets go of the lock, so the processes it is still stopping are
+//! left to it. Unix only: elsewhere nothing is recorded.
 
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::OnceLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use parking_lot::Mutex;
 
-/// How far a leader's start time may be from the time recorded for it: `ps`
-/// says it to the second.
-const START_TOLERANCE: Duration = Duration::from_secs(2);
-
+/// The record of one server's groups.
 struct Ledger {
     path: PathBuf,
-    /// Group id to the time its leader started, in seconds since the epoch.
-    groups: Mutex<BTreeMap<i32, u64>>,
+    /// The recording server: its pid and start time.
+    server: Option<(u32, String)>,
+    /// Group id to its leader's start time.
+    groups: Mutex<BTreeMap<i32, String>>,
+    /// Given up (see [`Recording`]): nothing more is written.
+    released: AtomicBool,
 }
 
-static LEDGER: OnceLock<Ledger> = OnceLock::new();
+static LEDGER: OnceLock<Arc<Ledger>> = OnceLock::new();
 
 impl Ledger {
-    fn write(&self, groups: &BTreeMap<i32, u64>) {
-        let text = groups
-            .iter()
-            .fold(String::new(), |mut text, (group, started)| {
-                use std::fmt::Write as _;
-                let _ = writeln!(text, "{group} {started}");
-                text
-            });
-        let partial = self.path.with_extension("partial");
+    fn new(path: PathBuf, carried: BTreeMap<i32, String>) -> Self {
+        let pid = std::process::id();
+        Self {
+            path,
+            server: start_of(pid).map(|start| (pid, start)),
+            groups: Mutex::new(carried),
+            released: AtomicBool::new(false),
+        }
+    }
+
+    fn write(&self, groups: &BTreeMap<i32, String>) {
+        if self.released.load(Ordering::Acquire) {
+            return;
+        }
+        use std::fmt::Write as _;
+        let mut text = String::new();
+        if let Some((pid, start)) = &self.server {
+            let _ = writeln!(text, "server {pid} {start}");
+        }
+        for (group, start) in groups {
+            let _ = writeln!(text, "{group} {start}");
+        }
+        let partial = self
+            .path
+            .with_extension(format!("{}.partial", std::process::id()));
         if std::fs::write(&partial, text).is_ok() {
             let _ = std::fs::rename(&partial, &self.path);
         }
     }
+
+    fn add(&self, group: i32, start: String) {
+        let mut groups = self.groups.lock();
+        groups.insert(group, start);
+        self.write(&groups);
+    }
+
+    fn remove(&self, group: i32) {
+        let mut groups = self.groups.lock();
+        groups.remove(&group);
+        self.write(&groups);
+    }
+
+    fn release(&self) {
+        let _groups = self.groups.lock();
+        if !self.released.swap(true, Ordering::AcqRel) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
-/// From now on, the groups this process starts are written to `path`. A
-/// workspace server calls it once, holding its folder's lock, after
-/// [`stop_left_running`]; nothing is recorded in any other process.
-pub fn record_to(path: PathBuf) {
-    if cfg!(unix) {
-        let ledger = LEDGER.get_or_init(|| Ledger {
-            path,
-            groups: Mutex::new(BTreeMap::new()),
-        });
+/// Held by a workspace server for as long as it holds its folder's lock;
+/// dropped just before the lock goes, it gives the record up: what this
+/// server is still stopping is left to it, never to the next server.
+#[must_use = "the record is given up when this is dropped"]
+pub struct Recording(bool);
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        if self.0
+            && let Some(ledger) = LEDGER.get()
+        {
+            ledger.release();
+        }
+    }
+}
+
+/// Run by a workspace server holding its folder's lock: stops the groups the
+/// record at `path` names that a dead server left running, then records this
+/// server's own groups there. Returns how many groups were stopped, and the
+/// guard to drop just before the lock is released.
+pub fn take_over(path: PathBuf) -> (usize, Recording) {
+    if !cfg!(unix) {
+        return (0, Recording(false));
+    }
+    let (stopped, carried) = sweep(&path, probe);
+    let installed = LEDGER.set(Arc::new(Ledger::new(path, carried))).is_ok();
+    if let Some(ledger) = LEDGER.get().filter(|_| installed) {
         ledger.write(&ledger.groups.lock());
     }
+    (stopped, Recording(installed))
 }
 
 /// A started process group, in the record until dropped.
 #[must_use = "the group leaves the record when this is dropped"]
-pub struct Recorded(Option<i32>);
+pub struct Recorded(Option<(Arc<Ledger>, i32)>);
 
 /// Records the process group `leader` leads, just started.
 pub fn recorded(leader: Option<u32>) -> Recorded {
-    let (Some(ledger), Some(group)) =
-        (LEDGER.get(), leader.and_then(|pid| i32::try_from(pid).ok()))
-    else {
+    let (Some(ledger), Some(pid)) = (LEDGER.get(), leader) else {
         return Recorded(None);
     };
-    let started = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    let mut groups = ledger.groups.lock();
-    groups.insert(group, started);
-    ledger.write(&groups);
-    Recorded(Some(group))
+    record_in(ledger, pid)
+}
+
+fn record_in(ledger: &Arc<Ledger>, pid: u32) -> Recorded {
+    let Ok(group) = i32::try_from(pid) else {
+        return Recorded(None);
+    };
+    // A leader gone already, or one this system cannot date, is nothing to
+    // stop later.
+    match probe(group) {
+        Probe::Running { group: led, start } if led == group => {
+            ledger.add(group, start);
+            Recorded(Some((ledger.clone(), group)))
+        }
+        _ => Recorded(None),
+    }
 }
 
 impl Drop for Recorded {
     fn drop(&mut self) {
-        if let (Some(group), Some(ledger)) = (self.0, LEDGER.get()) {
-            let mut groups = ledger.groups.lock();
-            groups.remove(&group);
-            ledger.write(&groups);
+        if let Some((ledger, group)) = &self.0 {
+            ledger.remove(*group);
         }
     }
 }
 
-/// Stops the groups the record at `path` names whose leader still runs as it
-/// was started, and empties the record. Call only while holding the folder's
-/// server lock, so the server that wrote it is gone. Returns how many groups
-/// were stopped.
-#[must_use]
-pub fn stop_left_running(path: &Path) -> usize {
+/// What a pid is now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Probe {
+    Running {
+        group: i32,
+        start: String,
+    },
+    Gone,
+    /// This system could not say.
+    Unknown,
+}
+
+/// The record's groups to stop, and those left unchecked, carried into the
+/// next record. Nothing is lost when the check cannot be made: the record is
+/// removed only once every entry is settled.
+fn sweep(path: &Path, probe: impl Fn(i32) -> Probe) -> (usize, BTreeMap<i32, String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return 0;
+        return (0, BTreeMap::new());
     };
-    let _ = std::fs::remove_file(path);
-    let recorded = parse_record(&text);
-    if recorded.is_empty() {
-        return 0;
-    }
-    let Some(running) = running_leaders() else {
-        tracing::warn!("could not list processes; commands an earlier server started are left");
-        return 0;
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    let mut stopped = 0;
-    for group in left_running(&recorded, &running, now) {
-        if kill_group(group) {
-            stopped += 1;
+    let (server, groups) = parse_record(&text);
+    if let Some((pid, start)) = server
+        && let Ok(pid) = i32::try_from(pid)
+    {
+        match probe(pid) {
+            // The server that wrote it is still there (a folder lock that was
+            // removed): its groups are its own.
+            Probe::Running { start: now, .. } if now == start => {
+                return (0, groups);
+            }
+            Probe::Unknown => return (0, groups),
+            _ => {}
         }
     }
-    stopped
-}
-
-fn parse_record(text: &str) -> Vec<(i32, u64)> {
-    text.lines()
-        .filter_map(|line| {
-            let (group, started) = line.split_once(' ')?;
-            Some((group.parse().ok()?, started.trim().parse().ok()?))
-        })
-        .filter(|(group, _)| *group > 1)
-        .collect()
-}
-
-/// The recorded groups whose leader still runs: the process of that pid
-/// leads that group and started when the group was recorded. `running` maps
-/// a group leader's pid to how long ago it started.
-fn left_running(recorded: &[(i32, u64)], running: &BTreeMap<i32, u64>, now: u64) -> Vec<i32> {
-    recorded
-        .iter()
-        .filter(|(group, started)| {
-            running.get(group).is_some_and(|elapsed| {
-                now.saturating_sub(*elapsed).abs_diff(*started) <= START_TOLERANCE.as_secs()
-            })
-        })
-        .map(|(group, _)| *group)
-        .collect()
-}
-
-/// Every process that leads its own group, with how many seconds ago it
-/// started; `None` when `ps` cannot say.
-fn running_leaders() -> Option<BTreeMap<i32, u64>> {
-    if !cfg!(unix) {
-        return None;
+    let mut stopped = 0;
+    let mut unchecked = BTreeMap::new();
+    for (group, start) in groups {
+        match probe(group) {
+            Probe::Running {
+                group: led,
+                start: now,
+            } if led == group && now == start => {
+                if kill_group(group) {
+                    stopped += 1;
+                }
+            }
+            Probe::Unknown => {
+                unchecked.insert(group, start);
+            }
+            _ => {}
+        }
     }
-    let output = std::process::Command::new("ps")
-        .args(["-axo", "pid=,pgid=,etime="])
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    if unchecked.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else {
+        tracing::warn!(
+            groups = unchecked.len(),
+            "could not tell whether commands an earlier server started still run; kept them on record"
+        );
     }
-    Some(parse_leaders(&String::from_utf8_lossy(&output.stdout)))
+    (stopped, unchecked)
 }
 
-fn parse_leaders(listing: &str) -> BTreeMap<i32, u64> {
-    listing
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid: i32 = fields.next()?.parse().ok()?;
-            let group: i32 = fields.next()?.parse().ok()?;
-            let elapsed = elapsed_seconds(fields.next()?)?;
-            (pid == group).then_some((pid, elapsed))
-        })
-        .collect()
+#[allow(clippy::type_complexity)]
+fn parse_record(text: &str) -> (Option<(u32, String)>, BTreeMap<i32, String>) {
+    let mut server = None;
+    let mut groups = BTreeMap::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("server ") {
+            if let Some((pid, start)) = rest.split_once(' ')
+                && let Ok(pid) = pid.parse()
+            {
+                server = Some((pid, start.trim().to_owned()));
+            }
+        } else if let Some((group, start)) = line.split_once(' ')
+            && let Ok(group) = group.parse::<i32>()
+            && group > 1
+            && !start.trim().is_empty()
+        {
+            groups.insert(group, start.trim().to_owned());
+        }
+    }
+    (server, groups)
 }
 
-/// `ps`'s `etime`: `[[dd-]hh:]mm:ss`.
-fn elapsed_seconds(text: &str) -> Option<u64> {
-    let (days, clock) = match text.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, text),
+/// A process's start time as this system says it, the same way every time.
+fn start_of(pid: u32) -> Option<String> {
+    match probe(i32::try_from(pid).ok()?) {
+        Probe::Running { start, .. } => Some(start),
+        _ => None,
+    }
+}
+
+/// Linux: `/proc/<pid>/stat` (its group and its start in clock ticks since
+/// boot), with the boot's id, so a pid and tick count from before a restart
+/// never match.
+#[cfg(target_os = "linux")]
+fn probe(pid: i32) -> Probe {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return if std::path::Path::new("/proc/self/stat").exists() {
+            Probe::Gone
+        } else {
+            Probe::Unknown
+        };
     };
-    let mut seconds = 0;
-    for part in clock.split(':') {
-        seconds = seconds * 60 + part.parse::<u64>().ok()?;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    parse_proc_stat(&stat, boot.trim()).unwrap_or(Probe::Unknown)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_proc_stat(stat: &str, boot: &str) -> Option<Probe> {
+    // The command name is in parentheses and may hold spaces or `)`.
+    let fields: Vec<&str> = stat
+        .get(stat.rfind(')')? + 1..)?
+        .split_whitespace()
+        .collect();
+    let group = fields.get(2)?.parse().ok()?;
+    let start = fields.get(19)?;
+    Some(Probe::Running {
+        group,
+        start: format!("{boot}:{start}"),
+    })
+}
+
+/// Elsewhere on Unix: `ps`, which macOS always has: the group and the start
+/// time it prints (to the second, in the C locale).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn probe(pid: i32) -> Probe {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "pgid=,lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+    else {
+        return Probe::Unknown;
+    };
+    // `ps` exits 1 when no such process exists.
+    let listing = String::from_utf8_lossy(&output.stdout);
+    if listing.trim().is_empty() {
+        return if output.status.code() == Some(1) {
+            Probe::Gone
+        } else {
+            Probe::Unknown
+        };
     }
-    Some(days * 86_400 + seconds)
+    parse_ps_line(&listing).unwrap_or(Probe::Unknown)
+}
+
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn parse_ps_line(line: &str) -> Option<Probe> {
+    let mut fields = line.split_whitespace();
+    let group = fields.next()?.parse().ok()?;
+    let start = fields.collect::<Vec<_>>().join(" ");
+    (!start.is_empty()).then_some(Probe::Running { group, start })
+}
+
+#[cfg(not(unix))]
+fn probe(_pid: i32) -> Probe {
+    Probe::Unknown
 }
 
 #[cfg(unix)]
@@ -209,68 +335,154 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_elapsed_time_ps_prints() {
-        assert_eq!(elapsed_seconds("00:07"), Some(7));
-        assert_eq!(elapsed_seconds("12:34"), Some(754));
-        assert_eq!(elapsed_seconds("01:02:03"), Some(3723));
-        assert_eq!(elapsed_seconds("2-01:02:03"), Some(2 * 86_400 + 3723));
-        assert_eq!(elapsed_seconds("soon"), None);
+    fn reads_the_start_time_linux_and_ps_give() {
+        let stat = "4242 (my (odd) cmd) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10";
+        assert_eq!(
+            parse_proc_stat(stat, "boot-1"),
+            Some(Probe::Running {
+                group: 4242,
+                start: "boot-1:987654".into()
+            })
+        );
+        assert_eq!(
+            parse_ps_line(" 4242 Thu Oct 22 11:46:03 2026\n"),
+            Some(Probe::Running {
+                group: 4242,
+                start: "Thu Oct 22 11:46:03 2026".into()
+            })
+        );
+        assert_eq!(parse_ps_line("   \n"), None);
+    }
+
+    fn temporary_record(text: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-process-groups-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("process-groups");
+        std::fs::write(&path, text).unwrap();
+        path
     }
 
     #[test]
-    fn only_a_leader_that_started_when_its_group_was_recorded_is_stopped() {
-        let now = 1_000_000;
-        let listing = "  100   100    00:10\n  101   100    00:09\n  200   200    05:00\n  300   300    00:30\n";
-        let running = parse_leaders(listing);
-        // 101 leads no group of its own.
-        assert_eq!(running.keys().copied().collect::<Vec<_>>(), [100, 200, 300]);
-        let recorded = parse_record(&format!(
-            "100 {}\n200 {}\n300 {}\n400 {}\n1 {}\nnot a line\n",
-            now - 10,
-            // Recorded 10 s ago, but this process 200 started 5 minutes
-            // ago: the pid now belongs to another program.
-            now - 10,
-            now - 31,
-            now - 5,
-            now,
-        ));
-        // 100 runs as it started (300 within the tolerance); 400 is gone;
-        // pid 1 is never named.
-        assert_eq!(left_running(&recorded, &running, now), [100, 300]);
+    fn only_a_leader_that_started_when_it_was_recorded_is_stopped_once_its_server_is_gone() {
+        let running = |group: i32, start: &str| Probe::Running {
+            group,
+            start: start.into(),
+        };
+        // 100 runs as recorded; pid 200 now belongs to another program; 300
+        // now leads no group of its own; 400 is gone. Nothing real is
+        // stopped: the pids are all above any this test could own.
+        let record = "server 9 server-start\n100 a\n200 b\n300 c\n400 d\n1 e\nnot a line\n";
+        let probe = |pid: i32| match pid {
+            9 => Probe::Gone,
+            100 => running(100, "a"),
+            200 => running(200, "other"),
+            300 => running(299, "c"),
+            _ => Probe::Gone,
+        };
+        let (_, groups) = parse_record(record);
+        assert_eq!(
+            groups.keys().copied().collect::<Vec<_>>(),
+            [100, 200, 300, 400]
+        );
+        let stoppable = |probe: &dyn Fn(i32) -> Probe| {
+            groups
+                .iter()
+                .filter(|(group, start)| {
+                    matches!(probe(**group), Probe::Running { group: led, start: now } if led == **group && &now == *start)
+                })
+                .map(|(group, _)| *group)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stoppable(&probe), [100]);
+
+        // The server that wrote it still runs (its lock was removed): its
+        // groups are left, and so is its record.
+        let path = temporary_record(record);
+        let alive = |pid: i32| match pid {
+            9 => running(9, "server-start"),
+            other => probe(other),
+        };
+        let (stopped, kept) = sweep(&path, alive);
+        assert_eq!(stopped, 0);
+        assert_eq!(kept.len(), 4);
+        assert!(path.exists());
+
+        // A check this system cannot make keeps the entry for the next
+        // record instead of losing it.
+        let unknown = |pid: i32| {
+            if pid == 400 {
+                Probe::Unknown
+            } else {
+                Probe::Gone
+            }
+        };
+        let (stopped, kept) = sweep(&path, unknown);
+        assert_eq!(stopped, 0);
+        assert_eq!(kept.into_iter().collect::<Vec<_>>(), [(400, "d".into())]);
+        assert!(
+            path.exists(),
+            "the record stays until every entry is settled"
+        );
+        let (stopped, kept) = sweep(&path, |_| Probe::Gone);
+        assert_eq!((stopped, kept.len()), (0, 0));
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_group_a_dead_server_left_running_is_stopped_and_a_reused_pid_is_not() {
+    fn a_group_a_dead_server_left_running_is_stopped_and_one_given_up_is_not() {
         use std::os::unix::process::CommandExt as _;
-        let directory =
-            std::env::temp_dir().join(format!("haarness-process-groups-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&directory).unwrap();
         let spawn = || {
             let mut command = std::process::Command::new("sleep");
             command.arg("30").process_group(0);
             command.spawn().unwrap()
         };
+        let path = temporary_record("");
         let mut left = spawn();
         let mut other = spawn();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let record = directory.join("process-groups");
-        // What a server killed before it could stop `left` wrote; `other`'s
-        // pid was recorded for a program that started an hour ago.
+        // What a server that was killed wrote: `left` as it started; and
+        // `other`'s pid for a program that started at another time.
+        let ledger = Arc::new(Ledger::new(path.clone(), BTreeMap::new()));
+        let _left = record_in(&ledger, left.id());
         std::fs::write(
-            &record,
-            format!("{} {now}\n{} {}\n", left.id(), other.id(), now - 3600),
+            &path,
+            std::fs::read_to_string(&path).unwrap()
+                + &format!("{} Mon Jan  1 00:00:00 2001\n", other.id()),
         )
         .unwrap();
-        assert_eq!(stop_left_running(&record), 1);
+        // The pid recorded as the server's is not this test's process any
+        // more: mark it gone.
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            &format!("server {} ", std::process::id()),
+            "server 2147483646 ",
+        );
+        std::fs::write(&path, text).unwrap();
+        let (stopped, kept) = sweep(&path, probe);
+        assert_eq!((stopped, kept.len()), (1, 0));
         assert!(left.wait().unwrap().code().is_none(), "killed by a signal");
         assert!(other.try_wait().unwrap().is_none(), "left alone");
-        assert!(!record.exists(), "the record is used once");
-        other.kill().unwrap();
-        other.wait().unwrap();
-        std::fs::remove_dir_all(directory).unwrap();
+        assert!(!path.exists(), "the record is used once");
+
+        // A server that stops normally gives its record up before its lock:
+        // what it is still stopping is not the next server's to kill.
+        let mut exiting = spawn();
+        let ledger = Arc::new(Ledger::new(path.clone(), BTreeMap::new()));
+        let recorded = record_in(&ledger, exiting.id());
+        assert!(path.exists());
+        ledger.release();
+        drop(recorded);
+        assert!(
+            !path.exists(),
+            "nothing is written once the record is given up"
+        );
+        assert_eq!(sweep(&path, probe).0, 0);
+        assert!(exiting.try_wait().unwrap().is_none());
+        for mut child in [other, exiting] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
