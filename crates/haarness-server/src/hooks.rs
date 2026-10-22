@@ -151,18 +151,17 @@ impl ConfiguredHooks {
         entries
     }
 
-    fn matching(&self, event: &str, tool: Option<&str>) -> Vec<&HookEntry> {
+    /// The hooks for `event` whose matcher matches any of `values` (an
+    /// event that sends none runs every hook).
+    fn matching(&self, event: &str, values: &[&str]) -> Vec<&HookEntry> {
         self.entries
             .iter()
             .filter(|entry| entry.event == event)
-            .filter(|entry| match (&entry.matcher, tool) {
-                (None, _) | (Some(_), None) => true,
-                (Some(matcher), Some(tool)) => {
-                    matcher_matches(matcher, tool)
-                        || (event == "StopFailure"
-                            && PROVIDER_FAILURES.contains(&tool)
-                            && matcher_matches(matcher, "provider"))
+            .filter(|entry| match &entry.matcher {
+                Some(matcher) if !values.is_empty() => {
+                    values.iter().any(|value| matcher_matches(matcher, value))
                 }
+                _ => true,
             })
             .collect()
     }
@@ -370,10 +369,14 @@ impl ConfiguredHooks {
     }
 
     async fn run_event(&self, event: &str, tool: Option<&str>, payload: &Value) -> HookOutcome {
+        self.run_matching(event, tool.as_slice(), payload).await
+    }
+
+    async fn run_matching(&self, event: &str, values: &[&str], payload: &Value) -> HookOutcome {
         let mut combined = HookOutcome::default();
         // Always holds only when every hook that allowed answered Always.
         let mut always = None;
-        for entry in self.matching(event, tool) {
+        for entry in self.matching(event, values) {
             let outcome = self.run(entry, payload).await;
             if outcome.block.is_some() && combined.block.is_none() {
                 combined.block = outcome.block;
@@ -965,15 +968,29 @@ fn changed_file(tool: &str, arguments: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The `StopFailure` categories of provider errors. Before they were told
-/// apart every provider error was `provider`, which still matches them all.
-const PROVIDER_FAILURES: &[&str] = &[
-    "authentication_failed",
-    "rate_limit",
-    "overloaded",
-    "server_error",
-    "invalid_request",
-];
+/// Claude Code's `StopFailure` names that a matcher may use although editors
+/// do not suggest them: `unknown` (an `error_type` Haarness cannot name more
+/// precisely), `billing_error` (a rate limit or quota) and `max_output_tokens`
+/// (a reply that ended early).
+const FAILURE_ALIASES: &[&str] = &["unknown", "billing_error", "max_output_tokens"];
+
+/// What a `StopFailure` hook's matcher is compared with: the failure's
+/// `error` and `error_type`, and the Claude Code name for what Haarness calls
+/// otherwise.
+fn failure_names(detail: &Value) -> Vec<&str> {
+    let mut names: Vec<&str> = ["error", "error_type"]
+        .iter()
+        .filter_map(|key| detail[key].as_str())
+        .collect();
+    for name in names.clone() {
+        match name {
+            "rate_limit" => names.push("billing_error"),
+            "incomplete" => names.push("max_output_tokens"),
+            _ => {}
+        }
+    }
+    names
+}
 
 /// What a hook's matcher is compared with for an event: what an editor
 /// suggests, and what decides whether a matcher can ever match.
@@ -1016,6 +1033,17 @@ pub fn matcher_target(event: &str) -> MatcherTarget {
     }
 }
 
+/// Names a matcher for `event` may also use, which editors do not suggest
+/// (see [`FAILURE_ALIASES`]).
+#[must_use]
+pub fn matcher_aliases(event: &str) -> &'static [&'static str] {
+    if event == "StopFailure" {
+        FAILURE_ALIASES
+    } else {
+        &[]
+    }
+}
+
 /// Whether a hook for `event` with `matcher` can never run: the event sends
 /// only certain values, and the matcher matches none of them.
 #[must_use]
@@ -1025,9 +1053,10 @@ pub fn never_runs(event: &str, matcher: &str) -> bool {
         return false;
     }
     match matcher_target(event) {
-        MatcherTarget::Values(values) => {
-            !values.iter().any(|value| matcher_matches(matcher, value))
-        }
+        MatcherTarget::Values(values) => !values
+            .iter()
+            .chain(matcher_aliases(event))
+            .any(|value| matcher_matches(matcher, value)),
         _ => false,
     }
 }
@@ -1080,6 +1109,7 @@ fn claude_alias(name: &str) -> Option<&'static str> {
         "LS" => "list",
         "Task" => "task",
         "TodoWrite" => "todowrite",
+        "AskUserQuestion" => "question",
         _ => return None,
     })
 }
@@ -1225,7 +1255,7 @@ impl HookPort for ConfiguredHooks {
         payload["turn_id"] = json!(turn);
         payload["cwd"] = json!(self.workspace);
         let _ = self
-            .run_event("StopFailure", detail["error"].as_str(), &payload)
+            .run_matching("StopFailure", &failure_names(detail), &payload)
             .await;
     }
 
@@ -1452,7 +1482,11 @@ mod tests {
         assert!(!never_runs("FileChanged", "Edit"));
         assert!(!never_runs("FileChanged", "notebookedit"));
         assert!(!never_runs("StopFailure", "rate_limit|provider"));
-        assert!(never_runs("StopFailure", "billing_error"));
+        // Claude Code's names for what Haarness calls otherwise.
+        for alias in ["billing_error", "max_output_tokens", "unknown"] {
+            assert!(!never_runs("StopFailure", alias), "{alias}");
+        }
+        assert!(never_runs("StopFailure", "network_error"));
         // Tools and permissions are open-ended, and an event with nothing
         // to match ignores its matcher.
         assert!(!never_runs("PreToolUse", "mcp__github__create_issue"));
@@ -1462,31 +1496,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stop_failure_matcher_for_provider_still_matches_every_provider_error() {
+    async fn stop_failure_matchers_compare_error_error_type_and_claude_names() {
         let thread = ThreadId::new();
         let turn = haarness_protocol::TurnId::new();
+        let failure = |error: &str, kind: &str| json!({"error": error, "error_type": kind});
         let events = captured(
-            json!({"StopFailure": [{"matcher": "provider"}, {"matcher": "rate_limit"}]}),
+            json!({"StopFailure": [{"matcher": "provider"}, {"matcher": "rate_limit"},
+                {"matcher": "billing_error"}, {"matcher": "max_output_tokens|unknown"}]}),
             async |hooks| {
-                for error in ["rate_limit", "authentication_failed", "provider", "tool"] {
-                    hooks
-                        .stop_failure(thread, turn, &json!({"error": error}))
-                        .await;
-                }
+                hooks
+                    .stop_failure(thread, turn, &failure("provider", "rate_limit"))
+                    .await;
+                hooks
+                    .stop_failure(thread, turn, &failure("provider", "unknown"))
+                    .await;
+                hooks
+                    .stop_failure(thread, turn, &failure("incomplete", "incomplete"))
+                    .await;
+                hooks
+                    .stop_failure(thread, turn, &failure("tool", "tool"))
+                    .await;
+                // A detail without `error_type`, as an older runtime sent it.
+                hooks
+                    .stop_failure(thread, turn, &json!({"error": "provider"}))
+                    .await;
             },
         )
         .await;
-        let errors: Vec<&str> = events
+        let seen: Vec<(&str, &str)> = events
             .iter()
-            .map(|event| event["error"].as_str().unwrap())
+            .map(|event| {
+                (
+                    event["error"].as_str().unwrap(),
+                    event["error_type"].as_str().unwrap_or("-"),
+                )
+            })
             .collect();
+        // The payload keeps `error` as it always was and adds `error_type`.
         assert_eq!(
-            errors,
+            seen,
             [
-                "rate_limit",
-                "rate_limit",
-                "authentication_failed",
-                "provider"
+                // provider, rate_limit and billing_error all match a rate limit.
+                ("provider", "rate_limit"),
+                ("provider", "rate_limit"),
+                ("provider", "rate_limit"),
+                // provider and unknown match an error Haarness cannot name.
+                ("provider", "unknown"),
+                ("provider", "unknown"),
+                // max_output_tokens matches a reply that ended early.
+                ("incomplete", "incomplete"),
+                ("provider", "-"),
             ]
         );
     }
@@ -1500,6 +1559,7 @@ mod tests {
         assert!(matcher_matches("MultiEdit", "edit"));
         assert!(matcher_matches("TodoWrite", "todo"));
         assert!(matcher_matches("todo", "todowrite"));
+        assert!(matcher_matches("AskUserQuestion", "question"));
         assert!(matcher_matches("^(bash|write)$", "bash"));
         assert!(!matcher_matches("[", "bash"));
     }

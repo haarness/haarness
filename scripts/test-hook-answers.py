@@ -7,8 +7,8 @@
 - Questions: a PreToolUse hook answers a known question; the agent gets the answer, nobody is asked,
   and the attached TUI shows "Answered by hook". Another question is left to the person, who answers
   it in the TUI.
-- StopFailure: a provider's HTTP 429 reaches a `rate_limit` hook and a hook still written for the old
-  `provider` name, with `error` set to `rate_limit`.
+- StopFailure: a provider's HTTP 429 reaches hooks for `rate_limit`, for `provider` and for Claude
+  Code's `billing_error`, with `error` still `provider` and `error_type` set to `rate_limit`.
 - Reasoning: a custom OpenAI-compatible server that streams `reasoning` gets it back in that field
   with the tool call in the next request.
 - Matchers: `/hooks` in the TUI marks a SessionEnd hook for `clear` as never running.
@@ -181,7 +181,7 @@ tools=true
 ''')
     write(ws / 'haarness.json', json.dumps({'hooks': {
         'PermissionRequest': group('*'), 'PreToolUse': group('question'),
-        'StopFailure': group('rate_limit') + group('provider'),
+        'StopFailure': group('rate_limit') + group('provider') + group('billing_error'),
         'SessionEnd': group('clear')}}, indent=1))
     c = connect(ws)
     env['HAARNESS_SERVER_TOKEN'] = c.get('token', '')
@@ -237,9 +237,10 @@ tools=true
     limited = Chat(c, 'Rate limited', 'mock', 'limited')
     t = limited.turn('Say hi')
     check('the rate-limited turn fails', limited.finish(t)['status'] == 'failed')
-    failures = until(lambda: (v if len(v := entries('StopFailure')) >= 2 else None), 'StopFailure hooks', 15)
-    check('a rate_limit hook and one for the old provider name both get rate_limit',
-          len(failures) == 2 and all(f['error'] == 'rate_limit' for f in failures), failures)
+    failures = until(lambda: (v if len(v := entries('StopFailure')) >= 3 else None), 'StopFailure hooks', 15)
+    check('rate_limit, provider and billing_error hooks all run, with error kept and error_type added',
+          len(failures) == 3 and all(f['error'] == 'provider' and f['error_type'] == 'rate_limit' for f in failures),
+          failures)
 
     # --- Interleaved reasoning ------------------------------------------------------------
     thinker = Chat(c, 'Thinker', 'mock', 'thinker')

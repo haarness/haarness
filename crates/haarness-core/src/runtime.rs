@@ -629,22 +629,23 @@ fn parse_goal_criteria_selection(proposed: &[String], answer: &str) -> CoreResul
         .collect())
 }
 
-/// The `StopFailure` category of a turn's terminal error. A provider error
-/// is named for what its message says happened (as Claude Code names them);
-/// one that says nothing Haarness recognises stays `provider`, the name every
-/// provider error had before, which a hook matcher still uses for all of them.
-fn stop_failure_category(error: &CoreError) -> &'static str {
+/// The `StopFailure` categories of a turn's terminal error: `error`, as hook
+/// scripts and extensions have always read it (every provider error is
+/// `provider`), and `error_type`, which names a provider error for what its
+/// message says happened, as Claude Code names it (`unknown` when Haarness
+/// recognises nothing, and for any other failure).
+fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
     let CoreError::Provider(message) = error else {
         return match error {
-            CoreError::ProviderIncomplete(_) => "incomplete",
-            CoreError::ProviderBlocked(_) => "content_filter",
-            CoreError::Tool(_) => "tool",
-            _ => "other",
+            CoreError::ProviderIncomplete(_) => ("incomplete", "incomplete"),
+            CoreError::ProviderBlocked(_) => ("content_filter", "content_filter"),
+            CoreError::Tool(_) => ("tool", "tool"),
+            _ => ("other", "unknown"),
         };
     };
     let lower = message.to_ascii_lowercase();
     let status = http_status(&lower);
-    if matches!(status, Some(401 | 403))
+    let kind = if matches!(status, Some(401 | 403))
         || [
             "unauthorized",
             "authentication_error",
@@ -667,8 +668,9 @@ fn stop_failure_category(error: &CoreError) -> &'static str {
     {
         "invalid_request"
     } else {
-        "provider"
-    }
+        "unknown"
+    };
+    ("provider", kind)
 }
 
 /// The HTTP status a provider error names (`HTTP 429 Too Many Requests`,
@@ -6456,8 +6458,8 @@ impl RunnerTask {
             && !self.cancel.is_cancelled()
             && let Some(hooks) = &self.hooks
         {
-            let category = stop_failure_category(error);
-            let detail = json!({"error":category,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            let (category, kind) = stop_failure_categories(error);
+            let detail = json!({"error":category,"error_type":kind,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {},
@@ -9540,10 +9542,11 @@ impl RunnerTask {
         );
         Ok(format!("Todo list updated ({count} items)"))
     }
-    /// The question tool. A `PreToolUse` hook runs first, as for other
-    /// tools: it may block the question, or answer it with `answers` in its
-    /// `updatedInput`, and then nobody is asked and the result records that
-    /// the hook answered (`answeredBy: "hook"`).
+    /// The question tool. Hooks run as for other tools: a `PreToolUse` hook
+    /// first, which may block the question, or answer it with `answers` in
+    /// its `updatedInput`, and then nobody is asked and the result records
+    /// that the hook answered (`answeredBy: "hook"`); a `PostToolUse` hook
+    /// after it is answered, with the answer as its output.
     async fn question_call(
         &self,
         call_id: &str,
@@ -9606,12 +9609,25 @@ impl RunnerTask {
             }
             plain_tool_output(self.ask_question(&arguments).await?)
         };
+        use std::fmt::Write as _;
         if let Some(context) = hook_context {
-            use std::fmt::Write as _;
             let _ = write!(
                 output.text,
                 "\n\n<hook-context>\n{context}\n</hook-context>"
             );
+        }
+        if let Some(hooks) = &self.hooks {
+            let context = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => None,
+                context = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => context,
+            };
+            if let Some(context) = context {
+                let _ = write!(
+                    output.text,
+                    "\n\n<hook-context>\n{context}\n</hook-context>"
+                );
+            }
         }
         Ok(output)
     }
@@ -13079,59 +13095,38 @@ mod tests {
     #[test]
     fn stop_failure_categories_name_what_happened() {
         let provider =
-            |message: &str| super::stop_failure_category(&CoreError::Provider(message.into()));
+            |message: &str| super::stop_failure_categories(&CoreError::Provider(message.into()));
+        // `error` stays what it always was; `error_type` says what happened.
+        for (message, kind) in [
+            (
+                "HTTP 401 Unauthorized: invalid x-api-key",
+                "authentication_failed",
+            ),
+            ("HTTP 403 Forbidden", "authentication_failed"),
+            ("openai api_key is not configured", "authentication_failed"),
+            ("HTTP 429 Too Many Requests: rate limit", "rate_limit"),
+            ("[insufficient_quota] You exceeded your quota", "rate_limit"),
+            ("HTTP 529: Overloaded", "overloaded"),
+            ("This model is experiencing high demand", "overloaded"),
+            ("HTTP 502 Bad Gateway", "server_error"),
+            ("HTTP 400 Bad Request: unknown field", "invalid_request"),
+            ("prompt is too long: 250000 tokens", "invalid_request"),
+            ("provider ended the response with an error", "unknown"),
+            ("HTTP 4000 nonsense", "unknown"),
+        ] {
+            assert_eq!(provider(message), ("provider", kind), "{message}");
+        }
+        let other = |error: CoreError| super::stop_failure_categories(&error);
         assert_eq!(
-            provider("HTTP 401 Unauthorized: invalid x-api-key"),
-            "authentication_failed"
-        );
-        assert_eq!(provider("HTTP 403 Forbidden"), "authentication_failed");
-        assert_eq!(
-            provider("openai api_key is not configured"),
-            "authentication_failed"
-        );
-        assert_eq!(
-            provider("HTTP 429 Too Many Requests: rate limit"),
-            "rate_limit"
-        );
-        assert_eq!(
-            provider("[insufficient_quota] You exceeded your quota"),
-            "rate_limit"
-        );
-        assert_eq!(provider("HTTP 529: Overloaded"), "overloaded");
-        assert_eq!(
-            provider("This model is experiencing high demand"),
-            "overloaded"
-        );
-        assert_eq!(provider("HTTP 502 Bad Gateway"), "server_error");
-        assert_eq!(
-            provider("HTTP 400 Bad Request: unknown field"),
-            "invalid_request"
+            other(CoreError::ProviderIncomplete("length".into())),
+            ("incomplete", "incomplete")
         );
         assert_eq!(
-            provider("prompt is too long: 250000 tokens"),
-            "invalid_request"
+            other(CoreError::ProviderBlocked("refusal".into())),
+            ("content_filter", "content_filter")
         );
-        assert_eq!(
-            provider("provider ended the response with an error"),
-            "provider"
-        );
-        assert_eq!(provider("HTTP 4000 nonsense"), "provider");
-        assert_eq!(
-            super::stop_failure_category(&CoreError::ProviderIncomplete("length".into())),
-            "incomplete"
-        );
-        assert_eq!(
-            super::stop_failure_category(&CoreError::ProviderBlocked("refusal".into())),
-            "content_filter"
-        );
-        assert_eq!(
-            super::stop_failure_category(&CoreError::Tool("x".into())),
-            "tool"
-        );
-        assert_eq!(
-            super::stop_failure_category(&CoreError::Storage("x".into())),
-            "other"
-        );
+        assert_eq!(other(CoreError::Tool("x".into())), ("tool", "tool"));
+        assert_eq!(other(CoreError::Storage("x".into())), ("other", "unknown"));
     }
 
     #[test]

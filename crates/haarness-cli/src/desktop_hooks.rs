@@ -60,17 +60,20 @@ fn rows(source: &jsonconfig::HookSource, workspace: &Path) -> Result<Vec<Value>>
     Ok(rows)
 }
 /// What each event's matcher is compared with, for editors: `tool`,
-/// `permission`, `value` (one of `values`, the only ones Haarness sends) or
-/// `nothing` (the matcher is ignored).
+/// `permission`, `value` (one of `values`, the only ones Haarness sends, or
+/// of `aliases`, other names it accepts) or `nothing` (the matcher is
+/// ignored).
 fn matchers() -> Value {
-    use haarness_server::hooks::{MatcherTarget, matcher_target};
+    use haarness_server::hooks::{MatcherTarget, matcher_aliases, matcher_target};
     EVENTS
         .iter()
         .map(|event| {
             let target = match matcher_target(event) {
                 MatcherTarget::Tool => json!({"compares": "tool"}),
                 MatcherTarget::Permission => json!({"compares": "permission"}),
-                MatcherTarget::Values(values) => json!({"compares": "value", "values": values}),
+                MatcherTarget::Values(values) => {
+                    json!({"compares": "value", "values": values, "aliases": matcher_aliases(event)})
+                }
                 MatcherTarget::Nothing => json!({"compares": "nothing"}),
             };
             ((*event).to_owned(), target)
@@ -351,7 +354,11 @@ mod tests {
         assert_eq!(listed["matchers"]["Stop"]["compares"], "nothing");
         assert_eq!(
             listed["matchers"]["PostCompact"],
-            json!({"compares": "value", "values": ["manual", "automatic"]})
+            json!({"compares": "value", "values": ["manual", "automatic"], "aliases": []})
+        );
+        assert_eq!(
+            listed["matchers"]["StopFailure"]["aliases"],
+            json!(["unknown", "billing_error", "max_output_tokens"])
         );
         assert!(
             listed["items"]

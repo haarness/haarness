@@ -1033,12 +1033,13 @@ impl HookPort for AnswersQuestions {
     async fn post_tool_use(
         &self,
         _: ThreadId,
-        _: &str,
+        tool: &str,
         _: &Value,
-        _: &str,
+        output: &str,
         _: bool,
     ) -> Option<String> {
-        None
+        // PostToolUse sees the answer, as it sees any tool's output.
+        (tool == "question").then(|| format!("after: {}", output.lines().next().unwrap_or("")))
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -1086,6 +1087,7 @@ async fn a_pre_tool_use_hook_answers_a_question_without_asking() {
         .expect("the question has a result");
     assert!(result.0.starts_with("Unit tests"), "{}", result.0);
     assert!(result.0.contains("answered from the project's policy"));
+    assert!(result.0.contains("after: Unit tests"), "{}", result.0);
     assert_eq!(result.1, json!({"answeredBy": "hook"}));
     // Nobody was asked: no question was recorded or left waiting.
     assert!(
@@ -1158,7 +1160,87 @@ async fn answers_that_do_not_fit_leave_the_question_to_the_person() {
     assert!(
         items.iter().any(|item| matches!(&item.data,
             ItemData::ToolResult { name, output, metadata, .. }
-                if name == "question" && output.starts_with("Full suite") && metadata.is_null())),
+                if name == "question" && output.starts_with("Full suite")
+                    && output.contains("after: Full suite") && metadata.is_null())),
         "{items:?}"
     );
+}
+
+/// A `PreToolUse` hook that stops every question, by a block or a deny.
+struct StopsQuestions {
+    deny: bool,
+}
+#[async_trait]
+impl HookPort for StopsQuestions {
+    async fn pre_tool_use(&self, _: ThreadId, tool: &str, _: &Value) -> HookDecision {
+        if tool != "question" {
+            return HookDecision::default();
+        }
+        if self.deny {
+            HookDecision {
+                permission: Some(PermissionDecision::Deny),
+                ..HookDecision::default()
+            }
+        } else {
+            HookDecision {
+                block: Some("questions are answered in the ticket".into()),
+                ..HookDecision::default()
+            }
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+#[tokio::test]
+async fn a_pre_tool_use_block_or_deny_stops_a_question() {
+    for (deny, reason) in [
+        (
+            false,
+            "blocked by a PreToolUse hook: questions are answered in the ticket",
+        ),
+        (true, "denied by a PreToolUse hook"),
+    ] {
+        let fixture = Fixture::with_hooks(
+            RuntimeConfig::default(),
+            Some(Arc::new(StopsQuestions { deny })),
+        );
+        let items = fixture.run(vec![vec![question()]]).await;
+        assert!(
+            items.iter().any(|item| matches!(&item.data,
+                ItemData::ToolResult { name, output, is_error: true, .. }
+                    if name == "question" && output.contains(reason))),
+            "{items:?}"
+        );
+        // Nobody was asked.
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::Question { .. })),
+            "{items:?}"
+        );
+        assert!(fixture.runtime.pending_questions().is_empty());
+    }
 }
