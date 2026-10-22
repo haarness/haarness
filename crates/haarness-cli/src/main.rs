@@ -6332,8 +6332,9 @@ impl HotReloadController {
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
             provider_instances(&sources.file_config, &credentials);
+        // Its model lists load once it is live, as at start (see below).
         let providers: Arc<dyn ProviderRegistry> = Arc::new(
-            NativeProviderRegistry::discover_with_providers_and_store(
+            NativeProviderRegistry::with_providers_and_store(
                 instances,
                 &disabled_providers,
                 Arc::new(CredentialStore::new(self.paths.auth.clone())),
@@ -6557,6 +6558,17 @@ impl HotReloadController {
             let agents_only = observed.without_agents == applied.without_agents;
             if self.apply(candidate) {
                 applied = observed.clone();
+                // The new providers' lists start loading now; a read waits
+                // for one with nothing to show, and the rest announce
+                // themselves when they come.
+                let runtime = self.runtime.clone();
+                tokio::spawn(async move {
+                    haarness_server::models::catalog(
+                        &runtime,
+                        haarness_server::models::Wait::Start(Duration::ZERO),
+                    )
+                    .await;
+                });
                 for notice in &candidate.notices {
                     tracing::info!("config: {notice}");
                 }
@@ -7158,7 +7170,11 @@ async fn application_at(
     let runtime = Arc::new(runtime);
     // A list still loading after a few seconds keeps loading while the server
     // starts answering; clients hear when it is in (`assets.updated`).
-    haarness_server::models::catalog(&runtime, false, Some(haarness_server::models::WAIT)).await;
+    haarness_server::models::catalog(
+        &runtime,
+        haarness_server::models::Wait::Start(haarness_server::models::WAIT),
+    )
+    .await;
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
     // Chrome groups a conversation's tabs under its title and keeps

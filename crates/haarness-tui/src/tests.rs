@@ -18182,11 +18182,13 @@ fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
     assert!(!home(&app).contains("Replies come from"));
 }
 
-/// A model list that loads past the server's short wait arrives after the
-/// first frame, announced by `assets.updated`; the status line then stops
-/// asking to connect a provider, as connecting one does.
+/// A model list that came after the first frame (Haarness Cloud, or an
+/// endpoint that lists its models only when asked, on a slow network): the
+/// TUI said it was loading models, not that nothing is connected, and the
+/// chat it opened meanwhile on a model it chose takes the model the list
+/// offers, instead of staying on a provider nobody connected.
 #[tokio::test]
-async fn a_model_list_announced_after_the_first_frame_updates_the_connect_notice() {
+async fn a_model_list_that_comes_after_the_first_frame_gives_the_new_chat_its_model() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let thread = fixture_thread();
@@ -18209,6 +18211,13 @@ async fn a_model_list_announced_after_the_first_frame_updates_the_connect_notice
         pricing: None,
     }])])
     .unwrap();
+    let updated = serde_json::to_string(&Thread {
+        provider: "slowlist".into(),
+        model: "late-model".into(),
+        ..thread.clone()
+    })
+    .unwrap();
+    let (asked, mut patches) = tokio::sync::mpsc::unbounded_channel::<String>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -18216,15 +18225,31 @@ async fn a_model_list_announced_after_the_first_frame_updates_the_connect_notice
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+            loop {
                 let read = socket.read(&mut chunk).await.unwrap();
                 if read == 0 {
                     break;
                 }
                 request.extend_from_slice(&chunk[..read]);
+                let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
             }
-            let body = if request.starts_with(b"GET /v1/providers ") {
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let body = if text.starts_with("GET /v1/providers ") {
                 late.as_str()
+            } else if text.starts_with("PATCH /v1/threads/") {
+                let _ = asked.send(text.clone());
+                updated.as_str()
             } else {
                 "[]"
             };
@@ -18236,14 +18261,18 @@ async fn a_model_list_announced_after_the_first_frame_updates_the_connect_notice
         }
     });
     let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
-    let mut app = App::new(
-        thread.clone(),
-        vec![thread.clone()],
-        vec![],
-        vec![slow(Vec::new())],
-        vec![],
-    );
-    assert_eq!(app.notice, "Connect a provider to start · /connect");
+    // As the first frame left it: the catalog had not come, and the TUI
+    // opened a chat on the server's default.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.models_loading = true;
+    app.auto_model = Some((thread.id, thread.provider.clone(), thread.model.clone()));
+    app.notice = "Loading models…".into();
+    let home = crate::view::home::masthead(&app, 100, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!home.contains("no provider connected"), "{home}");
 
     app.reduce(
         fixture_event(
@@ -18256,7 +18285,17 @@ async fn a_model_list_announced_after_the_first_frame_updates_the_connect_notice
     )
     .await
     .unwrap();
+    let patch = patches.recv().await.unwrap();
+    assert!(
+        patch.contains(r#""provider":"slowlist""#) && patch.contains(r#""model":"late-model""#),
+        "{patch}"
+    );
+    assert_eq!(
+        (app.thread.provider.as_str(), app.thread.model.as_str()),
+        ("slowlist", "late-model")
+    );
     assert!(app.any_provider_connected());
-    assert_eq!(app.notice, "openai is not connected · /connect openai");
+    assert!(!app.models_loading);
+    assert_eq!(app.notice, "Ready");
     server.abort();
 }

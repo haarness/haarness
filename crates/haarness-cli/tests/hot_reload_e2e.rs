@@ -818,3 +818,59 @@ async fn open_terminals_survive_configuration_reloads() {
     process.kill().await.expect("stop server");
     process.wait().await.expect("reap server");
 }
+
+/// A provider slow to list its models (an endpoint that accepts and never
+/// answers) once held every configuration reload for its whole timeout,
+/// since the new generation fetched every list before it was applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_does_not_wait_for_a_provider_slow_to_list_its_models() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create project config root");
+    std::fs::create_dir_all(&home).expect("create isolated home");
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a silent endpoint");
+    let reloads = directory.0.join("reloads");
+    std::fs::write(
+        workspace.join(".haarness/haarness.json"),
+        serde_json::to_string_pretty(&json!({
+            "providers": {"slowlist": {
+                "protocol": "openai-chat-completions",
+                "base_url": format!("http://{}/v1", silent.local_addr().unwrap()),
+                "api_key_env": "SLOWLIST_KEY"
+            }},
+            "hooks": {"ConfigChange": [{"hooks": [{
+                "type": "command",
+                "command": format!("printf 'reload\\n' >> '{}'", reloads.display())
+            }]}]}
+        }))
+        .expect("serialize project config"),
+    )
+    .expect("write project config");
+    let agents = workspace.join("AGENTS.md");
+    std::fs::write(&agents, "Use tabs.\n").expect("write instructions");
+    let address = unused_address().await;
+    let mut process = server_command(&workspace, &data, &home, address)
+        .env("SLOWLIST_KEY", "fixture-key")
+        .spawn()
+        .expect("launch Haarness server");
+    wait_until_listening(address).await;
+    // Past the start: the list the server asked for gave up by now.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    std::fs::write(&agents, "Use spaces.\n").expect("edit instructions");
+    let edited = std::time::Instant::now();
+    while line_count(&reloads) == 0 && edited.elapsed() < Duration::from_secs(15) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(line_count(&reloads), 1, "the edit did not reload");
+    assert!(
+        edited.elapsed() < Duration::from_millis(2500),
+        "the reload waited {:?} for the model list",
+        edited.elapsed()
+    );
+    process.kill().await.expect("stop server");
+    process.wait().await.expect("reap server");
+    drop(silent);
+}

@@ -689,6 +689,63 @@ impl App {
         Ok(())
     }
 
+    /// The provider catalog came in, after the first frame (its lists were
+    /// still loading) or announced by the server (`assets.updated`). A chat
+    /// this TUI opened on a model it chose meanwhile takes the model it would
+    /// have chosen, unless it has been used or given another model since; and
+    /// what the status line said about connecting follows the catalog.
+    pub(crate) async fn catalog_arrived(
+        &mut self,
+        providers: Vec<haarness_protocol::ProviderInfo>,
+        client: &ApiClient,
+    ) {
+        let said = (self.models_loading && self.notice == "Loading models…")
+            || self.notice
+                == crate::state::unconnected_notice(&self.providers, &self.thread.provider);
+        self.providers = providers;
+        self.models_loading = false;
+        self.normalize_reasoning();
+        if let Some((id, provider, model)) = self.auto_model.take()
+            && id == self.thread.id
+            && self.thread.provider == provider
+            && self.thread.model == model
+            && self.items.is_empty()
+            && self.active_turn.is_none()
+            && let Some((chosen_provider, chosen_model)) =
+                crate::state::default_connected_model(&self.providers)
+            && (chosen_provider != provider || chosen_model != model)
+            && let Ok(thread) = client
+                .update_thread(
+                    id,
+                    haarness_protocol::UpdateThreadRequest {
+                        title: None,
+                        archived: None,
+                        agent: None,
+                        provider: Some(chosen_provider),
+                        model: Some(chosen_model),
+                        ultracode: None,
+                    },
+                )
+                .await
+        {
+            if let Some(listed) = self.threads.iter_mut().find(|listed| listed.id == id) {
+                *listed = thread.clone();
+            }
+            self.thread = thread;
+        }
+        if said {
+            self.notice = if self
+                .providers
+                .iter()
+                .any(|provider| provider.id == self.thread.provider && provider.authenticated)
+            {
+                "Ready".into()
+            } else {
+                crate::state::unconnected_notice(&self.providers, &self.thread.provider)
+            };
+        }
+    }
+
     /// Whether any provider can serve a prompt right now.
     pub(crate) fn any_provider_connected(&self) -> bool {
         self.providers

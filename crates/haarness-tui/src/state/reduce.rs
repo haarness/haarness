@@ -295,21 +295,7 @@ impl App {
             "assets.updated" => {
                 self.server_commands = client.commands().await.unwrap_or_default();
                 if let Ok(providers) = client.providers().await {
-                    // A model list that came after the first frame changes
-                    // what "not connected" says, as connecting does.
-                    let said = self.notice
-                        == crate::state::unconnected_notice(&self.providers, &self.thread.provider);
-                    self.providers = providers;
-                    self.normalize_reasoning();
-                    if said {
-                        self.notice = if self.providers.iter().any(|provider| {
-                            provider.id == self.thread.provider && provider.authenticated
-                        }) {
-                            "Ready".into()
-                        } else {
-                            crate::state::unconnected_notice(&self.providers, &self.thread.provider)
-                        };
-                    }
+                    self.catalog_arrived(providers, client).await;
                 }
                 if let Ok(agents) = client.agents().await {
                     self.agents = agents;

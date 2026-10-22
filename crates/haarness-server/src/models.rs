@@ -13,46 +13,79 @@ use haarness_protocol::ProviderInfo;
 use parking_lot::Mutex;
 use serde_json::json;
 
-/// How long starting up, and a catalog read, wait for lists still loading.
+/// How long starting up, and an ordinary read, wait for lists still loading.
 pub const WAIT: Duration = Duration::from_secs(3);
 
+/// How long a catalog read waits for the model lists still loading.
+#[derive(Clone, Copy, Debug)]
+pub enum Wait {
+    /// An explicit refresh (a picker opening, a key just saved): for every
+    /// list, even one fetched moments ago.
+    All,
+    /// An ordinary read: up to the time given, and for as long as it takes
+    /// (each list gives up within 10 s) for a signed-in provider with no
+    /// model to show yet, such as Haarness Cloud or an endpoint that lists
+    /// its models only when asked: without its list a chat would start on a
+    /// model nobody chose, or find no model at all.
+    Read(Duration),
+    /// The server starting: up to the time given, never longer, so it
+    /// starts answering.
+    Start(Duration),
+}
+
 /// The registries (by address) whose lists outlasted a wait and are still
-/// loading. A read meanwhile answers at once: it would only wait for the
-/// same lists, which announce themselves when they come.
+/// loading. A read meanwhile answers at once, unless it has to wait for a
+/// provider with nothing to show: it would only wait for the same lists,
+/// which announce themselves when they come.
 static LATE: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
 fn key(registry: &Arc<dyn ProviderRegistry>) -> usize {
     Arc::as_ptr(registry).cast::<()>() as usize
 }
 
-/// The provider catalog, once every signed-in provider's list is refreshed
-/// (`force`: even one fetched moments ago). Waits for the lists at most
-/// `wait`, or for as long as they take with `None`. Lists that take longer
-/// keep loading; once they are all in, `assets.updated` (`resource:
-/// "provider"`) tells clients to read the catalog again if it changed, so a
-/// model picker already open fills in by itself.
-pub async fn catalog(
-    runtime: &Arc<AgentRuntime>,
-    force: bool,
-    wait: Option<Duration>,
-) -> Vec<ProviderInfo> {
+/// The provider catalog, once every signed-in provider's list is refreshed,
+/// waiting for the lists as `wait` says. Lists that take longer keep
+/// loading; once they are all in, `assets.updated` (`resource: "provider"`)
+/// tells clients to read the catalog again if it changed, so a model picker
+/// already open fills in by itself.
+pub async fn catalog(runtime: &Arc<AgentRuntime>, wait: Wait) -> Vec<ProviderInfo> {
     let registry = runtime.providers();
-    if wait.is_some() && LATE.lock().contains(&key(&registry)) {
-        return registry.list();
-    }
-    let refreshes: Vec<_> = registry
-        .list()
+    let listed = registry.list();
+    // Signed in with nothing to show yet: the reader needs that list.
+    let needed: BTreeSet<String> = listed
         .iter()
-        .filter(|info| info.authenticated)
-        .filter_map(|info| registry.get(&info.id))
-        .map(|provider| tokio::spawn(async move { provider.refresh_models(force).await }))
+        .filter(|info| {
+            matches!(wait, Wait::Read(_)) && info.authenticated && info.models.is_empty()
+        })
+        .map(|info| info.id.clone())
         .collect();
-    let mut all = tokio::spawn(futures::future::join_all(refreshes));
-    let Some(wait) = wait else {
-        let _ = all.await;
-        return registry.list();
+    if needed.is_empty() && !matches!(wait, Wait::All) && LATE.lock().contains(&key(&registry)) {
+        return listed;
+    }
+    let force = matches!(wait, Wait::All);
+    let started = tokio::time::Instant::now();
+    let (mut first, mut rest) = (Vec::new(), Vec::new());
+    for info in listed.iter().filter(|info| info.authenticated) {
+        let Some(provider) = registry.get(&info.id) else {
+            continue;
+        };
+        let refresh = tokio::spawn(async move { provider.refresh_models(force).await });
+        if needed.contains(&info.id) {
+            first.push(refresh);
+        } else {
+            rest.push(refresh);
+        }
+    }
+    let _ = futures::future::join_all(first).await;
+    let mut all = tokio::spawn(futures::future::join_all(rest));
+    let limit = match wait {
+        Wait::All => {
+            let _ = all.await;
+            return registry.list();
+        }
+        Wait::Read(limit) | Wait::Start(limit) => limit.saturating_sub(started.elapsed()),
     };
-    if tokio::time::timeout(wait, &mut all).await.is_ok() {
+    if tokio::time::timeout(limit, &mut all).await.is_ok() {
         return registry.list();
     }
     let shown = registry.list();
@@ -165,7 +198,7 @@ mod tests {
         let mut events = runtime.events().subscribe(None).receiver;
         let shown = tokio::time::timeout(
             Duration::from_secs(2),
-            catalog(&runtime, false, Some(Duration::from_millis(200))),
+            catalog(&runtime, Wait::Read(Duration::from_millis(200))),
         )
         .await
         .expect("a read waited for the slow list");
@@ -173,7 +206,7 @@ mod tests {
         // Reads while the list is still loading answer at once.
         let again = tokio::time::timeout(
             Duration::from_millis(100),
-            catalog(&runtime, false, Some(WAIT)),
+            catalog(&runtime, Wait::Read(WAIT)),
         )
         .await
         .expect("a second read waited for the same list");
@@ -190,7 +223,7 @@ mod tests {
         assert!(events.try_recv().is_err(), "announced once");
         // The next read has it.
         assert_eq!(
-            model_ids(&catalog(&runtime, false, Some(Duration::from_millis(100))).await),
+            model_ids(&catalog(&runtime, Wait::Read(Duration::from_millis(100))).await),
             ["built-in", "live"]
         );
     }
@@ -204,11 +237,39 @@ mod tests {
         let runtime = runtime(provider.clone());
         let refresh = tokio::spawn({
             let runtime = runtime.clone();
-            async move { catalog(&runtime, true, None).await }
+            async move { catalog(&runtime, Wait::All).await }
         });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!refresh.is_finished());
         provider.answer.notify_one();
         assert_eq!(model_ids(&refresh.await.unwrap()), ["built-in", "live"]);
+    }
+
+    /// Haarness Cloud, or an endpoint that lists its models only when
+    /// asked, has no built-in list: an ordinary read that answered before
+    /// its list came left `haarness run` with no model, or a new chat on a
+    /// provider nobody chose. Starting up still does not wait for it.
+    #[tokio::test]
+    async fn a_read_waits_for_a_signed_in_provider_with_nothing_to_show_and_starting_does_not() {
+        let provider = Arc::new(SlowList {
+            models: parking_lot::Mutex::new(Vec::new()),
+            answer: tokio::sync::Notify::new(),
+        });
+        let runtime = runtime(provider.clone());
+        let started = tokio::time::timeout(
+            Duration::from_secs(2),
+            catalog(&runtime, Wait::Start(Duration::from_millis(100))),
+        )
+        .await
+        .expect("starting up waited for the list");
+        assert!(model_ids(&started).is_empty());
+        let read = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { catalog(&runtime, Wait::Read(Duration::from_millis(100))).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!read.is_finished(), "the read answered without the list");
+        provider.answer.notify_waiters();
+        assert_eq!(model_ids(&read.await.unwrap()), ["built-in", "live"]);
     }
 }
