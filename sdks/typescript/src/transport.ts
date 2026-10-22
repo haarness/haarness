@@ -80,17 +80,20 @@ export interface EventOptions extends Omit<RequestOptions, "timeoutMs"> {
    * included, so only a connection that died without closing (a laptop that
    * slept, a network that changed, a proxy that froze) reaches it. Then the
    * stream connects again from its cursor with `reconnect`, and otherwise
-   * ends with a `TransportError`. A wait that ran far past its time (the
-   * machine slept, or the event loop was blocked) first gets one more window.
+   * ends with a `TransportError`. Time the consumer spends with an event is
+   * not counted. A wait that ran far past its time (the machine slept, or
+   * the event loop was blocked) first gives the server min(5 s, limit) more.
    */
   idleTimeoutMs?: number;
 }
 
 /**
- * One connection attempt's silence limit. `heard` on every chunk. A timer
+ * One connection attempt's silence limit. `heard` on every chunk; `pause`
+ * while the consumer has an event, whose time is not the server's. A timer
  * that fires more than min(5 s, limit) after it was due says this process
- * could not run, not that the server went quiet, so it gives one more
- * window, once per silence: hearing anything starts the next silence afresh.
+ * could not run, not that the server went quiet, so it gives the server
+ * min(5 s, limit) more, once per silence: hearing anything starts the next
+ * silence afresh.
  */
 function silence(limit: number | undefined, lost: () => void) {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -104,7 +107,7 @@ function silence(limit: number | undefined, lost: () => void) {
   const fire = () => {
     if (!extended && Date.now() - due > Math.min(5_000, limit!)) {
       extended = true;
-      arm(limit!);
+      arm(Math.min(5_000, limit!));
       return;
     }
     expired = true;
@@ -120,6 +123,9 @@ function silence(limit: number | undefined, lost: () => void) {
       clearTimeout(timer);
       extended = false;
       arm(limit);
+    },
+    pause() {
+      clearTimeout(timer);
     },
     stop() {
       clearTimeout(timer);
@@ -334,7 +340,10 @@ export class Transport extends HttpTransport {
               instance = event.serverInstanceId;
               if (cursor !== undefined && event.eventId <= cursor) continue;
               cursor = event.eventId;
+              // The consumer's time with it is not the server's silence.
+              quiet.pause();
               yield event;
+              quiet.heard();
             } else if (line.startsWith("data:")) {
               size += line.length;
               if (size > 8 * 1024 * 1024)

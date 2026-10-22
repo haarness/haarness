@@ -50,8 +50,6 @@ exec /bin/bash --noprofile --norc -i
     HAARNESS_DESKTOP_TEST: "1",
     SHELL: shell,
     BASH_SILENCE_DEPRECATION_WARNING: "1",
-    // A socket that stopped answering is given up within a second here.
-    HAARNESS_DESKTOP_TERMINAL_PING_TIMEOUT_MS: "1000",
   };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.ELECTRON_RENDERER_URL;
@@ -372,6 +370,8 @@ test("a terminal whose connection went dead while the machine slept connects aga
   // Nothing comes in any more, as after a sleep on another network, while
   // the socket still reads as open; what is typed still leaves.
   await app.evaluate(() => {
+    // A socket that stopped answering is given up within a second, here only.
+    (globalThis as { haarnessTerminalPingTimeoutMs?: number }).haarnessTerminalPingTimeoutMs = 1000;
     const sockets = (globalThis as unknown as {
       haarnessTerminalSockets: { all(): { socket: { _socket: { pause(): void } } }[] };
     }).haarnessTerminalSockets;
@@ -385,6 +385,9 @@ test("a terminal whose connection went dead while the machine slept connects aga
   await expect(rows()).toContainText("after-wake", { timeout: 10_000 });
   await expect(rows()).toContainText("before-sleep");
   await expect(page.getByText("Terminal disconnected")).toHaveCount(0);
+  await app.evaluate(() => {
+    delete (globalThis as { haarnessTerminalPingTimeoutMs?: number }).haarnessTerminalPingTimeoutMs;
+  });
   expect(errors).toEqual([]);
 });
 

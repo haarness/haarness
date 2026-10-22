@@ -217,6 +217,8 @@ class Transport(Base):
         connection that died without closing. It connects again from its cursor
         with ``reconnect``, and otherwise ends with a ``TransportError``.
         """
+        if idle_timeout is not None and not idle_timeout > 0:
+            raise ValueError("idle_timeout must be positive")
         instance = None
         renewed = False
         while True:
@@ -339,6 +341,8 @@ class AsyncTransport(Base):
         idle_timeout: float | None = None,
     ) -> AsyncIterator[ServerEvent]:
         """See ``Transport.events``."""
+        if idle_timeout is not None and not idle_timeout > 0:
+            raise ValueError("idle_timeout must be positive")
         instance = None
         renewed = False
         while True:

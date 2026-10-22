@@ -657,6 +657,8 @@ pub struct App {
     /// The provider catalog did not come in time for the first frame: it
     /// says "Loading models…", not that nothing is connected.
     pub(crate) models_loading: bool,
+    /// When the "Connection lost" toast was last shown.
+    pub(crate) lost_toast_at: Option<std::time::Instant>,
     /// The chat this TUI opened on a model it chose while the catalog was
     /// loading: its id and that model, re-chosen once the catalog comes.
     pub(crate) auto_model: Option<(ThreadId, String, String)>,
@@ -983,6 +985,7 @@ impl App {
             language: crate::locale::Language::default(),
             connection_lost: None,
             models_loading: false,
+            lost_toast_at: None,
             auto_model: None,
             server_restart: None,
             overlay: Overlay::None,
@@ -1246,6 +1249,27 @@ impl App {
             &self.items,
             self.thread.revert.as_ref().map(|state| state.sequence),
         );
+    }
+
+    /// The connection to the server dropped: the status line says so at
+    /// once; the toast at most every 30 s, so a proxy that drops it over and
+    /// over cannot make it flicker.
+    pub(crate) fn connection_dropped(&mut self, attempt: u32) {
+        let first = self.connection_lost.is_none();
+        self.connection_lost = Some(attempt);
+        if first
+            && self
+                .lost_toast_at
+                .is_none_or(|shown| shown.elapsed() >= std::time::Duration::from_secs(30))
+        {
+            self.lost_toast_at = Some(std::time::Instant::now());
+            self.show_toast(
+                None,
+                "Connection lost · retrying".into(),
+                ToastVariant::Warning,
+                std::time::Duration::from_secs(4),
+            );
+        }
     }
 
     pub fn show_toast(

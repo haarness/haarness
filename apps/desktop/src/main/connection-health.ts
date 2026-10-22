@@ -31,9 +31,14 @@ export function eventIdleMs(env: NodeJS.ProcessEnv = process.env) {
   return limit(env, "HAARNESS_DESKTOP_EVENT_IDLE_MS", EVENT_IDLE_MS);
 }
 
-/** How long a terminal's answer may take; end-to-end tests may shorten it. */
+/** How long a terminal's answer may take. An end-to-end test may shorten it
+ * for itself alone, through `haarnessTerminalPingTimeoutMs`. */
 export function terminalPingTimeoutMs(env: NodeJS.ProcessEnv = process.env) {
-  return limit(env, "HAARNESS_DESKTOP_TERMINAL_PING_TIMEOUT_MS", TERMINAL_PING_TIMEOUT_MS);
+  const set = (globalThis as { haarnessTerminalPingTimeoutMs?: unknown })
+    .haarnessTerminalPingTimeoutMs;
+  return env.HAARNESS_DESKTOP_TEST === "1" && typeof set === "number" && set > 0
+    ? set
+    : TERMINAL_PING_TIMEOUT_MS;
 }
 
 /**
