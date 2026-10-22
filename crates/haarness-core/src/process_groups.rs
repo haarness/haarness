@@ -35,10 +35,13 @@ static LEDGER: OnceLock<Ledger> = OnceLock::new();
 
 impl Ledger {
     fn write(&self, groups: &BTreeMap<i32, u64>) {
-        let text: String = groups
+        let text = groups
             .iter()
-            .map(|(group, started)| format!("{group} {started}\n"))
-            .collect();
+            .fold(String::new(), |mut text, (group, started)| {
+                use std::fmt::Write as _;
+                let _ = writeln!(text, "{group} {started}");
+                text
+            });
         let partial = self.path.with_extension("partial");
         if std::fs::write(&partial, text).is_ok() {
             let _ = std::fs::rename(&partial, &self.path);

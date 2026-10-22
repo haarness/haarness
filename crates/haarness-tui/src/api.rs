@@ -1902,13 +1902,12 @@ impl ApiClient {
                     };
                     let chunk = match tokio::time::timeout(wait, stream.next()).await {
                         Ok(Some(Ok(chunk))) => chunk,
-                        // Ended, failed, or silent for `stream_idle`: lost.
-                        Ok(_) => break,
                         Err(_) if !proven && opened.elapsed() >= STREAM_PROVEN => {
                             prove!();
                             continue;
                         }
-                        Err(_) => break,
+                        // Ended, failed, or silent for `stream_idle`: lost.
+                        Ok(_) | Err(_) => break,
                     };
                     buffer.extend_from_slice(&chunk);
                     while let Some(index) = buffer.windows(2).position(|window| window == b"\n\n") {
@@ -2773,7 +2772,7 @@ mod tests {
         let info = serde_json::to_string(&fixture_server_info(instance, "/w")).unwrap();
         let (cursors, mut asked) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
         let server = tokio::spawn(async move {
-            let mut held = Vec::new();
+            let mut open_sockets = Vec::new();
             let mut next = 5;
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -2799,7 +2798,7 @@ mod tests {
                     )
                     .await;
                 // Then nothing, and the connection stays open.
-                held.push(socket);
+                open_sockets.push(socket);
             }
         });
         let client = ApiClient::new(&format!("http://{address}"), "token")
@@ -2833,6 +2832,7 @@ mod tests {
     /// once nothing has come for the silence limit, pings included, and
     /// connected again from its cursor.
     #[tokio::test]
+    #[allow(clippy::result_large_err)]
     async fn a_terminal_socket_that_stops_answering_connects_again_from_its_cursor() {
         use futures::SinkExt as _;
         use tokio_tungstenite::tungstenite::Message;
@@ -2853,7 +2853,7 @@ mod tests {
         .unwrap();
         let (queries, mut asked) = tokio::sync::mpsc::unbounded_channel::<String>();
         let server = tokio::spawn(async move {
-            let mut held = Vec::new();
+            let mut open_sockets = Vec::new();
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut head = [0_u8; 2048];
@@ -2888,7 +2888,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Never read again: its pings go unanswered.
-                held.push(socket);
+                open_sockets.push(socket);
             }
         });
         let client = ApiClient::new(&format!("http://{address}"), "token")
