@@ -11136,7 +11136,8 @@ mod tests {
     }
 
     /// The runtime is built from the memory settings: a key a newer version
-    /// wrote, or a file that is not JSON, no longer stops the server.
+    /// wrote, or a file that is not JSON, no longer stops the server, and a
+    /// broken file keeps memory off.
     #[test]
     fn a_memory_settings_file_haarness_cannot_fully_read_never_stops_the_runtime() {
         let root =
@@ -11163,8 +11164,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(compose(), Ok(Some(false)));
-        std::fs::write(memory.join("settings.json"), "{not json").unwrap();
-        assert_eq!(compose(), Ok(None));
+        // A file that cannot be read keeps memory off rather than on.
+        std::fs::write(memory.join("settings.json"), r#"{"enabled": false,}"#).unwrap();
+        assert_eq!(compose(), Ok(Some(false)));
         std::fs::remove_dir_all(root).unwrap();
     }
 

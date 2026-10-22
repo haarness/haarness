@@ -1567,7 +1567,13 @@ impl ManagementService {
         config["enabled"] = json!(!config["enabled"].as_bool().unwrap_or(true));
         let mut view = View {
             title: "Project memory".into(),
-            lines: vec![format!("Directory: {}", text(&status, "directory"))],
+            lines: [format!("Directory: {}", text(&status, "directory"))]
+                .into_iter()
+                .chain(status["settingsUnreadable"].as_bool().unwrap_or(false).then(|| {
+                    "Memory is off because its settings file could not be read. Saving replaces it."
+                        .to_owned()
+                }))
+                .collect(),
             entries: vec![
                 entry("Create memory", "", json!({"action":"form"})),
                 entry(

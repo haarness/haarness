@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "Hukommelse for {project}. Gemmes uden for repositoriet.",
   "Loading memory…": "Indlæser hukommelse …",
   "Memory could not be loaded.": "Hukommelsen kunne ikke indlæses.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Hukommelsen er slået fra, fordi dens indstillingsfil ikke kunne læses. Når du gemmer, erstattes den.",
   "Include the memory index in prompts and make memory tools available.": "Medtag hukommelsesindekset i prompter, og gør hukommelsesværktøjer tilgængelige.",
   "Index limit must be between 1 and 1000.": "Indeksgrænsen skal være mellem 1 og 1000.",
   "Memory settings saved. Runtime changes apply when idle.": "Hukommelsesindstillinger gemt. Ændringer i runtime træder i kraft, når den er inaktiv.",

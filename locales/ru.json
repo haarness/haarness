@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "Память для {project}. Хранится вне репозитория.",
   "Loading memory…": "Загрузка памяти…",
   "Memory could not be loaded.": "Не удалось загрузить память.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Память выключена: не удалось прочитать файл её настроек. Сохранение заменит его.",
   "Include the memory index in prompts and make memory tools available.": "Включать индекс памяти в запросы и предоставлять инструменты памяти.",
   "Index limit must be between 1 and 1000.": "Лимит индекса должен быть от 1 до 1000.",
   "Memory settings saved. Runtime changes apply when idle.": "Настройки памяти сохранены. Изменения среды выполнения применяются во время простоя.",

@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "Gedächtnis für {project}. Wird außerhalb des Repositorys gespeichert.",
   "Loading memory…": "Gedächtnis wird geladen …",
   "Memory could not be loaded.": "Das Gedächtnis konnte nicht geladen werden.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Das Gedächtnis ist aus, weil seine Einstellungsdatei nicht gelesen werden konnte. Beim Speichern wird sie ersetzt.",
   "Include the memory index in prompts and make memory tools available.": "Den Gedächtnisindex in Prompts einbeziehen und Gedächtnistools bereitstellen.",
   "Index limit must be between 1 and 1000.": "Das Indexlimit muss zwischen 1 und 1000 liegen.",
   "Memory settings saved. Runtime changes apply when idle.": "Gedächtniseinstellungen gespeichert. Änderungen greifen, sobald die Laufzeit im Leerlauf ist.",

@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "Memory for {project}. Stored outside the repository.",
   "Loading memory…": "Loading memory…",
   "Memory could not be loaded.": "Memory could not be loaded.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "Memory is off because its settings file could not be read. Saving replaces it.",
   "Include the memory index in prompts and make memory tools available.": "Include the memory index in prompts and make memory tools available.",
   "Index limit must be between 1 and 1000.": "Index limit must be between 1 and 1000.",
   "Memory settings saved. Runtime changes apply when idle.": "Memory settings saved. Runtime changes apply when idle.",

@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "ذاكرة {project}. تُخزَّن خارج المستودع.",
   "Loading memory…": "جارٍ تحميل الذاكرة…",
   "Memory could not be loaded.": "تعذر تحميل الذاكرة.",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "الذاكرة متوقفة لأنه تعذرت قراءة ملف إعداداتها. يؤدي الحفظ إلى استبداله.",
   "Include the memory index in prompts and make memory tools available.": "تضمين فهرس الذاكرة في الموجهات وإتاحة أدوات الذاكرة.",
   "Index limit must be between 1 and 1000.": "يجب أن يكون حد الفهرس بين 1 و1000.",
   "Memory settings saved. Runtime changes apply when idle.": "تم حفظ إعدادات الذاكرة. تُطبَّق تغييرات وقت التشغيل عند الخمول.",

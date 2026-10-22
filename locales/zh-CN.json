@@ -913,6 +913,7 @@
   "Memory for {project}. Stored outside the repository.": "{project} 的记忆。存储在代码库之外。",
   "Loading memory…": "正在加载记忆…",
   "Memory could not be loaded.": "无法加载记忆。",
+  "Memory is off because its settings file could not be read. Saving replaces it.": "无法读取记忆的设置文件，因此记忆已关闭。保存会替换该文件。",
   "Include the memory index in prompts and make memory tools available.": "在提示中包含记忆索引，并启用记忆工具。",
   "Index limit must be between 1 and 1000.": "索引上限必须在 1 到 1000 之间。",
   "Memory settings saved. Runtime changes apply when idle.": "记忆设置已保存。运行时更改会在空闲时生效。",
