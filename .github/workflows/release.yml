@@ -67,6 +67,8 @@ jobs:
       - run: cargo test --workspace
       - name: Public release URL verification regression
         run: python scripts/test-release-publish.py
+      - name: Haarness for Chrome packaging
+        run: python scripts/test-release-extension.py
       - run: npm --prefix sdks/typescript ci
       - run: npm --prefix sdks/typescript run build
       - run: npm --prefix sdks/typescript test

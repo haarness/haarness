@@ -2,7 +2,7 @@
 """Collect real build outputs, publish immutably, and verify every downloaded byte.
 No npm/Docker publication. Tokens are read from the environment, never arguments.
 """
-import argparse, hashlib, http.client, json, os, platform, shutil, subprocess, tempfile
+import argparse, base64, hashlib, http.client, json, os, platform, shutil, subprocess, tempfile, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, urlencode
@@ -92,6 +92,102 @@ def collect(args):
     path=out/f'index-{os_name}-{arch}.json';path.write_text(json.dumps(index,indent=2)+'\n')
     print(path)
 
+# Haarness for Chrome: the ID its manifest key pins (docs/CHROME-EXTENSION.md), and where the release owner keeps the
+# private key beside the checkouts.
+EXTENSION_ID='accdjhmcgljbadpeanajllmcembhkomn'
+EXTENSION_KEY=ROOT.parent/'.chrome-extension-key'/'key.pem'
+
+def extension_id(public_der):
+    # Chrome's ID for a public key: the first 32 hex digits of its SHA-256, written with the letters a-p.
+    return ''.join(chr(97+int(c,16)) for c in hashlib.sha256(public_der).hexdigest()[:32])
+
+def varint(n):
+    out=b''
+    while True:
+        byte=n&0x7f;n>>=7
+        if not n: return out+bytes([byte])
+        out+=bytes([byte|0x80])
+
+def field(number,data): return varint(number<<3|2)+varint(len(data))+data
+
+def fields(data):
+    # The length-delimited fields of a protobuf message, as (number, bytes) pairs; CRX headers use no other kind.
+    out=[];i=0
+    def read():
+        nonlocal i
+        n=shift=0
+        while True:
+            b=data[i];i+=1;n|=(b&0x7f)<<shift;shift+=7
+            if not b&0x80: return n
+    while i<len(data):
+        key=read()
+        if key&7!=2: raise ValueError('Unexpected protobuf wire type in the CRX header')
+        size=read();out.append((key>>3,data[i:i+size]));i+=size
+    return out
+
+def crx3(archive,key):
+    # A CRX3 package (Chromium's components/crx_file/crx3.proto): "Cr24", version 3, the header size, a header holding
+    # the RSA public key and its SHA-256 signature over the signed data, then the zip itself.
+    public=subprocess.run(['openssl','pkey','-in',str(key),'-pubout','-outform','DER'],capture_output=True,check=True).stdout
+    signed_data=field(1,hashlib.sha256(public).digest()[:16])
+    message=b'CRX3 SignedData\x00'+len(signed_data).to_bytes(4,'little')+signed_data+archive
+    signature=subprocess.run(['openssl','dgst','-sha256','-sign',str(key)],input=message,capture_output=True,check=True).stdout
+    header=field(2,field(1,public)+field(2,signature))+field(10000,signed_data)
+    return b'Cr24'+(3).to_bytes(4,'little')+len(header).to_bytes(4,'little')+header+archive
+
+def verify_crx(package):
+    # The archive inside a CRX3 whose signature verifies and whose ID is Haarness for Chrome's.
+    data=Path(package).read_bytes()
+    if data[:4]!=b'Cr24' or int.from_bytes(data[4:8],'little')!=3: raise ValueError(f'{package}: not a CRX3 package')
+    size=int.from_bytes(data[8:12],'little');header=dict(fields(data[12:12+size]));archive=data[12+size:]
+    proof=dict(fields(header[2]));public,signature=proof[1],proof[2]
+    signed_data=header[10000]
+    if dict(fields(signed_data))[1]!=hashlib.sha256(public).digest()[:16] or extension_id(public)!=EXTENSION_ID: raise ValueError(f'{package}: signed for another extension ID')
+    message=b'CRX3 SignedData\x00'+len(signed_data).to_bytes(4,'little')+signed_data+archive
+    with tempfile.TemporaryDirectory(prefix='haarness-crx-') as d:
+        der=Path(d)/'public.der';der.write_bytes(public);sig=Path(d)/'signature';sig.write_bytes(signature)
+        pem=subprocess.run(['openssl','pkey','-pubin','-inform','DER','-in',str(der)],capture_output=True,check=True).stdout
+        (Path(d)/'public.pem').write_bytes(pem)
+        r=subprocess.run(['openssl','dgst','-sha256','-verify',str(Path(d)/'public.pem'),'-signature',str(sig)],input=message,capture_output=True)
+        if r.returncode: raise ValueError(f'{package}: bad signature')
+    return archive
+
+def collect_extension(args):
+    # Haarness for Chrome for the release service: its unpacked folder as a zip people load, and the same zip signed
+    # as a CRX that Chrome installs by policy. One build for every platform (os and arch "any").
+    folder=Path(args.extension_dir).resolve();manifest=json.loads((folder/'manifest.json').read_text())
+    version=manifest.get('version_name')
+    if args.version and version!=args.version: raise ValueError(f'The extension is {version}, not {args.version}')
+    if manifest.get('manifest_version')!=3: raise ValueError('Not a Manifest V3 extension')
+    public=base64.b64decode(manifest.get('key',''))
+    if extension_id(public)!=EXTENSION_ID: raise ValueError(f'The manifest key gives {extension_id(public)}, not {EXTENSION_ID}')
+    key=Path(args.key)
+    if not key.is_file(): raise ValueError(f'No signing key at {key}: the release owner keeps it outside every repository')
+    signing=subprocess.run(['openssl','pkey','-in',str(key),'-pubout','-outform','DER'],capture_output=True,check=True).stdout
+    if signing!=public: raise ValueError('The signing key is not the one the manifest pins')
+    files=sorted(p for p in folder.rglob('*') if p.is_file() or p.is_symlink())
+    if any(p.is_symlink() for p in files): raise ValueError('Links are not packaged')
+    if leaked:=[p.relative_to(folder).as_posix() for p in files if p.suffix in ('.ts','.tsx','.map')]: raise ValueError(f'Source files in the build: {leaked}')
+    if args.revision: revision=args.revision;dirty=''
+    else:
+        revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
+        dirty=subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],cwd=ROOT,text=True).strip()
+        if dirty and not args.allow_dirty: raise ValueError('Commit build sources before collecting a publishable release (or --allow-dirty for local proof).')
+    if len(revision)!=40 or any(c not in '0123456789abcdef' for c in revision): raise ValueError('--revision takes a full Git commit')
+    out=Path(args.out).resolve();out.mkdir(parents=True,exist_ok=True)
+    # Sorted names, one timestamp and fixed modes: the same folder always gives the same bytes.
+    zip_path=out/f'haarness-chrome-{version}.zip'
+    with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+        for p in files:
+            info=zipfile.ZipInfo(p.relative_to(folder).as_posix(),date_time=(1980,1,1,0,0,0));info.external_attr=0o644<<16
+            z.writestr(info,p.read_bytes(),zipfile.ZIP_DEFLATED,9)
+    crx_path=out/f'haarness-chrome-{version}.crx';crx_path.write_bytes(crx3(zip_path.read_bytes(),key))
+    if verify_crx(crx_path)!=zip_path.read_bytes(): raise ValueError('The CRX does not carry the zip')
+    artifacts=[dict(file=p.name,product='chrome-extension',kind=p.suffix[1:],os='any',arch='any',size=p.stat().st_size,sha256=digest(p)) for p in (zip_path,crx_path)]
+    index=dict(version=version,sourceRevision=revision,dirty=bool(dirty),releasedAt=datetime.now(timezone.utc).isoformat(),artifacts=artifacts)
+    path=out/'index-chrome-extension.json';path.write_text(json.dumps(index,indent=2)+'\n')
+    print(path)
+
 def connection(base):
     u=urlsplit(base)
     if u.username or u.password or u.query or u.fragment or u.path not in ('','/'): raise ValueError('Use a release service origin')
@@ -138,7 +234,8 @@ def publish(args):
     # fails, so operators can inspect or roll back the exact publication.
     Path(args.receipt).write_text(json.dumps(result,indent=2)+'\n')
     for product in result['release']['manifest']['products'].values():
-        for a in product['artifacts']:
+        # The files this run uploaded: all of a new release's, or only the product a published one gained.
+        for a in (a for a in product['artifacts'] if a['id'] in ids):
             # Test the same URL the frontend gives users, including its query.
             # Never attach the operator token to a public artifact request.
             u=urlsplit(a['url'])
@@ -214,5 +311,6 @@ if __name__=='__main__':
     c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.set_defaults(run=collect)
     c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.add_argument('--allow-unsigned',action='store_true',help='preview only: publish a Mac Desktop that Gatekeeper rejects');c.set_defaults(run=publish)
     c=sub.add_parser('github',help='release the published artifacts on the tag\'s GitHub release');c.add_argument('--index',nargs='+',required=True);c.add_argument('--repo',default=os.environ.get('GITHUB_REPOSITORY','haarness/haarness'));c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.set_defaults(run=github)
+    c=sub.add_parser('collect-extension',help='package Haarness for Chrome as a zip and a signed CRX');c.add_argument('--extension-dir',default=str(ROOT/'apps/browser-extension/dist/chrome'),help='the unpacked extension: the build, or the folder `haarness browser setup` wrote from a released CLI');c.add_argument('--key',default=str(EXTENSION_KEY));c.add_argument('--version',help='refuse an extension of another version');c.add_argument('--revision',help='the commit a released CLI was built from, when packaging its folder');c.add_argument('--out',default=str(ROOT/'dist/releases/chrome-extension'));c.add_argument('--allow-dirty',action='store_true');c.set_defaults(run=collect_extension)
     c=sub.add_parser('check-macos',help='check that Gatekeeper accepts the app in each downloaded .dmg/.zip');c.add_argument('packages',nargs='+');c.set_defaults(run=check_macos)
     args=p.parse_args();args.run(args)
