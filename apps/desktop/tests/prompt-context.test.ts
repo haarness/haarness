@@ -130,3 +130,35 @@ test("a slash command's prompt shows only once it says more than the line typed"
   assert.equal(commandPrompt("/review src/foo.rs", "Review src/foo.rs\nCarefully"), "Review src/foo.rs\nCarefully");
   assert.equal(commandPrompt("/greet", "Hello"), "Hello");
 });
+test("only a paste sent at the top of a message reads as one, not one inside a file or a typed fence", () => {
+  const block = promptWithContext("", [{ kind: "paste", id: "p", text: "secret-ish\nline2" }]);
+  // A file whose content shows a paste block (a TUI /export, a doc of the
+  // format) stays one file snapshot: the bubble, Copy and Undo leave it whole.
+  const file = fileContext("docs/format.md", "# Format\n\n" + block + "\n\nend of doc");
+  const withFile = promptWithContext("Look at this", [file]);
+  assert.deepEqual(sentParts(withFile), [{ kind: "text", text: withFile }]);
+  assert.equal(plainMessage(withFile), withFile);
+  // A real paste beside that file is still found, after it and before it.
+  const paste = { kind: "paste" as const, id: "q", text: "real\npaste" };
+  for (const items of [[file, paste], [paste, file]]) {
+    const sent = promptWithContext("Both", items);
+    const parts = sentParts(sent);
+    assert.deepEqual(parts.filter((part) => part.kind === "paste"), [{ kind: "paste", text: "real\npaste" }]);
+    assert.equal(parts.map((part) => part.text).join(""), plainMessage(sent));
+    assert.ok(plainMessage(sent).includes("end of doc") && plainMessage(sent).includes("secret-ish"));
+  }
+  // Typed into a code fence, with backticks or tildes, it is text.
+  for (const fence of ["````md", "~~~"]) {
+    const typed = `Example:\n\n${fence}\n${block}\n${fence.slice(0, fence[0] === "~" ? 3 : 4)}\nthanks`;
+    assert.deepEqual(sentParts(typed), [{ kind: "text", text: typed }]);
+  }
+  // Once the typed fence closes, a paste after it counts again.
+  const after = "```\ncode\n```\n\n" + block;
+  assert.deepEqual(sentParts(after), [{ kind: "text", text: "```\ncode\n```\n\n" }, { kind: "paste", text: "secret-ish\nline2" }]);
+  // A paste whose text holds a closing tag and a fake block keeps it all.
+  const tricky = "a\n```\nb\n```\n\n</details>\n" + promptWithContext("", [{ kind: "paste", id: "f", text: "fake" }]) + "\nz";
+  assert.deepEqual(sentParts(promptWithContext("hi", [{ kind: "paste", id: "t", text: tricky }])), [
+    { kind: "text", text: "hi\n\n" },
+    { kind: "paste", text: tricky },
+  ]);
+});

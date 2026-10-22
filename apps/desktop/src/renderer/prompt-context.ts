@@ -184,30 +184,93 @@ export function promptWithContext(text: string, items: PromptContext[]) {
 export type SentPart =
   | { kind: "text"; text: string }
   | { kind: "paste"; text: string };
-const PASTE_OPEN = "<details>\n<summary>Pasted text";
-/** A sent message split around its pastes, the inverse of
- * `promptWithContext` for them; text that only looks like one stays text. */
+const BLOCK_OPEN = "<details>\n<summary>";
+/**
+ * The context block `message` holds at `start`, as `promptWithContext` (and
+ * the TUI) write them: a paste, a file snapshot or a folder listing, each
+ * fenced. Its end, and for a paste the text pasted; undefined when the text
+ * there only looks like one.
+ */
+function blockAt(message: string, start: number) {
+  const from = start + BLOCK_OPEN.length;
+  const close = message.indexOf("</summary>\n\n", from);
+  if (close < 0) return undefined;
+  const summary = message.slice(from, close);
+  const paste = summary.startsWith("Pasted text");
+  if (
+    summary.includes("\n") ||
+    !(paste || summary.startsWith("File context: ") || summary.startsWith("Directory listing: "))
+  )
+    return undefined;
+  const body = close + "</summary>\n\n".length;
+  const marker = /`{3,}(?=\n)/y;
+  marker.lastIndex = body;
+  const fence = marker.exec(message)?.[0];
+  if (!fence) {
+    // An unfenced listing, as older clients wrote one; a paste always has a fence.
+    const end = paste ? -1 : message.indexOf("\n\n</details>", body);
+    return end < 0 ? undefined : { end: end + "\n\n</details>".length };
+  }
+  // The fence is longer than any run of backticks inside, so the first
+  // matching close is this block's.
+  const end = message.indexOf(`\n${fence}\n\n</details>`, body + fence.length);
+  if (end < 0) return undefined;
+  const inner = body + fence.length + 1;
+  return {
+    end: end + `\n${fence}\n\n</details>`.length,
+    paste: paste ? message.slice(inner, Math.max(inner, end)) : undefined,
+  };
+}
+/** The marker a typed line opens or closes a Markdown code fence with. */
+const fenceLine = (line: string) => /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+/**
+ * A sent message split around its pastes, the inverse of `promptWithContext`
+ * for them, read the way the TUI reads one (`prompt_context::parts`): a
+ * context block is taken whole, so a paste-shaped block inside a file
+ * snapshot stays part of that file, and nothing inside a code fence the
+ * person typed counts. Text that only looks like a paste stays text.
+ */
 export function sentParts(message: string): SentPart[] {
   const parts: SentPart[] = [];
   let typed = 0;
-  let cursor = 0;
-  while (true) {
-    const start = message.indexOf(PASTE_OPEN, cursor);
-    if (start < 0) break;
-    const summary = message.indexOf("</summary>\n\n", start);
-    const body = summary + "</summary>\n\n".length;
-    const fence = /^`{3,}(?=\n)/.exec(message.slice(body))?.[0];
-    const close = fence
-      ? message.indexOf(`\n${fence}\n\n</details>`, body + fence.length)
-      : -1;
-    if (summary < 0 || message.slice(start, summary).includes("\n", PASTE_OPEN.length) || close < 0) {
-      cursor = start + 1;
+  let fence: string | undefined;
+  let lineStart = true;
+  let at = 0;
+  while (at < message.length) {
+    const newline = message.indexOf("\n", at);
+    const end = newline < 0 ? message.length : newline;
+    const line = message.slice(at, end);
+    if (lineStart) {
+      const marker = fenceLine(line);
+      if (fence) {
+        if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim())
+          fence = undefined;
+        at = end + 1;
+        continue;
+      }
+      // A backtick fence's info string holds no backtick.
+      if (marker && !(marker[1][0] === "`" && marker[2].includes("`"))) {
+        fence = marker[1];
+        at = end + 1;
+        continue;
+      }
+    }
+    // A block opens at the end of a line: `<details>`, then its summary.
+    const start = end - "<details>".length;
+    const block =
+      start >= at && message.startsWith(BLOCK_OPEN, start) ? blockAt(message, start) : undefined;
+    if (!block) {
+      at = end + 1;
+      lineStart = true;
       continue;
     }
-    if (typed < start) parts.push({ kind: "text", text: message.slice(typed, start) });
-    parts.push({ kind: "paste", text: message.slice(body + fence!.length + 1, Math.max(body + fence!.length + 1, close)) });
-    typed = close + `\n${fence}\n\n</details>`.length;
-    cursor = typed;
+    if (block.paste !== undefined) {
+      if (typed < start) parts.push({ kind: "text", text: message.slice(typed, start) });
+      parts.push({ kind: "paste", text: block.paste });
+      typed = block.end;
+    }
+    at = block.end;
+    lineStart = false;
   }
   if (typed < message.length) parts.push({ kind: "text", text: message.slice(typed) });
   return parts;
