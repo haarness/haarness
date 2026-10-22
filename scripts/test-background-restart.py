@@ -168,7 +168,7 @@ try:
     until(lambda: not [line for line in running(marker) if "unrelated-" not in line],
           "the next daemon left the killed one's command running")
     assert running("unrelated-" + marker), "a process the daemon never started was stopped"
-    unrelated.kill()
+    os.killpg(unrelated.pid, signal.SIGKILL)
     unrelated.wait()
     print("PASS the next daemon stops a command a crash left running, and nothing else", flush=True)
     until(lambda: notices(crash), "the crashed task was never reported")
