@@ -32,7 +32,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -57,6 +60,10 @@ const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
 /// Most of a tool result an MCP App payload holds. The payload is stored with
 /// the result and streamed to every client, beside the text the model reads.
 const MCP_APP_RESULT_LIMIT: usize = 512 * 1024;
+/// The status of a stdio server stopped because one message passed
+/// [`process::MESSAGE_LIMIT`].
+const OVERSIZED_STATUS: &str =
+    "Its reply was larger than 64 MB, so Haarness stopped it. Reconnect it to use it again.";
 /// Tool-result metadata keys Haarness itself fills: `attachments` (media the
 /// model is sent, local paths included), `diffs` (file changes clients draw)
 /// and `mcp_app` (the page Desktop renders).
@@ -85,6 +92,9 @@ struct Entry {
     home: Option<Home>,
     /// A candidate entry sharing the live registry's connection.
     adopted: bool,
+    /// Set once the stdio server of this connection sent a message larger
+    /// than [`process::MESSAGE_LIMIT`] and was stopped for it.
+    oversized: Option<Arc<AtomicBool>>,
 }
 #[derive(Clone)]
 struct CatalogClient {
@@ -291,6 +301,7 @@ impl McpRegistry for NativeMcpRegistry {
                 auth_challenge: None,
                 home: None,
                 adopted: false,
+                oversized: None,
             },
         );
         if config.enabled {
@@ -309,6 +320,7 @@ impl McpRegistry for NativeMcpRegistry {
             .ok_or_else(|| CoreError::NotFound(format!("MCP server {name}")))?;
         entry.generation = uuid::Uuid::now_v7();
         entry.worker = None;
+        entry.oversized = None;
         entry.tools.clear();
         entry.remembered.clear();
         entry.identity = None;
@@ -411,6 +423,7 @@ impl NativeMcpRegistry {
                 entry.info.status = "connecting".into();
                 entry.info.detail = None;
                 entry.worker = None;
+                entry.oversized = None;
                 entry.tools.clear();
                 (entry.config.clone(), entry.generation)
             };
@@ -420,6 +433,7 @@ impl NativeMcpRegistry {
             .then(|| manager_store(name, self.auth_dir.as_deref()));
             let home: Home = Arc::new(RwLock::new(Arc::downgrade(&self.servers)));
             let handler = CatalogClient::new(home.clone(), name, generation, credential.clone());
+            let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
             let activation = async {
                 match config.transport.as_str() {
                     "stdio" => {
@@ -449,14 +463,20 @@ impl NativeMcpRegistry {
                             if let Some((_, path)) = resolved {
                                 command.env("PATH", path);
                             }
-                            let transport = process::Process::new(command).map_err(|error| {
-                                CoreError::Tool(format!("cannot start {program}: {error}"))
-                            })?;
+                            let passed = oversized.clone().unwrap_or_default();
+                            let transport = process::Process::new(command, passed.clone())
+                                .map_err(|error| {
+                                    CoreError::Tool(format!("cannot start {program}: {error}"))
+                                })?;
                             let client =
                                 handler.clone().serve(transport).await.map_err(mcp_error)?;
                             let tools = client.list_all_tools().await.map_err(mcp_error)?;
                             let definitions = client.service().catalog(&tools);
-                            let tx = spawn_worker(client, None);
+                            let limit = Limit {
+                                name: name.to_owned(),
+                                passed,
+                            };
+                            let tx = spawn_worker(client, None, Some(limit));
                             CoreResult::Ok((definitions, tx, None))
                         }
                         .await;
@@ -507,6 +527,14 @@ impl NativeMcpRegistry {
                     ));
                     return Ok(entry.info.clone());
                 }
+                Err(ActivationError::Core(_))
+                    if oversized
+                        .as_ref()
+                        .is_some_and(|passed| passed.load(Ordering::Acquire)) =>
+                {
+                    stop_oversized(name, entry, oversized);
+                    return Err(oversized_error(name));
+                }
                 Err(ActivationError::Core(error)) => {
                     entry.info.status = "failed".into();
                     // Clients, the model's `mcp_manage` and logs show this:
@@ -536,6 +564,7 @@ impl NativeMcpRegistry {
             entry.worker = Some(worker);
             entry.auth_challenge = None;
             entry.home = Some(home);
+            entry.oversized = oversized;
             entry.info.status = "connected".into();
             entry.info.detail = Some(format!("{count} tools discovered"));
             let info = entry.info.clone();
@@ -713,29 +742,16 @@ impl NativeMcpRegistry {
     }
 
     async fn call_once(&self, name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput> {
-        self.revoke_stale();
-        let worker = self
-            .servers
-            .read()
-            .get(name)
-            .and_then(|entry| entry.worker.clone())
-            .ok_or_else(|| CoreError::Conflict(format!("MCP server {name} is not connected")))?;
         let raw = tool
             .strip_prefix(&format!("mcp__{name}__"))
             .unwrap_or(tool)
             .to_owned();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        worker
-            .send(WorkerCommand::Call {
-                tool: raw,
-                arguments,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| CoreError::Conflict(format!("MCP server {name} disconnected")))?;
-        reply_rx
-            .await
-            .map_err(|_| CoreError::Conflict(format!("MCP server {name} disconnected")))?
+        self.worker_request(name, |reply| WorkerCommand::Call {
+            tool: raw,
+            arguments,
+            reply,
+        })
+        .await
     }
 
     async fn worker_request<T: Send + 'static>(
@@ -749,15 +765,34 @@ impl NativeMcpRegistry {
             .read()
             .get(name)
             .and_then(|entry| entry.worker.clone())
-            .ok_or_else(|| CoreError::Conflict(format!("MCP server {name} is not connected")))?;
+            .ok_or_else(|| {
+                self.stopped(name).unwrap_or_else(|| {
+                    CoreError::Conflict(format!("MCP server {name} is not connected"))
+                })
+            })?;
+        let disconnected = || {
+            self.stopped(name)
+                .unwrap_or_else(|| CoreError::Conflict(format!("MCP server {name} disconnected")))
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
         worker
             .send(command(reply_tx))
             .await
-            .map_err(|_| CoreError::Conflict(format!("MCP server {name} disconnected")))?;
-        reply_rx
-            .await
-            .map_err(|_| CoreError::Conflict(format!("MCP server {name} disconnected")))?
+            .map_err(|_| disconnected())?;
+        reply_rx.await.map_err(|_| disconnected())?
+    }
+
+    /// Why requests to `name` fail, when its server was stopped for sending
+    /// a message over [`process::MESSAGE_LIMIT`]: a call does not start it
+    /// again, which would only stop it again and run the request twice.
+    fn stopped(&self, name: &str) -> Option<CoreError> {
+        self.servers
+            .read()
+            .get(name)?
+            .oversized
+            .as_ref()
+            .is_some_and(|passed| passed.load(Ordering::Acquire))
+            .then(|| oversized_error(name))
     }
 
     fn watch(&self, name: &str, generation: uuid::Uuid) {
@@ -789,6 +824,17 @@ impl NativeMcpRegistry {
                     {
                         continue;
                     }
+                    // A server stopped for a message over the limit stays
+                    // stopped: restarting it would only stop it again.
+                    if entry
+                        .oversized
+                        .as_ref()
+                        .is_some_and(|passed| passed.load(Ordering::Acquire))
+                    {
+                        let oversized = entry.oversized.clone();
+                        stop_oversized(&name, entry, oversized);
+                        return;
+                    }
                     entry.worker = None;
                     entry.tools.clear();
                     entry.info.status = "failed".into();
@@ -813,6 +859,50 @@ impl NativeMcpRegistry {
         });
     }
 }
+/// Marks `entry` failed after its stdio server sent a message over
+/// [`process::MESSAGE_LIMIT`]. The connection has ended and stopped the
+/// server already; the log names the server, never what it sent.
+fn stop_oversized(name: &str, entry: &mut Entry, oversized: Option<Arc<AtomicBool>>) {
+    tracing::warn!(
+        server = name,
+        limit = process::MESSAGE_LIMIT,
+        "stopped an MCP server whose message passed the size limit"
+    );
+    entry.worker = None;
+    entry.tools.clear();
+    entry.oversized = oversized;
+    entry.info.status = "failed".into();
+    entry.info.detail = Some(OVERSIZED_STATUS.into());
+}
+
+/// What a request to a server stopped for a message over
+/// [`process::MESSAGE_LIMIT`] ends with. It says that retrying cannot help,
+/// so the model tells the person instead of calling it again.
+fn oversized_error(name: &str) -> CoreError {
+    CoreError::Tool(format!(
+        "MCP server \"{name}\" sent a reply larger than 64 MB, so Haarness stopped it. \
+         Calling it again fails until the user reconnects it."
+    ))
+}
+
+/// A stdio connection's message limit, as its worker sees it.
+struct Limit {
+    name: String,
+    passed: Arc<AtomicBool>,
+}
+
+/// `result`, or [`oversized_error`] when it failed because the server passed
+/// its message limit: rmcp reports that as a closed transport, which reads
+/// as a passing fault worth retrying.
+fn settled<T>(limit: Option<&Limit>, result: CoreResult<T>) -> CoreResult<T> {
+    match limit {
+        Some(limit) if result.is_err() && limit.passed.load(Ordering::Acquire) => {
+            Err(oversized_error(&limit.name))
+        }
+        _ => result,
+    }
+}
+
 fn credential_valid(credential: Option<&FileCredentialStore>) -> bool {
     credential.is_none_or(FileCredentialStore::valid)
 }
@@ -1218,13 +1308,14 @@ where
         .map_err(mcp_error)
         .map_err(ActivationError::Core)?;
     let definitions = client.service().catalog(&tools);
-    let tx = spawn_worker(client, credential);
+    let tx = spawn_worker(client, credential, None);
     Ok((definitions, tx))
 }
 
 fn spawn_worker(
     client: rmcp::service::RunningService<RoleClient, CatalogClient>,
     credential: Option<FileCredentialStore>,
+    limit: Option<Limit>,
 ) -> mpsc::Sender<WorkerCommand> {
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -1256,7 +1347,7 @@ fn spawn_worker(
                             None => to_output(result, &tool),
                         },
                     );
-                    let _ = reply.send(result);
+                    let _ = reply.send(settled(limit.as_ref(), result));
                 }
                 WorkerCommand::Resources { reply } => {
                     let result = if peer
@@ -1270,7 +1361,7 @@ fn spawn_worker(
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(result);
+                    let _ = reply.send(settled(limit.as_ref(), result));
                 }
                 WorkerCommand::ResourceTemplates { reply } => {
                     let result = if peer
@@ -1284,7 +1375,7 @@ fn spawn_worker(
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(result);
+                    let _ = reply.send(settled(limit.as_ref(), result));
                 }
                 WorkerCommand::ReadResource { uri, reply } => {
                     let result = peer
@@ -1292,7 +1383,7 @@ fn spawn_worker(
                         .await
                         .map_err(mcp_error)
                         .and_then(json_value);
-                    let _ = reply.send(result);
+                    let _ = reply.send(settled(limit.as_ref(), result));
                 }
                 WorkerCommand::Prompts { reply } => {
                     let result = if peer
@@ -1306,7 +1397,7 @@ fn spawn_worker(
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(result);
+                    let _ = reply.send(settled(limit.as_ref(), result));
                 }
                 WorkerCommand::GetPrompt {
                     prompt,
@@ -1320,7 +1411,7 @@ fn spawn_worker(
                         .await
                         .map_err(mcp_error)
                         .and_then(json_value);
-                    let _ = reply.send(result);
+                    let _ = reply.send(settled(limit.as_ref(), result));
                 }
             }
         }
@@ -1409,7 +1500,7 @@ async fn activate_legacy_sse(
             let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
             let tools = client.list_all_tools().await.map_err(mcp_error)?;
             let definitions = client.service().catalog(&tools);
-            let tx = spawn_worker(client, None);
+            let tx = spawn_worker(client, None, None);
             CoreResult::Ok((definitions, tx))
         }
         .await;
@@ -3405,6 +3496,125 @@ mod recovery_tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "called\n");
         registry.disconnect("fixture").await.unwrap();
         std::fs::remove_file(log).unwrap();
+    }
+
+    fn flood_config(dir: &Path, flood_init: bool) -> McpConfigureRequest {
+        serde_json::from_value(serde_json::json!({
+            "transport": "stdio", "command": "python3",
+            "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/flood.py")],
+            "env": {
+                "LAUNCH_LOG": dir.join("launches"),
+                "PID_LOG": dir.join("pids"),
+                "FLOOD_INIT": if flood_init { "1" } else { "0" },
+            },
+            "enabled": true, "timeout_ms": 20_000
+        }))
+        .unwrap()
+    }
+
+    /// Waits until every process the fixture logged in `dir` has exited.
+    #[cfg(unix)]
+    async fn stopped(dir: &Path) {
+        let pids = std::fs::read_to_string(dir.join("pids")).unwrap();
+        let alive = |pid: &str| {
+            std::process::Command::new("ps")
+                .args(["-p", pid, "-o", "stat="])
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && !String::from_utf8_lossy(&output.stdout)
+                            .trim_start()
+                            .starts_with('Z')
+                })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pids.lines().any(alive) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the server kept running after its message passed the limit");
+    }
+
+    #[tokio::test]
+    async fn a_reply_over_the_message_limit_stops_the_server_until_it_is_reconnected() {
+        let dir = std::env::temp_dir().join(format!("haarness-mcp-flood-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure("flood", flood_config(&dir, false))
+            .await
+            .unwrap();
+        // A 20 MB result is an ordinary reply.
+        let big = registry
+            .call("flood", "mcp__flood__big", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(big.text.len(), 20 << 20);
+        let started = std::time::Instant::now();
+        let error = registry
+            .call("flood", "mcp__flood__flood", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            error.contains("sent a reply larger than 64 MB, so Haarness stopped it")
+                && error.contains("Calling it again fails until the user reconnects it."),
+            "{error}"
+        );
+        status(&registry, "failed").await;
+        let info = registry.list().await.unwrap().remove(0);
+        assert_eq!(info.detail.as_deref(), Some(OVERSIZED_STATUS));
+        #[cfg(unix)]
+        stopped(&dir).await;
+        // Neither the watcher nor a call starts it again.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let again = registry
+            .call("flood", "mcp__flood__ping", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(again.contains("larger than 64 MB"), "{again}");
+        assert_eq!(launches(&dir.join("launches")), 1);
+        assert_eq!(
+            registry.list().await.unwrap()[0].detail.as_deref(),
+            Some(OVERSIZED_STATUS)
+        );
+        // A reconnect does.
+        registry.reconnect("flood").await.unwrap();
+        assert_eq!(
+            registry
+                .call("flood", "mcp__flood__ping", serde_json::json!({}))
+                .await
+                .unwrap()
+                .text,
+            "pong"
+        );
+        registry.disconnect("flood").await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_server_that_floods_its_handshake_fails_at_once_and_says_why() {
+        let dir = std::env::temp_dir().join(format!("haarness-mcp-flood-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = NativeMcpRegistry::default();
+        let started = std::time::Instant::now();
+        let error = registry
+            .configure("flood", flood_config(&dir, true))
+            .await
+            .unwrap_err()
+            .to_string();
+        // Long before the 20 s connection timeout.
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(error.contains("larger than 64 MB"), "{error}");
+        let info = registry.list().await.unwrap().remove(0);
+        assert_eq!(info.status, "failed");
+        assert_eq!(info.detail.as_deref(), Some(OVERSIZED_STATUS));
+        #[cfg(unix)]
+        stopped(&dir).await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
