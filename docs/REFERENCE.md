@@ -137,6 +137,7 @@ haarness mcp disconnect files
 haarness mcp reconnect files
 haarness mcp logout protected
 haarness mcp get remote # hides env/header values and URL/argument credentials; add --show-secrets explicitly
+# connection and sign-in errors quote a server's address without its user name, password or keys
 haarness mcp disable remote
 haarness mcp tools files
 haarness workflow list

@@ -1717,8 +1717,12 @@ fn initialize_error(error: &(dyn std::error::Error + 'static), url: &str) -> Cor
     mcp_error(text)
 }
 
+/// An rmcp or transport error as Haarness passes it on. Clients, the
+/// model's `mcp_manage` and the CLI's stderr show it, and rmcp quotes the
+/// server's address in OAuth errors (`issuer mismatch: expected …`), so a URL
+/// in it keeps its host but not its credentials.
 fn mcp_error(error: impl std::fmt::Display) -> CoreError {
-    CoreError::Tool(error.to_string())
+    CoreError::Tool(haarness_core::redact::urls_in(&error.to_string()).into_owned())
 }
 
 /// The headers [`resolve_headers`] returned, already resolved.
@@ -2225,6 +2229,17 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn an_mcp_error_quoting_the_server_address_hides_its_credentials() {
+        let error = mcp_error(
+            "Authorization server issuer mismatch: expected http://someone:PRIVATE%40PASS@127.0.0.1:9/mcp?api_key=PRIVATE_KEY, received http://127.0.0.1:9",
+        );
+        assert_eq!(
+            error.to_string(),
+            "tool error: Authorization server issuer mismatch: expected http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>, received http://127.0.0.1:9"
+        );
     }
 
     #[tokio::test]
