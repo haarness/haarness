@@ -110,7 +110,7 @@ async function feed(notes: unknown) {
 
 test("the update confirmation shows the release notes, rendered and sanitized, in their own scroll area", async () => {
   await feed(
-    "## Highlights\n\n- Pick an element in the browser\n- Export logs from **Settings**\n\n<img src=x onerror=\"window.pwned=1\"><script>window.pwned=2</script>\n\n" +
+    "## Highlights\n\n- Pick an element in the browser\n- Export logs from **Settings**\n- [Read the guide](https://haarness.ai/docs/desktop) · [the changelog](./CHANGELOG.md) · [a file](file:///etc/hosts)\n\n<img src=x onerror=\"window.pwned=1\"><script>window.pwned=2</script>\n\n" +
       Array.from({ length: 40 }, (_, index) => `- Fix ${index + 1}`).join("\n"),
   );
   await page.getByRole("button", { name: "Settings" }).first().click();
@@ -134,6 +134,15 @@ test("the update confirmation shows the release notes, rendered and sanitized, i
   // Enter never installs by accident: the dialog starts on Cancel.
   await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
   await shoot("update-notes", confirm);
+  // A web link opens in the system browser; a relative or file link does nothing.
+  await app.evaluate(({ shell }) => {
+    const record = globalThis as { opened?: string[] };
+    record.opened = [];
+    shell.openExternal = (async (url: string) => void record.opened!.push(url)) as typeof shell.openExternal;
+  });
+  for (const name of ["Read the guide", "the changelog", "a file"]) await notes.getByRole("link", { name }).click();
+  await expect.poll(() => app.evaluate(() => (globalThis as { opened?: string[] }).opened)).toEqual(["https://haarness.ai/docs/desktop"]);
+  await expect(confirm).toBeVisible();
   await confirm.getByRole("button", { name: "Cancel" }).click();
   await expect(confirm).toBeHidden();
   expect(await app.evaluate(() => (globalThis as { installed?: number }).installed)).toBe(0);
