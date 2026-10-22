@@ -1,4 +1,14 @@
 //! Bounded Git diff support for workspace review.
+//!
+//! A review only reads, and nobody asked it to run a program, but Git runs
+//! programs a repository's own configuration names: a file system monitor,
+//! hooks, filters, an external diff or text conversion, a second Git in each
+//! submodule (with that submodule's own configuration), a signature check,
+//! and, in a partial clone, a fetch of missing objects through the remote's
+//! commands. A folder someone else prepared brings that configuration with
+//! it, so every review read turns these off (`run_git`, [`filters`]).
+
+mod filters;
 
 use std::{
     collections::BTreeMap,
@@ -145,6 +155,7 @@ pub async fn diff_selected(
         }
     }
     ensure_worktree(workspace).await?;
+    let filters = filter_settings(workspace).await?;
 
     let Some(reference) = diff_reference(workspace, mode).await? else {
         return Ok(Vec::new());
@@ -173,8 +184,6 @@ pub async fn diff_selected(
     );
     let untracked_args = os_args(&[
         "-c",
-        "core.fsmonitor=false",
-        "-c",
         "core.quotepath=false",
         "ls-files",
         "-z",
@@ -190,13 +199,13 @@ pub async fn diff_selected(
             if summary {
                 Ok(None)
             } else {
-                run_git(workspace, &patch_args, MAX_TOTAL_PATCH_BYTES)
+                run_git_with(workspace, &patch_args, MAX_TOTAL_PATCH_BYTES, &filters)
                     .await
                     .map(Some)
             }
         },
-        run_git(workspace, &numstat_args, MAX_METADATA_BYTES),
-        run_git(workspace, &status_args, MAX_METADATA_BYTES),
+        run_git_with(workspace, &numstat_args, MAX_METADATA_BYTES, &filters),
+        run_git_with(workspace, &status_args, MAX_METADATA_BYTES, &filters),
         run_git(workspace, &untracked_args, MAX_METADATA_BYTES),
     )?;
 
@@ -518,9 +527,10 @@ enum DiffOutput {
 }
 
 fn tracked_diff_args(reference: &str, context_lines: u32, output: DiffOutput) -> Vec<OsString> {
+    // A submodule is not checked for uncommitted changes: that runs a second
+    // Git in it, with the submodule's own configuration. One moved to another
+    // commit is still listed.
     let mut args = os_args(&[
-        "-c",
-        "core.fsmonitor=false",
         "-c",
         "core.quotepath=false",
         "diff",
@@ -528,6 +538,7 @@ fn tracked_diff_args(reference: &str, context_lines: u32, output: DiffOutput) ->
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
+        "--ignore-submodules=dirty",
     ]);
     match output {
         DiffOutput::Patch => args.push(OsString::from(format!("--unified={context_lines}"))),
@@ -816,12 +827,86 @@ fn git_error(operation: &str, output: &GitOutput) -> anyhow::Error {
     }
 }
 
+/// The repository's own filters, emptied for the diffs that read changed
+/// files (see [`filters`]). When they cannot be read, Git is not run.
+async fn filter_settings(workspace: &Path) -> Result<Vec<(String, String)>> {
+    let mut scoped = true;
+    let mut output = run_git(
+        workspace,
+        &os_args(&["config", "--show-scope", "-z", "--list"]),
+        MAX_METADATA_BYTES,
+    )
+    .await?;
+    // Git before 2.26 has no `--show-scope`: every filter then counts as the
+    // repository's own, the user's included.
+    if output.status.code() == Some(129) {
+        scoped = false;
+        output = run_git(
+            workspace,
+            &os_args(&["config", "--includes", "-z", "--list"]),
+            MAX_METADATA_BYTES,
+        )
+        .await?;
+    }
+    if !output.success() || output.stdout.truncated {
+        let detail = output.stderr_text();
+        let detail = detail.lines().next().unwrap_or_default();
+        bail!(
+            "cannot read the repository's Git settings, so Git was not run{}{detail}",
+            if detail.is_empty() { "" } else { ": " }
+        );
+    }
+    let pairs = filters::overrides(&output.stdout_text(), scoped);
+    let base = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0);
+    Ok(filters::environment(&pairs, base))
+}
+
+/// What every review read passes to Git so that the repository's own
+/// configuration cannot make it run a program: no file system monitor, no
+/// hooks (a diff that refreshes the index runs `post-index-change`),
+/// submodules shown as a commit line (an inline diff runs a second Git with
+/// the submodule's configuration) and no signature check (the repository's
+/// gpg program). `GIT_NO_LAZY_FETCH` makes a partial clone fail on a missing
+/// object instead of fetching it with the remote's commands (Git 2.45+).
+fn read_only_args() -> Vec<OsString> {
+    let hooks = if cfg!(windows) {
+        "core.hooksPath=NUL"
+    } else {
+        "core.hooksPath=/dev/null"
+    };
+    os_args(&[
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        hooks,
+        "-c",
+        "diff.submodule=short",
+        "-c",
+        "log.showSignature=false",
+    ])
+}
+
 async fn run_git(workspace: &Path, args: &[OsString], stdout_limit: usize) -> Result<GitOutput> {
+    run_git_with(workspace, args, stdout_limit, &[]).await
+}
+
+async fn run_git_with(
+    workspace: &Path,
+    args: &[OsString],
+    stdout_limit: usize,
+    env: &[(String, String)],
+) -> Result<GitOutput> {
     let mut command = Command::new("git");
     command
+        .args(read_only_args())
         .args(args)
         .current_dir(workspace)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1503,6 +1588,192 @@ mod tests {
         let empty = &diffs["empty.txt"];
         assert_eq!(empty.diff.additions, 0);
         assert!(empty.diff.patch.is_none() && !empty.diff.truncated);
+    }
+
+    /// A folder outside the repository where the programs a repository's
+    /// configuration names leave a mark when they run.
+    struct Marks(PathBuf);
+
+    impl Marks {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("haarness-vcs-marks-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&path).expect("create marks folder");
+            Self(path)
+        }
+
+        /// A shell command that leaves the mark `name`, then runs `then`.
+        fn command(&self, name: &str, then: &str) -> String {
+            format!("touch '{}'; {then}", self.0.join(name).display())
+        }
+
+        fn left(&self) -> Vec<String> {
+            let mut names: Vec<_> = fs::read_dir(&self.0)
+                .expect("read marks")
+                .map(|entry| {
+                    entry
+                        .expect("mark")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for Marks {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Gives `relative` a new modification time, so Git refreshes its entry
+    /// in the index (and writes the index) though its content is unchanged.
+    fn touch_later(repo: &Path, relative: &str) {
+        fs::File::options()
+            .write(true)
+            .open(repo.join(relative))
+            .expect("open fixture")
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+            .expect("set modification time");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_review_runs_none_of_the_programs_the_repository_names() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marks = Marks::new();
+        let repo = TestRepo::new();
+        repo.write(".gitattributes", "*.txt filter=evil\n");
+        repo.write("a.txt", "one\n");
+        repo.write("same.md", "same\n");
+        repo.commit_all("baseline");
+        run(
+            &repo.path,
+            &[
+                "config",
+                "filter.evil.clean",
+                &marks.command("clean", "cat"),
+            ],
+        );
+        run(&repo.path, &["config", "filter.evil.required", "true"]);
+        let monitor = repo.path.join(".git/monitor.sh");
+        fs::write(
+            &monitor,
+            format!("#!/bin/sh\n{}\n", marks.command("fsmonitor", "exit 1")),
+        )
+        .unwrap();
+        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+        run(
+            &repo.path,
+            &["config", "core.fsmonitor", &monitor.to_string_lossy()],
+        );
+        let hook = repo.path.join(".git/hooks/post-index-change");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\n{}\n", marks.command("hook", "true")),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        repo.write("a.txt", "two\n");
+        touch_later(&repo.path, "same.md");
+
+        let diffs = by_file(working_tree_diff(&repo.path).await.expect("review"));
+        assert_eq!(diffs.keys().collect::<Vec<_>>(), ["a.txt"]);
+        assert!(
+            diffs["a.txt"]
+                .diff
+                .patch
+                .as_deref()
+                .unwrap()
+                .contains("+two")
+        );
+        assert!(marks.left().is_empty(), "{:?}", marks.left());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_review_does_not_run_git_inside_a_changed_submodule() {
+        let marks = Marks::new();
+        let module = TestRepo::new();
+        module.write(".gitattributes", "*.txt filter=inner\n");
+        module.write("inner.txt", "inner\n");
+        module.commit_all("module");
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit_all("baseline");
+        run(
+            &repo.path,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &module.path.to_string_lossy(),
+                "module",
+            ],
+        );
+        repo.commit_all("add module");
+        let inside = repo.path.join("module");
+        run(
+            &inside,
+            &[
+                "config",
+                "filter.inner.clean",
+                &marks.command("submodule", "cat"),
+            ],
+        );
+        // The same size, so Git reads the file (through the filter) to see
+        // whether it changed.
+        fs::write(inside.join("inner.txt"), "INNER\n").unwrap();
+        repo.write("a.txt", "two\n");
+
+        let diffs = by_file(working_tree_diff(&repo.path).await.expect("review"));
+        assert!(diffs.contains_key("a.txt"));
+        assert!(marks.left().is_empty(), "{:?}", marks.left());
+    }
+
+    #[tokio::test]
+    async fn a_review_of_a_partial_clone_fetches_nothing() {
+        let marks = Marks::new();
+        let origin = TestRepo::new();
+        run(&origin.path, &["config", "uploadpack.allowFilter", "true"]);
+        origin.write("file.txt", "one\n");
+        origin.commit_all("one");
+        run(&origin.path, &["checkout", "-q", "-b", "feature"]);
+        origin.write("file.txt", "two\n");
+        origin.commit_all("two");
+        run(&origin.path, &["checkout", "-q", "main"]);
+        let clone = origin.path.with_extension("partial");
+        let output = StdCommand::new("git")
+            .args(["clone", "-q", "--filter=blob:none", "--branch", "feature"])
+            .arg(format!("file://{}", origin.path.display()))
+            .arg(&clone)
+            .output()
+            .expect("clone");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        run(
+            &clone,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &marks.command("fetch", "git-upload-pack"),
+            ],
+        );
+
+        // The base's copy of the file was never downloaded, and the review
+        // does not fetch it.
+        let review = branch_diff(&clone).await;
+        let _ = fs::remove_dir_all(&clone);
+        assert!(marks.left().is_empty(), "{:?} {review:?}", marks.left());
     }
 
     fn added_lines(patch: &str) -> usize {

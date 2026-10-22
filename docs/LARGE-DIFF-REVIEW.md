@@ -67,6 +67,28 @@ being diffed. `.gitignore`, nested ignore files and the usual excludes are
 honoured by the same `git ls-files --others --exclude-standard` listing as
 before.
 
+### What a review runs
+
+A review only reads, so it runs none of the programs a repository's own
+configuration can name, and a folder someone else prepared (a copied checkout,
+an unpacked archive) cannot run code when Review or `/diff` opens
+(`crates/haarness-server/src/vcs.rs`). Every Git call turns off the file system
+monitor (`core.fsmonitor`), hooks (a diff that refreshes the index runs
+`post-index-change`), external diffs and text conversion, signature checks, and
+in a partial clone the fetch of a missing object (Git 2.45 and later), which
+would run the remote's commands. The repository's own clean, smudge and process
+filters are emptied before the diffs that read changed files; the standard
+git-lfs commands and filters from the user's global and system configuration
+still run, unless the repository defines a git-lfs extension, which empties
+them all. Submodules are listed when they point at another commit, without
+looking inside them for uncommitted changes, since that runs a second Git with
+the submodule's own configuration. When the settings cannot be read, Git is not
+run and the review says so. A partial clone's review of a branch whose base was
+never downloaded fails with Git's own message instead of fetching it.
+
+Creating, resetting and removing a worktree are started by the person and keep
+the repository's own filters and hooks, as Git does for any checkout.
+
 Each entry of the response is a `ReviewFile`: a `FileDiff` plus two optional,
 defaulted fields, so the wire shape stays a superset of `FileDiff` and existing
 clients are unaffected.
