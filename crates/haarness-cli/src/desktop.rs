@@ -330,7 +330,11 @@ fn desktop_candidates(
     ];
     #[cfg(all(unix, not(target_os = "macos")))]
     return search_path
-        .map(|value| std::env::split_paths(value).map(|directory| directory.join("haarness-desktop")).collect())
+        .map(|value| {
+            std::env::split_paths(value)
+                .map(|directory| directory.join("haarness-desktop"))
+                .collect()
+        })
         .unwrap_or_else(Vec::new)
         .into_iter()
         .chain([
@@ -428,7 +432,10 @@ fn install_desktop() -> Result<()> {
         .env("HAARNESS_RELEASE_URL", &release_url)
         .env_remove("HAARNESS_INSTALL_DIR")
         .status()?;
-    ensure!(status.success(), "Installing Haarness Desktop failed; see the installer output above");
+    ensure!(
+        status.success(),
+        "Installing Haarness Desktop failed; see the installer output above"
+    );
     Ok(())
 }
 
@@ -756,13 +763,20 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn finds_the_desktop_command_on_the_search_path() {
-        let root =
-            std::env::temp_dir().join(format!("haarness-desktop-path-find-{}", uuid::Uuid::now_v7()));
+        let root = std::env::temp_dir().join(format!(
+            "haarness-desktop-path-find-{}",
+            uuid::Uuid::now_v7()
+        ));
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         fs::write(bin.join("haarness-desktop"), "").unwrap();
         let path = std::env::join_paths([&bin]).unwrap();
-        let found = find_desktop(desktop_candidates(&root.join("home"), Some(&path), None, None));
+        let found = find_desktop(desktop_candidates(
+            &root.join("home"),
+            Some(&path),
+            None,
+            None,
+        ));
         assert_eq!(found, Some(bin.join("haarness-desktop")));
         fs::remove_dir_all(root).unwrap();
     }
