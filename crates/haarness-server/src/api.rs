@@ -1036,7 +1036,13 @@ fn read_head(head: &std::path::Path) -> Option<String> {
 /// An ordinary read waits a little for lists still loading; an explicit
 /// refresh (a model picker opening, a key just saved) for all of them.
 async fn providers(State(state): State<ServerState>) -> Json<Vec<ProviderInfo>> {
-    Json(crate::models::catalog(&state.runtime, crate::models::Wait::Read(crate::models::WAIT)).await)
+    Json(
+        crate::models::catalog(
+            &state.runtime,
+            crate::models::Wait::Read(crate::models::WAIT),
+        )
+        .await,
+    )
 }
 async fn refresh_providers(State(state): State<ServerState>) -> Json<Vec<ProviderInfo>> {
     Json(crate::models::catalog(&state.runtime, crate::models::Wait::All).await)

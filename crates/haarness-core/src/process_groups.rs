@@ -539,8 +539,9 @@ mod tests {
         let mut child = std::process::Command::new("sleep");
         let mut child = child.arg("30").process_group(0).spawn().unwrap();
         let recorded = record_in(&ledger, child.id());
+        let group = i32::try_from(child.id()).unwrap();
         // Recorded at once, written once dated.
-        assert!(ledger.groups.lock().contains_key(&(child.id() as i32)));
+        assert!(ledger.groups.lock().contains_key(&group));
         dated(&path, child.id());
         drop(recorded);
         assert!(
