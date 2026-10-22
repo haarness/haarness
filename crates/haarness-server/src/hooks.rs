@@ -942,13 +942,19 @@ fn head(text: &str, max: usize) -> &str {
 /// for the server's own log lines.
 pub(crate) use haarness_core::redact::{log_text, text as redact};
 
+/// The tools whose successful completion runs `FileChanged`.
+const FILE_TOOLS: &[&str] = &[
+    "write",
+    "edit",
+    "multiedit",
+    "notebook_edit",
+    "notebookedit",
+];
+
 /// Native tools whose successful completion changes workspace files, with
 /// the argument that names the file. Shell commands are not inspected.
 fn changed_file(tool: &str, arguments: &Value) -> Option<String> {
-    if !matches!(
-        tool,
-        "write" | "edit" | "multiedit" | "notebook_edit" | "notebookedit"
-    ) {
+    if !FILE_TOOLS.contains(&tool) {
         return None;
     }
     arguments
@@ -1005,7 +1011,7 @@ pub fn matcher_target(event: &str) -> MatcherTarget {
             "tool",
             "other",
         ]),
-        "FileChanged" => MatcherTarget::Values(&["write", "edit", "multiedit", "notebook_edit"]),
+        "FileChanged" => MatcherTarget::Values(FILE_TOOLS),
         _ => MatcherTarget::Nothing,
     }
 }
@@ -1444,6 +1450,7 @@ mod tests {
         assert!(!never_runs("PostCompact", "auto.*"));
         assert!(never_runs("FileChanged", "Bash"));
         assert!(!never_runs("FileChanged", "Edit"));
+        assert!(!never_runs("FileChanged", "notebookedit"));
         assert!(!never_runs("StopFailure", "rate_limit|provider"));
         assert!(never_runs("StopFailure", "billing_error"));
         // Tools and permissions are open-ended, and an event with nothing
