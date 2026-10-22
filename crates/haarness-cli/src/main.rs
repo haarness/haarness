@@ -4122,6 +4122,8 @@ async fn serve_command(
             executable_fingerprint: Some(current_executable_fingerprint()?),
             access_fingerprint,
             trace_endpoint: otel::configured_endpoint(),
+            base_config_dir: haarness_protocol::base_config_dir()
+                .map(|dir| dir.display().to_string()),
         },
     )?;
     // Listening: what goes wrong from here is not a failure to start.
@@ -11032,6 +11034,32 @@ fn warn_trace_endpoint_mismatch(discovery: &RuntimeDiscovery) {
     }
 }
 
+/// A client started with `HAARNESS_BASE_CONFIG_DIR` that reuses a server
+/// started without it, or with another folder, is told how to apply it. A
+/// client without the variable is not: Desktop, opened from the Dock, never
+/// has it, and must not keep replacing a server a terminal started with one.
+fn warn_base_folder_mismatch(discovery: &RuntimeDiscovery) {
+    let Some(wanted) = haarness_protocol::base_config_dir() else {
+        return;
+    };
+    let wanted = wanted.display().to_string();
+    if discovery.base_config_dir.as_deref() == Some(wanted.as_str()) {
+        return;
+    }
+    let current = discovery.base_config_dir.as_deref().map_or_else(
+        || "reads no base folder".to_owned(),
+        |dir| format!("reads the base folder {dir}"),
+    );
+    let notice = format!(
+        "the Haarness server already running for this project (pid {}) {current}, so {wanted} is not applied. Stop it with `haarness serve --stop` and run again to use it.",
+        discovery.pid
+    );
+    tracing::warn!("{notice}");
+    if io::stderr().is_terminal() {
+        eprintln!("haarness: {notice}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn ensure_workspace_server_at(
     paths: &Paths,
@@ -11077,6 +11105,7 @@ async fn ensure_workspace_server_at(
                 "The configured server uses different project configuration settings. Restart it with the desired --disable-project-config setting before connecting."
             );
             warn_trace_endpoint_mismatch(&live.discovery);
+            warn_base_folder_mismatch(&live.discovery);
             return Ok(live.discovery);
         }
         if let Some(reason) = local_server_compatibility_error(&live).or_else(|| {
@@ -11103,12 +11132,14 @@ async fn ensure_workspace_server_at(
                         eprintln!("haarness: {notice}");
                     }
                     warn_trace_endpoint_mismatch(&discovery);
+                    warn_base_folder_mismatch(&discovery);
                     return Ok(discovery);
                 }
                 Err(error) => return Err(error),
             }
         } else {
             warn_trace_endpoint_mismatch(&live.discovery);
+            warn_base_folder_mismatch(&live.discovery);
             return Ok(live.discovery);
         }
     }
@@ -13357,6 +13388,7 @@ request_timeout = 0
                 executable_fingerprint: Some(current),
                 access_fingerprint: None,
                 trace_endpoint: None,
+                base_config_dir: None,
             },
             info: fixture_server_info(vec![
                 WORKSPACE_HISTORY_CAPABILITY.into(),
@@ -13525,6 +13557,7 @@ request_timeout = 0
             executable_fingerprint: Some("other-build".into()),
             access_fingerprint: None,
             trace_endpoint: None,
+            base_config_dir: None,
         };
         write_runtime(&paths, &discovery).unwrap();
         (paths, workspace, fake, discovery)
