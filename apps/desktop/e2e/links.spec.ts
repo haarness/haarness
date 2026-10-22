@@ -297,6 +297,20 @@ test("a toast rises over the message box only while the box runs under it, clear
   await expect.poll(async () => (await place())?.aboveBox).toBe(16);
   expect((await place())?.edge).toBe(16);
 
+  // A toast has nothing to press: a click on it reaches the control it covers.
+  const box = (await toast().boundingBox())!;
+  await page.evaluate((rect) => {
+    const under = document.createElement("button");
+    under.id = "under-toast";
+    under.textContent = "Under the toast";
+    Object.assign(under.style, { position: "fixed", left: rect.x + "px", top: rect.y + "px", width: rect.width + "px", height: rect.height + "px", zIndex: "1" });
+    under.onclick = () => (under.dataset.clicked = "yes");
+    document.body.append(under);
+  }, box);
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.locator("#under-toast")).toHaveAttribute("data-clicked", "yes");
+  await page.evaluate(() => document.getElementById("under-toast")?.remove());
+
   // Review takes the right of the window: the toast stays in its corner over it.
   await page.getByRole("button", { name: "Show side panel", exact: true }).click();
   await page.getByRole("region", { name: "Open a project panel" }).getByRole("button", { name: "Open Review", exact: true }).click();

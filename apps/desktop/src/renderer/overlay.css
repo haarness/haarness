@@ -629,6 +629,11 @@
 .notifications > * {
   pointer-events: auto;
 }
+/* A toast has nothing to press and does not pause on hover: a click on it
+   reaches whatever it covers. The error banner keeps its Dismiss button. */
+.notifications > .toast {
+  pointer-events: none;
+}
 /* What a toast clears changed (a panel, the terminal or the message box came
    or went): it glides to its new place instead of jumping. */
 :root[data-toast-glide] .notifications {
