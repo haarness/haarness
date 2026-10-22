@@ -958,6 +958,12 @@ pub struct McpServerInfo {
     pub transport: String,
     pub status: String,
     pub detail: Option<String>,
+    /// `base` for a server of the base configuration folder
+    /// (`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes:
+    /// an edit saves the person's own copy. Absent for every other server and
+    /// from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

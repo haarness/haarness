@@ -20,7 +20,7 @@
 //! `compatibility`) including the legacy JSON format. A
 //! legacy `config.toml` is migrated to `haarness.json` once.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,6 +48,8 @@ pub struct JsonLayers {
     pub rules: Vec<PermissionRule>,
     /// MCP servers by name (trust-gated ones only included when trusted).
     pub mcp: BTreeMap<String, McpConfigureRequest>,
+    /// The servers of `mcp` whose entry in effect is the base folder's.
+    pub base_mcp: BTreeSet<String>,
     pub commands: Vec<CommandInfo>,
     pub agents: Vec<CustomAgent>,
     /// Lifecycle hook entries from every config layer.
@@ -837,6 +839,9 @@ fn apply_toml(layers: &mut JsonLayers, path: &Path) {
                 .rules
                 .extend(super::compile_permissions(permissions)?);
         }
+        for name in config.mcp.keys() {
+            layers.base_mcp.remove(name);
+        }
         layers.mcp.extend(config.mcp.clone());
         super::merge_file_config(&mut layers.native, config);
         Ok(())
@@ -990,6 +995,11 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
         if let Some(mcp) = value.get("mcp").and_then(Value::as_object) {
             for (name, entry) in mcp {
                 if let Some(request) = loaded_mcp_entry(entry, None) {
+                    if base {
+                        layers.base_mcp.insert(name.clone());
+                    } else {
+                        layers.base_mcp.remove(name);
+                    }
                     layers.mcp.insert(name.clone(), request);
                 }
             }
@@ -2281,6 +2291,7 @@ mod tests {
             layers.mcp["docs"].url.as_deref(),
             Some("https://docs.example/mcp")
         );
+        assert!(layers.base_mcp.contains("docs"));
         let hook = layers
             .hook_sources
             .iter()

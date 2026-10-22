@@ -6156,6 +6156,7 @@ fn compose_runtime_sources(
         anyhow::bail!(json_layers.errors.join("; "));
     }
     file_config.mcp.extend(json_layers.mcp.clone());
+    file_config.base_mcp.clone_from(&json_layers.base_mcp);
     if let Some(overrides) = capability_state::load(paths, workspace, trust)?.get("mcp") {
         for (name, enabled) in overrides {
             if let Some(entry) = file_config.mcp.get_mut(name) {
@@ -7425,6 +7426,10 @@ async fn compose_mcp(
             eprintln!("MCP {name}: {error}");
         }
     }
+    // Clients tag the base folder's servers, which Haarness never changes.
+    for name in &config.base_mcp {
+        registry.set_scope(name, Some("base".into()));
+    }
     registry
 }
 
@@ -8129,6 +8134,13 @@ fn set_mcp_enabled(
     let mut entry = before.clone();
     entry.enabled = enabled;
     write_mcp_changes(&target, name, &before, &entry)?;
+    if enabled && let Some(source) = release_base_mcp_copy(paths, workspace, name, project)? {
+        println!(
+            "Enabled MCP server '{name}' from the base folder ({}).",
+            source.display()
+        );
+        return Ok(loaded_mcp_entry(&source, entry));
+    }
     println!(
         "{} MCP server '{name}' in {}.",
         if enabled { "Enabled" } else { "Disabled" },
@@ -8330,16 +8342,23 @@ fn base_mcp_entry(workspace: &Path, name: &str) -> Option<(PathBuf, McpConfigure
     })
 }
 
+/// Whether a layer above the base folder (global or project) defines MCP
+/// server `name`: then that entry is the one in effect and the one to edit.
+fn mcp_defined_above_base(paths: &Paths, workspace: &Path, name: &str) -> bool {
+    [false, true].into_iter().any(|project| {
+        scoped_config_files(paths, workspace, project)
+            .iter()
+            .any(|path| read_mcp_entry(path, name).is_ok())
+    })
+}
+
 /// Before an edit of MCP server `name` in the global (or, with `project`,
-/// the project) configuration: when that layer does not define it but the
-/// base folder does, copy the base folder's entry, as written, into the
-/// layer's file, which then overrides it. Haarness never changes the base
-/// folder, so an edit of its server is the person's own version.
+/// the project) configuration: when only the base folder defines it, copy
+/// the base folder's entry in effect, as written, into the layer's file,
+/// which then overrides it. Haarness never changes the base folder, so an
+/// edit of its server is the person's own version.
 fn adopt_base_mcp_entry(paths: &Paths, workspace: &Path, name: &str, project: bool) -> Result<()> {
-    let defined = scoped_config_files(paths, workspace, project)
-        .iter()
-        .any(|path| read_mcp_entry(path, name).is_ok());
-    if defined {
+    if mcp_defined_above_base(paths, workspace, name) {
         return Ok(());
     }
     let Some((source, entry)) = base_mcp_entry(workspace, name) else {
@@ -8356,6 +8375,35 @@ fn adopt_base_mcp_entry(paths: &Paths, workspace: &Path, name: &str, project: bo
     } else {
         write_mcp_entry(&target, name, Some(&entry))
     }
+}
+
+/// After MCP server `name` is turned back on: when the person's copy in the
+/// global (or project) file is the base folder's entry apart from `enabled`,
+/// remove it, so the base folder's applies again and its later changes reach
+/// the person. Returns the base folder's file when it does.
+fn release_base_mcp_copy(
+    paths: &Paths,
+    workspace: &Path,
+    name: &str,
+    project: bool,
+) -> Result<Option<PathBuf>> {
+    let Some((source, base)) = base_mcp_entry(workspace, name) else {
+        return Ok(None);
+    };
+    let target = mcp_entry_target(paths, workspace, project, name);
+    let Ok(mine) = read_mcp_entry(&target, name) else {
+        return Ok(None);
+    };
+    let comparable = |entry: &McpConfigureRequest| {
+        let mut entry = entry.clone();
+        entry.enabled = true;
+        serde_json::to_value(entry).ok()
+    };
+    if !mine.enabled || !base.enabled || comparable(&mine) != comparable(&base) {
+        return Ok(None);
+    }
+    write_mcp_entry(&target, name, None)?;
+    Ok(Some(source))
 }
 
 /// The `section.name` entry of a configuration file as written, as JSON.
@@ -8867,6 +8915,9 @@ struct FileConfig {
     #[serde(skip)]
     provider_notices: Vec<String>,
     mcp: BTreeMap<String, McpConfigureRequest>,
+    /// The servers of `mcp` the base folder defines and no layer above it.
+    #[serde(skip)]
+    base_mcp: std::collections::BTreeSet<String>,
     /// Opt-in discovery of Claude Code home/project files.
     compatibility: Option<CompatibilitySection>,
     /// Extra skill folders and remote skill indexes (`skills`).
@@ -9501,6 +9552,7 @@ fn load_config(paths: &Paths, workspace: &Path, trust: bool) -> Result<FileConfi
     }
     let mut config = layers.native;
     config.mcp.extend(layers.mcp);
+    config.base_mcp = layers.base_mcp;
     Ok(config)
 }
 
@@ -11042,25 +11094,39 @@ fn warn_trace_endpoint_mismatch(discovery: &RuntimeDiscovery) {
     }
 }
 
-/// A client started with `HAARNESS_BASE_CONFIG_DIR` that reuses a server
-/// started without it, or with another folder, is told how to apply it. A
-/// client without the variable is not: Desktop, opened from the Dock, never
-/// has it, and must not keep replacing a server a terminal started with one.
-fn warn_base_folder_mismatch(discovery: &RuntimeDiscovery) {
-    let Some(wanted) = haarness_protocol::base_config_dir() else {
+/// How a reused server's base folder differs from the one this client
+/// names (`HAARNESS_BASE_CONFIG_DIR`): "reads no base folder" or "reads the
+/// base folder …"; `None` when they are the same folder, compared where they
+/// really are, or when this client names none. Only a client with the
+/// variable acts on a difference: Desktop opened from the Dock never has it,
+/// and must not keep replacing a server a terminal started with one.
+fn base_folder_change(discovery: &RuntimeDiscovery) -> Option<String> {
+    base_folder_change_from(crate::layout::base_config_dir().as_deref(), discovery)
+}
+
+fn base_folder_change_from(wanted: Option<&Path>, discovery: &RuntimeDiscovery) -> Option<String> {
+    let wanted = wanted?;
+    let real = |path: &Path| {
+        path.canonicalize()
+            .unwrap_or_else(|_| path.components().collect())
+    };
+    match discovery.base_config_dir.as_deref() {
+        Some(current) if real(Path::new(current)) == real(wanted) => None,
+        Some(current) => Some(format!("reads the base folder {current}")),
+        None => Some("reads no base folder".to_owned()),
+    }
+}
+
+/// Say once that a server this client reuses as it is does not read the
+/// base folder the client names, and what applies it.
+fn notice_base_folder_change(discovery: &RuntimeDiscovery, current: &str, remedy: &str) {
+    let Some(wanted) = crate::layout::base_config_dir() else {
         return;
     };
-    let wanted = wanted.display().to_string();
-    if discovery.base_config_dir.as_deref() == Some(wanted.as_str()) {
-        return;
-    }
-    let current = discovery.base_config_dir.as_deref().map_or_else(
-        || "reads no base folder".to_owned(),
-        |dir| format!("reads the base folder {dir}"),
-    );
     let notice = format!(
-        "the Haarness server already running for this project (pid {}) {current}, so {wanted} is not applied. Stop it with `haarness serve --stop` and run again to use it.",
-        discovery.pid
+        "the Haarness server running for this project (pid {}) {current}, so {} is not applied yet; {remedy}",
+        discovery.pid,
+        wanted.display()
     );
     tracing::warn!("{notice}");
     if io::stderr().is_terminal() {
@@ -11113,12 +11179,26 @@ async fn ensure_workspace_server_at(
                 "The configured server uses different project configuration settings. Restart it with the desired --disable-project-config setting before connecting."
             );
             warn_trace_endpoint_mismatch(&live.discovery);
-            warn_base_folder_mismatch(&live.discovery);
+            if let Some(current) = base_folder_change(&live.discovery) {
+                notice_base_folder_change(
+                    &live.discovery,
+                    &current,
+                    "restart that server with the variable set to apply it",
+                );
+            }
             return Ok(live.discovery);
         }
-        if let Some(reason) = local_server_compatibility_error(&live).or_else(|| {
+        let incompatible = local_server_compatibility_error(&live).or_else(|| {
             (live.info.project_trusted != Some(trust))
                 .then(|| "project configuration setting changed".to_owned())
+        });
+        // A server that reads another base folder than this client names is
+        // replaced like an outdated one, but only while it is idle.
+        let base_change = base_folder_change(&live.discovery);
+        if let Some(reason) = incompatible.clone().or_else(|| {
+            base_change
+                .as_ref()
+                .map(|_| "base configuration folder changed".to_owned())
         }) {
             let reusable = busy == BusyServer::Reuse
                 && server_compatibility_error(&live.info).is_none()
@@ -11126,6 +11206,18 @@ async fn ensure_workspace_server_at(
             let discovery = live.discovery.clone();
             match replace_incompatible_workspace_server(paths, workspace, live, &reason).await {
                 Ok(()) => {}
+                // Only the base folder differs and the server still works:
+                // keep using it, and a later client replaces it once idle.
+                Err(error) if incompatible.is_none() => {
+                    tracing::debug!(%error, "kept the server that reads another base folder");
+                    notice_base_folder_change(
+                        &discovery,
+                        base_change.as_deref().unwrap_or_default(),
+                        "it applies once that server's work is done and Haarness connects again",
+                    );
+                    warn_trace_endpoint_mismatch(&discovery);
+                    return Ok(discovery);
+                }
                 // Replacing it would end what it still holds; the person keeps
                 // working on it, and a later client replaces it once idle.
                 Err(error)
@@ -11140,14 +11232,12 @@ async fn ensure_workspace_server_at(
                         eprintln!("haarness: {notice}");
                     }
                     warn_trace_endpoint_mismatch(&discovery);
-                    warn_base_folder_mismatch(&discovery);
                     return Ok(discovery);
                 }
                 Err(error) => return Err(error),
             }
         } else {
             warn_trace_endpoint_mismatch(&live.discovery);
-            warn_base_folder_mismatch(&live.discovery);
             return Ok(live.discovery);
         }
     }
@@ -15947,5 +16037,52 @@ request_timeout = 0
         assert_eq!(config.execution.shell_timeout_ms, 0);
         assert_eq!(config.execution.subagent_concurrency, 6);
         assert_eq!(config.execution.subagent_depth, 3);
+    }
+
+    #[test]
+    fn a_server_reads_the_same_base_folder_whatever_way_it_is_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-base-change-{}", uuid::Uuid::now_v7()));
+        let team = root.join("team");
+        std::fs::create_dir_all(&team).unwrap();
+        let discovery = |base: Option<String>| crate::RuntimeDiscovery {
+            url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            pid: 7,
+            workspace: None,
+            executable_fingerprint: None,
+            access_fingerprint: None,
+            trace_endpoint: None,
+            base_config_dir: base,
+        };
+        let same = Some(format!("{}/", team.display()));
+        assert_eq!(
+            crate::base_folder_change_from(Some(&team), &discovery(same)),
+            None
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&team, root.join("link")).unwrap();
+            let linked = Some(root.join("link").display().to_string());
+            assert_eq!(
+                crate::base_folder_change_from(Some(&team), &discovery(linked)),
+                None
+            );
+        }
+        assert_eq!(
+            crate::base_folder_change_from(Some(&team), &discovery(None)).as_deref(),
+            Some("reads no base folder")
+        );
+        let other = root.join("other").display().to_string();
+        assert_eq!(
+            crate::base_folder_change_from(Some(&team), &discovery(Some(other.clone()))),
+            Some(format!("reads the base folder {other}"))
+        );
+        // A client without the variable never asks for a change.
+        assert_eq!(
+            crate::base_folder_change_from(None, &discovery(Some(other))),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
