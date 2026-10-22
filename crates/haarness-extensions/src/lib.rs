@@ -753,6 +753,7 @@ impl HookPort for CombinedHooks {
         thread: ThreadId,
         permission: &str,
         patterns: &[String],
+        always: Option<&[String]>,
         detail: &Value,
     ) -> HookDecision {
         // Extensions answer first; command hooks only see
@@ -792,7 +793,7 @@ impl HookPort for CombinedHooks {
         }
         if let Some(inner) = &self.inner {
             inner
-                .permission_request(thread, permission, patterns, detail)
+                .permission_request(thread, permission, patterns, always, detail)
                 .await
         } else {
             HookDecision::default()

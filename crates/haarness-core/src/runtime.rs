@@ -4394,24 +4394,7 @@ impl AgentRuntime {
                 if !matches!(decision, PermissionReplyDecision::AlwaysRepository) {
                     self.session_rules.lock().extend(rules.iter().cloned());
                 }
-                // Any other pending prompt now covered by the new rules
-                // resolves immediately — three parallel children asking for
-                // the same command need one answer, not three.
-                let covered: Vec<String> = self
-                    .permissions
-                    .iter()
-                    .filter(|entry| entry.value().covered_by(&rules))
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                for other in covered {
-                    if let Some((_, other_pending)) = self.permissions.remove(&other) {
-                        self.publish_permission_resolved(&other, &other_pending, true);
-                        let _ = other_pending.sender.send(PermissionResolution {
-                            allowed: true,
-                            feedback: None,
-                        });
-                    }
-                }
+                release_covered_permissions(&self.permissions, &self.events, &rules);
                 true
             }
             PermissionReplyDecision::Reject => false,
@@ -4529,18 +4512,7 @@ impl AgentRuntime {
     /// covering identical siblings, Reject clearing a root) would otherwise
     /// leave stale prompts in client state.
     fn publish_permission_resolved(&self, id: &str, pending: &PendingPermission, allowed: bool) {
-        self.events.publish_scoped(
-            "permission.resolved",
-            Some(pending.thread_id),
-            Some(pending.root_thread_id),
-            pending.turn_id,
-            None,
-            json!({
-                "permissionId": id,
-                "allowed": allowed,
-                "operation": pending.operation,
-            }),
-        );
+        publish_permission_resolved(&self.events, id, pending, allowed);
     }
     pub fn reply_question(&self, id: &str, reply: QuestionReply) -> CoreResult<()> {
         // Registration inserts the REST-visible entry and publishes
@@ -5996,6 +5968,51 @@ impl PendingQuestion {
                 "rootThreadId": self.root_thread_id,
             }),
         );
+    }
+}
+
+/// See [`Runtime::publish_permission_resolved`].
+fn publish_permission_resolved(
+    events: &EventBus,
+    id: &str,
+    pending: &PendingPermission,
+    allowed: bool,
+) {
+    events.publish_scoped(
+        "permission.resolved",
+        Some(pending.thread_id),
+        Some(pending.root_thread_id),
+        pending.turn_id,
+        None,
+        json!({
+            "permissionId": id,
+            "allowed": allowed,
+            "operation": pending.operation,
+        }),
+    );
+}
+
+/// Allows every waiting prompt that newly remembered `rules` cover, at once:
+/// three parallel children asking for the same command need one answer, not
+/// three.
+fn release_covered_permissions(
+    permissions: &DashMap<String, PendingPermission>,
+    events: &EventBus,
+    rules: &[PermissionRule],
+) {
+    let covered: Vec<String> = permissions
+        .iter()
+        .filter(|entry| entry.value().covered_by(rules))
+        .map(|entry| entry.key().clone())
+        .collect();
+    for other in covered {
+        if let Some((_, pending)) = permissions.remove(&other) {
+            publish_permission_resolved(events, &other, &pending, true);
+            let _ = pending.sender.send(PermissionResolution {
+                allowed: true,
+                feedback: None,
+            });
+        }
     }
 }
 
@@ -9112,20 +9129,34 @@ impl RunnerTask {
             });
         }
         if let Some(hooks) = &self.hooks {
-            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, detail).await {
+            // A hook answers Always only where a person's Always would be
+            // offered and kept: not for a request only a person answers, not
+            // in a run nobody watches (which records nothing), and not in a
+            // chat in Auto, which approves once and records nothing either.
+            let always = (!forced
+                && !explicit
+                && !self.unattended
+                && hook_may_remember(plan)
+                && !self.approval_modes.is_auto(self.thread.id).await)
+                .then_some(plan.always.as_slice());
+            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, always, detail).await
+            {
                 HookAnswer::Refused(feedback) => {
                     return Ok(PermissionResolution {
                         allowed: false,
                         feedback: Some(feedback),
                     });
                 }
-                HookAnswer::Allowed if !forced && !explicit => {
+                HookAnswer::Allowed { always } if !forced && !explicit => {
+                    if always {
+                        self.remember_hook_always(&operation, &always_rules);
+                    }
                     return Ok(PermissionResolution {
                         allowed: true,
                         feedback: None,
                     });
                 }
-                HookAnswer::Allowed | HookAnswer::Open => {}
+                HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
@@ -9271,6 +9302,27 @@ impl RunnerTask {
         self.publish_task_update("running");
         resolution
     }
+    /// A `PermissionRequest` hook answered Always: remember what Always in
+    /// the prompt remembers (the request's "always" rules, for every chat on
+    /// this server until it stops), and allow the prompts they now cover.
+    fn remember_hook_always(&self, operation: &str, always_rules: &[String]) {
+        let rules: Vec<PermissionRule> = always_rules
+            .iter()
+            .map(|pattern| PermissionRule {
+                pattern: pattern.clone(),
+                decision: PermissionDecision::Allow,
+            })
+            .collect();
+        self.session_rules.lock().extend(rules.iter().cloned());
+        release_covered_permissions(&self.permissions, &self.events, &rules);
+        tracing::info!(
+            thread = %self.thread.id,
+            operation = %operation_for_log(operation),
+            rules = always_rules.len(),
+            "approved always by a PermissionRequest hook"
+        );
+    }
+
     /// Record this turn's pre-image immediately before its first approved side
     /// effect. Snapshot failures are fail-closed: running the tool without a
     /// trustworthy pre-image would make a later `/undo` actively misleading.
@@ -11579,7 +11631,11 @@ impl AskPlan {
 /// What `PermissionRequest` hooks and `permission.ask` extensions said about
 /// one prompt.
 enum HookAnswer {
-    Allowed,
+    /// Allowed, and with `always` remembered as Always in the prompt
+    /// remembers it.
+    Allowed {
+        always: bool,
+    },
     Refused(String),
     Open,
 }
@@ -11590,11 +11646,13 @@ enum HookAnswer {
 /// leads is asked about alone, with the arguments' path replaced by it: the
 /// hook would otherwise judge the link it was given (`notes.txt`) and answer
 /// for the file it opens (`.env`). Any refusal refuses the prompt; the hooks
-/// answer it only when every call allowed.
+/// answer it only when every call allowed, and answer Always only when every
+/// call did and `always` offered it.
 async fn permission_hook_answer(
     hooks: &dyn crate::HookPort,
     thread: ThreadId,
     plan: &AskPlan,
+    always: Option<&[String]>,
     detail: &serde_json::Value,
 ) -> HookAnswer {
     let own: Vec<String> = plan
@@ -11611,10 +11669,12 @@ async fn permission_hook_answer(
         calls.push((vec![pattern.clone()], with_target_path(detail, path)));
     }
     let mut allowed = !calls.is_empty();
+    let mut remembered = always.is_some();
     for (patterns, input) in calls {
         let decision = hooks
-            .permission_request(thread, &plan.permission, &patterns, &input)
+            .permission_request(thread, &plan.permission, &patterns, always, &input)
             .await;
+        remembered &= decision.always;
         if let Some(reason) = decision.block {
             return HookAnswer::Refused(reason);
         }
@@ -11643,10 +11703,21 @@ async fn permission_hook_answer(
         }
     }
     if allowed {
-        HookAnswer::Allowed
+        HookAnswer::Allowed { always: remembered }
     } else {
         HookAnswer::Open
     }
+}
+
+/// Whether a hook may answer Always for `plan`: it remembers the plan's
+/// "always" patterns, and never a site rule (the built-in browser's or
+/// Chrome's), which only a person makes last.
+fn hook_may_remember(plan: &AskPlan) -> bool {
+    !plan.always.is_empty()
+        && !matches!(
+            plan.permission.as_str(),
+            "browser" | "browser_site" | "multiple"
+        )
 }
 
 /// Tool arguments with the file path they name replaced by `path`, as a
