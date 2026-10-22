@@ -43,7 +43,7 @@ pub use permissions::{
 pub use ports::*;
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
-    shorten_title,
+    refusal_reason, shorten_title,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,

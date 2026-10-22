@@ -935,7 +935,8 @@ fn user_facing_error(error: &CoreError) -> String {
 
 /// Why a chat refused input, as a notice quotes it: the refusal's own words,
 /// without the category the error type adds ("invalid request: …").
-fn refusal_reason(error: &CoreError) -> String {
+#[must_use]
+pub fn refusal_reason(error: &CoreError) -> String {
     match error {
         CoreError::Invalid(reason)
         | CoreError::Conflict(reason)
@@ -15246,6 +15247,18 @@ fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::Prompt
 mod prepared_usage_tests {
     use super::*;
 
+    #[test]
+    fn a_refusal_is_quoted_in_its_own_words() {
+        assert_eq!(
+            refusal_reason(&CoreError::Invalid("Unknown agent: reviewer".into())),
+            "Unknown agent: reviewer"
+        );
+        assert_eq!(refusal_reason(&CoreError::Conflict("busy".into())), "busy");
+        assert_eq!(
+            refusal_reason(&CoreError::Storage("database is locked".into())),
+            "storage error: database is locked"
+        );
+    }
 
     #[test]
     fn prepared_estimates_include_current_tools_and_system_without_media_payloads() {

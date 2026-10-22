@@ -718,6 +718,7 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
         // starts a clean follow-up turn once the interrupted turn is gone.
         tokio::spawn(async move {
             let deadline = Instant::now() + Duration::from_secs(5);
+            let mut storage_attempts = 0_u32;
             loop {
                 match runtime
                     .queue_background_result(launch_thread_id, text.clone(), &handoff)
@@ -728,17 +729,14 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     // A busy database clears; the handoff's request id makes
-                    // a retry of an admission that did land a no-op.
-                    Err(CoreError::Storage(_)) if Instant::now() < deadline => {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    // a retry of an admission that did land a no-op. Three
+                    // tries, as for a subagent's result.
+                    Err(CoreError::Storage(_)) if storage_attempts < 3 => {
+                        storage_attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(250) * storage_attempts).await;
                     }
                     Err(error) => {
-                        let reason = match &error {
-                            CoreError::Invalid(reason)
-                            | CoreError::Conflict(reason)
-                            | CoreError::PermissionDenied(reason) => reason.clone(),
-                            other => other.to_string(),
-                        };
+                        let reason = haarness_core::refusal_reason(&error);
                         let notice = format!(
                             "The result of the workflow \u{201c}{name}\u{201d} could not start a turn in this chat ({reason}); your next message passes it to the agent."
                         );
