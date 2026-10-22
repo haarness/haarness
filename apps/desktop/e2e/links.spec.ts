@@ -256,3 +256,72 @@ test("a haarness:// link opens a saved folder directly and confirms any other, w
   expect((await calls()).boxes.length).toBe(2);
   expect(errors).toEqual([]);
 });
+
+test("a toast rises over the message box only while the box runs under it, and keeps its corner beside a side panel or an expanded one", async ({}, info) => {
+  const thread = await client.createThread({ title: "Toast corner", provider: "echo", model: "echo-1" });
+  await page.locator(".sessions").getByRole("button", { name: "Toast corner", exact: true }).click();
+  const turn = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "[script url](javascript:alert(1))" });
+  await client.waitTurn(turn.id);
+  const link = page.locator(".message.assistant .markdown").last().getByRole("link", { name: "script url", exact: true });
+  await expect(link).toBeVisible();
+  // Start from the chat alone.
+  while (await page.locator(".dock-tab").count())
+    await page.locator(".dock-tab").first().getByRole("button", { name: /^Close .* panel$/ }).click();
+  if (await page.locator(".side-panel").isVisible())
+    await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await expect(page.locator(".side-panel")).toBeHidden();
+  // Where the toast's bottom edge is: its gap to the window's bottom and to the message box's top.
+  const place = () =>
+    page.evaluate(() => {
+      const toast = document.querySelector(".notifications .toast")?.getBoundingClientRect();
+      const dock = document.querySelector(".composer-area")?.getBoundingClientRect();
+      return {
+        corner: toast ? Math.round(innerHeight - toast.bottom) : null,
+        aboveBox: toast && dock?.height ? Math.round(dock.top - toast.bottom) : null,
+      };
+    });
+  const notice = "This kind of link does not open in Haarness.";
+
+  await link.click();
+  await expect(toast()).toHaveText(notice);
+  // The message box runs under the toast column: the toast clears its Send button.
+  await expect.poll(async () => (await place()).aboveBox).toBe(16);
+
+  // Review takes the right of the window: the toast stays in its corner over it.
+  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  await page.getByRole("region", { name: "Open a project panel" }).getByRole("button", { name: "Open Review", exact: true }).click();
+  await expect(page.locator(".review")).toBeVisible();
+  await link.click();
+  await expect(toast()).toHaveText(notice);
+  await expect.poll(async () => (await place()).corner).toBe(16);
+  await page.screenshot({ path: info.outputPath("toast-beside-review-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await link.click();
+  await expect.poll(async () => (await place()).corner).toBe(16);
+  await page.screenshot({ path: info.outputPath("toast-beside-review-dark.png") });
+
+  // An expanded side panel hides the chat; the toast does not float up to the middle.
+  await page.getByRole("button", { name: "Expand side panel", exact: true }).click();
+  await expect(page.locator(".chat-pane")).toBeHidden();
+  await expect(toast()).toHaveText(notice);
+  await expect.poll(async () => (await place()).corner).toBe(16);
+  await page.getByRole("button", { name: "Restore side panel", exact: true }).click();
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+
+  // Right to left, the side panel and the toasts both sit on the left.
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await link.click();
+  await expect.poll(async () => (await place()).corner).toBe(16);
+  await page.screenshot({ path: info.outputPath("toast-beside-review-rtl.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+
+  // Back to the chat alone, the toast clears the message box again.
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await expect(page.locator(".side-panel")).toBeHidden();
+  await link.click();
+  await expect.poll(async () => (await place()).aboveBox).toBe(16);
+  expect(errors).toEqual([]);
+});

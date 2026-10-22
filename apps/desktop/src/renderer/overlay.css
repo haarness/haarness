@@ -617,6 +617,9 @@
   /* Above the composer's Send and Stop buttons and a waiting approval, but
      never past the middle: a tall question would lift it off the window. */
   bottom: min(calc(var(--s4) + var(--composer-clearance, 0px)), 50vh);
+  /* A panel opening or the message box growing glides a toast to its new
+     place instead of making it jump. */
+  transition: bottom var(--slow) var(--ease);
   z-index: 70;
   display: flex;
   flex-direction: column;
