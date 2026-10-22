@@ -1421,9 +1421,16 @@ async fn cli_main() -> Result<()> {
     // `serve --stop` and the `--daemon` launcher are control commands: they
     // print their result, not the server's log. A detached server's stderr
     // goes nowhere.
-    let stderr_logs = cli.print_logs
-        || matches!(&cli.command, Some(Command::Serve(args))
-            if !args.stop && !args.daemon && !args.background_child);
+    let stderr_logs = if matches!(&cli.command, Some(Command::Serve(args))
+            if !args.stop && !args.daemon && !args.background_child)
+    {
+        // Everyone the server answers would wait on a reader that stopped.
+        StderrLogs::Queued
+    } else if cli.print_logs {
+        StderrLogs::InPlace
+    } else {
+        StderrLogs::Off
+    };
     // Read-only commands stay out of the log files they inspect.
     let file_logs = !matches!(cli.command, Some(Command::Logs { .. } | Command::Doctor));
     // Processes that live as long as a window or a server get no command span:
@@ -9346,9 +9353,21 @@ fn plugin_command(
     Ok(())
 }
 
+/// Where [`init_logging`] streams log lines besides the log file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StderrLogs {
+    Off,
+    /// Written as they come, in order with the command's own output.
+    InPlace,
+    /// A server's: through [`logs::StderrQueue`], so a reader that stops
+    /// reading never holds a request.
+    Queued,
+}
+
 /// Keeps asynchronous file logs alive and flushes an optional OTLP provider.
 struct TelemetryGuard {
     _file_writer: Option<tracing_appender::non_blocking::WorkerGuard>,
+    _stderr_queue: Option<logs::StderrQueueGuard>,
     tracer_provider: Option<SdkTracerProvider>,
     /// Telemetry problems are also printed on stderr (a CLI command on a terminal).
     interactive: bool,
@@ -9577,7 +9596,7 @@ fn urls_between_escapes(text: &str) -> String {
 fn init_logging(
     paths: &Paths,
     level: Option<&str>,
-    stderr_logs: bool,
+    stderr_logs: StderrLogs,
     file_logs: bool,
     role: otel::ProcessRole,
     command: &'static str,
@@ -9626,17 +9645,39 @@ fn init_logging(
     } else {
         None
     };
-    if stderr_logs {
+    let mut stderr_queue_guard = None;
+    if stderr_logs != StderrLogs::Off {
         let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
         reloads.push(reload);
-        layers.push(Box::new(
-            tracing_subscriber::fmt::layer()
-                .with_writer(RedactUrls(io::stderr))
-                // Colour only for a terminal: not in files, pipes or journald.
-                .with_ansi(io::stderr().is_terminal())
-                .with_timer(stamp())
-                .with_filter(filter),
-        ));
+        // Colour only for a terminal: not in files, pipes or journald.
+        let ansi = io::stderr().is_terminal();
+        let queue = (stderr_logs == StderrLogs::Queued)
+            .then(|| {
+                logs::stderr_queue(
+                    io::stderr(),
+                    logs::STDERR_QUEUE_LIMIT,
+                    &paths.data.join("logs"),
+                )
+            })
+            .flatten();
+        if let Some((queue, guard)) = queue {
+            stderr_queue_guard = Some(guard);
+            layers.push(Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(RedactUrls(queue))
+                    .with_ansi(ansi)
+                    .with_timer(stamp())
+                    .with_filter(filter),
+            ));
+        } else {
+            layers.push(Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(RedactUrls(io::stderr))
+                    .with_ansi(ansi)
+                    .with_timer(stamp())
+                    .with_filter(filter),
+            ));
+        }
     }
     let otel::Tracing {
         provider: tracer_provider,
@@ -9680,6 +9721,7 @@ fn init_logging(
     }
     Ok(TelemetryGuard {
         _file_writer: file_writer_guard,
+        _stderr_queue: stderr_queue_guard,
         tracer_provider,
         interactive,
     })

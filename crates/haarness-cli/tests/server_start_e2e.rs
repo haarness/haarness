@@ -279,3 +279,93 @@ fn a_second_serve_listens_beside_the_running_server() {
     drop(stop);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// `serve` streams its log to stderr. A reader that stops reading (a paused
+/// terminal, a stalled SSH session, a pipe nobody reads) once filled the
+/// pipe, and then every request that logged waited inside that write: once
+/// the runtime's threads were all waiting, the server answered nobody.
+#[test]
+fn a_serve_whose_stderr_nobody_reads_keeps_answering() {
+    let root = std::env::temp_dir().join(format!("haarness-serve-stalled-{}", Uuid::now_v7()));
+    let workspace = root.join("workspace");
+    let data = root.join("data");
+    let home = root.join("home");
+    for directory in [&workspace, &data, &home] {
+        std::fs::create_dir_all(directory).expect("create fixture directory");
+    }
+    let mut server = Command::new(env!("CARGO_BIN_EXE_haarness"))
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["serve", "--port", "0"])
+        .current_dir(&workspace)
+        .env("HOME", &home)
+        .env("HAARNESS_HOME", &home)
+        .env("HAARNESS_TEST_PROVIDER", "1")
+        .env("HAARNESS_SERVER_TOKEN", "stalled-token")
+        .env_remove("HAARNESS_SERVER_PASSWORD")
+        // One line for every rejected request body.
+        .env("HAARNESS_LOG", "warn,axum::rejection=trace")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // Held open and never read.
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch haarness serve");
+    let stdout = server.stdout.take().expect("serve stdout");
+    let _stop = Cleanup(move || {
+        let _ = server.kill();
+        let _ = server.wait();
+    });
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = sender.send(line);
+        }
+    });
+    let url = loop {
+        let line = lines
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("serve did not listen");
+        if let Some(url) = line.strip_prefix("Haarness server listening on ") {
+            break url.trim().to_owned();
+        }
+    };
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .expect("client");
+        // Several times what a pipe holds, from as many requests at once as
+        // the server has threads, and more.
+        for _ in 0..30 {
+            let rejected = (0..50).map(|_| {
+                client
+                    .post(format!("{url}/v1/threads"))
+                    .bearer_auth("stalled-token")
+                    .header("content-type", "application/json")
+                    .body("not json")
+                    .send()
+            });
+            for answer in futures::future::join_all(rejected).await {
+                let answer = answer.expect("a rejected request still got its answer");
+                assert!(answer.status().is_client_error(), "{}", answer.status());
+            }
+        }
+        let info = client
+            .get(format!("{url}/v1/info"))
+            .bearer_auth("stalled-token")
+            .send()
+            .await
+            .expect("the server still answers");
+        assert!(info.status().is_success(), "{}", info.status());
+    });
+    drop(_stop);
+    let _ = std::fs::remove_dir_all(root);
+}
