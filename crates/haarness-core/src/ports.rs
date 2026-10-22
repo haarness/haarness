@@ -205,6 +205,20 @@ pub trait ThreadRepository: Send + Sync {
         turn: Option<TurnId>,
         data: ItemData,
     ) -> CoreResult<Item>;
+    /// Append `items` to `thread` in order, all or none. Stores without
+    /// transactions append them one at a time.
+    async fn append_items(
+        &self,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        items: Vec<ItemData>,
+    ) -> CoreResult<Vec<Item>> {
+        let mut appended = Vec::with_capacity(items.len());
+        for data in items {
+            appended.push(self.append_item(thread, turn, data).await?);
+        }
+        Ok(appended)
+    }
     async fn set_turn_status(
         &self,
         id: TurnId,

@@ -690,6 +690,35 @@ impl SqliteStore {
         Ok((turn, item, true))
     }
 
+    /// One item appended inside `tx`, the chat's last change time with it.
+    fn insert_item(
+        tx: &rusqlite::Transaction<'_>,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        data: ItemData,
+    ) -> CoreResult<Item> {
+        let now = Utc::now();
+        let item = Item {
+            id: ItemId::new(),
+            thread_id: thread,
+            turn_id: turn,
+            sequence: Self::next_sequence(tx, thread)?,
+            data,
+            created_at: now,
+        };
+        tx.execute(
+            "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![item.id.to_string(), thread.to_string(), turn.map(|id| id.to_string()), i64::try_from(item.sequence).map_err(storage)?,
+                serde_json::to_string(&item.data).map_err(storage)?, time(now)],
+        ).map_err(storage)?;
+        tx.execute(
+            "UPDATE threads SET updated_at=?2 WHERE id=?1",
+            params![thread.to_string(), time(now)],
+        )
+        .map_err(storage)?;
+        Ok(item)
+    }
+
     fn next_sequence(connection: &Connection, thread_id: ThreadId) -> CoreResult<u64> {
         let value: i64 = connection
             .query_row(
@@ -993,27 +1022,27 @@ impl ThreadRepository for SqliteStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
-        let now = Utc::now();
-        let item = Item {
-            id: ItemId::new(),
-            thread_id: thread,
-            turn_id: turn,
-            sequence: Self::next_sequence(&tx, thread)?,
-            data,
-            created_at: now,
-        };
-        tx.execute(
-            "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![item.id.to_string(), thread.to_string(), turn.map(|id| id.to_string()), i64::try_from(item.sequence).map_err(storage)?,
-                serde_json::to_string(&item.data).map_err(storage)?, time(now)],
-        ).map_err(storage)?;
-        tx.execute(
-            "UPDATE threads SET updated_at=?2 WHERE id=?1",
-            params![thread.to_string(), time(now)],
-        )
-        .map_err(storage)?;
+        let item = Self::insert_item(&tx, thread, turn, data)?;
         tx.commit().map_err(storage)?;
         Ok(item)
+    }
+
+    async fn append_items(
+        &self,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        items: Vec<ItemData>,
+    ) -> CoreResult<Vec<Item>> {
+        let mut connection = self.connection.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let items = items
+            .into_iter()
+            .map(|data| Self::insert_item(&tx, thread, turn, data))
+            .collect::<CoreResult<Vec<_>>>()?;
+        tx.commit().map_err(storage)?;
+        Ok(items)
     }
 
     async fn set_turn_status(

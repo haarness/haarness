@@ -2767,8 +2767,10 @@ impl AgentRuntime {
     /// Keep a background result that `thread` refused as input with `error`
     /// (its agent was removed or disabled meanwhile, or storage kept
     /// failing), as a restart keeps one it held: a hidden message the model
-    /// reads with the person's next one, and a notice that says so. Only a
-    /// chat that is gone loses it.
+    /// reads with the person's next one, and a notice that says so, written
+    /// together while no turn can start. A turn that started meanwhile takes
+    /// the result as steering instead, so it never lands between a tool call
+    /// and its result. A chat that is gone, or archived, is not told.
     pub async fn keep_refused_background_result(
         &self,
         thread: ThreadId,
@@ -2781,36 +2783,84 @@ impl AgentRuntime {
             return;
         }
         let kept = async {
-            let thread = self.repository.get_thread(thread).await?;
-            let root = self.resolve_root(&thread).await;
-            for data in [
-                ItemData::UserMessage {
-                    text,
-                    attachments: Vec::new(),
-                    queued: false,
-                    synthetic: true,
-                },
-                ItemData::Error {
-                    message: notice,
-                    retryable: false,
-                },
-            ] {
-                let item = self.repository.append_item(thread.id, None, data).await?;
-                self.events.publish_scoped(
-                    "item.created",
-                    Some(thread.id),
-                    Some(root),
-                    None,
-                    Some(item.id),
-                    json!(item),
-                );
+            loop {
+                let admission = turn_admission_lock(&self.turn_admissions, thread);
+                let admitted = admission.lock().await;
+                let active = self
+                    .active
+                    .get(&thread)
+                    .map(|entry| Arc::clone(entry.value()));
+                if let Some(active) = active {
+                    drop(admitted);
+                    let changed = active.changed.notified();
+                    let accepting = active.accepting.lock().await;
+                    if *accepting {
+                        let chat = self.repository.get_thread(thread).await?;
+                        let request = QueueInputRequest {
+                            preview: None,
+                            reasoning_effort: None,
+                            delivery: haarness_protocol::InputDelivery::Steer,
+                            request_id: RequestId::new(),
+                            text,
+                            attachments: Vec::new(),
+                            synthetic: true,
+                        };
+                        self.append_queued_input(&chat, active.id, &request).await?;
+                        return CoreResult::Ok("steered into the turn that started meanwhile");
+                    }
+                    drop(accepting);
+                    // Starting or closing: wait for it, then look again.
+                    if self
+                        .active
+                        .get(&thread)
+                        .is_some_and(|current| current.id == active.id)
+                    {
+                        changed.await;
+                    }
+                    continue;
+                }
+                let chat = self.repository.get_thread(thread).await?;
+                if chat.archived {
+                    return Ok("dropped: its chat is archived");
+                }
+                let root = self.resolve_root(&chat).await;
+                let items = self
+                    .repository
+                    .append_items(
+                        thread,
+                        None,
+                        vec![
+                            ItemData::UserMessage {
+                                text,
+                                attachments: Vec::new(),
+                                queued: false,
+                                synthetic: true,
+                            },
+                            ItemData::Error {
+                                message: notice,
+                                retryable: false,
+                            },
+                        ],
+                    )
+                    .await?;
+                drop(admitted);
+                for item in items {
+                    self.events.publish_scoped(
+                        "item.created",
+                        Some(thread),
+                        Some(root),
+                        None,
+                        Some(item.id),
+                        json!(item),
+                    );
+                }
+                return Ok("kept for the chat's next message");
             }
-            CoreResult::Ok(())
         }
         .await;
         match kept {
-            Ok(()) => {
-                tracing::warn!(%thread, %error, "background result kept for the chat's next message");
+            Ok(outcome) => {
+                tracing::warn!(%thread, %error, outcome, "background result its chat refused");
             }
             Err(kept) => {
                 tracing::error!(%thread, %error, %kept, "failed to deliver or keep a background result");
@@ -15195,6 +15245,7 @@ fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::Prompt
 #[cfg(test)]
 mod prepared_usage_tests {
     use super::*;
+
 
     #[test]
     fn prepared_estimates_include_current_tools_and_system_without_media_payloads() {

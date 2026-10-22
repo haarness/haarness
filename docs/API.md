@@ -268,8 +268,10 @@ take as input is kept the same way instead of being lost: when the chat's
 agent was removed or disabled meanwhile, or storage still fails after three
 tries, the result becomes a hidden user message and an `error` item says
 “The result of the background task “…” could not start a turn in this chat
-(reason); your next message passes it to the agent.” Only a chat that no
-longer exists drops it.
+(reason); your next message passes it to the agent.” (“workflow” for a
+workflow's). Both are written in one database step while no turn can start;
+if a turn started meanwhile, the result steers into it instead. A chat that
+no longer exists, or is archived, is not told.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
