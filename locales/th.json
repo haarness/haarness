@@ -1599,6 +1599,8 @@
   "Video": "วิดีโอ",
   "Reasoning": "การให้เหตุผล",
   "Built-in / plugin": "ในตัว / ปลั๊กอิน",
+  "Base": "พื้นฐาน",
+  "From the base folder": "จากโฟลเดอร์พื้นฐาน",
   "Model default": "ค่าเริ่มต้นของโมเดล",
   "Minimal": "น้อยที่สุด",
   "Low": "ต่ำ",

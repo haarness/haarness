@@ -909,6 +909,15 @@ dialog .notifications {
   font-size: var(--ui-lg);
   font-weight: 500;
 }
+/* A source tag (Base) beside a row's title or a block's heading: a quiet
+   badge in the label's own words. */
+.badge.setting-tag {
+  text-transform: none;
+  vertical-align: 1px;
+}
+.setting-row strong + .setting-tag {
+  margin-inline-start: var(--s2);
+}
 .setting-row p {
   font-size: var(--ui);
   color: var(--muted);

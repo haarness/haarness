@@ -37,7 +37,7 @@ use crate::{
     CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionEngine,
     PermissionRule, ProviderEvent, ProviderMessage, ProviderRegistry, ProviderRequest,
     RuntimeConfig, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput,
-    ToolRegistry, system_prompt_for, system_prompt_with_context,
+    ToolRegistry,
 };
 
 const MAX_COMPACTIONS_PER_TURN: u8 = 4;
@@ -2503,7 +2503,12 @@ impl AgentRuntime {
                 output_style: components.config.output_style.as_ref(),
             };
             let base = custom.as_ref().map_or_else(
-                || system_prompt_with_context(&thread.agent, &context),
+                || {
+                    crate::agents::instructions_with_context(
+                        &components.config.prompts.agent(&thread.agent),
+                        &context,
+                    )
+                },
                 |custom| custom_system_prompt_with_context(&custom.prompt, &context),
             );
             let ultracode = if let Some(turn) = turn_id {
@@ -2511,8 +2516,14 @@ impl AgentRuntime {
             } else {
                 false
             };
-            let mut system =
-                crate::side_question::system(base, &components.project_context, ultracode, false);
+            let ultracode =
+                ultracode.then(|| components.config.prompts.text(crate::PromptName::Ultracode));
+            let mut system = crate::side_question::system(
+                base,
+                &components.project_context,
+                ultracode.as_deref(),
+                false,
+            );
             let mut engine = components.config.permission_defaults(&thread.agent, "");
             for rule in self.repository_rules.lock().iter().cloned() {
                 engine.add_repository_grant(rule);
@@ -3213,6 +3224,10 @@ impl AgentRuntime {
         let summary = summarize_context(
             &provider,
             &thread.model,
+            self.components()
+                .config
+                .prompts
+                .text(crate::PromptName::Compaction),
             provider_messages(items.clone()),
             CancellationToken::new(),
         )
@@ -5365,6 +5380,7 @@ impl AgentRuntime {
             .and_then(|agent| agent.model)
             .or_else(|| components.config.small_model.clone());
         let fallback = (turn.provider.clone(), turn.model.clone());
+        let title_prompt = components.config.prompts.text(crate::PromptName::Title);
         tokio::spawn(
             async move {
                 let guard = job;
@@ -5382,6 +5398,7 @@ impl AgentRuntime {
                         guard.thread_id,
                         small_model.clone(),
                         fallback.clone(),
+                        &title_prompt,
                     )
                     .await
                     {
@@ -6711,6 +6728,7 @@ impl RunnerTask {
         let summary = summarize_context(
             provider,
             model,
+            self.config.prompts.text(crate::PromptName::Compaction),
             provider_messages(items.clone()),
             self.cancel.clone(),
         )
@@ -7096,6 +7114,7 @@ impl RunnerTask {
                         let summary = summarize_context(
                             &provider,
                             &model,
+                            self.config.prompts.text(crate::PromptName::Compaction),
                             provider_messages(items),
                             self.cancel.clone(),
                         )
@@ -7229,7 +7248,10 @@ impl RunnerTask {
                 if let Some(state) = &goal_for_request
                     && self.accounted_goal_id().as_deref() == Some(state.goal_id.as_str())
                 {
-                    let doctrine = crate::goal::goal_continuation_prompt(state);
+                    let doctrine = crate::goal::goal_continuation_prompt(
+                        state,
+                        &self.config.prompts.text(crate::PromptName::Goal),
+                    );
                     inject_goal_doctrine(&mut messages, &doctrine, goal_doctrine_insert_at);
                 }
                 for item_id in consumed_now {
@@ -7252,8 +7274,8 @@ impl RunnerTask {
                         },
                     )
                 } else {
-                    system_prompt_with_context(
-                        agent,
+                    crate::agents::instructions_with_context(
+                        &self.config.prompts.agent(agent),
                         &SystemPromptContext {
                             provider: provider_id,
                             model: &model,
@@ -7264,10 +7286,14 @@ impl RunnerTask {
                         },
                     )
                 };
+                let ultracode = self
+                    .turn
+                    .ultracode
+                    .then(|| self.config.prompts.text(crate::PromptName::Ultracode));
                 let mut system = crate::side_question::system(
                     base,
                     &self.project_context,
-                    self.turn.ultracode,
+                    ultracode.as_deref(),
                     self.output_schema.is_some(),
                 );
                 let tool_round_limit_reached = max_rounds.is_some_and(|limit| tool_rounds >= limit);
@@ -7276,7 +7302,7 @@ impl RunnerTask {
                     // prefill, which Claude 4.6 and later answer with a 400.
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
-                        content: "The configured maximum number of tool steps has been reached. Tools are disabled for this response. Summarize the work completed, explain anything unfinished, and respond to the user without calling tools.".into(),
+                        content: self.config.prompts.text(crate::PromptName::MaxSteps),
                     });
                 }
                 // Apply disabled-tool filtering before the
@@ -7306,7 +7332,11 @@ impl RunnerTask {
                 if !tool_round_limit_reached
                     && eligible_tools.iter().any(|tool| tool.name == "preview")
                 {
-                    system.push_str(include_str!("preview.txt"));
+                    // A line break before and after, as the built-in
+                    // section has always been sent.
+                    system.push('\n');
+                    system.push_str(&self.config.prompts.text(crate::PromptName::Preview));
+                    system.push('\n');
                 }
                 let mut lazy_settings = self.config.lazy_tools.clone();
                 if let Some(mode) = *self.lazy_tool_mode.read() {
@@ -10864,6 +10894,7 @@ async fn auto_title(
     thread_id: ThreadId,
     small_model: Option<String>,
     fallback: (String, String),
+    system: &str,
 ) -> CoreResult<()> {
     if !haarness_protocol::is_untitled_chat_title(&repository.get_thread(thread_id).await?.title) {
         return Ok(());
@@ -10904,13 +10935,14 @@ async fn auto_title(
     }];
     let mut failure = CoreError::Provider("title generation returned no text".into());
     for (provider_id, model) in models {
-        let title = match generate_title(providers, &provider_id, model, messages.clone()).await {
-            Ok(title) => title,
-            Err(error) => {
-                failure = error;
-                continue;
-            }
-        };
+        let title =
+            match generate_title(providers, &provider_id, model, system, messages.clone()).await {
+                Ok(title) => title,
+                Err(error) => {
+                    failure = error;
+                    continue;
+                }
+            };
         if let Some(thread) = repository
             .update_generated_title(thread_id, haarness_protocol::UNTITLED_CHAT_TITLE, &title)
             .await?
@@ -10926,6 +10958,7 @@ async fn generate_title(
     providers: &Arc<dyn ProviderRegistry>,
     provider_id: &str,
     model: String,
+    system: &str,
     messages: Vec<ProviderMessage>,
 ) -> CoreResult<String> {
     let provider = providers
@@ -10933,7 +10966,7 @@ async fn generate_title(
         .ok_or_else(|| CoreError::Invalid(format!("unknown provider {provider_id}")))?;
     let request = ProviderRequest {
         model,
-        system: system_prompt_for("title"),
+        system: system.to_owned(),
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
@@ -11283,6 +11316,7 @@ fn compaction_message(message: ProviderMessage) -> ProviderMessage {
 async fn summarize_context(
     provider: &Arc<dyn ModelProvider>,
     model: &str,
+    system: String,
     messages: Vec<ProviderMessage>,
     cancel: CancellationToken,
 ) -> CoreResult<String> {
@@ -11301,7 +11335,7 @@ async fn summarize_context(
     });
     let request = ProviderRequest {
         model: model.to_owned(),
-        system: system_prompt_for("compaction"),
+        system,
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
