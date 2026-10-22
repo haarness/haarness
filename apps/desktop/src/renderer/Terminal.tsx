@@ -265,6 +265,13 @@ export function TerminalPanel() {
           onClick={() => app.run(create)}
         />
         <div class="grow" />
+        {/* A terminal of another computer says so where commands are typed. */}
+        <Show when={app.state.connection?.remoteHost}>
+          <span class="badge host-badge" title={app.currentServer().label}>
+            <Icon name="host" size="xs" />
+            <span>{t("on {computer}", { computer: app.currentServer().label })}</span>
+          </span>
+        </Show>
         <Button
           icon="close"
           label={t("Hide terminal")}

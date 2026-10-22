@@ -24,6 +24,7 @@ import { shortcutLabel } from "../renderer/search";
 const say = (key: string) => translate(data().preferences.language, key);
 import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { browseRemote, openRemote, remoteLocationId } from "./remote-projects";
+import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
 import {
   app,
@@ -65,6 +66,8 @@ import {
   connectLocal,
   establish,
   connection,
+  connectionAuth,
+  connectionClient,
   connections,
   invoke,
   command,
@@ -267,7 +270,7 @@ function watchNotifications(id: string, owner: number) {
     return;
   }
   previous?.stop();
-  const client = new Haarness({ baseUrl: item.url, auth: item.auth });
+  const client = connectionClient(item);
   let stopped = false;
   let waiting: (() => void) | undefined;
   // Each listen is an attempt of its own; a newer one ends the older.
@@ -362,6 +365,20 @@ function forgetNotifications(id: string) {
   notificationWatches.get(id)?.stop();
   notificationWatches.delete(id);
   notifications.forget(id);
+}
+/** Your other computers are reached through Haarness Cloud with the
+ * account's sign-in, which only main holds. */
+const relay = createRelay((rejected) =>
+  accountRequest({ action: "remote-auth", ...(rejected ? { rejected } : {}) }),
+);
+/** Keeps another computer in the server list once it is opened, under the
+ * name the account gives it now. */
+function saveHostServer(host: string, label?: string) {
+  const id = hostServerId(host);
+  const saved = data().servers.find((item) => item.id === id);
+  if (saved) {
+    if (label) saved.label = label;
+  } else data().servers.push({ id, label: label || say("Remote"), host });
 }
 let projectCatalog: Promise<Recent[]> | undefined;
 async function refreshProjects(): Promise<Recent[]> {
@@ -580,7 +597,7 @@ function installHandlers() {
       const id = z.string().parse(rawServer);
       const path = z.string().max(16384).optional().parse(rawPath);
       const server = data().servers.find((item) => item.id === id);
-      if (!server?.url) throw new Error("Saved remote server was not found");
+      if (!server?.url && !server?.host) throw new Error("Saved remote server was not found");
       const options = z
         .object({
           prefix: z.string().max(4096).optional(),
@@ -592,10 +609,18 @@ function installHandlers() {
         .optional()
         .parse(rawOptions);
       return {
-        listing: await browseRemote(server.url, serverAuth(id), path, options),
+        listing: server.host
+          ? await hostBrowse(relay, server.host, say, { ...options, ...(path ? { path } : {}) })
+          : await browseRemote(server.url!, serverAuth(id), path, options),
       };
     },
   );
+  handle("remoteCatalog", async (_, rawServer: unknown) => {
+    const id = z.string().max(200).parse(rawServer);
+    const host = data().servers.find((item) => item.id === id)?.host;
+    if (!host) throw new Error("Saved remote server was not found");
+    return hostCatalog(relay, host, say);
+  });
   handle("notificationHandled", (win, raw: unknown) => {
     const target = z
       .object({ connection: z.string(), thread: z.string() })
@@ -694,7 +719,7 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web", "remote-hosts"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "billing-state") return billingState();
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
     if (input.action === "login") {
@@ -708,6 +733,8 @@ function installHandlers() {
       if (!["logout", "select", "select-router"].includes(input.action)) return result;
       if (input.action !== "select-router") closeCloudConnections();
     }
+    // Another computer is opened with the account's own sign-in.
+    relay.forget();
     await Promise.allSettled([...connections.values()].filter(c => !c.view.remote).map(c => c.client.refreshProviders()));
     startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
     broadcast({ kind: "menu", data: { action: "account-changed" } });
@@ -719,6 +746,8 @@ function installHandlers() {
         workspace: z.string().optional(),
         cloudWorkspace: z.string().uuid().optional(),
         cloudSession: z.string().uuid().optional(),
+        remoteHost: z.string().uuid().optional(),
+        remoteWorkspace: z.string().min(1).max(200).optional(),
         url: z.string().optional(),
         token: z.string().optional(),
         username: z.string().max(1024).optional(),
@@ -740,7 +769,8 @@ function installHandlers() {
         input.url ||
         input.recent ||
         input.cloudSession ||
-        input.cloudWorkspace)
+        input.cloudWorkspace ||
+        input.remoteHost)
     )
       throw new Error("A link can only open a folder on this computer");
     const recent = input.recent
@@ -757,6 +787,47 @@ function installHandlers() {
         saved: view,
         requested: input.recent,
         save: async (next) => {
+          data().recent = next;
+          await persist();
+        },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
+    }
+    const remoteHost = input.remoteHost ?? recent?.remoteHost;
+    if (remoteHost) {
+      const opened = await connectHost(
+        relay,
+        {
+          host: remoteHost,
+          workspace: input.remoteWorkspace ?? recent?.remoteWorkspace,
+          path: input.recent ? undefined : input.workspace,
+          apiUrl: recent?.cloudApiUrl,
+          project: recent?.project,
+          checkout: recent?.checkout,
+        },
+        say,
+      );
+      const { view } = opened;
+      connections.get(view.id)?.client.close();
+      connections.set(view.id, { ...opened, auth: { type: "none" } });
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved: {
+          id: view.id,
+          label: view.label,
+          workspace: view.workspace,
+          remote: true,
+          remoteHost,
+          remoteWorkspace: view.remoteWorkspace,
+          cloudApiUrl: view.cloudApiUrl,
+          trust: false,
+          ...(view.project ? { project: view.project } : {}),
+          ...(view.checkout ? { checkout: view.checkout } : {}),
+        },
+        requested: input.recent,
+        save: async (next) => {
+          saveHostServer(remoteHost, input.label);
           data().recent = next;
           await persist();
         },
@@ -953,11 +1024,16 @@ function installHandlers() {
     const input = z
       .object({
         id: z.string(),
-        action: z.enum(["rename", "remove"]),
+        action: z.enum(["rename", "remove", "host"]),
         label: z.string().trim().min(1).max(200).optional(),
       })
       .strict()
       .parse(raw);
+    if (input.action === "host") {
+      saveHostServer(z.string().uuid().parse(input.id), input.label);
+      await persist();
+      return data().servers;
+    }
     return projectTransaction(input.id, async () => {
       const server = data().servers.find((item) => item.id === input.id);
       if (!server) throw new Error("Saved server was not found");
@@ -1018,10 +1094,10 @@ function installHandlers() {
       if (spec[0] === "GET")
         for (const [key, value] of Object.entries(input))
           url.searchParams.set(key, String(value));
-      const response = await fetch(url, {
+      const response = await (item.fetch ?? fetch)(url, {
         method: spec[0],
         headers: {
-          ...authorizationHeaders(item.auth),
+          ...authorizationHeaders(await connectionAuth(item)),
           "Content-Type": "application/json",
         },
         body: spec[0] === "GET" ? undefined : JSON.stringify(input),
@@ -1077,20 +1153,33 @@ function installHandlers() {
         send(win, { kind: "connection", connection: id, id: key, data: "opened" });
       return response;
     };
-    const client = new Haarness({
-      baseUrl: item.url,
-      auth: item.auth,
-      fetch: (request, init) => fetch(request, init).then(opened),
-    });
+    const client = connectionClient(item, opened);
     subscriptions.set(key, { owner: win.id, client });
+    // Cloud ends a relayed stream when the sign-in it opened with expires
+    // (every ten minutes): one that worked for a while follows on at once
+    // from its last event with a fresh one, as if nothing happened. A stream
+    // that fails at once is the computer gone, and is reported.
+    const relayed = (started: number) =>
+      !!item.resolveAuth && subscriptions.has(key) && Date.now() - started > 30_000;
     void (async () => {
       try {
-        for await (const event of client.events({
-          after: cursor,
-          reconnect: false,
-          idleTimeoutMs: eventIdleMs(),
-        })) {
-          send(win, { kind: "server", connection: id, id: key, data: event });
+        let after = cursor;
+        for (;;) {
+          const started = Date.now();
+          try {
+            for await (const event of client.events({
+              after,
+              reconnect: false,
+              idleTimeoutMs: eventIdleMs(),
+            })) {
+              send(win, { kind: "server", connection: id, id: key, data: event });
+              if ("eventId" in event) after = event.eventId;
+            }
+          } catch (error) {
+            if (!relayed(started)) throw error;
+            continue;
+          }
+          if (!relayed(started)) break;
         }
         send(win, {
           kind: "connection",

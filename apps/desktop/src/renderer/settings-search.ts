@@ -200,7 +200,7 @@ export function createSettingsSearch(
                 "servers",
                 server.label,
                 "server:" + server.id,
-                server.url ?? "local computer",
+                server.url ?? (server.host ? "remote computer" : "local computer"),
               ),
             ),
           ...app

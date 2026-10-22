@@ -5,7 +5,7 @@ import { SettingRow as Row } from "./SettingRow";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
-import { formatNumber, t, languages } from "./i18n";
+import { formatNumber, splitAround, t, languages } from "./i18n";
 import { InputSettings } from "./InputSettings";
 import { openServerConnection } from "./ServerConnect";
 import { ManagementPanel } from "./ManagementPanel";
@@ -23,12 +23,15 @@ import { Select } from "./Select";
 import { MenuButton } from "./MenuButton";
 import {
   For,
+  Match,
   Show,
+  Switch,
   createSignal,
   createEffect,
   onCleanup,
   onMount,
 } from "solid-js";
+import { computers, lastSeen, loadComputers, platformName, watchComputers } from "./computers";
 import type * as T from "@haarness/sdk";
 import type { Preferences } from "../shared";
 import { themes, themeColors } from "../themes";
@@ -728,7 +731,7 @@ function Servers() {
       <p class="muted">
         {t("Select a server to see its projects and chats.")}
       </p>
-      <For each={app.servers()}>
+      <For each={app.servers().filter((item) => !item.host)}>
         {(item) => (
           <Row
             title={item.label}
@@ -799,7 +802,99 @@ function Servers() {
           {t("Add remote server")}
         </button>
       </div>
+      <Computers />
     </>
+  );
+}
+/** Your other computers, read from the account when this page opens. */
+function Computers() {
+  const app = useApp();
+  onCleanup(watchComputers());
+  const active = () => app.currentServer().host;
+  return (
+    <section class="settings-computers" aria-label={t("Your computers")} data-setting="Your computers">
+      <header>
+        <div>
+          <h3>{t("Your computers")}</h3>
+          <p>
+            {splitAround(
+              t("Open a computer you share with {command}, through Haarness Cloud. Its prompts, tools and terminals run there."),
+              () => <code>haarness remote enable</code>,
+              "{command}",
+            )}
+          </p>
+        </div>
+        <Show when={computers.status !== "signed-out"}>
+          <Button
+            icon="refresh"
+            label={t("Refresh")}
+            disabled={computers.status === "loading"}
+            onClick={() => void loadComputers()}
+          />
+        </Show>
+      </header>
+      <Switch>
+        <Match when={computers.status === "signed-out"}>
+          <div class="settings-computers-note">
+            <p>{t("Sign in to Haarness to open your other computers here.")}</p>
+            <button onClick={() => window.dispatchEvent(new CustomEvent("haarness:account"))}>
+              {t("Sign in")}
+            </button>
+          </div>
+        </Match>
+        <Match when={computers.status === "error"}>
+          <div class="settings-computers-note">
+            <p role="alert" title={computers.error}>
+              {t("Couldn’t list your computers. Check your connection and try again.")}
+            </p>
+            <button onClick={() => void loadComputers()}>{t("Try again")}</button>
+          </div>
+        </Match>
+        <Match when={!computers.items.length && computers.status !== "ready"}>
+          <p class="settings-computers-note" role="status">
+            {t("Looking for your computers…")}
+          </p>
+        </Match>
+        <Match when={!computers.items.length}>
+          <p class="settings-computers-note">
+            {splitAround(
+              t("No other computers yet. Run {command} on one to open it here."),
+              () => <code>haarness remote enable</code>,
+              "{command}",
+            )}
+          </p>
+        </Match>
+      </Switch>
+      <For each={computers.items}>
+        {(computer) => (
+          <div
+            class="setting-row computer-row"
+            classList={{ away: !computer.connected }}
+            data-setting={"server:host:" + computer.id}
+          >
+            <Icon name="host" size="md" />
+            <div>
+              <strong>{computer.name}</strong>
+              <p>
+                {computer.connected
+                  ? platformName(computer.platform) || t("Connected")
+                  : lastSeen(computer)}
+              </p>
+            </div>
+            <button
+              disabled={
+                active() === computer.id
+                  ? !app.state.openingProject
+                  : !computer.connected
+              }
+              onClick={() => app.run(() => app.openComputer(computer))}
+            >
+              {active() === computer.id ? t("Selected") : t("Switch")}
+            </button>
+          </div>
+        )}
+      </For>
+    </section>
   );
 }
 function Projects() {

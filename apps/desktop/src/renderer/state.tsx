@@ -41,6 +41,7 @@ import { createStore, reconcile, unwrap } from "solid-js/store";
 import type * as T from "@haarness/sdk";
 import {
   defaults,
+  type Computer,
   type Connection,
   type Preferences,
   type Recent,
@@ -966,7 +967,7 @@ function createApp(saved?: Preferences) {
   async function openProject(newChat = false) {
     set("openingChat", 0);
     const server = currentServer();
-    if (server.url) {
+    if (server.url || server.host) {
       set("remoteProjectRequest", { server, newChat });
       return false;
     }
@@ -985,6 +986,18 @@ function createApp(saved?: Preferences) {
     applyRecent((await window.haarness.boot()).recent);
     if (active) await switchServer(state.activeServer);
     return true;
+  }
+  /** Switches to another of your computers, as to any server: its last
+   * project reopens, or its project home lists what it offers. */
+  async function openComputer(computer: Pick<Computer, "id" | "name">) {
+    const id = "host:" + computer.id;
+    const saved = state.servers.find((item) => item.id === id);
+    if (!saved || saved.label !== computer.name)
+      set(
+        "servers",
+        await window.haarness.server({ id: computer.id, action: "host", label: computer.name }),
+      );
+    return switchServer(id);
   }
   async function removeServer(id: string) {
     if (state.activeServer === id && !(await switchServer("local")))
@@ -2147,6 +2160,7 @@ function createApp(saved?: Preferences) {
     servers,
     currentServer,
     switchServer,
+    openComputer,
     openProject,
     forgetProject,
     removeServer,
