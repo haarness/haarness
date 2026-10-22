@@ -11551,6 +11551,22 @@ async fn permission_hook_answer(
             Some(PermissionDecision::Deny) => {
                 return HookAnswer::Refused("denied by a PermissionRequest hook".into());
             }
+            // An allow for input the hook rewrote approves a different call
+            // than the one asked about; the prompt rules were checked for
+            // this one, so it stays the person's to answer.
+            Some(PermissionDecision::Allow)
+                if decision
+                    .updated_input
+                    .as_ref()
+                    .is_some_and(|updated| updated != &input) =>
+            {
+                tracing::info!(
+                    %thread,
+                    permission = %plan.permission,
+                    "a PermissionRequest hook allowed a rewritten input; asking instead"
+                );
+                allowed = false;
+            }
             Some(PermissionDecision::Allow) => {}
             _ => allowed = false,
         }

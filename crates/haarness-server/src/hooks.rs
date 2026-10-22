@@ -304,6 +304,17 @@ impl ConfiguredHooks {
                 if let Some(input) = specific.get("updatedInput").and_then(Value::as_object) {
                     outcome.updated_input = Some(Value::Object(input.clone()));
                 }
+                // Claude Code's PermissionRequest answer carries its rewrite
+                // inside the decision. The runtime reads it only to know that
+                // an allow was for other input (see `permission_hook_answer`).
+                if entry.event == "PermissionRequest"
+                    && let Some(input) = specific
+                        .get("decision")
+                        .and_then(|decision| decision.get("updatedInput"))
+                        .and_then(Value::as_object)
+                {
+                    outcome.updated_input = Some(Value::Object(input.clone()));
+                }
                 match specific
                     .get("decision")
                     .and_then(|decision| decision.get("behavior"))
@@ -1732,6 +1743,28 @@ mod tests {
             .await;
         assert_eq!(decision.permission, Some(PermissionDecision::Allow));
         assert!(decision.block.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_permission_request_allow_says_when_it_rewrote_the_input() {
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PermissionRequest": [{"matcher": "bash", "hooks": [{
+                    "command": r#"echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"command":"npm ci"}}}}'"#
+                }]}]
+            })),
+            std::env::temp_dir(),
+        );
+        let decision = hooks
+            .permission_request(
+                ThreadId::new(),
+                "bash",
+                &["npm install".to_owned()],
+                &json!({"command": "npm install"}),
+            )
+            .await;
+        assert_eq!(decision.permission, Some(PermissionDecision::Allow));
+        assert_eq!(decision.updated_input, Some(json!({"command": "npm ci"})));
     }
 
     #[tokio::test]
