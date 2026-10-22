@@ -24,7 +24,7 @@ Published access includes descendants and the shared project filesystem. It excl
 - Record native/Cloud source SHAs, selected Cloud checkout, API/web addresses and binary path. Use current endpoint discovery; daemon replacement changes its address/token.
 - Use an owned disposable workspace plus `HAARNESS_DATA_DIR` and `HAARNESS_CLOUD_CONFIG_DIR`. Keep user daemons/projects intact. Retain a manifest of host/publication/project/thread/PTY IDs and fixture processes.
 - Reuse the local Cloud sandbox with migrated PostgreSQL. The CLI requires runtime capability `remote-chat-scope.v1`; if stale, rebuild and restart only the fixture daemon.
-- Supply a private test key with `remote:read`, `remote:connect`, `remote:control` and an appropriate account role. Model access is configured separately on the native fixture. Never print tokens or save them in evidence.
+- Supply a private test key with `remote:read`, `remote:connect`, `remote:control`, `workspaces:read` and `workspaces:write` (the live script lists and dismisses attention) and an appropriate account role. Model access is configured separately on the native fixture. Never print tokens or save them in evidence.
 - If contracts changed, regenerate matching schemas using the [SDK skill](../haarness-sdk-surface/SKILL.md). Build the CLI and TypeScript SDK when their code changed or outputs are absent.
 
 ## Focused and live automated checks

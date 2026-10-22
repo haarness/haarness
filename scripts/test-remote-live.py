@@ -2,8 +2,8 @@
 """Opt-in real native connector + Cloud + Python/TS SDK lifecycle/stress test.
 
 HAARNESS_REMOTE_E2E=1 HAARNESS_CLOUD_API_URL=http://127.0.0.1:19080
-HAARNESS_API_KEY must allow remote:read, remote:connect, remote:control and
-workspaces:read (the attention list).
+HAARNESS_API_KEY must allow remote:read, remote:connect, remote:control,
+workspaces:read (listing attention) and workspaces:write (dismissing a row).
 Uses the built CLI, isolated local files/state, echo provider, and owned registrations.
 Connectors reach Cloud through a loopback proxy the test can cut, as a network
 change would, while the connector keeps running.
