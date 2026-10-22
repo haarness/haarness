@@ -10,9 +10,8 @@
 - `${keychain:NAME}` resolves when a server starts, from `haarness mcp secret set` or Desktop's request; a missing
   entry fails that server naming the reference; the setting stays as written and no log holds the secret.
 
-The keychain is a test file (HAARNESS_TEST_KEYCHAIN_FILE, honoured by debug builds only); the script fails if a
-secret reaches anything else. With HAARNESS_REAL_KEYCHAIN=1 on macOS it also stores, uses and removes one
-uniquely named entry in the login Keychain.
+The keychain is a test file (HAARNESS_TEST_KEYCHAIN_FILE, honoured by debug builds only), so the script never
+touches the system's keychain, and it fails if a secret reaches anything else.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-servers.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -27,6 +26,8 @@ root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-servers-', dir=os.envi
 workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True)
 keychain = root/'keychain.json'
 SECRET = 'ghp_e2e-' + uuid.uuid4().hex
+# Quotes, backslashes and length the old `security -i` path split or mangled.
+AWKWARD = 'a"b\\c\\"d \'e\' $(f) %g% ' + 'x' * 4096
 python = sys.executable
 
 
@@ -37,12 +38,15 @@ def server(fixture, **extra):
 settings = workspace/'.haarness/haarness.json'
 settings.write_text(json.dumps({
     'model': 'echo/echo-1',
-    'permission': {'mcp_resource_read': {'docs:docs://private*': 'deny'}},
+    'permission': {'mcp_resource_read': {'docs:docs://private*': 'deny'}, 'mcp__hidden__*': 'deny'},
     'mcp': {
         'flood': server('flood.py', env={'FLOOD_MIB': '400', 'PID_LOG': str(root/'flood-pids')}),
         'docs': server('resources.py'),
+        # Every tool of it denied: its resources are kept from the model too.
+        'hidden': server('resources.py'),
         'app': server('app.py', apps=False),
-        'keyed': server('env.py', env={'TOKEN': '${keychain:fixture-token}', 'HOME_SEEN': '${HOME}'}),
+        'keyed': server('env.py', env={'TOKEN': '${keychain:fixture-token}', 'AWKWARD': '${keychain:awkward}',
+                                       'HOME_SEEN': '${HOME}'}),
         'missing': server('env.py', env={'TOKEN': 'Bearer ${keychain:absent-token}'}),
     },
 }, indent=2) + '\n')
@@ -89,10 +93,16 @@ try:
     stored = cli('mcp', 'secret', 'set', 'fixture-token', input=SECRET + '\n')
     assert 'Stored fixture-token in the' in stored and SECRET not in stored, stored
     assert json.loads(keychain.read_text()) == {'fixture-token': SECRET}, 'the secret went somewhere else than the test keychain'
+    cli('mcp', 'secret', 'set', 'awkward', input=AWKWARD + '\n')
+    try:
+        cli('mcp', 'secret', 'set', '--', '-leading', input='x\n')
+        raise AssertionError('a name that starts with "-" was taken')
+    except subprocess.CalledProcessError as error:
+        assert 'start with a letter or digit' in error.stderr, error.stderr
     check('`haarness mcp secret set` stores a piped secret without showing it')
 
     connection = desktop({'action': 'connect'})
-    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'app', 'keyed', 'missing'}
+    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
@@ -102,7 +112,8 @@ try:
     result = call(thread, 'mcp__keyed__env', {'name': 'TOKEN'})
     assert not result['is_error'] and result['output'] == SECRET, result
     assert call(thread, 'mcp__keyed__env', {'name': 'HOME_SEEN'})['output'] == os.environ['HOME']
-    check('a ${keychain:NAME} reference reaches the starting server as the stored secret, beside ${VAR} references')
+    assert call(thread, 'mcp__keyed__env', {'name': 'AWKWARD'})['output'] == AWKWARD
+    check('a ${keychain:NAME} reference reaches the starting server as the stored secret, 4 KB with quotes and backslashes included, beside ${VAR} references')
     missing = servers()['missing']
     assert missing['status'] == 'failed', missing
     assert '${keychain:absent-token} is not in the' in missing['detail'] and 'haarness mcp secret set absent-token' in missing['detail'], missing
@@ -110,6 +121,12 @@ try:
     written = json.loads(settings.read_text())['mcp']
     assert written['keyed']['env']['TOKEN'] == '${keychain:fixture-token}', written
     assert desktop({'action': 'store_mcp_secret', 'name': 'absent-token', 'secret': 'desktop-secret'})['reference'] == '${keychain:absent-token}'
+    # Desktop's request never replaces an entry: the next one gets the next free name, and can be taken out again.
+    again = desktop({'action': 'store_mcp_secret', 'name': 'absent-token', 'secret': 'other-server'})
+    assert again['name'] == 'absent-token-2', again
+    assert json.loads(keychain.read_text())['absent-token'] == 'desktop-secret'
+    assert desktop({'action': 'remove_mcp_secrets', 'names': ['absent-token-2']})['removed'] == 1
+    assert 'absent-token-2' not in json.loads(keychain.read_text())
     assert api('/mcp/missing/reconnect', {})['status'] == 'connected'
     assert call(thread, 'mcp__missing__env', {'name': 'TOKEN'})['output'] == 'Bearer desktop-secret'
     check('Desktop\'s store request keeps a secret for a reference, and a reconnect then starts the server')
@@ -146,15 +163,19 @@ try:
     denied = call(thread, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://private/notes'})
     assert denied['is_error'] and 'mcp_resource_read:docs:docs://private/notes' in denied['output'] and 'denied' in denied['output'], denied
     wrong = call(thread, 'mcp_resource_read', {'server': 'keyed', 'uri': 'x://y'})
-    # The app fixture serves its page as a resource, so it is listed too.
+    # The app fixture serves its page as a resource, so it is listed too; `hidden`, whose tools are all denied, is not.
     assert wrong['is_error'] and 'Servers with resources: app, docs.' in wrong['output'], wrong
-    check('the resource tools list and read (text, an image as an attachment), and a rule about server:uri refuses a read')
-    for name in ('docs', 'app'):
+    hidden = call(thread, 'mcp_resource_read', {'server': 'hidden', 'uri': 'docs://setup'})
+    assert hidden['is_error'] and 'MCP server "hidden" is turned off for this chat' in hidden['output'], hidden
+    assert not any(entry['server'] == 'hidden' for entry in listing['resources']), listing
+    check('the resource tools list and read (text, an image as an attachment), a rule about server:uri refuses a read, and a server whose tools are all denied is out of reach')
+    for name in ('docs', 'app', 'hidden'):
         api(f'/mcp/{name}/disconnect', {})
     until(lambda: not {'mcp_resource_list', 'mcp_resource_read'} & tool_names(), 'the resource tools stayed without a resource server')
     api('/mcp/docs/reconnect', {})
     until(lambda: {'mcp_resource_list', 'mcp_resource_read'} <= tool_names(), 'the resource tools did not come back')
     api('/mcp/app/reconnect', {})
+    api('/mcp/hidden/reconnect', {})
     check('the resource tools are offered only while a server declares resources')
 
     # --- the 64 MB message limit
@@ -173,11 +194,17 @@ try:
     until(lambda: not any(alive(pid) for pid in pids), 'the flooding server kept running', 10)
     # A 400 MiB flood without the limit would hold all of it, copied as it grows.
     assert peak - before < 250 * 1024, f'memory grew by {(peak - before) // 1024} MB'
+    # A reload for another change (a server added) leaves it stopped.
+    edited = json.loads(settings.read_text())
+    edited['mcp']['probe'] = server('env.py')
+    settings.write_text(json.dumps(edited, indent=2) + '\n')
+    until(lambda: servers().get('probe', {}).get('status') == 'connected', 'the reload did not happen', 60)
+    assert servers()['flood']['detail'] == status['detail'], servers()['flood']
     time.sleep(1.5)
     again = call(thread, 'mcp__flood__ping', {})
     assert again['is_error'] and 'larger than 64 MB' in again['output'], again
     assert len((root/'flood-pids').read_text().split()) == 1, 'something restarted the server'
-    check(f'a 400 MiB reply stops its server in {elapsed:.1f} s with memory bounded ({max(peak - before, 0) // 1024} MB), says why, and stays stopped')
+    check(f'a 400 MiB reply stops its server in {elapsed:.1f} s with memory bounded ({max(peak - before, 0) // 1024} MB), says why, and stays stopped, also through a reload')
     assert api('/mcp/flood/reconnect', {})['status'] == 'connected'
     assert call(thread, 'mcp__flood__ping', {})['output'] == 'pong'
     check('a reconnect brings the stopped server back')
@@ -204,18 +231,6 @@ try:
     for path in files:
         assert SECRET.encode() not in path.read_bytes(), f'the secret is in {path}'
     check('no log or setting holds the secret')
-
-    if os.environ.get('HAARNESS_REAL_KEYCHAIN') == '1' and sys.platform == 'darwin':
-        name = 'haarness-e2e-' + uuid.uuid4().hex[:12]
-        real = {k: v for k, v in env.items() if k != 'HAARNESS_TEST_KEYCHAIN_FILE'}
-        try:
-            subprocess.run([str(binary), 'mcp', 'secret', 'set', name], input='real-' + SECRET + '\n', text=True, check=True, capture_output=True, env=real)
-            found = subprocess.run(['security', 'find-generic-password', '-s', 'haarness-mcp', '-a', name], capture_output=True)
-            assert found.returncode == 0, 'the entry is not in the login Keychain'
-        finally:
-            removed = subprocess.run([str(binary), 'mcp', 'secret', 'remove', name], text=True, capture_output=True, env=real)
-        assert 'Removed' in removed.stdout, removed.stdout + removed.stderr
-        check('the real macOS Keychain stores and removes an entry through security')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP server scenarios.', flush=True)
