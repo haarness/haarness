@@ -1754,17 +1754,36 @@ async fn resolve_headers(
         return Ok(headers);
     };
     let url = config.url.as_deref().unwrap_or_default();
-    // cmd.exe reads its own command line: hand it the helper as written.
+    // cmd.exe reads its own command line and expands `%NAME%`, not
+    // `${NAME}`: hand it the helper with its references filled in.
     #[cfg(windows)]
     let mut command = {
+        let helper = expand_env_reference_with(helper, &|name| {
+            config
+                .env
+                .get(name)
+                .map(|value| expand_env_reference(value))
+                .or_else(|| std::env::var(name).ok())
+        });
         let mut command = tokio::process::Command::new("cmd.exe");
         command.raw_arg(format!("/d /s /c \"{helper}\""));
         command
     };
+    // `sh` reads each `${NAME}` from the environment set below, so a value
+    // (a token, a folder name) is never read as shell syntax; inside single
+    // quotes, where `sh` expands nothing, a reference is opened for it.
     #[cfg(not(windows))]
     let mut command = {
+        use haarness_core::shell_text::{Placeholders, ShellKind, place_placeholders, variable_at};
+        let helper = place_placeholders(
+            ShellKind::Posix,
+            helper,
+            &variable_at,
+            Placeholders::Expand,
+            &|_| String::new(),
+        );
         let mut command = tokio::process::Command::new("sh");
-        command.args(["-lc", helper]);
+        command.args(["-lc", &helper]);
         command
     };
     if let Some(cwd) = &config.cwd {
@@ -1853,6 +1872,11 @@ fn refreshable_helper_error(error: &CoreError) -> bool {
 /// pass: a variable's value is spliced in and never read again, so a value
 /// that holds `${OTHER}` reaches the server as that text.
 fn expand_env_reference(value: &str) -> String {
+    expand_env_reference_with(value, &|name| std::env::var(name).ok())
+}
+
+/// `value` with each `${NAME}` or `${NAME:-fallback}` read from `lookup`.
+fn expand_env_reference_with(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(start) = rest.find("${") {
@@ -1866,9 +1890,9 @@ fn expand_env_reference(value: &str) -> String {
         let (name, fallback) = token
             .split_once(":-")
             .map_or((token, None), |(name, fallback)| (name, Some(fallback)));
-        match std::env::var(name) {
-            Ok(value) => output.push_str(&value),
-            Err(_) => output.push_str(fallback.unwrap_or_default()),
+        match lookup(name) {
+            Some(value) => output.push_str(&value),
+            None => output.push_str(fallback.unwrap_or_default()),
         }
         rest = &after[end + 1..];
     }
@@ -2699,6 +2723,49 @@ mod tests {
             headers.get("X-URL").map(String::as_str),
             Some("https://example.test/mcp")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The helper is shell text: a `${VAR}` value that holds shell syntax
+    /// stays plain text, written bare, in double quotes or in single quotes,
+    /// and a plugin root with a space is one word.
+    #[tokio::test]
+    async fn a_headers_helper_reads_references_as_plain_text() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-mcp-helper-text-{}", uuid::Uuid::now_v7()));
+        let plugin = root.join("plugin with space");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let marker = root.join("marker");
+        std::fs::write(
+            plugin.join("headers.sh"),
+            r#"printf '{"X-Double":"%s","X-Bare":"%s"}' "$1" "$2""#,
+        )
+        .unwrap();
+        let value = format!(
+            "v $(touch {}) `touch {}`",
+            marker.display(),
+            marker.display()
+        );
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http", "url": "https://example.test/mcp",
+            "env": {"FIXTURE_VALUE": value, "CLAUDE_PLUGIN_ROOT": plugin.display().to_string()},
+            "headersHelper": "sh \"${CLAUDE_PLUGIN_ROOT}/headers.sh\" \"${FIXTURE_VALUE}\" ${FIXTURE_VALUE:-none} >/dev/null; printf '{\"X-Single\":\"${FIXTURE_VALUE}\",\"X-Fallback\":\"${HAARNESS_MCP_FIXTURE_UNSET:-none}\"}'",
+            "timeoutMs": 5_000
+        }))
+        .unwrap();
+        let headers = resolve_headers("weather", &config).await.unwrap();
+        assert_eq!(headers.get("X-Single"), Some(&value));
+        assert_eq!(headers.get("X-Fallback").map(String::as_str), Some("none"));
+        assert!(!marker.exists(), "the value ran as a command");
+        // The same helper through its script, the plugin root holding a space.
+        let mut config = config;
+        config.headers_helper = Some(
+            "sh \"${CLAUDE_PLUGIN_ROOT}/headers.sh\" \"${FIXTURE_VALUE}\" ${FIXTURE_VALUE}".into(),
+        );
+        let headers = resolve_headers("weather", &config).await.unwrap();
+        assert_eq!(headers.get("X-Bare").map(String::as_str), Some("v"));
+        assert_eq!(headers.get("X-Double"), Some(&value));
+        assert!(!marker.exists(), "the value ran as a command");
         std::fs::remove_dir_all(root).unwrap();
     }
 

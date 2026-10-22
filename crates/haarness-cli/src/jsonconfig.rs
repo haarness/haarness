@@ -1059,10 +1059,12 @@ fn loaded_mcp_entry(entry: &Value, plugin_root: Option<&Path>) -> Option<McpConf
 }
 
 /// Resolves `${VAR}` references in the strings the MCP client uses as given
-/// (command, arguments, folder, URL, headers helper, OAuth client and scopes).
-/// Environment values and headers keep theirs: the client resolves them once
-/// when it connects, so a variable whose value holds `${OTHER}` is not read
-/// again, and the server receives that text as it is.
+/// (command, arguments, folder, URL, OAuth client and scopes). Environment
+/// values and headers keep theirs: the client resolves them once when it
+/// connects, so a variable whose value holds `${OTHER}` is not read again,
+/// and the server receives that text as it is. So does the headers helper,
+/// a shell command: its shell reads each reference from its environment, so
+/// a value is never read as shell syntax.
 pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureRequest {
     for value in entry
         .command
@@ -1070,7 +1072,6 @@ pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureR
         .chain(&mut entry.args)
         .chain(&mut entry.cwd)
         .chain(&mut entry.url)
-        .chain(&mut entry.headers_helper)
         .chain(&mut entry.oauth_client_id)
         .chain(&mut entry.oauth_scopes)
     {
@@ -1121,10 +1122,12 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
             cwd: entry.get("cwd").and_then(Value::as_str).map(&expand),
             url: Some(expand(url)),
             headers: mcp_string_map_with(entry.get("headers"), &expand),
+            // A shell command: the plugin root stays `${CLAUDE_PLUGIN_ROOT}`
+            // for the shell to read from `env` below, never pasted in.
             headers_helper: entry
                 .get("headersHelper")
                 .and_then(Value::as_str)
-                .map(&expand),
+                .map(str::to_owned),
             timeout_ms,
             oauth: entry.get("oauth").and_then(Value::as_bool),
             oauth_client_id: entry
@@ -3419,9 +3422,41 @@ mod tests {
         let remote = layers.mcp.get("remote").unwrap();
         assert_eq!(remote.transport, "streamable_http");
         assert_eq!(remote.headers.get("X-Plugin"), Some(&rendered));
-        let helper = format!("sh {rendered}/scripts/headers.sh");
-        assert_eq!(remote.headers_helper.as_deref(), Some(helper.as_str()));
+        // The helper's shell reads the plugin root from its environment.
+        assert_eq!(
+            remote.headers_helper.as_deref(),
+            Some("sh ${CLAUDE_PLUGIN_ROOT}/scripts/headers.sh")
+        );
+        assert_eq!(remote.env.get("CLAUDE_PLUGIN_ROOT"), Some(&rendered));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A headers helper is shell text, so a configuration load leaves its
+    /// `${VAR}` references for the helper's shell: pasted in, a value holding
+    /// `$(…)` ran as a command.
+    #[test]
+    fn a_headers_helper_keeps_its_references_as_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-helper-text-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(
+            root.join("config/haarness.json"),
+            r#"{"mcp": {"remote": {"type": "http", "url": "https://example.test/mcp",
+                "headersHelper": "get-token --home \"${HOME}\" --scope ${HAARNESS_FIXTURE_SCOPE:-all}"}}}"#,
+        )
+        .unwrap();
+        let layers = load_layers(
+            &root.join("config"),
+            None,
+            &root.join("workspace"),
+            true,
+            &[],
+        );
+        assert_eq!(
+            layers.mcp["remote"].headers_helper.as_deref(),
+            Some(r#"get-token --home "${HOME}" --scope ${HAARNESS_FIXTURE_SCOPE:-all}"#)
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
