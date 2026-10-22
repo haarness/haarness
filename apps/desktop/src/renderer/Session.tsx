@@ -2930,8 +2930,15 @@ function Question(props: { question: T.PendingQuestionInfo }) {
     [choices, setChoices] = createSignal<string[]>([]),
     [answered, setAnswered] = createSignal(false);
   let dock!: HTMLElement, input: HTMLInputElement | undefined;
+  // A question that takes several answers sends the marked choices and then
+  // what was typed; one that takes a single answer sends the one shown,
+  // typed or chosen (typing unmarks a choice, and choosing clears the text).
+  const reply = () =>
+    props.question.multiple
+      ? [...choices(), answer().trim()].filter(Boolean).join(", ")
+      : answer().trim() || choices()[0] || "";
   const submit = () => {
-    const value = answer() || choices().join(", ");
+    const value = reply();
     if (!value || answered()) return;
     setAnswered(true);
     void app.run(async () => {
@@ -2995,14 +3002,14 @@ function Question(props: { question: T.PendingQuestionInfo }) {
               classList={{ active: choices().includes(choice) }}
               aria-pressed={choices().includes(choice)}
               onClick={() => {
+                if (!props.question.multiple) {
+                  setChoices([choice]);
+                  setAnswer("");
+                  return;
+                }
                 setChoices((old) =>
-                  props.question.multiple
-                    ? old.includes(choice)
-                      ? old.filter((c) => c !== choice)
-                      : [...old, choice]
-                    : [choice],
+                  old.includes(choice) ? old.filter((c) => c !== choice) : [...old, choice],
                 );
-                setAnswer("");
               }}
               onKeyDown={(event) => {
                 // Enter on a choice of a single-answer question picks it and
@@ -3035,15 +3042,18 @@ function Question(props: { question: T.PendingQuestionInfo }) {
           <input
             ref={input}
             aria-label={t("Answer")}
-            placeholder={t("Or write your answer…")}
+            placeholder={props.question.multiple ? t("Add another answer…") : t("Or write your answer…")}
             value={answer()}
-            onInput={(event) => setAnswer(event.currentTarget.value)}
+            onInput={(event) => {
+              setAnswer(event.currentTarget.value);
+              if (!props.question.multiple && answer().trim()) setChoices([]);
+            }}
             onKeyDown={(event) => {
               if (
                 event.key !== "Enter" ||
                 event.shiftKey ||
                 composing(event) ||
-                !answer()
+                !answer().trim()
               )
                 return;
               event.preventDefault();
@@ -3053,7 +3063,7 @@ function Question(props: { question: T.PendingQuestionInfo }) {
         </Show>
         <button
           class="primary"
-          disabled={answered() || (!answer() && !choices().length)}
+          disabled={answered() || !reply()}
           onClick={submit}
         >
           {t("Reply")}

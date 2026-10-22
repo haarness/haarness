@@ -4628,6 +4628,28 @@ test("a question answers from the keyboard, and only a deliberate key sends it",
   await settled();
   expect(await replied()).toMatch(/macOS.*Linux/);
 
+  // Marked choices and typed text go together on a question that takes several answers.
+  await ask({ prompt: "Which platforms else?", choices: ["macOS", "Linux"], multiple: true });
+  await choice("macOS").click();
+  await answer.fill("BSD");
+  await expect(choice("macOS")).toHaveAttribute("aria-pressed", "true");
+  await question.getByRole("button", { name: "Reply", exact: true }).click();
+  await settled();
+  expect(await replied()).toMatch(/macOS, BSD/);
+
+  // A single-answer question sends what it shows: typing unmarks a choice, choosing clears the text.
+  await ask({ prompt: "Which tier?", choices: ["Free", "Pro"] });
+  await choice("Pro").click();
+  await answer.fill("Team");
+  await expect(choice("Pro")).toHaveAttribute("aria-pressed", "false");
+  await choice("Free").click();
+  await expect(answer).toHaveValue("");
+  await answer.fill("Team");
+  await answer.press("Enter");
+  await settled();
+  expect(await replied()).toContain("Team");
+  expect(await replied()).not.toContain("Free");
+
   // Text an input method is still composing does not send, even with Cmd/Ctrl.
   await ask({ prompt: "A name, please", choices: ["Keep"] });
   await answer.fill("候補");
