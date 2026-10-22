@@ -93,6 +93,8 @@ const namedTools: Record<string, { icon: IconName } & Verbs> = {
   skill_manage: { icon: "book", ...verbs("Managed skills", "Managing skills", "Tried to manage skills") },
   plugin_manage: { icon: "plugin", ...verbs("Managed plugins", "Managing plugins", "Tried to manage plugins") },
   mcp_manage: { icon: "server", ...verbs("Managed MCP servers", "Managing MCP servers", "Tried to manage MCP servers") },
+  mcp_resource_list: { icon: "server", ...verbs("Listed MCP resources", "Listing MCP resources", "Tried to list MCP resources") },
+  mcp_resource_read: { icon: "file-text", ...verbs("Read an MCP resource", "Reading an MCP resource", "Tried to read an MCP resource") },
   agent_manage: { icon: "agents", ...verbs("Managed agents", "Managing agents", "Tried to manage agents") },
   command_manage: { icon: "compose", ...verbs("Managed commands", "Managing commands", "Tried to manage commands") },
   cloud_agent_manage: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
@@ -189,6 +191,11 @@ export function describeTool(name: string, args: unknown): ToolShape {
         target:
           targetList(files),
       };
+  }
+  // A resource row names the resource it read, or the server it listed.
+  if (name === "mcp_resource_read" || name === "mcp_resource_list") {
+    const value = name === "mcp_resource_read" ? record?.uri : record?.server;
+    return { ...known, target: typeof value === "string" ? value.trim() : "" };
   }
   if (name === "load_tool" && Array.isArray(record?.queries))
     return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string")) };

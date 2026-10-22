@@ -1772,6 +1772,18 @@ impl ToolRegistry for NativeToolRegistry {
         if let Some(tool) = self.tools.get(name) {
             return Some(tool.clone());
         }
+        if let Some(mcp) = self
+            .mcp
+            .as_ref()
+            .filter(|mcp| !mcp.resource_servers().is_empty())
+        {
+            let [list, read] = crate::mcp_resources::tools(mcp);
+            match name {
+                crate::mcp_resources::LIST => return Some(list),
+                crate::mcp_resources::READ => return Some(read),
+                _ => {}
+            }
+        }
         let definition = self
             .mcp
             .as_ref()?
@@ -1789,6 +1801,12 @@ impl ToolRegistry for NativeToolRegistry {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         if let Some(mcp) = &self.mcp {
             values.extend(mcp.tool_snapshot());
+            // Only while a connected server declares resources: most expose
+            // tools only, and the two tools would cost every request for
+            // nothing.
+            if !mcp.resource_servers().is_empty() {
+                values.extend(crate::mcp_resources::definitions());
+            }
         }
         values.sort_by(|a, b| a.name.cmp(&b.name));
         values
@@ -4300,11 +4318,11 @@ fn output_with_diffs(text: String, diffs: Vec<FileDiff>, diffs_truncated: bool) 
 const TOOL_OUTPUT_MAX_LINES: usize = 2_000;
 const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1_024;
 
-async fn truncate_output(text: String) -> CoreResult<ToolOutput> {
+pub(crate) async fn truncate_output(text: String) -> CoreResult<ToolOutput> {
     truncate_output_at(text, &tool_output_dir()).await
 }
 
-async fn truncate_output_at(text: String, directory: &Path) -> CoreResult<ToolOutput> {
+pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreResult<ToolOutput> {
     let total_lines = text.lines().count();
     if total_lines <= TOOL_OUTPUT_MAX_LINES && text.len() <= TOOL_OUTPUT_MAX_BYTES {
         return Ok(output(text));
@@ -4342,7 +4360,7 @@ fn output_preview(text: &str) -> String {
     preview.join("\n")
 }
 
-fn tool_output_dir() -> PathBuf {
+pub(crate) fn tool_output_dir() -> PathBuf {
     if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
         return PathBuf::from(root).join("data/tool-output");
     }

@@ -95,6 +95,8 @@ struct Entry {
     /// Set once the stdio server of this connection sent a message larger
     /// than [`process::MESSAGE_LIMIT`] and was stopped for it.
     oversized: Option<Arc<AtomicBool>>,
+    /// The server declared the resources capability when it last connected.
+    resources: bool,
 }
 #[derive(Clone)]
 struct CatalogClient {
@@ -106,6 +108,9 @@ struct CatalogClient {
     /// tool name. Shared with the connection's worker, which attaches the
     /// page to those tools' results.
     apps: Arc<RwLock<HashMap<String, AppTool>>>,
+    /// Whether the server declared the resources capability when it
+    /// connected.
+    resources: Arc<AtomicBool>,
 }
 impl CatalogClient {
     fn new(
@@ -120,7 +125,21 @@ impl CatalogClient {
             generation,
             credential,
             apps: Arc::default(),
+            resources: Arc::default(),
         }
+    }
+    /// [`Self::catalog`] for a connection that just started, which also
+    /// records what the server declared it offers.
+    fn connected(
+        &self,
+        peer: &rmcp::service::Peer<RoleClient>,
+        tools: &[rmcp::model::Tool],
+    ) -> Vec<ToolDefinition> {
+        let resources = peer
+            .peer_info()
+            .is_some_and(|info| info.capabilities.resources.is_some());
+        self.resources.store(resources, Ordering::Release);
+        self.catalog(tools)
     }
     /// The model's view of a freshly listed catalog, remembering which of its
     /// tools have an MCP App page.
@@ -240,17 +259,23 @@ impl McpRegistry for NativeMcpRegistry {
                 if entry.info.status == "connected" {
                     return entry.tools.clone();
                 }
-                if matches!(entry.info.status.as_str(), "connecting" | "failed")
-                    && entry.config.enabled
-                    && entry.config.headers_helper.is_none()
-                    && entry.identity.is_some()
-                    && entry.identity
-                        == schema_identity(name, &entry.config, self.auth_dir.as_deref())
-                {
+                if self.recovering(name, entry) {
                     return entry.remembered.clone();
                 }
                 Vec::new()
             })
+            .collect()
+    }
+    fn resource_servers(&self) -> Vec<String> {
+        self.revoke_stale();
+        self.servers
+            .read()
+            .iter()
+            .filter(|(name, entry)| {
+                entry.resources
+                    && (entry.info.status == "connected" || self.recovering(name, entry))
+            })
+            .map(|(name, _)| name.clone())
             .collect()
     }
     async fn list(&self) -> CoreResult<Vec<McpServerInfo>> {
@@ -302,6 +327,7 @@ impl McpRegistry for NativeMcpRegistry {
                 home: None,
                 adopted: false,
                 oversized: None,
+                resources: false,
             },
         );
         if config.enabled {
@@ -321,6 +347,7 @@ impl McpRegistry for NativeMcpRegistry {
         entry.generation = uuid::Uuid::now_v7();
         entry.worker = None;
         entry.oversized = None;
+        entry.resources = false;
         entry.tools.clear();
         entry.remembered.clear();
         entry.identity = None;
@@ -391,6 +418,17 @@ impl McpRegistry for NativeMcpRegistry {
     }
 }
 impl NativeMcpRegistry {
+    /// Whether `entry` is getting its connection back with the same
+    /// configuration and credentials: the model keeps the tools it had
+    /// meanwhile, so its tool list (and the prompt cache that starts with
+    /// it) does not change for a passing outage.
+    fn recovering(&self, name: &str, entry: &Entry) -> bool {
+        matches!(entry.info.status.as_str(), "connecting" | "failed")
+            && entry.config.enabled
+            && entry.config.headers_helper.is_none()
+            && entry.identity.is_some()
+            && entry.identity == schema_identity(name, &entry.config, self.auth_dir.as_deref())
+    }
     fn revoke_stale(&self) {
         for entry in self.servers.write().values_mut() {
             if !credential_valid(entry.credential.as_ref()) {
@@ -471,7 +509,7 @@ impl NativeMcpRegistry {
                             let client =
                                 handler.clone().serve(transport).await.map_err(mcp_error)?;
                             let tools = client.list_all_tools().await.map_err(mcp_error)?;
-                            let definitions = client.service().catalog(&tools);
+                            let definitions = client.service().connected(client.peer(), &tools);
                             let limit = Limit {
                                 name: name.to_owned(),
                                 passed,
@@ -565,6 +603,7 @@ impl NativeMcpRegistry {
             entry.auth_challenge = None;
             entry.home = Some(home);
             entry.oversized = oversized;
+            entry.resources = handler.resources.load(Ordering::Acquire);
             entry.info.status = "connected".into();
             entry.info.detail = Some(format!("{count} tools discovered"));
             let info = entry.info.clone();
@@ -1307,7 +1346,7 @@ where
         .await
         .map_err(mcp_error)
         .map_err(ActivationError::Core)?;
-    let definitions = client.service().catalog(&tools);
+    let definitions = client.service().connected(client.peer(), &tools);
     let tx = spawn_worker(client, credential, None);
     Ok((definitions, tx))
 }
@@ -1349,40 +1388,45 @@ fn spawn_worker(
                     );
                     let _ = reply.send(settled(limit.as_ref(), result));
                 }
-                WorkerCommand::Resources { reply } => {
+                WorkerCommand::Resources { mut reply } => {
                     let result = if peer
                         .peer_info()
                         .is_some_and(|info| info.capabilities.resources.is_some())
                     {
-                        peer.list_all_resources()
-                            .await
-                            .map_err(mcp_error)
-                            .and_then(json_values)
+                        // A listing nobody waits for any more (Stop, a closed
+                        // client) is dropped, so the next request runs.
+                        tokio::select! {
+                            () = reply.closed() => continue,
+                            result = peer.list_all_resources() => {
+                                result.map_err(mcp_error).and_then(json_values)
+                            }
+                        }
                     } else {
                         Ok(Vec::new())
                     };
                     let _ = reply.send(settled(limit.as_ref(), result));
                 }
-                WorkerCommand::ResourceTemplates { reply } => {
+                WorkerCommand::ResourceTemplates { mut reply } => {
                     let result = if peer
                         .peer_info()
                         .is_some_and(|info| info.capabilities.resources.is_some())
                     {
-                        peer.list_all_resource_templates()
-                            .await
-                            .map_err(mcp_error)
-                            .and_then(json_values)
+                        tokio::select! {
+                            () = reply.closed() => continue,
+                            result = peer.list_all_resource_templates() => {
+                                result.map_err(mcp_error).and_then(json_values)
+                            }
+                        }
                     } else {
                         Ok(Vec::new())
                     };
                     let _ = reply.send(settled(limit.as_ref(), result));
                 }
-                WorkerCommand::ReadResource { uri, reply } => {
-                    let result = peer
-                        .read_resource(ReadResourceRequestParams::new(uri))
-                        .await
-                        .map_err(mcp_error)
-                        .and_then(json_value);
+                WorkerCommand::ReadResource { uri, mut reply } => {
+                    let result = read_resource(&peer, uri, &mut reply).await;
+                    let Some(result) = result else {
+                        continue;
+                    };
                     let _ = reply.send(settled(limit.as_ref(), result));
                 }
                 WorkerCommand::Prompts { reply } => {
@@ -1417,6 +1461,43 @@ fn spawn_worker(
         }
     });
     tx
+}
+
+/// Reads `uri`, or tells the server to stop and returns `None` once nobody
+/// waits for the answer (Stop, a closed client): a read can take long, and
+/// the server would otherwise go on with it and hold up the next request.
+async fn read_resource(
+    peer: &rmcp::service::Peer<RoleClient>,
+    uri: String,
+    reply: &mut oneshot::Sender<CoreResult<Value>>,
+) -> Option<CoreResult<Value>> {
+    let request = rmcp::model::ClientRequest::ReadResourceRequest(
+        rmcp::model::ReadResourceRequest::new(ReadResourceRequestParams::new(uri)),
+    );
+    let handle = match peer
+        .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+        .await
+    {
+        Ok(handle) => handle,
+        Err(error) => return Some(Err(mcp_error(error))),
+    };
+    let id = handle.id.clone();
+    tokio::select! {
+        () = reply.closed() => {
+            let _ = peer
+                .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                    Some(id),
+                    Some("The user stopped the request".into()),
+                ))
+                .await;
+            None
+        }
+        result = handle.await_response() => Some(match result {
+            Ok(rmcp::model::ServerResult::ReadResourceResult(result)) => json_value(result),
+            Ok(_) => Err(mcp_error("unexpected response to resources/read")),
+            Err(error) => Err(mcp_error(error)),
+        }),
+    }
 }
 
 fn json_values<T: serde::Serialize>(values: Vec<T>) -> CoreResult<Vec<Value>> {
@@ -1499,7 +1580,7 @@ async fn activate_legacy_sse(
             .await?;
             let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
             let tools = client.list_all_tools().await.map_err(mcp_error)?;
-            let definitions = client.service().catalog(&tools);
+            let definitions = client.service().connected(client.peer(), &tools);
             let tx = spawn_worker(client, None, None);
             CoreResult::Ok((definitions, tx))
         }
@@ -3614,6 +3695,67 @@ mod recovery_tests {
         assert_eq!(info.detail.as_deref(), Some(OVERSIZED_STATUS));
         #[cfg(unix)]
         stopped(&dir).await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_servers_that_declare_resources_offer_them_and_stop_cancels_a_read() {
+        let dir =
+            std::env::temp_dir().join(format!("haarness-mcp-resources-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancels = dir.join("cancels");
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure(
+                "docs",
+                serde_json::from_value(serde_json::json!({
+                    "transport": "stdio", "command": "python3",
+                    "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resources.py")],
+                    "env": {"CANCEL_LOG": cancels}, "enabled": true
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        registry
+            .configure("plain", config(&dir.join("calls"), "0"))
+            .await
+            .unwrap();
+        assert_eq!(McpRegistry::resource_servers(&registry), ["docs"]);
+        let page = registry
+            .read_resource("docs", "docs://setup")
+            .await
+            .unwrap();
+        assert_eq!(page["contents"][0]["text"], "# Setup\nRun the fixture.");
+        // Nobody waits for the read any more: the server is told so, and the
+        // next request is not held up behind it.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                registry.read_resource("docs", "docs://slow")
+            )
+            .await
+            .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&cancels).is_ok_and(|text| text.starts_with("cancelled"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the server was not told the read was cancelled");
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.read_resource("docs", "docs://page/7"),
+        )
+        .await
+        .expect("a cancelled read held up the next one")
+        .unwrap();
+        assert_eq!(next["contents"][0]["text"], "Page 7");
+        registry.disconnect("docs").await.unwrap();
+        assert!(McpRegistry::resource_servers(&registry).is_empty());
+        registry.disconnect("plain").await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

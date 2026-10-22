@@ -11899,6 +11899,40 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         return plans;
     }
 
+    if matches!(name, "mcp_resource_list" | "mcp_resource_read") {
+        let servers: Vec<String> = match arguments["server"].as_str() {
+            Some(server) => vec![server.to_owned()],
+            // A listing of every server names them before it is asked about.
+            None => arguments["__servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        };
+        let servers: Vec<String> = servers
+            .iter()
+            .map(|server| resource_server_pattern(server))
+            .collect();
+        let (patterns, always) = if name == "mcp_resource_read" {
+            let server = servers.first().cloned().unwrap_or_default();
+            let uri = arguments["uri"].as_str().unwrap_or_default();
+            (vec![format!("{server}:{uri}")], vec![format!("{server}:*")])
+        } else if servers.is_empty() {
+            (vec!["*".into()], vec!["*".into()])
+        } else {
+            (servers.clone(), servers)
+        };
+        return vec![AskPlan {
+            permission: name.into(),
+            patterns,
+            always,
+            external_paths: Vec::new(),
+            resolved: Vec::new(),
+            shell: None,
+        }];
+    }
     if matches!(name, "image_generate" | "video_generate") {
         let kind = if name == "image_generate" {
             "image"
@@ -12132,6 +12166,22 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         shell: None,
     });
     plans
+}
+
+/// An MCP server's name as resource permission patterns spell it: letters,
+/// digits, `.`, `_` and `-` as they are, anything else as `_`, so a server
+/// named `a:b` cannot be reached through a rule `a:*` written for server `a`.
+fn resource_server_pattern(server: &str) -> String {
+    server
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// The address a fetch of `target` reads, written the way rules name it:
@@ -14516,6 +14566,51 @@ mod tests {
             );
             assert!(plans[0].external_paths.is_empty());
         }
+    }
+
+    #[test]
+    fn mcp_resource_permissions_name_the_server_and_its_resource() {
+        let workspace = std::path::Path::new("/workspace");
+        let read = super::ask_plans(
+            "mcp_resource_read",
+            &json!({"server":"docs","uri":"docs://guides/setup"}),
+            workspace,
+        );
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].permission, "mcp_resource_read");
+        assert_eq!(read[0].patterns, vec!["docs:docs://guides/setup"]);
+        // Always allows every resource of that server, and no other.
+        assert_eq!(read[0].always, vec!["docs:*"]);
+        let named = super::ask_plans("mcp_resource_list", &json!({"server":"docs"}), workspace);
+        assert_eq!(named[0].patterns, vec!["docs"]);
+        // A listing of every server is asked about each server it lists.
+        let every = super::ask_plans(
+            "mcp_resource_list",
+            &json!({"__servers":["docs","team notes"]}),
+            workspace,
+        );
+        assert_eq!(every[0].patterns, vec!["docs", "team_notes"]);
+        assert_eq!(every[0].always, vec!["docs", "team_notes"]);
+        // A `:` in a server name cannot reach another server's resources.
+        let tricky = super::ask_plans(
+            "mcp_resource_read",
+            &json!({"server":"docs:private","uri":"x"}),
+            workspace,
+        );
+        assert_eq!(tricky[0].patterns, vec!["docs_private:x"]);
+        let mut engine = crate::permissions::PermissionEngine::build_defaults();
+        engine.add_rule(crate::permissions::PermissionRule {
+            pattern: "mcp_resource_read:docs:*".into(),
+            decision: crate::PermissionDecision::Deny,
+        });
+        assert_eq!(
+            read[0].evaluate(&engine, &read[0].patterns[0]).decision,
+            crate::PermissionDecision::Deny
+        );
+        assert_eq!(
+            tricky[0].evaluate(&engine, &tricky[0].patterns[0]).decision,
+            crate::PermissionDecision::Allow
+        );
     }
 
     #[test]

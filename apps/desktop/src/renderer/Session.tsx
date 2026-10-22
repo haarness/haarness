@@ -2662,6 +2662,8 @@ const permissionTitles: Record<string, string> = {
   workflow: "Run a workflow",
   agent_switch: "Switch the active agent",
   media_generate: "Generate media",
+  mcp_resource_list: "List an MCP server's resources",
+  mcp_resource_read: "Read a resource from an MCP server",
   browser: "Use the browser",
   browser_site: "Allow site access",
   multiple: "Allow browser and file access",

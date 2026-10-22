@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Próba zwrócenia wyniku",
   "Using a skill": "Używanie umiejętności",
   "Asking a question": "Zadawanie pytania",
-  "Add another answer…": "Dodaj inną odpowiedź…"
+  "Add another answer…": "Dodaj inną odpowiedź…",
+  "Listed MCP resources": "Wyświetlono zasoby MCP",
+  "Listing MCP resources": "Wyświetlanie zasobów MCP",
+  "Tried to list MCP resources": "Próba wyświetlenia zasobów MCP",
+  "Read an MCP resource": "Odczytano zasób MCP",
+  "Reading an MCP resource": "Odczytywanie zasobu MCP",
+  "Tried to read an MCP resource": "Próba odczytania zasobu MCP",
+  "List an MCP server's resources": "Wyświetl zasoby serwera MCP",
+  "Read a resource from an MCP server": "Odczytaj zasób z serwera MCP"
 }

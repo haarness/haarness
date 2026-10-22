@@ -16693,6 +16693,18 @@ fn search_rows_name_the_pattern_and_where_it_looked() {
             "memory_search",
             serde_json::json!({"query":"release checklist"}),
         ),
+        call(
+            6,
+            "resource-1",
+            "mcp_resource_read",
+            serde_json::json!({"server":"docs","uri":"docs://guides/setup"}),
+        ),
+        call(
+            7,
+            "resources-1",
+            "mcp_resource_list",
+            serde_json::json!({"server":"docs"}),
+        ),
     ];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
     let text = |app: &App| {
@@ -16716,6 +16728,12 @@ fn search_rows_name_the_pattern_and_where_it_looked() {
         english.contains("memory_search release checklist"),
         "{english}"
     );
+    // A resource row names the resource it read, or the server it listed.
+    assert!(
+        english.contains("mcp_resource_read docs://guides/setup"),
+        "{english}"
+    );
+    assert!(english.contains("mcp_resource_list docs"), "{english}");
     app.language = crate::locale::Language::French;
     let french = text(&app);
     assert!(french.contains("grep TODO dans src"), "{french}");

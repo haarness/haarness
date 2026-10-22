@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Pokušaj vraćanja rezultata",
   "Using a skill": "Korištenje vještine",
   "Asking a question": "Postavljanje pitanja",
-  "Add another answer…": "Dodaj drugi odgovor…"
+  "Add another answer…": "Dodaj drugi odgovor…",
+  "Listed MCP resources": "Izlistani MCP resursi",
+  "Listing MCP resources": "Izlistavanje MCP resursa",
+  "Tried to list MCP resources": "Pokušaj izlistavanja MCP resursa",
+  "Read an MCP resource": "Pročitan MCP resurs",
+  "Reading an MCP resource": "Čitanje MCP resursa",
+  "Tried to read an MCP resource": "Pokušaj čitanja MCP resursa",
+  "List an MCP server's resources": "Izlistati resurse MCP servera",
+  "Read a resource from an MCP server": "Pročitati resurs sa MCP servera"
 }

@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Prøvde å returnere et resultat",
   "Using a skill": "Bruker en ferdighet",
   "Asking a question": "Stiller et spørsmål",
-  "Add another answer…": "Legg til et annet svar…"
+  "Add another answer…": "Legg til et annet svar…",
+  "Listed MCP resources": "Listet MCP-ressurser",
+  "Listing MCP resources": "Lister MCP-ressurser",
+  "Tried to list MCP resources": "Prøvde å liste MCP-ressurser",
+  "Read an MCP resource": "Leste en MCP-ressurs",
+  "Reading an MCP resource": "Leser en MCP-ressurs",
+  "Tried to read an MCP resource": "Prøvde å lese en MCP-ressurs",
+  "List an MCP server's resources": "List ressursene til en MCP-server",
+  "Read a resource from an MCP server": "Les en ressurs fra en MCP-server"
 }

@@ -2631,5 +2631,13 @@
   "Tried to return a result": "결과 반환 시도",
   "Using a skill": "기술 사용 중",
   "Asking a question": "질문하는 중",
-  "Add another answer…": "다른 답변 추가…"
+  "Add another answer…": "다른 답변 추가…",
+  "Listed MCP resources": "MCP 리소스 나열함",
+  "Listing MCP resources": "MCP 리소스 나열 중",
+  "Tried to list MCP resources": "MCP 리소스 나열 시도",
+  "Read an MCP resource": "MCP 리소스 읽음",
+  "Reading an MCP resource": "MCP 리소스 읽는 중",
+  "Tried to read an MCP resource": "MCP 리소스 읽기 시도",
+  "List an MCP server's resources": "MCP 서버의 리소스 나열",
+  "Read a resource from an MCP server": "MCP 서버의 리소스 읽기"
 }

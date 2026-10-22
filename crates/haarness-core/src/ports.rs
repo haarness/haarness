@@ -879,6 +879,11 @@ pub trait McpRegistry: Send + Sync {
     async fn disconnect(&self, name: &str) -> CoreResult<McpServerInfo>;
     async fn tools(&self, name: &str) -> CoreResult<Vec<ToolDefinition>>;
     async fn call(&self, name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput>;
+    /// Connected servers that declare the resources capability, by name.
+    /// The model's resource tools are offered only while there is one.
+    fn resource_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
     async fn resources(&self, name: &str) -> CoreResult<Vec<Value>>;
     async fn resource_templates(&self, name: &str) -> CoreResult<Vec<Value>>;
     async fn read_resource(&self, name: &str, uri: &str) -> CoreResult<Value>;

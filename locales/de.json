@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Ergebnis zurückgeben fehlgeschlagen",
   "Using a skill": "Nutzt eine Fähigkeit",
   "Asking a question": "Stellt eine Frage",
-  "Add another answer…": "Weitere Antwort hinzufügen…"
+  "Add another answer…": "Weitere Antwort hinzufügen…",
+  "Listed MCP resources": "MCP-Ressourcen aufgelistet",
+  "Listing MCP resources": "Listet MCP-Ressourcen auf",
+  "Tried to list MCP resources": "MCP-Ressourcen auflisten fehlgeschlagen",
+  "Read an MCP resource": "MCP-Ressource gelesen",
+  "Reading an MCP resource": "Liest eine MCP-Ressource",
+  "Tried to read an MCP resource": "MCP-Ressource lesen fehlgeschlagen",
+  "List an MCP server's resources": "Ressourcen eines MCP-Servers auflisten",
+  "Read a resource from an MCP server": "Eine Ressource von einem MCP-Server lesen"
 }

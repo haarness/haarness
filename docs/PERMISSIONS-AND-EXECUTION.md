@@ -112,6 +112,25 @@ An agent that rewrites the files Haarness takes permissions, hooks, MCP servers 
 
 A fetch follows redirects only while they stay on the host it asked for (the same host and port, or the same host moving from http to https). Any other redirect (to another host, another port, or from https to plain http) is not followed: the result names the new address and why, and fetching it is the model's next call, checked against the rules like any other. Image and video generation follow their configured backend's redirects as before. A redirect within the host is followed without a new check, so a rule for one path of a host does not stop a redirect to it from another path of the same host.
 
+## MCP resources
+
+When a connected MCP server declares resources, the model can list and read them with `mcp_resource_list` and `mcp_resource_read` (see [MCP resources](REFERENCE.md#plugins-skills-and-tools)). Like MCP tools, both run without asking unless a rule says otherwise. Rules use these names:
+
+| Permission | Pattern it matches |
+| --- | --- |
+| `mcp_resource_list` | The server name. Listing every server asks about each server it lists, so a rule about one server still applies. |
+| `mcp_resource_read` | `<server>:<uri>`. **Always** remembers `<server>:*`, every resource of that server and no other. |
+
+In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. To be asked before reading anything but one server's resources:
+
+```json
+{
+  "permission": {
+    "mcp_resource_read": { "*": "ask", "docs:*": "allow" }
+  }
+}
+```
+
 ## Skills and plan mode
 
 Dynamic `!` shell context in a skill or command now raises the ordinary permission prompt when it needs approval. A deny still prevents execution, and a nonzero context command still fails the invocation. Installed skill and enabled plugin helper directories receive read-only external-directory exemptions. Secret-file rules and canonical symlink checks still apply; these exemptions do not authorize writes or arbitrary home-directory access.

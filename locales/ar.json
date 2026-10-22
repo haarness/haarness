@@ -2631,5 +2631,13 @@
   "Tried to return a result": "حاول إعادة نتيجة",
   "Using a skill": "جارٍ استخدام مهارة",
   "Asking a question": "جارٍ طرح سؤال",
-  "Add another answer…": "أضف إجابة أخرى…"
+  "Add another answer…": "أضف إجابة أخرى…",
+  "Listed MCP resources": "عرض موارد MCP",
+  "Listing MCP resources": "جارٍ عرض موارد MCP",
+  "Tried to list MCP resources": "حاول عرض موارد MCP",
+  "Read an MCP resource": "قرأ موردًا من MCP",
+  "Reading an MCP resource": "جارٍ قراءة مورد من MCP",
+  "Tried to read an MCP resource": "حاول قراءة مورد من MCP",
+  "List an MCP server's resources": "عرض موارد خادم MCP",
+  "Read a resource from an MCP server": "قراءة مورد من خادم MCP"
 }

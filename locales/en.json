@@ -2631,5 +2631,13 @@
   "Tried to return a result": "Tried to return a result",
   "Using a skill": "Using a skill",
   "Asking a question": "Asking a question",
-  "Add another answer…": "Add another answer…"
+  "Add another answer…": "Add another answer…",
+  "Listed MCP resources": "Listed MCP resources",
+  "Listing MCP resources": "Listing MCP resources",
+  "Tried to list MCP resources": "Tried to list MCP resources",
+  "Read an MCP resource": "Read an MCP resource",
+  "Reading an MCP resource": "Reading an MCP resource",
+  "Tried to read an MCP resource": "Tried to read an MCP resource",
+  "List an MCP server's resources": "List an MCP server's resources",
+  "Read a resource from an MCP server": "Read a resource from an MCP server"
 }
