@@ -313,6 +313,16 @@ mod history_tests {
     }
 }
 
+/// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) this TUI
+/// started with; never the machine's own in this crate's tests.
+pub(crate) fn base_config_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        haarness_protocol::base_config_dir()
+    }
+}
+
 /// Themes discovered from `<config>/themes/*.toml`, then from the base
 /// configuration folder's `themes` (`HAARNESS_BASE_CONFIG_DIR`), appended
 /// after the built-ins; the first theme of a name wins, so a global theme
@@ -324,7 +334,7 @@ pub fn load_theme_entries() -> Vec<crate::theme::ThemeEntry> {
         entries.iter().map(|entry| entry.name.clone()).collect();
     let directories = config_dir()
         .into_iter()
-        .chain(haarness_protocol::base_config_dir())
+        .chain(base_config_dir())
         .map(|directory| directory.join("themes"));
     for directory in directories {
         add_theme_entries(&mut entries, &mut names, &directory);

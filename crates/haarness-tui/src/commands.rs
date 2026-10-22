@@ -2867,7 +2867,7 @@ impl App {
                     } else {
                         // Skills of the base folder this TUI started with
                         // (`HAARNESS_BASE_CONFIG_DIR`) say so.
-                        let base = haarness_protocol::base_config_dir();
+                        let base = crate::config::base_config_dir();
                         skills
                             .into_iter()
                             .map(|skill| {

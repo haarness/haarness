@@ -39,7 +39,7 @@ Explicitly supported compatibility resources remain readable. These are imports,
 
 ## Base folder
 
-`HAARNESS_BASE_CONFIG_DIR` names a configuration folder that sits under every other layer: a team's Git checkout, a folder device management installs, or the defaults a product ships. It has the global folder's layout and is read first, so the global folder, the project and everything above them override it. A base folder gives people a starting setup without taking anything away from them. Without the variable, or with an empty value, Haarness loads exactly as before. A relative path is read from the folder Haarness starts in; an absolute one is clearer.
+`HAARNESS_BASE_CONFIG_DIR` names a configuration folder that sits under every other layer: a team's Git checkout, a folder device management installs, or the defaults a product ships. It has the global folder's layout and is read first, so the global folder, the project and everything above them override it. A base folder gives people a starting setup without taking anything away from them. Without the variable, or with an empty value, Haarness loads exactly as before. The value must be an absolute path: a relative one would name another folder for each process that reads it, so it is ignored, with one line on standard error (`HAARNESS_BASE_CONFIG_DIR must be an absolute path; ignoring "team"`) and in the log. A server a client starts gets the client's resolved path.
 
 ```sh
 HAARNESS_BASE_CONFIG_DIR=/opt/acme/haarness haarness

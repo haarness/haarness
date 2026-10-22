@@ -18,25 +18,41 @@ pub const BASE_CONFIG_DIR_ENV: &str = "HAARNESS_BASE_CONFIG_DIR";
 /// The base configuration folder, `HAARNESS_BASE_CONFIG_DIR`: a read-only
 /// layer that a team or device management ships below the user's global
 /// configuration. `None` when the variable is unset or blank, so Haarness
-/// loads exactly as before; a relative value is read from the folder
-/// Haarness starts in, which the servers it starts share.
+/// loads exactly as before, and when it is not an absolute path: an
+/// administrator's folder, it must mean the same folder for every process,
+/// whatever folder each starts in ([`base_config_dir_problem`] says why it is
+/// ignored).
 #[must_use]
 pub fn base_config_dir() -> Option<PathBuf> {
     base_config_dir_from(std::env::var_os(BASE_CONFIG_DIR_ENV))
 }
 
-/// [`base_config_dir`] for a value of the variable.
+/// [`base_config_dir`] for a value of the variable, without a trailing
+/// separator or `.` parts.
 #[must_use]
 pub fn base_config_dir_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    let value = value?;
-    let path = match value.to_str() {
+    let path = written(value?);
+    (path.is_absolute()).then(|| path.components().collect())
+}
+
+/// Why a set `HAARNESS_BASE_CONFIG_DIR` is ignored, in one line: it is not an
+/// absolute path. `None` when it is unset, blank or absolute.
+#[must_use]
+pub fn base_config_dir_problem() -> Option<String> {
+    let path = written(std::env::var_os(BASE_CONFIG_DIR_ENV)?);
+    (!path.as_os_str().is_empty() && !path.is_absolute()).then(|| {
+        format!(
+            "{BASE_CONFIG_DIR_ENV} must be an absolute path; ignoring \"{}\"",
+            path.display()
+        )
+    })
+}
+
+fn written(value: std::ffi::OsString) -> PathBuf {
+    match value.to_str() {
         Some(text) => PathBuf::from(text.trim()),
         None => PathBuf::from(value),
-    };
-    if path.as_os_str().is_empty() {
-        return None;
     }
-    std::path::absolute(&path).ok()
 }
 
 #[cfg(test)]
@@ -44,17 +60,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_config_dir_is_unset_for_blank_values_and_absolute_otherwise() {
+    fn base_config_dir_is_unset_for_blank_and_relative_values() {
         assert_eq!(base_config_dir_from(None), None);
         assert_eq!(base_config_dir_from(Some("".into())), None);
         assert_eq!(base_config_dir_from(Some("  ".into())), None);
+        assert_eq!(base_config_dir_from(Some("team".into())), None);
+        assert_eq!(base_config_dir_from(Some("./team".into())), None);
         let absolute = std::env::temp_dir().join("team-base");
         assert_eq!(
-            base_config_dir_from(Some(format!(" {} ", absolute.display()).into())),
-            Some(absolute)
+            base_config_dir_from(Some(format!(" {}/ ", absolute.display()).into())),
+            Some(absolute.components().collect())
         );
-        let relative = base_config_dir_from(Some("team".into())).unwrap();
-        assert!(relative.is_absolute());
-        assert!(relative.ends_with("team"));
+        assert_eq!(
+            base_config_dir_from(Some(format!("{}/./", absolute.display()).into())),
+            Some(absolute.components().collect())
+        );
     }
 }
