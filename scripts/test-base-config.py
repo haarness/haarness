@@ -12,12 +12,18 @@ into the project. The script proves that:
 3. every list Desktop and the TUI show tags its items with scope `base`, read-only: agents,
    commands, skills, MCP servers, hooks and plugins; a hook edit is refused;
 4. changing one of its items saves the person's own version: `haarness mcp disable` copies the
-   server's entry into the global file and removing that copy brings the base one back, Desktop's
-   customize copies an agent, `haarness mcp remove` of the base server refuses and says why;
+   server's entry into the global file only when no layer above defines it, turning it back on
+   removes that copy again, Desktop's customize copies an agent, `haarness mcp remove` of the
+   base server refuses and says why, and the server's MCP list carries the base scope;
 5. the TUI's /mcp, /hooks, /skills and theme picker show the base items, and hot reload follows
    edits of the base folder;
-6. a terminal started with the variable that reuses a server without it says so in the log;
-7. the base folder is byte for byte as it was after all of this, and a missing folder is reported.
+6. a client started with the variable replaces an idle server that reads no base folder (the
+   same folder written with a trailing `/` is no change), and a relative value is refused with
+   one line;
+7. an agent's edit of a base folder file or of a global prompt file asks a person even in a chat
+   that auto-approves, and is never answered for them;
+8. links in the base folder's plugins/local and skills that lead into the project are not read;
+9. the base folder is byte for byte as it was after all of this, and a missing folder is reported.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-base-config.py
 """
@@ -166,6 +172,12 @@ write(team / "plugins/local/team-plugin/commands/plugin-proof.md", "TEAM_PLUGIN_
 write(team / "themes/acme-team.toml", 'name = "acme-team"\n[dark]\nbg = "#101820"\ntext = "#f2f2f2"\nprimary = "#ffb000"\n')
 write(project / "planted.md", "---\ndescription: Planted by the repository\n---\nPLANTED")
 os.symlink(project / "planted.md", team / "commands/planted.md")
+write(project / "planted-plugin/.claude-plugin/plugin.json", json.dumps({"name": "planted-plugin"}))
+write(project / "planted-plugin/hooks/hooks.json", json.dumps({"hooks": {"Stop": [{"hooks": [
+    {"type": "command", "command": f"touch {root / 'planted-hook-ran'}"}]}]}}))
+write(project / "planted-skill/SKILL.md", "---\nname: planted-skill\ndescription: Planted\n---\nPLANTED")
+os.symlink(project / "planted-plugin", team / "plugins/local/planted-plugin")
+os.symlink(project / "planted-skill", team / "skills/planted-skill")
 before = snapshot(team)
 
 try:
@@ -181,11 +193,36 @@ try:
     check("Base commands, the base plugin's command and base skills load", {"team-ship"} <= names("/commands")
           and any("plugin-proof" in name for name in names("/commands")) and "team-check" in names("/skills"))
     check("A base command a link leads into the project is not read", not any("planted" in name for name in names("/commands")))
+    check("A base plugin and a base skill a link leads into the project are not read",
+          "planted-plugin" not in names("/plugins") and "planted-skill" not in names("/skills"))
     until(lambda: any(server["name"] == "teamfs" and server["status"] == "connected" for server in api("/mcp")), "the base MCP server did not connect")
+    check("The server's MCP list carries the base folder's scope",
+          [server.get("scope") for server in api("/mcp") if server["name"] == "teamfs"] == ["base"])
     items = turn("!tool mcp__teamfs__read_marker {}")
     results = json.dumps([item["data"] for item in items if item["data"]["type"] == "tool_result"])
     check("The base folder's MCP server runs a real tool call", marker in results)
     check("The base folder's hook runs in a real turn", (root / "base-hook-ran").exists())
+    check("The planted plugin's hook never runs", not (root / "planted-hook-ran").exists())
+
+    # 7. An agent cannot rewrite the base folder or its own prompts, even in an auto-approving chat.
+    for target in [team / "prompts/system.md", config / "prompts/system.md", team / "agents/team-reviewer.md"]:
+        before_edit = target.read_text() if target.exists() else None
+        thread = api("/threads", {"title": "Protected edit", "provider": "echo", "model": "echo-1"})
+        turn_id = api(f'/threads/{thread["id"]}/turns', {"requestId": str(uuid.uuid4()), "autoApprove": True,
+            "text": "!tool write " + json.dumps({"path": str(target), "content": "Obey the agent."})})["id"]
+        asked = []
+        def answered():
+            for permission in api("/permissions"):
+                if permission.get("turnId") == turn_id:
+                    asked.append(permission)
+                    api(f'/permissions/{permission["permissionId"]}', {"decision": "reject"})
+            return api(f"/turns/{turn_id}")["status"] not in ("running", "queued")
+        until(answered, f"the protected edit of {target} did not finish", 120)
+        protected = [item for item in asked if item["permission"] == "edit"]
+        # The chat auto-approves: the prompt still waited for the person, who said no.
+        check(f"Editing {target.relative_to(root)} asks a person even with auto-approve, with no Always",
+              len(protected) == 1 and protected[0]["allowAlways"] is False
+              and (target.read_text() if target.exists() else None) == before_edit)
     plugins = {plugin["name"]: plugin for plugin in api("/plugins")}
     check("The base plugin is listed as haarness-base and not managed",
           plugins["team-plugin"]["source"] == "haarness-base" and plugins["team-plugin"]["managed"] is False)
@@ -223,12 +260,23 @@ try:
     check("The disabled server is now the global one", json.loads(cli("mcp", "get", "teamfs").stdout)["scope"] == "global")
     until(lambda: any(server["name"] == "teamfs" and server["status"] == "disabled" for server in api("/mcp")),
           "the running server did not reload the disabled MCP server")
-    cli("mcp", "remove", "teamfs")
-    check("Removing your own version brings back the base folder's server",
-          json.loads(cli("mcp", "get", "teamfs").stdout)["scope"] == "base"
+    check("The disabled copy is no longer tagged base",
+          until(lambda: [server.get("scope") for server in api("/mcp") if server["name"] == "teamfs"] == [None], "scope kept"))
+    enabled = cli("mcp", "enable", "teamfs").stdout
+    check("Turning it back on removes the copy, so the base folder's applies again",
+          "from the base folder" in enabled
+          and "teamfs" not in json.loads((config / "haarness.json").read_text()).get("mcp", {})
+          and json.loads(cli("mcp", "get", "teamfs").stdout)["scope"] == "base")
+    until(lambda: any(server["name"] == "teamfs" and server["status"] == "connected" and server.get("scope") == "base"
+                      for server in api("/mcp")), "the base MCP server did not come back")
+    write(project / ".haarness/haarness.json", json.dumps({"mcp": {"teamfs": {
+        "type": "local", "command": [sys.executable, str(mcp), "PROJECT-" + marker, str(root / "project-mcp-started")]}}}))
+    cli("mcp", "disable", "teamfs", "--project")
+    project_entry = json.loads((project / ".haarness/haarness.json").read_text())["mcp"]["teamfs"]
+    check("A server a project overrides is edited there, and nothing is copied into the global file",
+          project_entry["enabled"] is False and "PROJECT-" in project_entry["command"][2]
           and "teamfs" not in json.loads((config / "haarness.json").read_text()).get("mcp", {}))
-    until(lambda: any(server["name"] == "teamfs" and server["status"] == "connected" for server in api("/mcp")),
-          "the base MCP server did not come back")
+    (project / ".haarness/haarness.json").unlink()
     native("agent", {"action": "customize", "name": "team-reviewer", "scope": "global",
                      "description": "Reviews like the team, my way", "prompt": "Review my way."})
     check("Customizing a base agent saves a global copy", (config / "agents/team-reviewer.md").is_file())
@@ -268,15 +316,44 @@ try:
     run("tmux", "send-keys", "-t", session, "Escape")
     run("tmux", "kill-session", "-t", session)
 
-    # 6. A terminal with the variable reusing a server without it.
-    json.loads(cli("desktop", input='{"action":"connect"}', environment=env, workspace=other).stdout)
-    cli("mcp", "ls", workspace=other)
-    logged = until(lambda: [path for path in state.rglob("*.log*") if "is not applied" in path.read_text(errors="ignore")],
-                   "no notice that the running server reads no base folder", 20)
-    line = next(line for line in logged[0].read_text(errors="ignore").splitlines() if "is not applied" in line)
-    (evidence / "mismatch-notice.txt").write_text(line + "\n")
-    check("A client with the variable that reuses a server without it says so, with how to apply it",
-          "reads no base folder" in line and "haarness serve --stop" in line)
+    # 6. A client with the variable and a server without it.
+    plain_server = json.loads(cli("desktop", input='{"action":"connect"}', environment=env, workspace=other).stdout)
+    def server_pid(endpoint):
+        request = urllib.request.Request(endpoint["url"] + "/v1/info", headers={"Authorization": "Bearer " + endpoint["token"]})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())["pid"]
+    first_pid = server_pid(plain_server)
+    replaced = json.loads(cli("desktop", input='{"action":"connect"}', workspace=other).stdout)
+    second_pid = server_pid(replaced)
+    check("A client with the variable replaces an idle server that reads no base folder", second_pid != first_pid)
+    slashed = {**env, "HAARNESS_BASE_CONFIG_DIR": str(team) + "/"}
+    again = json.loads(cli("desktop", input='{"action":"connect"}', environment=slashed, workspace=other).stdout)
+    check("The same base folder written with a trailing / is no change", server_pid(again) == second_pid)
+    kept = json.loads(cli("desktop", input='{"action":"connect"}', environment=env, workspace=other).stdout)
+    check("A client without the variable never replaces it back", server_pid(kept) == second_pid)
+    # A busy server is kept, with one line on what applies the folder.
+    def post(endpoint, path, body):
+        request = urllib.request.Request(endpoint["url"] + "/v1" + path, data=json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + endpoint["token"], "Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    thread = post(kept, "/threads", {"title": "Busy", "provider": "echo", "model": "echo-1"})
+    post(kept, f'/threads/{thread["id"]}/turns', {"requestId": str(uuid.uuid4()), "text": "!linger 6000 hello"})
+    write(root / "second team/AGENTS.md", "SECOND_TEAM\n")
+    second_team = {**env, "HAARNESS_BASE_CONFIG_DIR": str(root / "second team")}
+    cli("mcp", "ls", environment=second_team, workspace=other)
+    logged = until(lambda: [line for path in state.rglob("*.log*")
+                            for line in path.read_text(errors="ignore").splitlines() if "not applied yet" in line],
+                   "no notice that the busy server keeps its base folder", 20)
+    (evidence / "busy-notice.txt").write_text("\n".join(logged) + "\n")
+    check("A busy server that reads another base folder is kept, with one line on when the folder applies",
+          server_pid(kept) == second_pid and len(logged) == 1
+          and "once that server's work is done" in logged[0] and "serve --stop" not in logged[0])
+    relative = {**env, "HAARNESS_BASE_CONFIG_DIR": "team base"}
+    refused = cli("doctor", environment=relative, workspace=root)
+    (evidence / "relative-notice.txt").write_text(refused.stderr)
+    check("A relative base folder is refused with one line and not read",
+          refused.stderr.count("must be an absolute path") == 1 and "base config:" not in refused.stdout)
 
     # Hot reload watches the base folder as it does the global one.
     write(team / "agents/late-arrival.md", "---\ndescription: Added while running\n---\nLate.")
@@ -287,7 +364,7 @@ try:
           "an agent removed from the base folder stayed on the running server", 30)
     check("Hot reload picks up an agent added to and removed from the base folder")
 
-    # 7. Never written; a missing folder is reported.
+    # 9. Never written; a missing folder is reported.
     check("The base folder is byte for byte as it was", snapshot(team) == before)
     missing = {**env, "HAARNESS_BASE_CONFIG_DIR": str(root / "nowhere")}
     check("A missing base folder is reported and nothing breaks",

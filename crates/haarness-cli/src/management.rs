@@ -1,8 +1,8 @@
 use super::{
     Paths, adopt_base_mcp_entry, asset_layers, base_mcp_entry, loaded_mcp_entry,
     mcp_config_for_display, mcp_config_target, mcp_entry_target, open_browser, read_mcp_entry,
-    receive_oauth_callback, validate_asset_name, validate_mcp_name, validate_qualified_model,
-    write_mcp_changes, write_mcp_entry,
+    receive_oauth_callback, release_base_mcp_copy, validate_asset_name, validate_mcp_name,
+    validate_qualified_model, write_mcp_changes, write_mcp_entry,
 };
 use crate::plugins;
 use anyhow::{Context as _, Result, bail};
@@ -891,6 +891,19 @@ impl ManagementService {
                 let mut entry = before.clone();
                 entry.enabled = action == "enable";
                 write_mcp_changes(&target, name, &before, &entry)?;
+                // Turned back on as the base folder has it: its entry applies again.
+                if action == "enable"
+                    && let Some(source) = release_base_mcp_copy(
+                        &self.paths,
+                        &self.workspace,
+                        name,
+                        scope == Scope::Local,
+                    )?
+                {
+                    return Ok(
+                        json!({"action":action,"resource":"mcp","name":name,"scope":"base","file":source,"runtimeStatus":"reload_queued","restartRequired":false,"usableFrom":"after_active_work_is_idle"}),
+                    );
+                }
                 Ok(
                     json!({"action":action,"resource":"mcp","name":name,"scope":scope.name(),"file":target,"runtimeStatus":"reload_queued","restartRequired":false,"usableFrom":"after_active_work_is_idle"}),
                 )
@@ -1778,26 +1791,19 @@ impl ManagementService {
     /// defines is copied into the chosen layer (global by default) first, so
     /// the change is the person's own version over it.
     fn adopt_base_mcp(&self, name: &str, scope: Option<Scope>) -> Result<()> {
-        let local = scope == Some(Scope::Local);
-        if scope.is_none()
-            && scopes(None).into_iter().any(|scope| {
-                read_mcp_entry(
-                    &mcp_entry_target(&self.paths, &self.workspace, scope == Scope::Local, name),
-                    name,
-                )
-                .is_ok()
-            })
-        {
-            return Ok(());
-        }
-        adopt_base_mcp_entry(&self.paths, &self.workspace, name, local)
+        adopt_base_mcp_entry(
+            &self.paths,
+            &self.workspace,
+            name,
+            scope == Some(Scope::Local),
+        )
     }
 }
 
 /// Whether `path` is in the base folder (`HAARNESS_BASE_CONFIG_DIR`), whose
 /// definitions are listed with a `base` scope and never changed in place.
 fn in_base_folder(path: &Path) -> bool {
-    haarness_protocol::base_config_dir().is_some_and(|base| {
+    crate::layout::base_config_dir().is_some_and(|base| {
         path.starts_with(&base)
             || path
                 .canonicalize()

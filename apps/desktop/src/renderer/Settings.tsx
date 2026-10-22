@@ -1364,26 +1364,11 @@ function Tools() {
 function Mcp(props: { cli: Cli }) {
   const app = useApp();
   const [rows, setRows] = createSignal<T.McpServerInfo[]>([]);
-  // Servers of the base folder, which Haarness lists but never changes.
-  const [base, setBase] = createSignal<ReadonlySet<string>>(new Set());
   async function refresh() {
-    const [servers, configured] = await Promise.all([
-      app.api<T.McpServerInfo[]>("mcpServers"),
-      app.state.connection?.remote
-        ? undefined
-        : app
-            .native<{ name: string; scope?: string }[]>({
-              action: "asset",
-              kind: "mcp",
-              input: { action: "list" },
-            })
-            .catch(() => undefined),
-    ]);
-    setRows(servers);
-    setBase(
-      new Set((configured ?? []).filter((row) => row.scope === "base").map((row) => row.name)),
-    );
+    setRows(await app.api("mcpServers"));
   }
+  // A server of the base folder, which Haarness lists but never changes.
+  const fromBase = (server: T.McpServerInfo) => server.scope === "base";
   createEffect(() => {
     app.state.catalogVersion;
     void app.run(refresh);
@@ -1414,7 +1399,7 @@ function Mcp(props: { cli: Cli }) {
           <div class="setting-block">
             <header>
               <h3 data-setting={"mcp:" + server.name}>{server.name}</h3>
-              <Show when={base().has(server.name)}>
+              <Show when={fromBase(server)}>
                 <BaseTag />
               </Show>
               <span class="badge">{server.status}</span>
@@ -1455,7 +1440,7 @@ function Mcp(props: { cli: Cli }) {
                     { label: "Enable", command: "enable" },
                     { label: "Disable", command: "disable" },
                     // The base folder's servers are turned off, not removed.
-                    ...(base().has(server.name) ? [] : [{ label: "Remove", command: "remove" }]),
+                    ...(fromBase(server) ? [] : [{ label: "Remove", command: "remove" }]),
                     { label: "Sign out", command: "logout" },
                   ].map((item) => ({
                     label: t(item.label),

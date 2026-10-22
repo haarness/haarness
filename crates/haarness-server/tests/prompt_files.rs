@@ -116,6 +116,15 @@ fn file(name: PromptName, mode: PromptMode, body: &str) -> PromptFile {
 }
 
 fn runtime(provider: Arc<Recorder>, prompts: Prompts, max_rounds: Option<u32>) -> AgentRuntime {
+    runtime_in(provider, prompts, max_rounds, PathBuf::from("."))
+}
+
+fn runtime_in(
+    provider: Arc<Recorder>,
+    prompts: Prompts,
+    max_rounds: Option<u32>,
+    workspace: PathBuf,
+) -> AgentRuntime {
     AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
         Arc::new(StaticProviderRegistry::new(vec![
@@ -123,7 +132,7 @@ fn runtime(provider: Arc<Recorder>, prompts: Prompts, max_rounds: Option<u32>) -
         ])),
         Arc::new(Tools),
         EventBus::new(256),
-        PathBuf::from("."),
+        workspace,
         "Project instructions marker".into(),
         RuntimeConfig {
             prompts,
@@ -313,10 +322,21 @@ fn runtime_with(provider: Arc<Recorder>) -> AgentRuntime {
     )
 }
 
+/// The requests Haarness sent before prompt files existed, as the code of
+/// that time wrote them (tests/golden, generated from it): without prompt
+/// files every request is still exactly that, byte for byte.
 #[tokio::test]
 async fn without_prompt_files_requests_are_byte_for_byte_the_builtin_ones() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-prompt-golden-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&workspace).unwrap();
     let provider = Arc::new(Recorder::default());
-    let runtime = runtime(provider.clone(), Prompts::default(), None);
+    let runtime = runtime_in(
+        provider.clone(),
+        Prompts::default(),
+        None,
+        workspace.clone(),
+    );
     let thread = runtime
         .create_thread(CreateThreadRequest {
             provider: Some("recorder".into()),
@@ -327,25 +347,60 @@ async fn without_prompt_files_requests_are_byte_for_byte_the_builtin_ones() {
         .unwrap();
     turn(&runtime, thread.id, None).await;
     let main = main_requests(&provider).remove(0);
-    let builtin = haarness_core::system_prompt_for("build");
-    assert!(main.system.starts_with(&format!(
-        "{builtin}\n\nYou are powered by the model named fixture."
-    )));
-    assert!(
-        main.system
-            .contains(&format!("\n{}\n", PromptName::Preview.builtin()))
-    );
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !provider
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|request| request.system == haarness_core::system_prompt_for("title"))
-        {
+    let date = thread
+        .created_at
+        .with_timezone(&chrono::Local)
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let golden = include_str!("golden/build-system.txt")
+        .replace("{model}", "fixture")
+        .replace("{provider}", "recorder")
+        .replace("{workspace}", &workspace.display().to_string())
+        .replace("{git}", "no")
+        .replace("{os}", std::env::consts::OS)
+        .replace("{arch}", std::env::consts::ARCH)
+        .replace("{date}", &date)
+        .replace("{project}", "Project instructions marker");
+    assert_eq!(main.system, golden);
+    assert_eq!(main.tools, vec![Preview.definition()]);
+    assert!(matches!(
+        main.messages.as_slice(),
+        [ProviderMessage::Text { role, content }, ..] if role == "user" && content == "Look at the project."
+    ));
+    let title = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let found = provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|request| {
+                    request.tools.is_empty() && !request.system.contains("Project instructions")
+                })
+                .cloned();
+            if let Some(title) = found {
+                return title;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the title request uses the built-in title prompt");
+    .expect("a title request");
+    assert_eq!(title.system, include_str!("golden/title-system.txt"));
+    let request =
+        include_str!("golden/title-request.txt").replace("{message}", "Look at the project.");
+    assert!(matches!(
+        title.messages.as_slice(),
+        [ProviderMessage::Text { role, content }] if role == "user" && *content == request
+    ));
+    runtime.compact_with_llm(thread.id).await.unwrap();
+    let summary = provider.requests.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(summary.system, include_str!("golden/compaction-system.txt"));
+    assert!(matches!(
+        summary.messages.last(),
+        Some(ProviderMessage::Text { role, content })
+            if role == "user" && content == include_str!("golden/compaction-request.txt")
+    ));
+    std::fs::remove_dir_all(workspace).unwrap();
 }

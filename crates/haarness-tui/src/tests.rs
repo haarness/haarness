@@ -9971,6 +9971,7 @@ fn sidebar_renders_on_wide_terminals_and_collapses_on_narrow() {
         transport: "stdio".into(),
         status: "connected".into(),
         detail: None,
+        scope: None,
     }];
     app.children.insert(
         "call-1".into(),
