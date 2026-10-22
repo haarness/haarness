@@ -294,6 +294,8 @@ test("your other computers open from the server switcher through Haarness Cloud,
     await expect(awayRow).toHaveClass(/away/);
     await expect(awayRow.getByRole("button", { name: "Switch" })).toBeDisabled();
     await expect(dialog.locator(".setting-row").filter({ hasText: "Studio" })).toHaveCount(1);
+    // The place search found is marked for a moment.
+    await expect(section).not.toHaveClass(/setting-search-target/, { timeout: 10000 });
     await shoot(page, "settings-servers");
     await dialog.getByRole("button", { name: "Close settings", exact: true }).click();
 
