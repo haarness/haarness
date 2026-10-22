@@ -21,6 +21,7 @@ and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
 - [Cross-project analytics](INSIGHTS.md): `haarness stats` and `haarness insights`, and how they count.
 - [Reviewing large changesets](LARGE-DIFF-REVIEW.md): how Desktop and the API page through very large diffs.
 - [Configuration profiles](PROFILES.md): save, inspect, restore and share portable configuration archives.
+- [Prompt files](PROMPT-FILES.md): replace or add to the built-in prompts from the global or base folder, and `haarness prompt`.
 - [Remote computers through Haarness Cloud](REMOTE-ACCESS.md): reach your own machine from Cloud web, the API and the SDKs.
 - [Haarness Router](ROUTER.md): connect a self-hosted router from Desktop, the TUI or the CLI.
 - [Side questions with `/btw`](SIDE-QUESTIONS.md): ask about a chat without adding to it.

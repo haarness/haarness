@@ -20,7 +20,12 @@ daemon in a private data folder shows that:
    wrote: the plan chat's browser and write ceiling refuses those tools when called, it does not
    take them out of the list.
 
-Usage: python3 scripts/test-prompt-stability.py   (HAARNESS_BIN picks the binary,
+With --base-folder the daemon also starts with a base configuration folder
+(HAARNESS_BASE_CONFIG_DIR) whose prompt files add to the main instructions and the
+summary prompt: every check above must hold with them, the additions must be on the wire,
+and the base folder must be left exactly as it was.
+
+Usage: python3 scripts/test-prompt-stability.py [--base-folder]   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_EVIDENCE the evidence folder).
 """
 import datetime
@@ -45,6 +50,10 @@ EVIDENCE = Path(os.environ.get('HAARNESS_E2E_EVIDENCE', REPO / 'target/prompt-st
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 MODEL = 'claude-sonnet-4-6'
 REQUESTS = []
+BASE_FOLDER = '--base-folder' in sys.argv[1:]
+if BASE_FOLDER:
+    EVIDENCE = EVIDENCE / 'base-folder'
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
 
 
 def run(args, **kwargs):
@@ -145,6 +154,19 @@ env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOM
        'ANTHROPIC_API_KEY': 'fixture-key', 'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{service.server_port}/v1'}
 args = [str(BINARY), '--workspace', str(workspace), '--trust-project']
 connection = None
+team = root / 'team'
+if BASE_FOLDER:
+    (team / 'prompts').mkdir(parents=True, exist_ok=True)
+    (team / 'prompts/system.md').write_text('BASE_PROMPT_MARKER: follow the team checklist.\n')
+    (team / 'prompts/compaction.md').write_text('---\nmode: prepend\n---\nBASE_SUMMARY_MARKER\n')
+    env['HAARNESS_BASE_CONFIG_DIR'] = str(team)
+    base_before = {path: path.read_bytes() for path in team.rglob('*') if path.is_file()}
+
+
+def system_text(body):
+    return ''.join(block['text'] for block in body['system']) if isinstance(body['system'], list) else body['system']
+
+
 try:
     (home / '.local/bin').mkdir(parents=True, exist_ok=True)
     (workspace / '.haarness').mkdir(parents=True, exist_ok=True)
@@ -244,6 +266,11 @@ try:
     assert len(stamps) == 2 and stamps[0] != stamps[1], stamps
     assert all(text.startswith('<system-reminder>\nContext from hooks:\nHOOK_STAMP ') for text in stamps), stamps
     assert 'HOOK_STAMP' not in json.dumps(first['system']), 'hook context reached the system prompt'
+    if BASE_FOLDER:
+        added = 'not an OS sandbox.\n\nBASE_PROMPT_MARKER: follow the team checklist.\n\nYou are powered by'
+        assert added in system_text(first), system_text(first)[:600]
+    else:
+        assert 'BASE_PROMPT_MARKER' not in json.dumps(first), 'a base prompt file applied without a base folder'
     prompts = texts(second)
     assert prompts.index(stamps[0]) == prompts.index('FIRST stable turn') + 1, prompts
     shown = [item for item in items(stable) if item['data']['type'] == 'user_message' and not item['data'].get('synthetic')]
@@ -268,6 +295,8 @@ try:
     assert len(summaries) == 1, f'{len(summaries)} compaction requests'
     assert 'Summarize this conversation for continuation' in json.dumps(summaries[0]['messages'][-1]), summaries[0]['messages'][-1]
     assert 'cache_control' not in json.dumps(summaries[0]), 'the compaction summary marked cache breakpoints'
+    if BASE_FOLDER:
+        assert system_text(summaries[0]).startswith('BASE_SUMMARY_MARKER\n\nYou are Haarness'), summaries[0]['system']
     assert 'cache_control' in json.dumps(first['system']) and 'cache_control' in json.dumps(second['messages']), 'a turn lost its breakpoints'
     offset = len(REQUESTS)
     assert turn(stable, 'THIRD stable turn')['status'] == 'completed'
@@ -329,6 +358,13 @@ try:
     assert clean(under_plan['tools']) == clean(under_build['tools']), 'the subagents sent different tool lists'
     assert json.dumps(clean(under_plan['system'])) == json.dumps(clean(under_build['system'])), 'the subagents sent different system prompts'
     assert 'browser_navigate' in plan_tools and 'write' in plan_tools, plan_tools
+    if BASE_FOLDER:
+        assert 'BASE_PROMPT_MARKER' in system_text(under_plan), 'the subagent lost the base prompt file'
+        after = {path: path.read_bytes() for path in team.rglob('*') if path.is_file()}
+        assert after == base_before, 'the base folder was written'
+        checks.append({'base folder': ['system.md appended to the main instructions on the wire',
+                                       'compaction.md prepended to the summary prompt', 'base folder unchanged']})
+        print('PASS base folder prompt files on the wire, base folder unchanged', flush=True)
     checks.append({'subagent prefix': [f'{len(plan_tools)} tools identical under a plan and a build chat',
                                        'system identical', 'browser_navigate and write listed under the plan chat']})
     print(f'PASS subagents of a plan chat and a build chat send one prefix ({len(plan_tools)} tools)', flush=True)

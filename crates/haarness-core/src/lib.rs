@@ -17,6 +17,7 @@ mod permissions;
 mod ports;
 mod prefix_warmup;
 pub mod process_groups;
+pub mod prompts;
 pub mod redact;
 mod runtime;
 pub mod shell_text;
@@ -47,6 +48,7 @@ pub use permissions::{
     set_global_config_dir,
 };
 pub use ports::*;
+pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
     refusal_reason, shorten_title,

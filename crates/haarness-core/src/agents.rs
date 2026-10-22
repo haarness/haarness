@@ -126,11 +126,16 @@ pub fn system_prompt_for(agent: &str) -> String {
 /// separately by the runtime and never need vendor-private assumptions.
 #[must_use]
 pub fn system_prompt_with_context(agent: &str, context: &SystemPromptContext<'_>) -> String {
-    format!(
-        "{}\n\n{}",
-        system_prompt_for(agent),
-        runtime_context_prompt(context)
-    )
+    instructions_with_context(&system_prompt_for(agent), context)
+}
+
+/// A built-in agent's instructions (its prompt as prompt files leave it) and
+/// the execution environment, which no prompt file changes.
+pub(crate) fn instructions_with_context(
+    instructions: &str,
+    context: &SystemPromptContext<'_>,
+) -> String {
+    format!("{instructions}\n\n{}", runtime_context_prompt(context))
 }
 
 /// Custom-agent bodies replace the role guidance but not the product identity,
