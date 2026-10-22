@@ -377,6 +377,10 @@ export interface Bridge {
   chromeSetup(action: "setup" | "status"): Promise<import("./chrome").ChromeSetupInfo>;
   /** Shows the unpacked Haarness for Chrome folder the last report named. */
   chromeReveal(): Promise<void>;
+  /** The raised log level on this computer, or Detailed logging turned on or off. */
+  logLevel(action: "status" | "detail-on" | "detail-off"): Promise<import("./diagnostics").LogLevelStatus>;
+  /** Saves this computer's logs where the person chooses and shows the zip; null when cancelled. */
+  exportLogs(): Promise<import("./diagnostics").ExportedLogs | null>;
   reveal(connection: string, path?: string): Promise<void>;
   /** `write` (the person's keys) and `answer` (xterm answering a program's
    * query, which only one window does per terminal) answer false when the

@@ -159,6 +159,8 @@ test("keys translated through a variable are in the catalog", () => {
     // `shortcutDescriptions`.
     "Next agent", "Previous agent", "While the message box has focus",
     "Pick an element", "Adds part of the browser's page to your message",
+    // Settings rows SettingRow translates, and the save dialog's labels from the main process.
+    "Diagnostics", "Detailed logging", "Export logs", "Export", "Zip archive",
     "Browser", "Review", "Terminal", "Context",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",

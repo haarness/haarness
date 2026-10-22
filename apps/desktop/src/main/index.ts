@@ -4,6 +4,7 @@ import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
+import { exportLogs, logLevel } from "./logs";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
@@ -1391,6 +1392,11 @@ function installHandlers() {
     chromeSetup(z.enum(["setup", "status"]).parse(action)),
   );
   handle("chromeReveal", () => revealChromeExtension());
+  // This computer's logs: Detailed logging, and the zip to share.
+  handle("logLevel", (_, action: unknown) =>
+    logLevel(z.enum(["status", "detail-on", "detail-off"]).parse(action)),
+  );
+  handle("exportLogs", (win) => exportLogs(win, say));
   // An image a reply links to on another host, once the person asks for it.
   // End-to-end tests pin fixture host names with `haarnessImageHosts`.
   handle("remoteImage", (_, raw: unknown) =>
@@ -1799,6 +1805,7 @@ function menu() {
         label: t("Help"),
         submenu: [
           { label: t("Keyboard shortcuts"), click: () => action("shortcuts") },
+          { label: t("Export logs") + "…", click: (_item, win) => action("export-logs", win) },
           { label: t("About Haarness"), click: () => action("about") },
         ],
       },
