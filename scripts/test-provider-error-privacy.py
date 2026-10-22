@@ -82,7 +82,8 @@ try:
         items = api(f"/threads/{thread}/items")
         assert any(item["data"]["type"] == "error" for item in items), items
         persisted = json.dumps({"turn": failed, "items": items})
-        assert "Could not reach the provider" in persisted, persisted
+        # The error names the provider and the host it could not reach, never the URL's query.
+        assert f"Could not reach OpenAI at 127.0.0.1:{service.server_port}" in persisted, persisted
         assert "private-query" not in persisted, "URL secret reached durable API errors"
         # Read the same state again, and include the real runtime error log.
         assert "private-query" not in json.dumps(api(f"/threads/{thread}/items"))
