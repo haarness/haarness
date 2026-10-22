@@ -345,7 +345,7 @@ test("the time a consumer spends with an event is not the server's silence", asy
   client.close();
 });
 
-test("a terminal ping counts anything the server sends, waits out a replay, and survives a blocked event loop", async () => {
+test("a terminal ping counts anything the server sends, fails a socket gone mid-replay, and survives a blocked event loop", async () => {
   const { WebSocketServer } = await import("ws");
   const cursor = JSON.stringify({ type: "cursor", start: 0, end: 0, truncated: false });
   const open = async (onConnection) => {
@@ -378,8 +378,16 @@ test("a terminal ping counts anything the server sends, waits out a replay, and 
       await opened.close();
     }
   };
-  // Still sending its replay: the server reads no ping, so none is asked.
-  assert.equal(await check(() => {}, (pty) => pty.ping(100)), true);
+  // Gone in the middle of its replay: nothing comes, so the ping fails.
+  const replay = JSON.stringify({ type: "replay", start: 0, end: 9, truncated: false });
+  const dead = await check(
+    (socket) => socket.send(replay),
+    async (pty) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return pty.ping(100);
+    },
+  );
+  assert.equal(dead, false);
 
   // No pong, but output: the server is there.
   const busy = await check(
