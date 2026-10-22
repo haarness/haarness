@@ -180,27 +180,52 @@ export const optionalShortcuts = new Set([
   "promptLast",
 ]);
 /**
- * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar and
- * prompt keys, came after people chose their own keys. A new default that is
- * already another action's key in `saved` (a `Mod+Tab` agent key off macOS,
- * say) is left unset, so that action keeps it and Settings still saves; a key
- * saved before is kept as it is.
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar,
+ * prompt and pick keys, came after people chose their own keys. A new
+ * default that is already a key the person has (another action's key in
+ * `saved`, such as a `Mod+Tab` agent key off macOS or a chat key moved to
+ * `Mod+Shift+C`, or their `global` shortcut) is left unset, so they keep it
+ * and Settings still saves; a key saved before is kept as it is.
  */
 export function migrateTabKeys(
   saved: Record<string, string> | undefined,
   shortcuts: Preferences["shortcuts"],
   platform: string,
+  global?: string,
 ) {
   let next = shortcuts;
   for (const name of optionalShortcuts) {
     if (!next[name] || (saved && name in saved)) continue;
     const mine = shortcutKeys(next[name], platform);
-    const taken = Object.entries(next).some(
-      ([other, value]) => other !== name && !optionalShortcuts.has(other) && value && shortcutKeys(value, platform) === mine,
-    );
+    const theirs = (other: string) => !optionalShortcuts.has(other) || (!!saved && other in saved);
+    const taken =
+      Object.entries(next).some(
+        ([other, value]) => other !== name && theirs(other) && value && shortcutKeys(value, platform) === mine,
+      ) || (!!global && shortcutKeys(global, platform) === mine);
     if (taken) next = { ...next, [name]: "" };
   }
   return next;
+}
+/** Optional shortcuts that are native menu accelerators, not keys the page matches. */
+export const menuShortcuts = new Set(["pick"]);
+// Menu shortcuts become native accelerators, so they need a modifier and a
+// single character. Composer, tab, chat and prompt shortcuts are matched in
+// the page and may also use a named key, such as Tab for people who want
+// the TUI's, or the arrows the page reports as ArrowUp and so on.
+const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
+const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown`;
+const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
+const accelerator = new RegExp(`^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
+const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
+/**
+ * Whether Settings may save `value` for the shortcut `name`: an optional one
+ * may be unset (""), the keys the page matches may be a named key, and the
+ * rest, menu accelerators (Pick an element included), need a modifier.
+ */
+export function shortcutAccepted(name: string, value: string) {
+  if (value === "" && optionalShortcuts.has(name)) return true;
+  const page = (name === "agentNext" || name === "agentPrev" || optionalShortcuts.has(name)) && !menuShortcuts.has(name);
+  return (page ? composer : accelerator).test(value);
 }
 export interface SavedServer {
   id: string;
