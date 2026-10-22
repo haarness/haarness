@@ -93,6 +93,35 @@ export class PtyConnection implements AsyncIterable<PtyMessage> {
   send(data: string | Uint8Array): void {
     this.socket.send(data, { binary: true });
   }
+  /**
+   * Whether the socket still reaches its server: a WebSocket ping answered
+   * within `timeoutMs`. A connection that died without closing (the machine
+   * slept, the network changed, a proxy froze) still reads as open and takes
+   * keys that go nowhere. One that misses the answer is closed, so iterating
+   * it ends and its reader can connect again from `cursor`.
+   */
+  ping(timeoutMs = 10_000): Promise<boolean> {
+    if (this.socket.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const done = (answered: boolean) => {
+        clearTimeout(timer);
+        this.socket.off("pong", answer);
+        this.socket.off("close", closed);
+        if (!answered) this.socket.terminate();
+        resolve(answered);
+      };
+      const answer = () => done(true);
+      const closed = () => done(false);
+      const timer = setTimeout(() => done(false), timeoutMs);
+      this.socket.on("pong", answer);
+      this.socket.once("close", closed);
+      try {
+        this.socket.ping();
+      } catch {
+        done(false);
+      }
+    });
+  }
   close(): void {
     if (this.socket.readyState === WebSocket.CONNECTING)
       this.socket.terminate();

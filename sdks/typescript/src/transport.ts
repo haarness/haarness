@@ -74,6 +74,60 @@ export interface EventOptions extends Omit<RequestOptions, "timeoutMs"> {
   after?: number;
   reconnect?: boolean;
   retryMs?: number;
+  /**
+   * How long the stream may stay silent, in ms, before it counts as lost.
+   * Every chunk resets it, the keepalive comments a server sends every 15 s
+   * included, so only a connection that died without closing (a laptop that
+   * slept, a network that changed, a proxy that froze) reaches it. Then the
+   * stream connects again from its cursor with `reconnect`, and otherwise
+   * ends with a `TransportError`. A wait that ran far past its time (the
+   * machine slept, or the event loop was blocked) first gets one more window.
+   */
+  idleTimeoutMs?: number;
+}
+
+/**
+ * One connection attempt's silence limit. `heard` on every chunk. A timer
+ * that fires more than min(5 s, limit) after it was due says this process
+ * could not run, not that the server went quiet, so it gives one more
+ * window, once per silence: hearing anything starts the next silence afresh.
+ */
+function silence(limit: number | undefined, lost: () => void) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let due = 0;
+  let extended = false;
+  let expired = false;
+  const arm = (ms: number) => {
+    due = Date.now() + ms;
+    timer = setTimeout(fire, ms);
+  };
+  const fire = () => {
+    if (!extended && Date.now() - due > Math.min(5_000, limit!)) {
+      extended = true;
+      arm(limit!);
+      return;
+    }
+    expired = true;
+    lost();
+  };
+  if (limit !== undefined) {
+    if (!(limit > 0)) throw new TypeError("idleTimeoutMs must be positive");
+    arm(limit);
+  }
+  return {
+    heard() {
+      if (limit === undefined || expired) return;
+      clearTimeout(timer);
+      extended = false;
+      arm(limit);
+    },
+    stop() {
+      clearTimeout(timer);
+    },
+    get expired() {
+      return expired;
+    },
+  };
 }
 
 export class HttpTransport {
@@ -232,15 +286,21 @@ export class Transport extends HttpTransport {
         ...(cursor === undefined ? {} : { "Last-Event-ID": String(cursor) }),
       };
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      const attempt = new AbortController();
+      const quiet = silence(options.idleTimeoutMs, () => {
+        attempt.abort();
+        void reader?.cancel().catch(() => {});
+      });
       try {
         const response = await this.fetcher(this.url("/v1/events"), {
           headers,
           redirect: "error",
-          signal,
+          signal: AbortSignal.any([signal, attempt.signal]),
         });
         if (!response.ok) await this.failure(response);
         if (!response.body)
           throw new TransportError("Event stream has no body");
+        quiet.heard();
         reader = response.body!.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -248,6 +308,8 @@ export class Transport extends HttpTransport {
         let size = 0;
         while (true) {
           const chunk = await reader.read();
+          if (quiet.expired) break;
+          quiet.heard();
           buffer += decoder.decode(chunk.value, { stream: !chunk.done });
           if (chunk.done && buffer.endsWith("\r")) buffer += "\n";
           if (buffer.length > 8 * 1024 * 1024)
@@ -282,9 +344,21 @@ export class Transport extends HttpTransport {
           }
           if (chunk.done) break;
         }
+        if (quiet.expired && !options.reconnect)
+          throw new TransportError(
+            `The event stream sent nothing for ${options.idleTimeoutMs} ms`,
+          );
       } catch (error) {
         if (signal.aborted) return;
-        if (
+        if (quiet.expired) {
+          if (!options.reconnect)
+            throw error instanceof TransportError
+              ? error
+              : new TransportError(
+                  `The event stream sent nothing for ${options.idleTimeoutMs} ms`,
+                  { cause: error },
+                );
+        } else if (
           !options.reconnect ||
           error instanceof ApiError ||
           error instanceof SyntaxError ||
@@ -292,6 +366,7 @@ export class Transport extends HttpTransport {
         )
           throw error;
       } finally {
+        quiet.stop();
         await reader?.cancel().catch(() => {});
         reader?.releaseLock();
       }

@@ -10,7 +10,8 @@ export type { RequestOptions } from "./transport.js";
 export interface CloudOptions extends ClientOptions {
   accountId?: string;
 }
-export interface CloudEventOptions extends Omit<EventOptions, "after"> {
+export interface CloudEventOptions
+  extends Omit<EventOptions, "after" | "idleTimeoutMs"> {
   accountId?: string;
 }
 /** Cloud credentials never fall back to the unrelated local server token. */

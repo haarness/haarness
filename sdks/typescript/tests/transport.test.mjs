@@ -174,3 +174,139 @@ test("SSE accepts CR-only frame delimiters at EOF", async () => {
   assert.deepEqual(events, [{ type: "resync_required" }]);
   client.close();
 });
+
+const sseEvent = (id) =>
+  "data: " +
+  JSON.stringify({ schemaVersion: "1", type: "item.created", serverInstanceId: "instance", eventId: id, payload: null }) +
+  "\n\n";
+/** A stream the test writes to; it never ends by itself, like a connection that died without closing. */
+function openStream(init) {
+  let controller;
+  const body = new ReadableStream({ start: (c) => (controller = c) });
+  const encoder = new TextEncoder();
+  init?.signal?.addEventListener("abort", () => {
+    try { controller.error(init.signal.reason); } catch {}
+  });
+  return {
+    response: new Response(body),
+    send: (text) => controller.enqueue(encoder.encode(text)),
+  };
+}
+
+test("an event stream silent past idleTimeoutMs is lost, and keepalives keep it open", async () => {
+  // Silent after it opened: the stream ends with a TransportError.
+  let silent;
+  const lost = new Haarness({
+    baseUrl: "http://localhost:8080",
+    fetch: async (_url, init) => {
+      silent = openStream(init);
+      setTimeout(() => silent.send(sseEvent(1)), 5);
+      return silent.response;
+    },
+  });
+  const seen = [];
+  const started = Date.now();
+  await assert.rejects(async () => {
+    for await (const event of lost.events({ idleTimeoutMs: 150 })) seen.push(event.eventId);
+  }, (error) => error instanceof TransportError && /sent nothing for 150 ms/.test(error.message));
+  assert.deepEqual(seen, [1]);
+  assert.ok(Date.now() - started < 1_000);
+  lost.close();
+
+  // Keepalive comments every 50 ms keep a 150 ms limit from firing.
+  let alive;
+  const kept = new Haarness({
+    baseUrl: "http://localhost:8080",
+    fetch: async (_url, init) => {
+      alive = openStream(init);
+      let beats = 0;
+      const timer = setInterval(() => {
+        if (++beats < 10) alive.send(": keepalive\n\n");
+        else {
+          clearInterval(timer);
+          alive.send(sseEvent(7));
+        }
+      }, 50);
+      return alive.response;
+    },
+  });
+  for await (const event of kept.events({ idleTimeoutMs: 150 })) {
+    assert.equal(event.eventId, 7);
+    break;
+  }
+  kept.close();
+});
+
+test("with reconnect, a silent event stream connects again from its cursor", async () => {
+  const cursors = [];
+  const client = new Haarness({
+    baseUrl: "http://localhost:8080",
+    fetch: async (_url, init) => {
+      cursors.push(init.headers["Last-Event-ID"]);
+      const stream = openStream(init);
+      const first = cursors.length === 1;
+      setTimeout(() => stream.send(sseEvent(first ? 4 : 5)), 5);
+      return stream.response;
+    },
+  });
+  const events = [];
+  for await (const event of client.events({ after: 3, reconnect: true, retryMs: 1, idleTimeoutMs: 100 })) {
+    events.push(event.eventId);
+    if (events.length === 2) break;
+  }
+  assert.deepEqual(events, [4, 5]);
+  assert.deepEqual(cursors, ["3", "4"]);
+  client.close();
+});
+
+test("a silence limit that fires late, behind a blocked event loop, gives the stream one more window", async () => {
+  let fetches = 0;
+  const client = new Haarness({
+    baseUrl: "http://localhost:8080",
+    fetch: async (_url, init) => {
+      fetches++;
+      const stream = openStream(init);
+      setTimeout(() => {
+        stream.send(": keepalive\n\n");
+        // The loop is blocked well past the limit, as a sleeping machine's
+        // would be; the event comes right after.
+        setTimeout(() => {
+          const until = Date.now() + 400;
+          while (Date.now() < until);
+          setTimeout(() => stream.send(sseEvent(9)), 10);
+        }, 20);
+      }, 5);
+      return stream.response;
+    },
+  });
+  for await (const event of client.events({ idleTimeoutMs: 100 })) {
+    assert.equal(event.eventId, 9);
+    break;
+  }
+  assert.equal(fetches, 1);
+  client.close();
+});
+
+test("a terminal socket's ping says whether its server still answers, and closes one that does not", async () => {
+  const { WebSocketServer } = await import("ws");
+  for (const autoPong of [true, false]) {
+    const server = new WebSocketServer({ port: 0, autoPong });
+    await new Promise((resolve) => server.once("listening", resolve));
+    server.on("connection", (socket) => socket.send(JSON.stringify({ type: "cursor", start: 0, end: 0, truncated: false })));
+    const client = new Haarness({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const pty = await client.connectPty("fixture");
+    const reading = (async () => {
+      for await (const _message of pty);
+    })();
+    const started = Date.now();
+    assert.equal(await pty.ping(200), autoPong);
+    if (autoPong) {
+      assert.ok(Date.now() - started < 200);
+      pty.close();
+    }
+    // A socket that missed its answer ends, so its reader connects again.
+    await reading;
+    client.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
