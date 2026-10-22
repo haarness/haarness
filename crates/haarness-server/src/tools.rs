@@ -2831,10 +2831,21 @@ impl Tool for BuiltinTool {
                         root.display()
                     )));
                 }
-                let pattern = root
-                    .join(string(&args, "pattern")?)
-                    .to_string_lossy()
-                    .into_owned();
+                let pattern = string(&args, "pattern")?;
+                // A `..` would leave the folder the outside-folder check
+                // judged; the folder is given as `path` instead.
+                if climbs(pattern) {
+                    return Err(CoreError::Invalid(
+                        "a glob pattern cannot contain `..`; pass the folder to search as path"
+                            .into(),
+                    ));
+                }
+                let pattern = root.join(pattern).to_string_lossy().into_owned();
+                let workspace = self
+                    .workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.workspace.clone());
+                let mut folders = HashMap::<PathBuf, bool>::new();
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
@@ -2847,11 +2858,31 @@ impl Tool for BuiltinTool {
                 for path in glob::glob(&pattern)
                     .map_err(tool_error)?
                     .filter_map(Result::ok)
-                    .filter(|path| path.starts_with(&root))
+                    // A part starting with `.`, such as `.*`, also matches
+                    // `.` and `..`.
+                    .filter(|path| {
+                        path.strip_prefix(&root).is_ok_and(|relative| {
+                            !relative
+                                .components()
+                                .any(|part| part == std::path::Component::ParentDir)
+                        })
+                    })
                 {
                     if values.len() == 10_000 {
                         partial = true;
                         break;
+                    }
+                    // `**` follows linked folders: a match in a folder a link
+                    // takes out of the project and the searched folder is
+                    // left out, as a list of that folder would ask first.
+                    let parent = path.parent().unwrap_or(&root).to_path_buf();
+                    let inside = *folders.entry(parent).or_insert_with_key(|parent| {
+                        parent.canonicalize().is_ok_and(|real| {
+                            real.starts_with(&root) || real.starts_with(&workspace)
+                        })
+                    });
+                    if !inside {
+                        continue;
                     }
                     // `*` matches dotfiles and `**` follows linked folders, so
                     // each file is checked by where it really leads as well.
@@ -3451,6 +3482,11 @@ impl SecretFilter {
 
 /// Whether two paths name one existing file: the same device and inode on
 /// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
+/// Whether a glob pattern has a `..` part.
+fn climbs(pattern: &str) -> bool {
+    pattern.split(['/', '\\']).any(|part| part == "..")
+}
+
 /// Whether the entry a move removes is the file it writes. A link is its
 /// own entry: moving it onto the file it leads to writes that file and
 /// removes only the link.
@@ -6181,6 +6217,76 @@ export default workflow({
         );
         assert_eq!(result.metadata["skipped"], 1);
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_glob_stays_in_the_folder_it_searches() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-scope-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join("src/inner")).unwrap();
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("outside/elsewhere.txt"), "").unwrap();
+        std::fs::write(workspace.join("src/inner/main.rs"), "").unwrap();
+        std::fs::write(workspace.join("docs/guide.md"), "").unwrap();
+        std::os::unix::fs::symlink("../outside", workspace.join("escape")).unwrap();
+        std::os::unix::fs::symlink("../docs", workspace.join("src/docs")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("outside/elsewhere.txt"),
+            workspace.join("note.txt"),
+        )
+        .unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let glob = |arguments: Value| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            async move {
+                registry
+                    .get("glob")
+                    .unwrap()
+                    .execute(arguments, context)
+                    .await
+            }
+        };
+        let error = glob(json!({"pattern":"../*"})).await.unwrap_err();
+        assert!(error.to_string().contains("cannot contain `..`"), "{error}");
+        let error = glob(json!({"pattern":"src/../../outside/*"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot contain `..`"), "{error}");
+        // `.*` also matches `..`, and `**` follows linked folders.
+        let dotted = glob(json!({"pattern":".*/*"})).await.unwrap();
+        assert!(!dotted.text.contains("outside"), "{}", dotted.text);
+        let dotted = glob(json!({"pattern":".*/*","path":"src"})).await.unwrap();
+        assert!(!dotted.text.contains(".."), "{}", dotted.text);
+        let all = glob(json!({"pattern":"**/*"})).await.unwrap();
+        assert!(!all.text.contains("elsewhere.txt"), "{}", all.text);
+        // A link in the project is listed, and a link to another project
+        // folder is followed.
+        assert!(
+            all.text.lines().any(|line| line == "note.txt"),
+            "{}",
+            all.text
+        );
+        assert!(
+            all.text.lines().any(|line| line == "escape"),
+            "{}",
+            all.text
+        );
+        assert!(
+            all.text.lines().any(|line| line == "src/docs/guide.md"),
+            "{}",
+            all.text
+        );
+        let nested = glob(json!({"pattern":"**/*.md","path":"src"}))
+            .await
+            .unwrap();
+        assert_eq!(nested.text, "src/docs/guide.md");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
