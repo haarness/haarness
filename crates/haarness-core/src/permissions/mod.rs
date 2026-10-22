@@ -239,10 +239,9 @@ pub struct PermissionEngine {
     /// differ between sessions of one agent, so they refuse calls but never
     /// take a tool out of the list the model sees.
     inherited: Vec<Vec<PermissionRule>>,
-    /// Each `external_directory` rule whose folder is a link, in the form
-    /// the asks use (the folder it leads to). Resolved once, when the rule
-    /// is added: never on a check, which would wait on a stale network
-    /// folder and follow a link someone made after the rule was loaded.
+    /// Each configured `external_directory` rule whose folder is a link, in
+    /// the form the asks use (the folder it leads to), from the
+    /// process-wide [`configured_real_folder`]: never resolved on a check.
     real_folders: std::collections::BTreeMap<String, String>,
     /// The project folder, when known: `read`, `edit` and `list` rules then
     /// name a project file however the call spelled its path.
@@ -299,12 +298,24 @@ impl PermissionEngine {
         engine
     }
 
-    /// Record where the `external_directory` rules among `rules` really
-    /// lead (see `real_folders`).
+    /// Record where the configured `external_directory` rules among `rules`
+    /// really lead (see `real_folders`), resolving each pattern once per
+    /// process.
     fn learn(&mut self, rules: &[PermissionRule]) {
+        self.learn_with(rules, configured_real_folder);
+    }
+
+    /// [`learn`](Self::learn) for rules that may mix configured rules with
+    /// answers (a parent's boundary): only what the process already resolved
+    /// for a configured rule is used, and nothing is followed now.
+    fn learn_resolved(&mut self, rules: &[PermissionRule]) {
+        self.learn_with(rules, resolved_real_folder);
+    }
+
+    fn learn_with(&mut self, rules: &[PermissionRule], real: fn(&str) -> Option<String>) {
         for rule in rules {
             if !self.real_folders.contains_key(&rule.pattern)
-                && let Some(real) = real_folder_rule(&rule.pattern)
+                && let Some(real) = real(&rule.pattern)
             {
                 self.real_folders.insert(rule.pattern.clone(), real);
             }
@@ -357,12 +368,13 @@ impl PermissionEngine {
     }
 
     pub fn approve_always(&mut self, pattern: impl Into<String>) {
-        let rule = normalize_rule_aliases(PermissionRule {
-            pattern: pattern.into(),
-            decision: PermissionDecision::Allow,
-        });
-        self.learn(std::slice::from_ref(&rule));
-        self.session_rules.push(rule);
+        // An answer names the folder an ask named, which is already where
+        // the path really leads: it is never followed.
+        self.session_rules
+            .push(normalize_rule_aliases(PermissionRule {
+                pattern: pattern.into(),
+                decision: PermissionDecision::Allow,
+            }));
     }
     pub fn add_rule(&mut self, rule: PermissionRule) {
         let rule = normalize_rule_aliases(rule);
@@ -370,16 +382,14 @@ impl PermissionEngine {
         self.rules.push(rule);
     }
     pub fn add_repository_grant(&mut self, rule: PermissionRule) {
-        let rule = normalize_rule_aliases(rule);
-        self.learn(std::slice::from_ref(&rule));
-        self.repository_grants.push(rule);
+        self.repository_grants.push(normalize_rule_aliases(rule));
     }
     /// An "always" answer (this session or this workspace). It settles what
     /// the configured rules leave as a question and never reopens their deny.
+    /// Like a repository grant it names the folder its ask named, so it is
+    /// never followed through a link.
     pub fn add_grant(&mut self, rule: PermissionRule) {
-        let rule = normalize_rule_aliases(rule);
-        self.learn(std::slice::from_ref(&rule));
-        self.session_rules.push(rule);
+        self.session_rules.push(normalize_rule_aliases(rule));
     }
     pub fn add_ceiling(&mut self, rule: PermissionRule) {
         let rule = normalize_rule_aliases(rule);
@@ -397,7 +407,7 @@ impl PermissionEngine {
             .map(|rules| rules.into_iter().map(normalize_rule_aliases).collect())
             .collect();
         for rules in &boundary {
-            self.learn(rules);
+            self.learn_resolved(rules);
         }
         self.inherited.extend(boundary);
     }
@@ -711,6 +721,56 @@ fn rule_names(
 }
 
 const EXTERNAL_DIRECTORY: &str = "external_directory:";
+
+/// Where each configured `external_directory` rule written through a folder
+/// link leads, by pattern, resolved once per process: engines are built for
+/// every tool call, and following a link each time would wait on a stale
+/// network folder every time and follow a link someone swapped since. A
+/// configuration reload ([`forget_rule_links`]) resolves them again.
+static RULE_LINKS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, Option<String>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// How many times each pattern was resolved, for the tests.
+#[cfg(test)]
+static RULE_LINK_LOOKUPS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// [`real_folder_rule`] for a configured rule, once per process.
+fn configured_real_folder(pattern: &str) -> Option<String> {
+    if !pattern.starts_with(EXTERNAL_DIRECTORY) {
+        return None;
+    }
+    if let Some(known) = RULE_LINKS.lock().get(pattern) {
+        return known.clone();
+    }
+    // Resolved without the lock held, so a slow folder holds up no other
+    // rule's check.
+    let real = real_folder_rule(pattern);
+    #[cfg(test)]
+    {
+        *RULE_LINK_LOOKUPS
+            .lock()
+            .entry(pattern.to_owned())
+            .or_default() += 1;
+    }
+    RULE_LINKS
+        .lock()
+        .entry(pattern.to_owned())
+        .or_insert(real)
+        .clone()
+}
+
+/// What [`configured_real_folder`] already found for `pattern`; never looks.
+fn resolved_real_folder(pattern: &str) -> Option<String> {
+    RULE_LINKS.lock().get(pattern).cloned().flatten()
+}
+
+/// Forget where configured rules' links lead, for a configuration reload.
+pub fn forget_rule_links() {
+    RULE_LINKS.lock().clear();
+}
 
 /// An `external_directory` rule written through a folder link, such as
 /// macOS's `/tmp` (really `/private/tmp`) or a linked home folder, in the
@@ -1550,6 +1610,63 @@ mod tests {
                 PermissionDecision::Allow
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_configured_rule_s_link_is_followed_once_per_process_and_an_answer_s_never() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-rule-links-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("first")).unwrap();
+        std::fs::create_dir_all(root.join("second")).unwrap();
+        std::os::unix::fs::symlink(root.join("first"), root.join("link")).unwrap();
+        let first = root.join("first").canonicalize().unwrap();
+        let second = root.join("second").canonicalize().unwrap();
+        let pattern = format!("external_directory:{}/*", root.join("link").display());
+        let ask = |folder: &Path| format!("external_directory:{}/*", folder.display());
+        // Engines are built afresh for every tool call.
+        let fresh = || PermissionEngine::new(vec![rule(&pattern, PermissionDecision::Allow)]);
+        assert_eq!(fresh().evaluate(&ask(&first)), PermissionDecision::Allow);
+        std::fs::remove_file(root.join("link")).unwrap();
+        std::os::unix::fs::symlink(root.join("second"), root.join("link")).unwrap();
+        let later = fresh();
+        assert_eq!(later.evaluate(&ask(&first)), PermissionDecision::Allow);
+        assert_eq!(later.evaluate(&ask(&second)), PermissionDecision::Ask);
+        assert_eq!(
+            RULE_LINK_LOOKUPS.lock()[&pattern],
+            1,
+            "a cache hit looks nothing up"
+        );
+        // An Always answer, a repository grant and a parent's boundary are
+        // never followed: they name the folder their ask named.
+        let answer = format!("external_directory:{}/*", root.join("link").display());
+        let mut engine = PermissionEngine::new(Vec::new());
+        engine.add_grant(rule(&format!("{answer}x"), PermissionDecision::Allow));
+        engine.add_repository_grant(rule(&format!("{answer}y"), PermissionDecision::Allow));
+        engine.add_inherited_ceiling([vec![rule(&format!("{answer}z"), PermissionDecision::Deny)]]);
+        engine.approve_always(format!("{answer}w"));
+        for suffix in ["x", "y", "z", "w"] {
+            let pattern = format!("{answer}{suffix}");
+            assert!(!RULE_LINK_LOOKUPS.lock().contains_key(&pattern), "{suffix}");
+            assert_eq!(
+                engine.evaluate(&format!(
+                    "external_directory:{}/*{suffix}",
+                    second.display()
+                )),
+                PermissionDecision::Ask,
+                "{suffix}"
+            );
+        }
+        // A parent's configured rule reaches its child as it was resolved.
+        let mut child = PermissionEngine::new(Vec::new());
+        child.add_inherited_ceiling([vec![rule(&pattern, PermissionDecision::Deny)]]);
+        assert_eq!(child.evaluate(&ask(&first)), PermissionDecision::Deny);
+        assert_eq!(RULE_LINK_LOOKUPS.lock()[&pattern], 1);
+        // A configuration reload follows the link again.
+        forget_rule_links();
+        assert_eq!(fresh().evaluate(&ask(&second)), PermissionDecision::Allow);
+        assert_eq!(RULE_LINK_LOOKUPS.lock()[&pattern], 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

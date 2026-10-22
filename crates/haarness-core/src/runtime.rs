@@ -1514,6 +1514,8 @@ impl AgentRuntime {
         self.prepared_prompts.lock().clear();
         *self.live_commands.write() = commands;
         *self.live_agents.write() = agents;
+        // Rules may name other folders now, and links may lead elsewhere.
+        crate::permissions::forget_rule_links();
         true
     }
 
