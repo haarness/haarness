@@ -45,6 +45,7 @@ import {
 } from "@haarness/sdk";
 import { z } from "zod";
 import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
+import { themeColors } from "../themes";
 import { serverKey } from "../servers";
 import { mergeProjectCatalog, projectKey } from "../projects";
 import {
@@ -581,6 +582,7 @@ function installHandlers() {
       throw error;
     });
     menu();
+    repaintWindows();
     broadcast({ kind: "menu", data: { action: "preferences", value } });
     return value;
   });
@@ -1414,15 +1416,25 @@ function registerShortcut(value: GlobalShortcut = data().preferences.globalShort
   else registeredShortcut = accelerator;
   return true;
 }
+/**
+ * The saved theme's page colour. The window paints it before its page draws
+ * anything, and the page leaves it showing until it applies the theme
+ * (base.css), so a light theme never shows a dark first frame, nor a dark one
+ * a light frame.
+ */
+function windowBackground() {
+  const { theme, palette } = data().preferences;
+  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
+  return themeColors(palette, dark ? "dark" : "light").page;
+}
+function repaintWindows() {
+  for (const win of windows) if (!win.isDestroyed()) win.setBackgroundColor(windowBackground());
+}
 function createWindow() {
   if (!initialized || quitting) return;
   const state = data().values.window as
     | { width?: number; height?: number }
     | undefined;
-  // Paint the window in the appearance the page is about to use, so a
-  // light system does not flash dark before the renderer loads.
-  const theme = data().preferences.theme;
-  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
   const win = new BrowserWindow({
     // Test runs keep windows hidden, except on Linux: X11 (and Xvfb in CI)
     // draws no frames for a window that was never shown, so every screenshot
@@ -1433,7 +1445,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 640,
     title: "Haarness",
-    backgroundColor: dark ? "#151413" : "#fdfcfa",
+    backgroundColor: windowBackground(),
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 18, y: 17 },
     webPreferences: {
@@ -1714,9 +1726,10 @@ else {
       powerMonitor.on("resume", () =>
         broadcast({ kind: "connection", data: "resume" }),
       );
-      nativeTheme.on("updated", () =>
-        broadcast({ kind: "menu", data: "theme" }),
-      );
+      nativeTheme.on("updated", () => {
+        repaintWindows();
+        broadcast({ kind: "menu", data: "theme" });
+      });
     })
     .catch((error) => {
       if (quitting) return;

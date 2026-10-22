@@ -11,11 +11,17 @@ import "./overlay.css";
 // The saved settings are read before the first render, so the window opens
 // in its own theme, palette, text size and language rather than flashing the
 // defaults until the rest of the app's state has loaded. One read, from the
-// main process's memory.
-const preferences = await window.haarness.boot().then(
-  (value) => value.preferences,
-  () => undefined,
-);
+// main process's memory; a main process busy elsewhere (a native dialog in
+// another window) does not leave this window empty: after 150 ms it starts
+// from the defaults, as it did before. Until then the window shows its own
+// background, the saved theme's page colour (base.css).
+const preferences = await Promise.race([
+  window.haarness.boot().then(
+    (value) => value.preferences,
+    () => undefined,
+  ),
+  new Promise<undefined>((resolve) => setTimeout(resolve, 150)),
+]);
 render(
   () => (
     <ErrorBoundary

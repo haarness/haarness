@@ -12533,25 +12533,80 @@ test("the window opens in its saved theme, palette, text size and language, neve
   const before = await page.evaluate(() => window.haarness.boot().then((value) => value.preferences));
   await page.evaluate(() => window.haarness.preferences({ theme: "light", palette: "ocean", fontSize: 18, language: "ar" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-  // From the page's first script on, every look the document has once the app has drawn anything.
-  await app.context().addInitScript(() => {
-    const seen: string[] = [];
-    (window as unknown as { appearance: string[] }).appearance = seen;
-    // The document has no root element yet when this runs.
-    const observer = new MutationObserver(() => {
-      const root = document.documentElement;
-      if (!document.getElementById("root")?.childElementCount) return;
-      const look = [root.lang, root.dir, root.dataset.theme, root.dataset.palette, root.style.getPropertyValue("--font-size")].join(" ");
-      if (seen.at(-1) !== look) seen.push(look);
-    });
-    observer.observe(document, { attributes: true, childList: true, subtree: true });
-    setTimeout(() => observer.disconnect(), 5000);
+  // The window itself paints the saved theme's page colour before its page draws anything.
+  const { themeColors } = await import("../src/themes");
+  expect((await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBackgroundColor())).toLowerCase())
+    .toBe(themeColors("ocean", "light").page);
+  // From this page's next document on (and only this one), every look the document has once the app has drawn anything.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Page.enable");
+  const { identifier } = await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => {
+      const seen = [];
+      window.appearance = seen;
+      // The document has no root element yet when this runs.
+      const observer = new MutationObserver(() => {
+        const root = document.documentElement;
+        if (!document.getElementById("root")?.childElementCount) return;
+        const look = [root.lang, root.dir, root.dataset.theme, root.dataset.palette, root.style.getPropertyValue("--font-size")].join(" ");
+        if (seen.at(-1) !== look) seen.push(look);
+      });
+      observer.observe(document, { attributes: true, childList: true, subtree: true });
+      setTimeout(() => observer.disconnect(), 5000);
+    })()`,
   });
-  await page.reload();
-  await expect(page.locator(".application")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { appearance: string[] }).appearance.length)).toBeGreaterThan(0);
-  await page.waitForTimeout(1000);
-  expect(await page.evaluate(() => (window as unknown as { appearance: string[] }).appearance)).toEqual(["ar rtl light ocean 18px"]);
+  try {
+    await page.reload();
+    await expect(page.locator(".application")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { appearance: string[] }).appearance.length)).toBeGreaterThan(0);
+    await page.waitForTimeout(1000);
+    expect(await page.evaluate(() => (window as unknown as { appearance: string[] }).appearance)).toEqual(["ar rtl light ocean 18px"]);
+  } finally {
+    await cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    await cdp.detach();
+  }
+
+  // Before the app applies the theme, the page lets that window colour show, not its stylesheet's dark defaults.
+  const empty = await page.evaluate(() => {
+    const root = document.documentElement;
+    const saved = { theme: root.dataset.theme, palette: root.dataset.palette, style: root.getAttribute("style") };
+    delete root.dataset.theme;
+    delete root.dataset.palette;
+    root.removeAttribute("style");
+    (document.getElementById("root") as HTMLElement).style.visibility = "hidden";
+    const look = { body: getComputedStyle(document.body).backgroundColor, scheme: getComputedStyle(root).colorScheme };
+    (window as unknown as { restore: () => void }).restore = () => {
+      root.dataset.theme = saved.theme!;
+      root.dataset.palette = saved.palette!;
+      root.setAttribute("style", saved.style ?? "");
+      (document.getElementById("root") as HTMLElement).style.visibility = "";
+    };
+    return look;
+  });
+  expect(empty).toEqual({ body: "rgba(0, 0, 0, 0)", scheme: "normal" });
+  await page.screenshot({ path: test.info().outputPath("first-frame-light.png") });
+  await page.evaluate(() => (window as unknown as { restore: () => void }).restore());
+
+  // A main process busy elsewhere (a native dialog in another window) does not leave the window empty.
+  await app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> })._invokeHandlers;
+    const original = handlers.get("haarness:boot")!;
+    (globalThis as unknown as { bootHandler: unknown }).bootHandler = original;
+    handlers.set("haarness:boot", async (...args: unknown[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      return original(...args);
+    });
+  });
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator(".application")).toBeVisible({ timeout: 1500 });
+  } finally {
+    await app.evaluate(({ ipcMain }) => {
+      const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, unknown> })._invokeHandlers;
+      handlers.set("haarness:boot", (globalThis as unknown as { bootHandler: unknown }).bootHandler);
+    });
+  }
+  await expect(page.locator("html")).toHaveAttribute("lang", "ar");
   await page.evaluate(
     (value) => window.haarness.preferences({ theme: value.theme, palette: value.palette, fontSize: value.fontSize, language: value.language }),
     before,

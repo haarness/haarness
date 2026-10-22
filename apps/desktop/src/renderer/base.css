@@ -19,6 +19,12 @@ body {
   text-rendering: optimizeLegibility;
   accent-color: var(--primary);
 }
+/* Before the app applies the theme, the page leaves the window's background
+   (the saved theme's page colour, set by the main process) showing, rather
+   than this stylesheet's dark defaults. */
+:root:not([data-theme]) body {
+  background: transparent;
+}
 ::selection {
   background: color-mix(in srgb, var(--primary) 30%, transparent);
 }
