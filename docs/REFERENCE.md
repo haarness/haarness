@@ -613,7 +613,8 @@ when Haarness connects; in a JSON file the other fields are resolved when the
 configuration loads. A variable's value is used as it is, so a `${OTHER}` inside it
 reaches the MCP server as that text, and what a headers helper prints is never resolved.
 The references stay in the file: `haarness mcp enable`/`disable`, `mcp_manage` and Desktop
-edits write the entry back as written, and `haarness mcp get --show-secrets` shows it so.
+edits write only the keys they change, in the entry's own shape, and `haarness mcp get
+--show-secrets` shows the entry as written.
 
 Answering an approval with **Always** (`a`) saves the rule shown on the card, which is a pattern rather than the exact call (approving `rm -rf build` allows every `rm` command), for every chat on that server until it stops. **This folder** (`w`) and **Repository** (`r`) answers are saved in the local database and apply after restarts. See [Permissions and approvals](https://haarness.ai/docs/security/permissions#what-does-always-remember). Global skills live in `~/.config/haarness/skills/<name>/SKILL.md` (where `haarness skill create` writes them); project skills live in `.haarness/skills/<name>/SKILL.md`.
 

@@ -7931,9 +7931,10 @@ fn set_mcp_enabled(
     enabled: bool,
 ) -> Result<McpConfigureRequest> {
     let target = mcp_entry_target(paths, workspace, project, name);
-    let mut entry = read_mcp_entry(&target, name)?;
+    let before = read_mcp_entry(&target, name)?;
+    let mut entry = before.clone();
     entry.enabled = enabled;
-    write_mcp_entry(&target, name, Some(&entry))?;
+    write_mcp_changes(&target, name, &before, &entry)?;
     println!(
         "{} MCP server '{name}' in {}.",
         if enabled { "Enabled" } else { "Disabled" },
@@ -8079,6 +8080,169 @@ fn mcp_entry_target(paths: &Paths, workspace: &Path, project: bool, name: &str) 
 
 fn mcp_config_target(paths: &Paths, workspace: &Path, project: bool) -> PathBuf {
     scoped_config_target(paths, workspace, project)
+}
+
+/// The `section.name` entry of a configuration file as written, as JSON.
+fn raw_config_entry(path: &Path, section: &str, name: &str) -> Result<serde_json::Value> {
+    let root = if path.extension().is_some_and(|value| value != "toml") {
+        jsonconfig::read_json(path)
+            .map_err(anyhow::Error::msg)?
+            .unwrap_or_default()
+    } else {
+        serde_json::to_value(toml::from_str::<toml::Value>(&fs::read_to_string(path)?)?)?
+    };
+    root.get(section)
+        .and_then(|entries| entries.get(name))
+        .filter(|entry| entry.is_object())
+        .cloned()
+        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))
+}
+
+/// Sets only `fields` of the `section.name` entry (`None` removes a key),
+/// leaving its other keys as written. JSON keeps the file's comments and
+/// formatting; TOML round-trips its values and loses its comments.
+fn write_entry_fields(
+    path: &Path,
+    section: &str,
+    name: &str,
+    fields: Vec<(String, Option<serde_json::Value>)>,
+) -> Result<()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    if path.extension().is_some_and(|value| value != "toml") {
+        return jsonconfig::write_entry_fields(path, section, name, fields);
+    }
+    let mut root: toml::Value = toml::from_str(&fs::read_to_string(path)?)?;
+    let entry = root
+        .get_mut(section)
+        .and_then(|entries| entries.get_mut(name))
+        .and_then(toml::Value::as_table_mut)
+        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
+    for (key, value) in fields {
+        match value {
+            Some(value) => {
+                entry.insert(key, toml::Value::try_from(value)?);
+            }
+            None => {
+                entry.remove(&key);
+            }
+        }
+    }
+    fs::write(path, toml::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+/// Saves `after`, an edit of the MCP entry `before` read from `path`: only
+/// what changed is written, under the entry's own keys and in its own
+/// shape, so an entry another tool reads (an `opencode.json` one with
+/// `type`, a `command` list and `environment`) stays one it can read, and
+/// keys Haarness does not know stay.
+fn write_mcp_changes(
+    path: &Path,
+    name: &str,
+    before: &McpConfigureRequest,
+    after: &McpConfigureRequest,
+) -> Result<()> {
+    let raw = raw_config_entry(path, "mcp", name)?;
+    write_entry_fields(path, "mcp", name, mcp_changes(&raw, before, after))
+}
+
+/// The keys to write into the entry `raw` (as written) for the edit from
+/// `before` to `after`.
+fn mcp_changes(
+    raw: &serde_json::Value,
+    before: &McpConfigureRequest,
+    after: &McpConfigureRequest,
+) -> Vec<(String, Option<serde_json::Value>)> {
+    use serde_json::{Value, json};
+    let has = |key: &str| raw.get(key).is_some();
+    let mut fields: Vec<(String, Option<Value>)> = Vec::new();
+    if before.command != after.command || before.args != after.args {
+        if raw.get("command").is_some_and(Value::is_array) {
+            // `command` names the program and its arguments together.
+            let parts: Vec<&str> = after
+                .command
+                .iter()
+                .chain(&after.args)
+                .map(String::as_str)
+                .collect();
+            fields.push(("command".into(), Some(json!(parts))));
+            if has("args") {
+                fields.push(("args".into(), None));
+            }
+        } else {
+            if before.command != after.command {
+                fields.push(("command".into(), after.command.clone().map(Value::String)));
+            }
+            if before.args != after.args {
+                fields.push(("args".into(), Some(json!(after.args))));
+            }
+        }
+    }
+    if before.env != after.env {
+        let opencode = matches!(
+            raw.get("type").and_then(Value::as_str),
+            Some("local" | "remote")
+        );
+        let key = if has("environment") || (opencode && !has("env")) {
+            "environment"
+        } else {
+            "env"
+        };
+        fields.push((key.into(), Some(json!(after.env))));
+    }
+    if before.url != after.url {
+        fields.push(("url".into(), after.url.clone().map(Value::String)));
+    }
+    if before.headers != after.headers {
+        fields.push(("headers".into(), Some(json!(after.headers))));
+    }
+    if before.oauth != after.oauth {
+        fields.push(("oauth".into(), after.oauth.map(Value::Bool)));
+    }
+    // A Claude-style entry keeps its client and scopes under `auth`.
+    let mut auth = raw.get("auth").filter(|auth| auth.is_object()).cloned();
+    let mut auth_changed = false;
+    for (key, nested, value) in [
+        (
+            "oauthClientId",
+            "clientId",
+            (before.oauth_client_id != after.oauth_client_id)
+                .then(|| after.oauth_client_id.clone().map(Value::String)),
+        ),
+        (
+            "oauthScopes",
+            "scopes",
+            (before.oauth_scopes != after.oauth_scopes)
+                .then(|| (!after.oauth_scopes.is_empty()).then(|| json!(after.oauth_scopes))),
+        ),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        match auth.as_mut().and_then(Value::as_object_mut) {
+            Some(auth) if auth.contains_key(nested) => {
+                match value {
+                    Some(value) => auth.insert(nested.into(), value),
+                    None => auth.remove(nested),
+                };
+                auth_changed = true;
+            }
+            _ => fields.push((key.into(), value)),
+        }
+    }
+    if auth_changed {
+        fields.push(("auth".into(), auth));
+    }
+    if before.enabled != after.enabled {
+        if has("disabled") && !has("enabled") {
+            fields.push(("disabled".into(), Some(Value::Bool(!after.enabled))));
+        } else {
+            fields.push(("enabled".into(), Some(Value::Bool(after.enabled))));
+        }
+    }
+    fields
 }
 
 /// Upsert or delete `[mcp.<name>]` in a TOML config file. TOML round-trips
