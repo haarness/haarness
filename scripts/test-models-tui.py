@@ -2,6 +2,7 @@
 """Model refresh through a real local server and tmux-driven terminal renderer."""
 import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time
 import e2e_scratch
+import e2e_tmux
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/release/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-models-tui-')).resolve()
 workspace=root/'workspace'
@@ -33,8 +34,8 @@ def until(predicate,label):
 endpoint=None
 try:
     endpoint=json.loads(run([str(binary),'--workspace',str(workspace),'--trust-project','desktop'],env=env,input='{"action":"connect"}',timeout=90))
-    args=['env','HAARNESS_DATA_DIR='+env['HAARNESS_DATA_DIR'],str(binary),'--workspace',str(workspace),'--trust-project']
-    run(['tmux','new-session','-d','-x','150','-y','38','-s',name,shlex.join(args)])
+    args=[str(binary),'--workspace',str(workspace),'--trust-project']
+    run(['tmux','new-session','-d','-x','150','-y','38','-s',name,e2e_tmux.pane_command(env,args)])
     until(lambda:'GPT-6 Astra' in capture(),'Friendly name not rendered in composer')
     command('/models')
     until(lambda:'Select model' in capture(),'Picker not opened')

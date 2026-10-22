@@ -68,7 +68,11 @@ and writes reports locally; it never opens the server's databases directly.
   now empty.` when it was cleared), and the turn's `UserPromptSubmit` and
   command hook context. What the model last saw is read back from the stored
   messages it can still see, so later requests replay them unchanged. The
-  logic lives in `crates/haarness-core/src/turn_context.rs`.
+  logic lives in `crates/haarness-core/src/turn_context.rs`. A compaction
+  summary request has its own system prompt and no tools, so it shares no
+  cached prefix and nothing reads its prefix back: providers that mark cache
+  breakpoints (Anthropic, Claude behind a Haarness router) send it without
+  them, so it writes no cache entry.
 
 ## Native boundary
 

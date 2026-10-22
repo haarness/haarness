@@ -4423,6 +4423,43 @@ async fn always_workspace_approval_persists_and_stops_prompting() {
 }
 
 #[tokio::test]
+async fn a_compaction_summary_asks_providers_to_write_no_cache_entry() {
+    let provider = Capturing::default();
+    let requests = provider.requests.clone();
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    );
+    let thread = echo_thread(&runtime).await;
+    for prompt in ["first question", "second question"] {
+        let turn = runtime
+            .start_turn(thread.id, turn_request(prompt))
+            .await
+            .unwrap();
+        wait_done(&runtime, &turn).await;
+    }
+    runtime.compact_with_llm(thread.id).await.unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("third question"))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let requests = requests.lock().unwrap();
+    let (summaries, turns): (Vec<_>, Vec<_>) = requests.iter().partition(|request| {
+        matches!(request.messages.last(), Some(ProviderMessage::Text { content, .. })
+            if content.starts_with("Summarize this conversation for continuation"))
+    });
+    assert_eq!(summaries.len(), 1, "{requests:#?}");
+    assert!(summaries[0].parameters.uncached);
+    assert!(turns.len() >= 3, "{requests:#?}");
+    assert!(turns.iter().all(|request| !request.parameters.uncached));
+}
+
+#[tokio::test]
 async fn llm_compaction_shrinks_context_but_retains_recent_turns_and_exact_todos() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let provider = Capturing::default();
@@ -7145,6 +7182,562 @@ async fn background_subagent_returns_immediately_then_delivers_into_the_parent()
             if text == "include this follow-up context in the same child")));
 }
 
+#[tokio::test]
+async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    runtime.replace_custom_agents(vec![reviewer("reviewer", false)]);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            agent: Some("reviewer".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let prompt = serde_json::json!({
+        "prompt": "!tool bash {\"command\":\"sleep 1\"}",
+        "agent": "general",
+        "description": "slow independent check",
+        "background": true,
+    });
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&format!("!tool task {prompt}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let child = runtime.background_tasks(thread.id).await.unwrap()[0].child_thread_id;
+    // The chat's agent goes away while its subagent works, so the result
+    // can no longer start a turn there.
+    runtime.replace_custom_agents(Vec::new());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !runtime
+            .background_tasks(thread.id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background task ends and its delivery settles");
+    assert_eq!(runtime.background_results_owed(thread.id), 0);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, queued: false, .. }
+                if text.contains(&child.to_string()) && text.contains("state=\"completed\""))),
+        "the result is kept as a hidden message: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, retryable: false }
+                if message.contains("\u{201c}slow independent check\u{201d} could not start a turn in this chat (Unknown agent: reviewer)")
+                    && message.ends_with("your next message passes it to the agent."))),
+        "a notice says why: {items:#?}"
+    );
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_reconnecting_event_stream_gets_waiting_deltas_joined_and_unbuffered() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let (thread, turn) = (
+        haarness_protocol::ThreadId::new(),
+        haarness_protocol::TurnId::new(),
+    );
+    let events = runtime.events();
+    let before = events.cursor();
+    for word in ["Hel", "lo", " wor", "ld"] {
+        events.publish(
+            "turn.text_delta",
+            Some(thread),
+            Some(turn),
+            None,
+            serde_json::json!({"delta": word}),
+        );
+    }
+    events.publish(
+        "turn.finished",
+        Some(thread),
+        Some(turn),
+        None,
+        serde_json::json!({}),
+    );
+    let response = reqwest::Client::new()
+        .get(format!("{base}/v1/events"))
+        .bearer_auth("activity-token")
+        .header("last-event-id", before.to_string())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        response
+            .headers()
+            .get("x-accel-buffering")
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "nginx in front of a server must not hold the stream"
+    );
+    let mut stream = response.bytes_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !text.contains("event: turn.finished") {
+            text.push_str(&String::from_utf8_lossy(
+                &stream.next().await.unwrap().unwrap(),
+            ));
+        }
+    })
+    .await
+    .expect("the replay arrives");
+    let deltas: Vec<Value> = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: turn.text_delta"))
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            serde_json::from_str(data).unwrap()
+        })
+        .collect();
+    assert_eq!(deltas.len(), 1, "{text}");
+    assert_eq!(deltas[0]["payload"]["delta"], "Hello world");
+    assert_eq!(deltas[0]["eventId"], before + 4);
+    handle.shutdown().await.unwrap();
+}
+
+/// An HTTP/1.1 chunked body's bytes, as far as whole chunks go.
+fn dechunked(raw: &[u8]) -> Vec<u8> {
+    let Some(start) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Vec::new();
+    };
+    let (mut rest, mut body) = (&raw[start + 4..], Vec::new());
+    while let Some(end) = rest.windows(2).position(|window| window == b"\r\n") {
+        let Ok(size) = usize::from_str_radix(&String::from_utf8_lossy(&rest[..end]), 16) else {
+            break;
+        };
+        let chunk = &rest[end + 2..];
+        if size == 0 || chunk.len() < size + 2 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..size]);
+        rest = &chunk[size + 2..];
+    }
+    body
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_reads_nothing_for_a_while_keeps_its_place_and_every_word() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let (thread, turn) = (
+        haarness_protocol::ThreadId::new(),
+        haarness_protocol::TurnId::new(),
+    );
+    // A small receive buffer, so the socket fills soon.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let mut connection = socket.connect(handle.address).await.unwrap();
+    connection
+        .write_all(
+            format!(
+                "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer activity-token\r\nLast-Event-ID: {}\r\n\r\n",
+                handle.address,
+                runtime.events().cursor()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The client reads nothing: a large event fills its socket, and while it
+    // waits there far more deltas than the bus keeps are published.
+    runtime.events().publish(
+        "item.created",
+        Some(thread),
+        Some(turn),
+        None,
+        serde_json::json!({"text": "x".repeat(8 * 1024 * 1024)}),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut written = String::new();
+    for word in 0..5000 {
+        let word = format!("w{word} ");
+        written.push_str(&word);
+        runtime.events().publish(
+            "turn.text_delta",
+            Some(thread),
+            Some(turn),
+            None,
+            serde_json::json!({"delta": word}),
+        );
+    }
+    runtime.events().publish(
+        "turn.finished",
+        Some(thread),
+        Some(turn),
+        None,
+        serde_json::json!({}),
+    );
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let marker = b"event: turn.finished";
+        loop {
+            let read = connection.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "the stream ended");
+            raw.extend_from_slice(&buffer[..read]);
+            let tail = &raw[raw.len().saturating_sub(read + marker.len())..];
+            if tail.windows(marker.len()).any(|window| window == marker) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the stream reaches the end");
+    let text = String::from_utf8(dechunked(&raw)).unwrap();
+    assert!(
+        !text.contains("resync_required"),
+        "the client lost its place"
+    );
+    let read: String = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: turn.text_delta"))
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            let event: Value = serde_json::from_str(data).unwrap();
+            event["payload"]["delta"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(read, written);
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_too_far_behind_is_told_to_resync_and_its_stream_ends() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let thread = haarness_protocol::ThreadId::new();
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let mut connection = socket.connect(handle.address).await.unwrap();
+    connection
+        .write_all(
+            format!(
+                "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer activity-token\r\nLast-Event-ID: {}\r\n\r\n",
+                handle.address,
+                runtime.events().cursor()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // More than a connection's queue holds while its client reads nothing.
+    for _ in 0..24 {
+        runtime.events().publish(
+            "item.created",
+            Some(thread),
+            None,
+            None,
+            serde_json::json!({"text": "x".repeat(1024 * 1024)}),
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Then the client reads what it was sent, to the end of the response.
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut buffer = vec![0_u8; 256 * 1024];
+        loop {
+            let read = connection.read(&mut buffer).await.unwrap();
+            raw.extend_from_slice(&buffer[..read]);
+            if read == 0 || raw.ends_with(b"0\r\n\r\n") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the server ends the response");
+    let text = String::from_utf8_lossy(&dechunked(&raw)).into_owned();
+    let resync = text
+        .find("event: resync_required")
+        .expect("the client is told to resync");
+    assert!(
+        !text[resync..].contains("event: item.created"),
+        "nothing follows the resync"
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_whose_replay_is_larger_than_its_queue_resyncs_once_and_stays_live() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let thread = haarness_protocol::ThreadId::new();
+    // While the client was away, more was published than a connection's
+    // queue holds, though less than the bus keeps.
+    let cursor = runtime.events().cursor();
+    for _ in 0..24 {
+        runtime.events().publish(
+            "item.created",
+            Some(thread),
+            None,
+            None,
+            serde_json::json!({"text": "x".repeat(1024 * 1024)}),
+        );
+    }
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let mut connection = socket.connect(handle.address).await.unwrap();
+    connection
+        .write_all(
+            format!(
+                "GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer activity-token\r\nLast-Event-ID: {cursor}\r\n\r\n",
+                handle.address,
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    // It reconnects from that cursor and reads nothing while its replay is
+    // queued; then something new is published.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    runtime.events().publish(
+        "turn.finished",
+        Some(thread),
+        None,
+        None,
+        serde_json::json!({}),
+    );
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut buffer = vec![0_u8; 256 * 1024];
+        let marker = b"event: turn.finished";
+        loop {
+            let read = connection.read(&mut buffer).await.unwrap();
+            raw.extend_from_slice(&buffer[..read]);
+            assert!(
+                read > 0 && !raw.ends_with(b"\r\n0\r\n\r\n"),
+                "the stream ended: {}",
+                String::from_utf8_lossy(&dechunked(&raw))
+                    .lines()
+                    .filter(|line| line.starts_with("event: "))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let tail = &raw[raw.len().saturating_sub(read + marker.len())..];
+            if tail.windows(marker.len()).any(|window| window == marker) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("what is published next arrives");
+    let text = String::from_utf8_lossy(&dechunked(&raw)).into_owned();
+    assert_eq!(text.matches("event: resync_required").count(), 1);
+    let resync = text.find("event: resync_required").unwrap();
+    assert!(
+        !text[resync..].contains("event: item.created"),
+        "the rest of the replay is left to the resync"
+    );
+    assert!(text[resync..].contains("event: turn.finished"));
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_event_larger_than_a_connections_queue_reaches_a_client_that_reads() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let thread = haarness_protocol::ThreadId::new();
+    let response = reqwest::Client::new()
+        .get(format!("http://{}/v1/events", handle.address))
+        .bearer_auth("activity-token")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // A message with several large screenshots: more than a connection's
+    // whole queue.
+    let text = "x".repeat(haarness_core::PENDING_EVENTS_LIMIT + 4 * 1024 * 1024);
+    runtime.events().publish(
+        "item.created",
+        Some(thread),
+        None,
+        None,
+        serde_json::json!({"text": text}),
+    );
+    runtime.events().publish(
+        "turn.finished",
+        Some(thread),
+        None,
+        None,
+        serde_json::json!({}),
+    );
+    let mut stream = response.bytes_stream();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let marker = b"event: turn.finished";
+        loop {
+            let chunk = stream.next().await.expect("the stream goes on").unwrap();
+            raw.extend_from_slice(&chunk);
+            let tail = &raw[raw.len().saturating_sub(chunk.len() + marker.len())..];
+            if tail.windows(marker.len()).any(|window| window == marker) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the stream reaches the next event");
+    let sent = String::from_utf8(raw).unwrap();
+    assert!(
+        !sent.contains("resync_required"),
+        "the client lost its place"
+    );
+    let item: Value = sent
+        .split("\n\n")
+        .find(|frame| frame.contains("event: item.created"))
+        .and_then(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .expect("the large event arrives");
+    assert_eq!(
+        item["payload"]["text"].as_str().map(str::len),
+        Some(text.len())
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_published_chats_stream_joins_its_deltas_across_other_chats_events() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let shared = echo_thread(&runtime).await.id;
+    let other = echo_thread(&runtime).await.id;
+    let turn = haarness_protocol::TurnId::new();
+    let events = runtime.events();
+    let before = events.cursor();
+    for (thread, word) in [
+        (shared, "Hel"),
+        (other, "not yours"),
+        (shared, "lo"),
+        (other, "still not"),
+        (shared, " world"),
+    ] {
+        events.publish(
+            "turn.text_delta",
+            Some(thread),
+            Some(turn),
+            None,
+            serde_json::json!({"delta": word}),
+        );
+    }
+    events.publish(
+        "turn.finished",
+        Some(shared),
+        Some(turn),
+        None,
+        serde_json::json!({}),
+    );
+    let response = reqwest::Client::new()
+        .get(format!("{base}/v1/events"))
+        .bearer_auth("activity-token")
+        .header("x-haarness-remote-thread", shared.to_string())
+        .header("last-event-id", before.to_string())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !text.contains("event: turn.finished") {
+            text.push_str(&String::from_utf8_lossy(
+                &stream.next().await.unwrap().unwrap(),
+            ));
+        }
+    })
+    .await
+    .expect("the replay arrives");
+    assert!(!text.contains("not yours"), "{text}");
+    let deltas: Vec<Value> = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: turn.text_delta"))
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            serde_json::from_str(data).unwrap()
+        })
+        .collect();
+    assert_eq!(deltas.len(), 1, "{text}");
+    assert_eq!(deltas[0]["payload"]["delta"], "Hello world");
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_turn_sent_to_a_chat_busy_elsewhere_is_refused_in_a_sentence() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let thread = echo_thread(&runtime).await;
+    let busy = runtime
+        .start_turn(
+            thread.id,
+            turn_request("!tool bash {\"command\":\"sleep 2\"}"),
+        )
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{base}/v1/threads/{}/turns", thread.id))
+        .bearer_auth("activity-token")
+        .json(&turn_request("another message"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "conflict");
+    assert_eq!(
+        body["message"],
+        "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped."
+    );
+    wait_done(&runtime, &busy).await;
+    handle.shutdown().await.unwrap();
+}
+
 /// A server for `runtime` with the routes under test and nothing else.
 async fn activity_server(
     runtime: Arc<AgentRuntime>,
@@ -7401,6 +7994,215 @@ export default workflow({
         0,
         delivered.turn_id,
     );
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn a_refused_background_result_goes_into_a_turn_that_started_meanwhile() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let thread = echo_thread(&runtime).await;
+    // A person's turn is in the middle of a tool call when the result,
+    // refused a moment ago, is kept.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request("!tool bash {\"command\":\"sleep 1\"}"),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::ToolCall { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn calls its tool");
+    runtime
+        .keep_refused_background_result(
+            thread.id,
+            "<task id=\"x\" state=\"completed\">late result</task>".into(),
+            "The result could not start a turn in this chat (busy).".into(),
+            &haarness_core::CoreError::Invalid("busy".into()),
+        )
+        .await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let call = items
+        .iter()
+        .position(|item| matches!(item.data, haarness_protocol::ItemData::ToolCall { .. }))
+        .unwrap();
+    let result = items
+        .iter()
+        .position(|item| matches!(item.data, haarness_protocol::ItemData::ToolResult { .. }))
+        .unwrap();
+    // Only steering the turn defers past the tool result may sit there; a
+    // plain message would split the call from its result for every request.
+    assert!(
+        items[call + 1..result].iter().all(|item| !matches!(
+            item.data,
+            haarness_protocol::ItemData::UserMessage { queued: false, .. }
+                | haarness_protocol::ItemData::Error { .. }
+        )),
+        "{items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::AssistantMessage { text, .. } if text.contains("late result"))),
+        "the turn read the result: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| item.turn_id == Some(turn.id)
+            && matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, queued: true, synthetic: true, .. }
+                if text.contains("late result"))),
+        "the running turn takes it as steering: {items:#?}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::Error { .. })),
+        "{items:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_background_result_is_not_kept_in_an_archived_chat() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let thread = echo_thread(&runtime).await;
+    runtime
+        .update_thread(
+            thread.id,
+            haarness_protocol::UpdateThreadRequest {
+                title: None,
+                archived: Some(true),
+                agent: None,
+                provider: None,
+                model: None,
+                ultracode: None,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .keep_refused_background_result(
+            thread.id,
+            "late result".into(),
+            "notice".into(),
+            &haarness_core::CoreError::Invalid("gone".into()),
+        )
+        .await;
+    assert!(runtime.items(thread.id, None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_workflow_result_its_chat_cannot_take_is_kept_for_the_next_message() {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-workflow-refused-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let events = EventBus::new(256);
+    let runtime = Arc::new(AgentRuntime::with_workspace(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        workspace.clone(),
+    ));
+    let host = WorkflowRuntimeAdapter::new();
+    host.attach(&runtime);
+    let executor = WorkflowExecutor::new(ExecutorConfig::default());
+    if !executor.capability().executable {
+        eprintln!("skipping refused workflow result fixture: Bun is unavailable");
+        let _ = std::fs::remove_dir_all(workspace);
+        return;
+    }
+    let workflows = Arc::new(WorkflowCoordinator::new(
+        store,
+        Arc::new(WorkflowCatalog::for_workspace(&workspace)),
+        executor,
+        host,
+        events,
+        workspace.clone(),
+        true,
+    ));
+    let handle = activity_server(runtime.clone(), Some(workflows), &workspace).await;
+    let base = format!("http://{}", handle.address);
+    runtime.replace_custom_agents(vec![reviewer("reviewer", false)]);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            agent: Some("reviewer".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let run: WorkflowRun = reqwest::Client::new()
+        .post(format!("{base}/v1/workflows/run"))
+        .bearer_auth("activity-token")
+        .json(&serde_json::json!({
+            // Portable workflows have no timers: a counting loop keeps the
+            // run busy for a moment, well past the agent's removal below.
+            "source": r#"export const meta = { name: "refused-result" }
+let total = 0
+for (let i = 0; i < 300000000; i++) total += i % 7
+return { total }
+"#,
+            "threadId": thread.id,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run.status, WorkflowRunStatus::Running);
+    // The chat's agent goes away while the run works.
+    runtime.replace_custom_agents(Vec::new());
+    let items = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let items = runtime.items(thread.id, None).await.unwrap();
+            if items
+                .iter()
+                .any(|item| matches!(item.data, haarness_protocol::ItemData::Error { .. }))
+            {
+                return items;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the refused result is kept with a notice");
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, queued: false, .. }
+                if text.contains("name=\"refused-result\" state=\"completed\""))),
+        "the result is kept as a hidden message: {items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, .. }
+                if message.contains("\u{201c}refused-result\u{201d} could not start a turn in this chat (Unknown agent: reviewer)"))),
+        "{items:#?}"
+    );
+    assert_activity(&settled_activity(&base, thread.id).await, 0, None);
     handle.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(workspace);
 }

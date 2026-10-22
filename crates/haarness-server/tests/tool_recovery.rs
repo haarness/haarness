@@ -637,3 +637,194 @@ async fn shell_env_hooks_add_variables_without_touching_bash_arguments() {
         outputs[0].0
     );
 }
+
+/// A `PermissionRequest` hook that allows, but only a rewritten command.
+struct RewritingAllow;
+#[async_trait]
+impl HookPort for RewritingAllow {
+    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision {
+            permission: Some(PermissionDecision::Allow),
+            updated_input: Some(json!({"command": "true"})),
+            ..HookDecision::default()
+        }
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+#[tokio::test]
+async fn a_permission_request_hook_allowing_other_input_leaves_the_prompt_to_the_person() {
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(PermissionRule {
+        pattern: "bash:*".into(),
+        decision: PermissionDecision::Ask,
+    });
+    let fixture = Fixture::with_hooks(config, Some(Arc::new(RewritingAllow)));
+    *fixture.provider.rounds.lock().unwrap() = vec![vec![call(
+        "touch",
+        "bash",
+        json!({"command": "touch allowed-by-hook"}),
+    )]]
+    .into();
+    let thread = fixture.thread().await;
+    let turn = fixture
+        .runtime
+        .start_turn(
+            thread,
+            StartTurnRequest {
+                request_id: RequestId::new(),
+                text: "Touch the file".into(),
+                attachments: vec![],
+                synthetic: false,
+                auto_approve: false,
+                agent: None,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                tools: None,
+                command: None,
+            },
+        )
+        .await
+        .unwrap();
+    // The hook approved `true`, not `touch allowed-by-hook`: the prompt
+    // waits for a person, and the command does not run meanwhile.
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pending) = fixture.runtime.pending_permissions().pop() {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the prompt is asked");
+    assert!(!fixture.root.join("allowed-by-hook").exists());
+    fixture
+        .runtime
+        .reply_permission(
+            &pending.permission_id,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+    assert_eq!(
+        fixture.runtime.turn(turn.id).await.unwrap().status,
+        TurnStatus::Completed
+    );
+    assert!(!fixture.root.join("allowed-by-hook").exists());
+}
+
+/// A `PermissionRequest` hook that allows, handing back the input it was
+/// shown unchanged, as some hooks always fill `updatedInput`.
+struct EchoingAllow(std::sync::Mutex<Vec<Value>>);
+#[async_trait]
+impl HookPort for EchoingAllow {
+    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        input: &Value,
+    ) -> HookDecision {
+        self.0.lock().unwrap().push(input.clone());
+        HookDecision {
+            permission: Some(PermissionDecision::Allow),
+            updated_input: Some(input.clone()),
+            ..HookDecision::default()
+        }
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_permission_request_hook_handing_back_the_same_input_still_allows() {
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(PermissionRule {
+        pattern: "bash:*".into(),
+        decision: PermissionDecision::Ask,
+    });
+    let hook = Arc::new(EchoingAllow(std::sync::Mutex::new(Vec::new())));
+    let fixture = Fixture::with_hooks(config, Some(hook.clone()));
+    // A read through a link to a secret asks about the file it opens, in a
+    // run of its own whose input names that file.
+    std::fs::write(fixture.root.join(".env"), "ECHOED_SECRET=1").unwrap();
+    std::os::unix::fs::symlink(".env", fixture.root.join("notes.txt")).unwrap();
+    let items = fixture
+        .run(vec![vec![
+            call(
+                "touch",
+                "bash",
+                json!({"command": "touch allowed-as-shown"}),
+            ),
+            call("read", "read", json!({"path": "notes.txt"})),
+        ]])
+        .await;
+    assert!(fixture.runtime.pending_permissions().is_empty());
+    assert!(fixture.root.join("allowed-as-shown").exists(), "{items:?}");
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            ItemData::ToolResult { name, output, is_error: false, .. }
+                if name == "read" && output.contains("ECHOED_SECRET"))),
+        "{items:?}"
+    );
+    // The resolved-path run was shown `.env`, and its echo still allowed it.
+    assert!(
+        hook.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|input| input["path"] == ".env"),
+        "{:?}",
+        hook.0.lock().unwrap()
+    );
+}

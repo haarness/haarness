@@ -5556,11 +5556,13 @@ fn elapsed_words(elapsed: Duration) -> String {
     }
 }
 
-/// Wait for `work` unless Ctrl-C or SIGTERM (a cancelled CI job) comes
-/// first. Then the chat's turns, helpers and workflows stop on the server —
-/// a run that exits must not leave them working, and spending, unwatched —
-/// and the process exits as an interrupted one does. A second signal exits
-/// at once.
+/// Wait for `work` unless Ctrl-C, SIGTERM (a cancelled CI job) or the run's
+/// terminal closing comes first. Then the chat's turns, helpers and workflows
+/// stop on the server — a run that exits must not leave them working, and
+/// spending, unwatched — and the process exits as an interrupted one does. A
+/// second Ctrl-C or SIGTERM exits at once; another SIGHUP does not, since a
+/// closing terminal's shell sends its jobs a second one (zsh does) right after
+/// the terminal's own, before the stop could reach the server.
 async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
@@ -5569,9 +5571,13 @@ async fn stop_on_signal<T>(
 ) -> Result<T> {
     let status = tokio::select! {
         result = work => return result,
-        status = run_stop_signal() => status,
+        status = run_stop_signal(true) => status,
     };
-    eprintln!("Stopping…");
+    // A closed terminal fails every write; the stop must still be sent.
+    let say = |line: &str| {
+        let _ = writeln!(io::stderr(), "{line}");
+    };
+    say("Stopping…");
     let stop = async {
         if goal {
             // Otherwise the goal would start its next turn on its own.
@@ -5583,18 +5589,21 @@ async fn stop_on_signal<T>(
     };
     tokio::select! {
         stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
-            Ok(Ok(())) => eprintln!("Stopped. The chat keeps what was done so far."),
-            Ok(Err(error)) => eprintln!("Could not stop the chat on the server: {error:#}"),
-            Err(_) => eprintln!("The server did not confirm the stop in time."),
+            Ok(Ok(())) => say("Stopped. The chat keeps what was done so far."),
+            Ok(Err(error)) => say(&format!("Could not stop the chat on the server: {error:#}")),
+            Err(_) => say("The server did not confirm the stop in time."),
         },
-        _ = run_stop_signal() => {}
+        _ = run_stop_signal(false) => {}
     }
     haarness_account::renewals::settle(Duration::from_secs(5)).await;
     std::process::exit(status)
 }
 
-/// The exit status once Ctrl-C (130) or SIGTERM (143) arrives.
-async fn run_stop_signal() -> i32 {
+/// The exit status once Ctrl-C (130), SIGTERM (143) or, with `hangup` for a
+/// run at a terminal, SIGHUP (129: the terminal window closed) arrives. A run
+/// without a terminal leaves SIGHUP alone, so one started with `nohup` (which
+/// never leaves stderr on a terminal) keeps ignoring it.
+async fn run_stop_signal(hangup: bool) -> i32 {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -5602,13 +5611,26 @@ async fn run_stop_signal() -> i32 {
             let _ = tokio::signal::ctrl_c().await;
             return 130;
         };
+        let mut hangup = if hangup && io::stderr().is_terminal() {
+            signal(SignalKind::hangup()).ok()
+        } else {
+            None
+        };
+        let hung_up = async {
+            match &mut hangup {
+                Some(hangup) => hangup.recv().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => 130,
             _ = terminate.recv() => 143,
+            _ = hung_up => 129,
         }
     }
     #[cfg(not(unix))]
     {
+        let _ = hangup;
         let _ = tokio::signal::ctrl_c().await;
         130
     }
@@ -13049,6 +13071,7 @@ request_timeout = 0
             pid: Some(4243),
             cols: 80,
             rows: 24,
+            created: false,
         })
         .unwrap()
     }
