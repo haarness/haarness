@@ -70,6 +70,35 @@ test("one sign-in serves every request, a refused one is renewed once, and a sig
   );
 });
 
+test("a sign-in close to its expiry is renewed before it is sent, and handed-out tokens are known for redaction", async () => {
+  const minutes = (count: number) => new Date(Date.now() + count * 60_000).toISOString();
+  const answers = [minutes(10), minutes(2), minutes(10)];
+  let issued = 0;
+  const relay = createRelay(async () => ({ token: `token-${++issued}`, apiUrl: "https://cloud.example", expiresAt: answers[issued - 1] }));
+  assert.equal((await relay.credential()).token, "token-1");
+  // Ten minutes left: kept.
+  assert.equal((await relay.credential()).token, "token-1");
+  relay.forget();
+  // Two minutes left is too little for a connection opened with it.
+  assert.equal((await relay.credential()).token, "token-2");
+  assert.equal((await relay.credential()).token, "token-3");
+  assert.equal((await relay.credential()).expiresAt, answers[2]);
+  assert.deepEqual(relay.secrets(), ["token-1", "token-2", "token-3"]);
+});
+
+test("a relayed request never follows a redirect", async () => {
+  await withCloud(
+    (_, response) => {
+      response.writeHead(302, { Location: "https://elsewhere.example/steal" });
+      response.end();
+    },
+    async (url) => {
+      const relay = createRelay(async () => ({ token: "t", apiUrl: url }));
+      await assert.rejects(relay.fetch(url + "/v1/info"));
+    },
+  );
+});
+
 test("relayed requests carry the sign-in and are sent again with a fresh one when Cloud refuses it", async () => {
   const seen: string[] = [];
   await withCloud(

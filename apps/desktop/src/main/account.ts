@@ -203,16 +203,21 @@ export async function connectCloud(
     info,
   };
   connections.get(id)?.client.close();
-  connections.set(id, { view, client, url: url.href, auth: { type: "none" } });
+  // Event streams, notifications and file reads use the ticket too.
+  connections.set(id, { view, client, url: url.href, auth: { type: "none" }, resolveAuth });
   return view;
 }
 
 /** After a sign-out or an account switch: Cloud sessions and your other
- * computers were reached with the account that just changed. */
+ * computers were reached with the account that just changed. Returns the
+ * connections closed. */
 export function closeCloudConnections() {
+  const closed: string[] = [];
   for (const [id, value] of connections)
     if (value.view.cloudWorkspace || value.view.remoteHost) {
       value.client.close();
       connections.delete(id);
+      closed.push(id);
     }
+  return closed;
 }

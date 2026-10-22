@@ -347,8 +347,9 @@ export interface Bridge {
   server(input: {
     id: string;
     /** `host` saves another computer (`id` is its Cloud host id) as a
-     * server to switch to, or renames it. */
-    action: "rename" | "remove" | "host";
+     * server to switch to, or renames it; `shown` says which server the
+     * window shows now. */
+    action: "rename" | "remove" | "host" | "shown";
     label?: string;
   }): Promise<SavedServer[]>;
   projects(): Promise<Recent[]>;

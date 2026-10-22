@@ -1605,6 +1605,11 @@ p.settings-computers-note {
   justify-content: space-between;
   padding: var(--s4) 0;
 }
+/* Signed out, one line under the servers says computers can be opened here. */
+.settings-computers-signed-out {
+  margin-block-start: var(--s6);
+  border-top: 1px solid var(--hairline);
+}
 .settings-computers-note p[role="alert"] {
   color: var(--danger);
 }

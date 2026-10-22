@@ -806,12 +806,28 @@ function Servers() {
     </>
   );
 }
-/** Your other computers, read from the account when this page opens. */
+/** Your other computers, read from the account when this page opens.
+ * Signed out, one quiet line is all there is: the only place that says the
+ * computers can be opened here at all. */
 function Computers() {
   const app = useApp();
   onCleanup(watchComputers());
   const active = () => app.currentServer().host;
   return (
+    <Show
+      when={computers.status !== "signed-out"}
+      fallback={
+        <div class="settings-computers-note settings-computers-signed-out" data-setting="Your computers">
+          <p>{t("Sign in to Haarness to open your other computers here.")}</p>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent("haarness:account"))}
+          >
+            {t("Sign in")}
+          </button>
+        </div>
+      }
+    >
     <section class="settings-computers" aria-label={t("Your computers")} data-setting="Your computers">
       <header>
         <div>
@@ -824,24 +840,14 @@ function Computers() {
             )}
           </p>
         </div>
-        <Show when={computers.status !== "signed-out"}>
-          <Button
-            icon="refresh"
-            label={t("Refresh")}
-            disabled={computers.status === "loading"}
-            onClick={() => void loadComputers()}
-          />
-        </Show>
+        <Button
+          icon="refresh"
+          label={t("Refresh")}
+          disabled={computers.status === "loading"}
+          onClick={() => void loadComputers()}
+        />
       </header>
       <Switch>
-        <Match when={computers.status === "signed-out"}>
-          <div class="settings-computers-note">
-            <p>{t("Sign in to Haarness to open your other computers here.")}</p>
-            <button onClick={() => window.dispatchEvent(new CustomEvent("haarness:account"))}>
-              {t("Sign in")}
-            </button>
-          </div>
-        </Match>
         <Match when={computers.status === "error"}>
           <div class="settings-computers-note">
             <p role="alert" title={computers.error}>
@@ -895,6 +901,7 @@ function Computers() {
         )}
       </For>
     </section>
+    </Show>
   );
 }
 function Projects() {
