@@ -654,6 +654,12 @@ pub struct App {
     /// SSE health: while present, stale activity is explicitly labelled as
     /// reconnecting rather than looking like a hung model.
     pub connection_lost: Option<u32>,
+    /// The provider catalog did not come in time for the first frame: it
+    /// says "Loading models…", not that nothing is connected.
+    pub(crate) models_loading: bool,
+    /// The chat this TUI opened on a model it chose while the catalog was
+    /// loading: its id and that model, re-chosen once the catalog comes.
+    pub(crate) auto_model: Option<(ThreadId, String, String)>,
     /// While disconnected: whether this client is bringing its local server
     /// back, or failed to.
     pub(crate) server_restart: Option<ServerRestart>,
@@ -976,6 +982,8 @@ impl App {
             billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
             connection_lost: None,
+            models_loading: false,
+            auto_model: None,
             server_restart: None,
             overlay: Overlay::None,
             reasoning: true,

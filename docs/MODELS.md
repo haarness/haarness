@@ -9,12 +9,18 @@ supplies missing display names, context/output limits and prices; values returne
 by the provider remain authoritative. Explicit user configuration still wins.
 
 The server discovers at startup and refreshes stale catalogs on `GET /v1/providers`
-(five-minute cache), every provider at once. Neither waits more than three seconds
-for them: a server starts answering, and a read answers with the lists it has, while
-slower lists keep loading; a read while they still load answers at once. When they
-are all in and the catalog changed, `assets.updated` (`resource: "provider"`) tells
-clients to read it again, so the TUI's status line and an open model picker fill in
-by themselves. `POST /v1/providers/refresh` (a picker opening, a key just saved)
+(five-minute cache), every provider at once. A server starts answering after three
+seconds at most, and a read answers after three seconds with the lists it has, while
+slower lists keep loading; a read while they still load answers at once. A read waits
+longer (each list gives up within ten seconds) only for a signed-in provider with no
+model to show yet, such as Haarness Cloud or an endpoint that lists its models only
+when asked, so `haarness run` and a new chat never choose a model without it. When the
+lists are all in and the catalog changed, `assets.updated` (`resource: "provider"`)
+tells clients to read it again, so an open model picker fills in by itself. A
+configuration reload loads its providers' lists the same way, after it is applied.
+The TUI's first frame waits a second at most for the catalog; until it comes the
+status line says **Loading models…**, and a new chat the TUI opened meanwhile on a
+model it chose takes the model it would have chosen once the catalog is in. `POST /v1/providers/refresh` (a picker opening, a key just saved)
 waits for every list; concurrent requests are coalesced with a one-second minimum
 interval. Each full request, including pagination, is bounded to ten seconds. Errors, partial pages
 and invalid responses retain the last successful catalog. Before any successful

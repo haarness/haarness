@@ -39,6 +39,9 @@ use haarness_opentui::{Color, ColorSupport, Renderer};
 use haarness_protocol::CreateThreadRequest;
 use std::{path::PathBuf, time::Duration};
 
+/// How long the first frame waits for the provider catalog.
+const PROVIDERS_FIRST_FRAME: Duration = Duration::from_secs(1);
+
 use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
 use crate::input::{AppAction, handle_key};
 /// The model a new chat starts on when none is configured; `haarness run`
@@ -283,7 +286,15 @@ async fn run_with_client(
     auto: bool,
 ) -> Result<Option<PathBuf>> {
     let initial_info = client.info().await.ok();
-    let mut providers = client.providers().await.unwrap_or_default();
+    // The server waits for a signed-in provider's list while it has no
+    // model to show (up to 10 s on a stalled network): the first frame does
+    // not, and the list comes in after it (see `App::catalog_arrived`).
+    let (mut providers, models_loading) =
+        match tokio::time::timeout(PROVIDERS_FIRST_FRAME, client.providers()).await {
+            Ok(listed) => (listed.unwrap_or_default(), false),
+            Err(_) => (Vec::new(), true),
+        };
+    let mut chose_model = false;
     let mut threads = client.threads().await?;
     let saved = config::load_state();
     let saved_thread = saved
@@ -331,6 +342,9 @@ async fn run_with_client(
         } else if let Some((provider, model)) = default_connected_model(&providers) {
             request.provider = Some(provider);
             request.model = Some(model);
+            chose_model = true;
+        } else {
+            chose_model = true;
         }
         let thread = client.create_thread(request).await?;
         threads.push(thread.clone());
@@ -343,8 +357,9 @@ async fn run_with_client(
     // still loading when they come (`assets.updated`). One that came before
     // this point did so before the events this client follows: ask again,
     // without waiting for the rest.
-    if let Ok(Ok(current)) =
-        tokio::time::timeout(Duration::from_millis(300), client.providers()).await
+    if !models_loading
+        && let Ok(Ok(current)) =
+            tokio::time::timeout(Duration::from_millis(300), client.providers()).await
     {
         providers = current;
     }
@@ -360,7 +375,16 @@ async fn run_with_client(
         },
         |view| view.viewport_offset,
     );
+    // The chat this TUI opened on the model it chose takes the one it would
+    // have chosen with the lists still loading, once they come.
+    let auto_model = (models_loading && chose_model)
+        .then(|| (thread.id, thread.provider.clone(), thread.model.clone()));
     let mut app = App::new(thread, threads, items, providers, agents);
+    app.models_loading = models_loading;
+    app.auto_model = auto_model;
+    if models_loading {
+        app.notice = "Loading models…".into();
+    }
     app.yolo = client.auto_approves();
     app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
     app.original_client = Some(client.clone());
@@ -515,6 +539,13 @@ async fn run_with_client(
     let (workspace_mutation_tx, mut workspace_mutation_rx) = tokio::sync::mpsc::channel(1);
     let (workspace_ref_tx, mut workspace_ref_rx) = tokio::sync::mpsc::channel(1);
     let mut pty_rx = client.subscribe_ptys();
+    let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(1);
+    if app.models_loading {
+        let client = client.clone();
+        tokio::spawn(async move {
+            let _ = catalog_tx.send(client.providers().await.ok()).await;
+        });
+    }
     let (statusline_context, mut statusline_rx, statusline_task) =
         statusline::spawn(statusline_config);
     let _ = statusline_context.send(statusline::Context::from_app(&app));
@@ -887,6 +918,12 @@ async fn run_with_client(
                             app.notice = "Terminal closed · the shell exited".into();
                         }
                     }
+                }
+            },
+            Some(listed) = catalog_rx.recv() => {
+                match listed {
+                    Some(providers) => app.catalog_arrived(providers, &client).await,
+                    None => app.catalog_arrived(app.providers.clone(), &client).await,
                 }
             },
             Some(completion) = workspace_mutation_rx.recv() => {
