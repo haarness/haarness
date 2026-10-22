@@ -8,10 +8,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use haarness_core::{
     CoreError, CoreResult, McpRegistry, Tool, ToolContext, ToolDefinition, ToolOutput,
 };
-use haarness_protocol::ThreadId;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 pub(crate) const LIST: &str = "mcp_resource_list";
 pub(crate) const READ: &str = "mcp_resource_read";
@@ -72,10 +70,26 @@ fn read_definition() -> ToolDefinition {
     }
 }
 
-/// `server` when it declares resources, otherwise an error that names the
-/// servers that do, so the model can pick one instead of guessing.
-fn resource_server(registry: &dyn McpRegistry, server: &str) -> CoreResult<()> {
-    let servers = registry.resource_servers();
+/// The servers a call may reach: those the runtime scoped it to
+/// (`__servers`, leaving out any whose tools a rule or setting takes away),
+/// or else every server that declares resources.
+fn reach(registry: &dyn McpRegistry, arguments: &Value) -> Vec<String> {
+    arguments
+        .get("__servers")
+        .and_then(Value::as_array)
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_else(|| registry.resource_servers())
+}
+
+/// `server` when the call may reach it, otherwise an error that names the
+/// servers it may reach, so the model can pick one instead of guessing.
+fn resource_server(servers: &[String], server: &str) -> CoreResult<()> {
     if servers.iter().any(|name| name == server) {
         return Ok(());
     }
@@ -98,39 +112,17 @@ impl Tool for ListTool {
     fn side_effectful(&self) -> bool {
         false
     }
-    /// A listing of every server asks about each server it lists, so a rule
-    /// about one server still applies: they are named here, before the
-    /// permission check, and the listing reads exactly those.
-    async fn prepare_arguments(
-        &self,
-        mut arguments: Value,
-        _thread: ThreadId,
-        _cancel: CancellationToken,
-    ) -> CoreResult<Value> {
-        if arguments.get("server").is_none()
-            && let Some(fields) = arguments.as_object_mut()
-        {
-            fields.insert("__servers".into(), json!(self.0.resource_servers()));
-        }
-        Ok(arguments)
-    }
+    /// A listing of every server reads the servers the runtime named in
+    /// `__servers` before its permission check, which asked about each, so
+    /// a rule about one server still applies.
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        let reachable = reach(self.0.as_ref(), &arguments);
         let servers: Vec<String> = match arguments.get("server").and_then(Value::as_str) {
             Some(server) => {
-                resource_server(self.0.as_ref(), server)?;
+                resource_server(&reachable, server)?;
                 vec![server.to_owned()]
             }
-            None => arguments
-                .get("__servers")
-                .and_then(Value::as_array)
-                .map(|servers| {
-                    servers
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_else(|| self.0.resource_servers()),
+            None => reachable,
         };
         let single = arguments.get("server").is_some();
         let listing = async {
@@ -233,7 +225,7 @@ impl Tool for ReadTool {
                 .ok_or_else(|| CoreError::Invalid(format!("{name} is required")))
         };
         let (server, uri) = (field("server")?, field("uri")?);
-        resource_server(self.0.as_ref(), server)?;
+        resource_server(&reach(self.0.as_ref(), &arguments), server)?;
         // Stop ends the read here, and the server is told to stop too.
         let result = tokio::select! {
             biased;
@@ -320,8 +312,9 @@ async fn resource_output(result: &Value, directory: &std::path::Path) -> CoreRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use haarness_protocol::{McpConfigureRequest, McpServerInfo, TurnId};
+    use haarness_protocol::{McpConfigureRequest, McpServerInfo, ThreadId, TurnId};
     use std::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
 
     /// Two servers with resources (`docs` and `notes`, whose template
     /// listing fails) and one without (`tools`). Reading `slow://` never
@@ -420,12 +413,7 @@ mod tests {
     async fn listing_every_server_names_each_entry_with_its_server_in_a_stable_order() {
         let registry: Arc<dyn McpRegistry> = Arc::new(Resources::default());
         let [list, _] = tools(&registry);
-        let prepared = list
-            .prepare_arguments(json!({}), ThreadId::new(), CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(prepared["__servers"], json!(["docs", "notes"]));
-        let output = list.execute(prepared, context()).await.unwrap();
+        let output = list.execute(json!({}), context()).await.unwrap();
         let listing: Value = serde_json::from_str(&output.text).unwrap();
         assert_eq!(
             listing["resources"],
@@ -440,16 +428,19 @@ mod tests {
             listing["templates"],
             json!([{"server": "docs", "uriTemplate": "docs://page/{id}", "name": "page"}])
         );
-        // A named server is listed alone and is not expanded.
-        let named = list
-            .prepare_arguments(
-                json!({"server": "notes"}),
-                ThreadId::new(),
-                CancellationToken::new(),
-            )
+        // The servers the runtime scoped the call to are all it reaches.
+        let scoped = list
+            .execute(json!({"__servers": ["notes"]}), context())
             .await
             .unwrap();
-        assert!(named.get("__servers").is_none());
+        let listing: Value = serde_json::from_str(&scoped.text).unwrap();
+        assert_eq!(listing["resources"].as_array().unwrap().len(), 1);
+        let error = read_error(
+            &registry,
+            json!({"server": "docs", "uri": "docs://setup", "__servers": ["notes"]}),
+        )
+        .await;
+        assert!(error.contains("Servers with resources: notes."), "{error}");
         let error = list
             .execute(json!({"server": "tools"}), context())
             .await
@@ -459,6 +450,14 @@ mod tests {
             error.contains("\"tools\" is not connected or has no resources. Servers with resources: docs, notes."),
             "{error}"
         );
+    }
+
+    async fn read_error(registry: &Arc<dyn McpRegistry>, arguments: Value) -> String {
+        let [_, read] = tools(registry);
+        read.execute(arguments, context())
+            .await
+            .unwrap_err()
+            .to_string()
     }
 
     #[tokio::test]

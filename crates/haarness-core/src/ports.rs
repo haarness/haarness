@@ -699,6 +699,11 @@ pub trait Tool: Send + Sync {
 pub trait ToolRegistry: Send + Sync {
     fn get(&self, name: &str) -> Option<Arc<dyn Tool>>;
     fn list(&self) -> Vec<ToolDefinition>;
+    /// The connected MCP servers that declare resources, for the resource
+    /// tools' reach (see [`McpRegistry::resource_servers`]).
+    fn resource_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Exact registrations win. Repair only unambiguous capitalization or the
     /// known function namespace; never guess spellings or choose by permission.
