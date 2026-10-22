@@ -17,7 +17,7 @@ import { createKeyboardHandoff } from "./browser-keyboard";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
 import { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
-import { connections } from "./runtime";
+import { connectionAuth, connections } from "./runtime";
 import { data, persist } from "./store";
 import { translate } from "../localization";
 import type { DesktopEvent, BrowserLayout } from "../shared";
@@ -421,10 +421,17 @@ export function createBrowserHost(
     await clearing.get(connection)?.catch(() => {});
     const owner = connections.get(connection);
     if (!owner) throw new Error("Project disconnected");
+    // Another computer's pages would all load through Haarness Cloud, and a
+    // relayed socket ends with each sign-in; Desktop shows no browser there.
+    if (owner.view.remoteHost)
+      throw new Error("The built-in browser works with projects on this computer and your servers.");
     // Verify that this conversation belongs to the routed project before attaching native views.
     if (thread) await owner.client.getThread(thread);
     else if (!owner.view.info.capabilities.includes("browser-drafts.v1"))
       throw new Error("Update this project's server to browse before starting a chat.");
+    // The credential is in hand before looking for an attached browser, so
+    // nothing can attach another one between the look and the socket.
+    const auth = await connectionAuth(owner);
     const id = key(connection, thread);
     let e = entries.get(id);
     if (e && e.win === win && e.endpoint === owner.url && !e.disposed) {
@@ -443,7 +450,7 @@ export function createBrowserHost(
       ? "/v1/threads/" + encodeURIComponent(thread) + "/browser"
       : "/v1/browser/drafts/" + draftID);
     const socket = new WebSocket(endpoint.replace(/^http/, "ws") + "/host?version=2", {
-      headers: authorizationHeaders(owner.auth),
+      headers: authorizationHeaders(auth),
       maxPayload: 8 * 1024 * 1024,
     });
     const saved = data().values["browser:" + id] as
@@ -538,10 +545,10 @@ export function createBrowserHost(
           entry.network = await createBrowserNetwork(
             entry.partition,
             async (action, input, signal) => {
-              const response = await fetch(endpoint + "/tunnel/" + action, {
+              const response = await (owner.fetch ?? fetch)(endpoint + "/tunnel/" + action, {
                 method: "POST",
                 headers: {
-                  ...authorizationHeaders(owner.auth),
+                  ...authorizationHeaders(await connectionAuth(owner)),
                   "Content-Type": "application/json",
                 },
                 body: JSON.stringify({ ...input, lease: entry.lease }),
@@ -650,9 +657,9 @@ export function createBrowserHost(
       if (entries.has(destination)) throw new Error("This conversation already has a browser");
       const transfer = e.queue.catch(() => {}).then(async () => {
         if (e.disposed || entries.get(source) !== e) throw new Error("The new-chat browser changed before transfer");
-        const response = await fetch(owner.url.replace(/\/$/, "") + "/v1/browser/drafts/" + e.draftID + "/adopt", {
+        const response = await (owner.fetch ?? fetch)(owner.url.replace(/\/$/, "") + "/v1/browser/drafts/" + e.draftID + "/adopt", {
           method: "POST",
-          headers: { ...authorizationHeaders(owner.auth), "Content-Type": "application/json" },
+          headers: { ...authorizationHeaders(await connectionAuth(owner)), "Content-Type": "application/json" },
           body: JSON.stringify({ thread, lease: e.lease }),
           signal: AbortSignal.any([e.abort.signal, AbortSignal.timeout(15000)]),
         });

@@ -35,13 +35,16 @@ import {
   createMemo,
   createRoot,
   createSignal,
+  on,
   untrack,
   type ParentProps,
 } from "solid-js";
+import { computers } from "./computers";
 import { createStore, reconcile, unwrap } from "solid-js/store";
 import type * as T from "@haarness/sdk";
 import {
   defaults,
+  type Computer,
   type Connection,
   type Preferences,
   type Recent,
@@ -889,6 +892,37 @@ function createApp(saved?: Preferences) {
     }
     return pending;
   }
+  // Each time the account lists your computers: one renamed in Cloud takes
+  // its new name, and one it no longer lists (removed from the account, or
+  // of another account) is forgotten here with its saved projects; its chats
+  // stay on that computer.
+  createEffect(
+    on(
+      () => computers.revision,
+      () => {
+        // Signed out says nothing about which computers are still shared.
+        if (computers.status !== "ready") return;
+        for (const saved of state.servers) {
+          if (!saved.host) continue;
+          const computer = computers.items.find((item) => item.id === saved.host);
+          if (!computer) void run(() => removeServer(saved.id));
+          else if (saved.label !== computer.name)
+            void window.haarness
+              .server({ id: computer.id, action: "host", label: computer.name })
+              .then((value) => set("servers", value))
+              .catch(() => {});
+        }
+      },
+      { defer: true },
+    ),
+  );
+  // Main reaches another computer only while a window shows it.
+  createEffect(
+    on(
+      () => state.activeServer,
+      (id) => void window.haarness.server({ id, action: "shown" }).catch(() => {}),
+    ),
+  );
   const servers = createMemo(() => [
     localServer,
     ...state.servers,
@@ -967,7 +1001,7 @@ function createApp(saved?: Preferences) {
   async function openProject(newChat = false) {
     set("openingChat", 0);
     const server = currentServer();
-    if (server.url) {
+    if (server.url || server.host) {
       set("remoteProjectRequest", { server, newChat });
       return false;
     }
@@ -986,6 +1020,18 @@ function createApp(saved?: Preferences) {
     applyRecent((await window.haarness.boot()).recent);
     if (active) await switchServer(state.activeServer);
     return true;
+  }
+  /** Switches to another of your computers, as to any server: its last
+   * project reopens, or its project home lists what it offers. */
+  async function openComputer(computer: Pick<Computer, "id" | "name">) {
+    const id = "host:" + computer.id;
+    const saved = state.servers.find((item) => item.id === id);
+    if (!saved || saved.label !== computer.name)
+      set(
+        "servers",
+        await window.haarness.server({ id: computer.id, action: "host", label: computer.name }),
+      );
+    return switchServer(id);
   }
   async function removeServer(id: string) {
     if (state.activeServer === id && !(await switchServer("local")))
@@ -1181,6 +1227,9 @@ function createApp(saved?: Preferences) {
             return (
               !!current &&
               current.checkout?.exists !== false &&
+              // Another computer is reached through Haarness Cloud: only
+              // while it is the server shown, never in the background.
+              (!current.remoteHost || serverKey(current) === state.activeServer) &&
               (!!state.expandedProjects[projectKey(current)] ||
                 state.sidebarLayout === "flat" ||
                 state.searchOpen ||
@@ -1991,6 +2040,11 @@ function createApp(saved?: Preferences) {
       return;
     }
     if (event.kind === "menu") {
+      // Signed out, or on another account: another computer shown here was
+      // reached with the account before, so the window goes to this
+      // computer's projects instead of trying it again and again.
+      if ((event.data as { closed?: unknown })?.closed && currentServer().host)
+        void run(() => switchServer(localServer.id));
       menuHandler(event.data);
       return;
     }
@@ -2154,6 +2208,7 @@ function createApp(saved?: Preferences) {
     servers,
     currentServer,
     switchServer,
+    openComputer,
     openProject,
     forgetProject,
     removeServer,

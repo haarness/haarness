@@ -17,6 +17,9 @@ export interface ProjectLocation {
   cloudAccount?: string;
   cloudApiUrl?: string;
   remoteWorkspace?: string;
+  /** Another of your computers, opened through Haarness Cloud's relay: its
+   * Cloud host id. `remoteWorkspace` names the folder there. */
+  remoteHost?: string;
   project?: { id: string; name: string; root: string; git: boolean };
   checkout?: Pick<
     Types.WorkspaceInfo,
@@ -248,6 +251,16 @@ export interface SavedServer {
   url?: string;
   /** Haarness Cloud sessions of one account, derived from saved locations. */
   cloud?: boolean;
+  /** Another of your computers, opened through Haarness Cloud: its host id. */
+  host?: string;
+}
+/** One of your other computers, as the account lists it (`haarness remote enable`). */
+export interface Computer {
+  id: string;
+  name: string;
+  connected: boolean;
+  lastSeenAt?: string | null;
+  platform?: string | null;
 }
 export interface Recent extends ProjectLocation {
   id: string;
@@ -329,6 +342,8 @@ export interface Bridge {
 
   notificationReady(): Promise<NotificationTarget | null>;
   notificationHandled(target: NotificationTarget): Promise<void>;
+  /** The projects another computer offers (`server` is its `host:` id). */
+  remoteCatalog(server: string): Promise<Types.WorkspaceListResponse>;
   remoteProjects(
     server: string,
     path?: string,
@@ -353,6 +368,10 @@ export interface Bridge {
   connect(input: {
     cloudWorkspace?: string;
     cloudSession?: string;
+    /** Another of your computers (its Cloud host id), with `remoteWorkspace`
+     * from its catalog or `workspace`, a folder to open there. */
+    remoteHost?: string;
+    remoteWorkspace?: string;
     workspace?: string;
     url?: string;
     token?: string;
@@ -372,7 +391,10 @@ export interface Bridge {
   forget(id: string): Promise<void>;
   server(input: {
     id: string;
-    action: "rename" | "remove";
+    /** `host` saves another computer (`id` is its Cloud host id) as a
+     * server to switch to, or renames it; `shown` says which server the
+     * window shows now. */
+    action: "rename" | "remove" | "host" | "shown";
     label?: string;
   }): Promise<SavedServer[]>;
   projects(): Promise<Recent[]>;

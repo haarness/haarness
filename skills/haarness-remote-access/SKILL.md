@@ -71,6 +71,10 @@ Check exit status, individual checks and cleanup. The echo provider is determini
 - Desktop: `npx playwright test e2e/remote-control.spec.ts` (signed-out case always; the live case with `HAARNESS_REMOTE_CONTROL_API`, `_WEB` and a signed-in `_ACCOUNT` config dir). It saves `qr.png`/`dialog.png`; decode the QR too.
 - Check Cloud's Remote control page (Sessions and Hosts tabs) and the shared chat at 375 px wide: chat-only connectors appear only under Sessions, never as computer cards under Hosts.
 
+## Your computers in Desktop
+
+Desktop lists the account's hosts (Settings → Servers and the server switcher, **Your computers**) and opens them through `/api/v1/remote-hosts/{id}/runtime`. Unit coverage: `cargo test -p haarness-cli --bin haarness desktop_lists_other_computers desktop_relay_sign_in`, `npm --prefix apps/desktop test` (`tests/remote-hosts.test.ts`, `tests/servers.test.ts`). `npx playwright test e2e/remote-hosts.spec.ts` plays Cloud itself in front of a real `haarness serve` gateway (no Cloud needed): listing, opening, stream cuts across sign-in renewals and a project server restart, sign-out and account switch, revoked computers, and a Cloud session's ticket on its event stream. Against a local Cloud with the fixture identity provider, `HAARNESS_REMOTE_E2E=1 HAARNESS_CLOUD_API_URL=http://127.0.0.1:19080 scripts/test-remote-hosts-live.py [state]` signs a fixture user in with the device flow, shares three computers (one away, one being Desktop's own), runs the spec's live case (chat, terminal and folder browser through the relay) and revokes everything; `HAARNESS_REMOTE_HOSTS_LONG=1` also waits past the ten minutes a relayed sign-in lives.
+
 ## Complete the user journey
 
 Follow the [test plan](references/remote-session-test-plan.md) for full-host and published-chat Chrome control, real-model file reading, bidirectional tmux chat updates, permissions/questions, reconnect with unsent draft retention, cross-replica routing and independent credential revocation. A connected badge or successful click alone is not a pass: verify fresh runtime effects and authoritative history after recovery.

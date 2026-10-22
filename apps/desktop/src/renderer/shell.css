@@ -1230,6 +1230,14 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   margin: var(--s1) var(--s1);
   background: var(--line);
 }
+/* A group's quiet name, aligned with the labels of its items. */
+.action-menu .menu-heading {
+  flex: none;
+  padding: var(--s1) var(--s2) var(--s0);
+  font-size: var(--ui-xs);
+  font-weight: 500;
+  color: var(--muted);
+}
 /* Reserve the tick column so a checked and an unchecked row align. */
 .menu-check {
   display: inline-flex;

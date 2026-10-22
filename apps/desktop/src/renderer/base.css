@@ -456,6 +456,16 @@ html[dir="rtl"] :is(pre, code, .cm-editor, .xterm) {
   color: var(--accent);
   background: var(--accent-soft);
 }
+/* "on Studio Mac": the computer's name as it was given. */
+.badge.host-badge {
+  min-width: 0;
+  text-transform: none;
+}
+.badge.host-badge > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .count {
   font-size: var(--ui);
   color: var(--muted);

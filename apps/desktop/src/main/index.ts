@@ -13,6 +13,8 @@ import { createScreenshotIntents, createScreenshotListings, displayFolder, input
 import { terminalSockets } from "./terminal-sockets";
 import {
   eventIdleMs,
+  RELAY_RESUME_FOR_MS,
+  relayResumeAfterMs,
   onlineAgain,
   retryWaits,
   TERMINAL_PING_EVERY_MS,
@@ -24,8 +26,9 @@ import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../
 import { shortcutLabel } from "../renderer/search";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
-import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
+import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { browseRemote, openRemote, remoteLocationId } from "./remote-projects";
+import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
 import {
   app,
@@ -68,6 +71,8 @@ import {
   connectLocal,
   establish,
   connection,
+  connectionAuth,
+  connectionClient,
   connections,
   invoke,
   command,
@@ -144,7 +149,10 @@ let renderer = resolve(here, "../renderer/index.html");
 let preload = resolve(here, "../preload/index.cjs");
 let uiSession: Awaited<ReturnType<typeof createUiSession>> | undefined;
 const windows = new Set<BrowserWindow>();
-const subscriptions = new Map<string, { owner: number; client: Haarness }>();
+const subscriptions = new Map<
+  string,
+  { owner: number; client: Haarness; connection: string }
+>();
 // Test runs never share usage statistics. Every server and CLI process
 // inherits this.
 if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
@@ -270,7 +278,7 @@ function watchNotifications(id: string, owner: number) {
     return;
   }
   previous?.stop();
-  const client = new Haarness({ baseUrl: item.url, auth: item.auth });
+  const client = connectionClient(item);
   let stopped = false;
   let waiting: (() => void) | undefined;
   // Each listen is an attempt of its own; a newer one ends the older.
@@ -336,8 +344,19 @@ function watchNotifications(id: string, owner: number) {
           )
           .catch(() => {});
       }
-    } catch {
-      /* Retry without disturbing the user's foreground connection. */
+    } catch (error) {
+      // Retry without disturbing the user's foreground connection; but
+      // another computer that refuses the account (signed out, no longer
+      // shared) is not asked again until it is opened again.
+      if (
+        item.view.remoteHost &&
+        error instanceof ApiError &&
+        [401, 403, 404].includes(error.status)
+      ) {
+        if (notificationWatches.get(id) === watch) notificationWatches.delete(id);
+        watch.stop();
+        return;
+      }
     }
     // The network coming back ends this wait, and a wake starts over (see
     // wakeConnections).
@@ -365,6 +384,53 @@ function forgetNotifications(id: string) {
   notificationWatches.get(id)?.stop();
   notificationWatches.delete(id);
   notifications.forget(id);
+}
+/** Ends the event streams windows hold for a connection that closed. */
+function closeSubscriptions(connection: string) {
+  for (const [key, item] of subscriptions)
+    if (item.connection === connection) {
+      subscriptions.delete(key);
+      item.client.close();
+    }
+}
+/** The server each window shows. Another computer is reached through Haarness
+ * Cloud only while a window shows it: its projects' notification watches stop
+ * when none does, and start again when one of its projects connects. */
+const shownServers = new Map<number, string>();
+function quietOtherComputers() {
+  const shown = new Set(shownServers.values());
+  for (const id of [...notificationWatches.keys()]) {
+    const view = connections.get(id)?.view;
+    if (view?.remoteHost && !shown.has(serverKey(view))) {
+      notificationWatches.get(id)?.stop();
+      notificationWatches.delete(id);
+    }
+  }
+}
+/** After a sign-out or an account switch: Cloud sessions and your other
+ * computers were reached with the account that changed. Returns the projects
+ * that closed. */
+function closeCloud() {
+  const closed = closeCloudConnections();
+  for (const id of closed) {
+    forgetNotifications(id);
+    closeSubscriptions(id);
+  }
+  return closed;
+}
+/** Your other computers are reached through Haarness Cloud with the
+ * account's sign-in, which only main holds. */
+const relay = createRelay((rejected) =>
+  accountRequest({ action: "remote-auth", ...(rejected ? { rejected } : {}) }),
+);
+/** Keeps another computer in the server list once it is opened, under the
+ * name the account gives it now. */
+function saveHostServer(host: string, label?: string) {
+  const id = hostServerId(host);
+  const saved = data().servers.find((item) => item.id === id);
+  if (saved) {
+    if (label) saved.label = label;
+  } else data().servers.push({ id, label: label || say("Remote"), host });
 }
 let projectCatalog: Promise<Recent[]> | undefined;
 async function refreshProjects(): Promise<Recent[]> {
@@ -444,6 +510,8 @@ function handle(
               : "";
         if (secret) message = message.replaceAll(secret, "[redacted]");
       }
+      for (const secret of relay.secrets())
+        message = message.replaceAll(secret, "[redacted]");
       return { ok: false, error: message.slice(0, 8000) };
     }
   });
@@ -591,7 +659,7 @@ function installHandlers() {
       const id = z.string().parse(rawServer);
       const path = z.string().max(16384).optional().parse(rawPath);
       const server = data().servers.find((item) => item.id === id);
-      if (!server?.url) throw new Error("Saved remote server was not found");
+      if (!server?.url && !server?.host) throw new Error("Saved remote server was not found");
       const options = z
         .object({
           prefix: z.string().max(4096).optional(),
@@ -603,10 +671,18 @@ function installHandlers() {
         .optional()
         .parse(rawOptions);
       return {
-        listing: await browseRemote(server.url, serverAuth(id), path, options),
+        listing: server.host
+          ? await hostBrowse(relay, server.host, say, { ...options, ...(path ? { path } : {}) })
+          : await browseRemote(server.url!, serverAuth(id), path, options),
       };
     },
   );
+  handle("remoteCatalog", async (_, rawServer: unknown) => {
+    const id = z.string().max(200).parse(rawServer);
+    const host = data().servers.find((item) => item.id === id)?.host;
+    if (!host) throw new Error("Saved remote server was not found");
+    return hostCatalog(relay, host, say);
+  });
   handle("notificationHandled", (win, raw: unknown) => {
     const target = z
       .object({ connection: z.string(), thread: z.string() })
@@ -705,23 +781,28 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web", "remote-hosts"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "billing-state") return billingState();
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
+    const closed: string[] = [];
     if (input.action === "login") {
       await accountLogin(!!input.device, value => send(win, { kind: "menu", data: { action: "account-login", ...value as object } }));
     } else if (input.action === "web") {
       const result = await accountRequest(input); await shell.openExternal(external(result.url)); return null;
     } else {
       if (["logout", "select"].includes(input.action)) cancelAccountLogin();
-      if (input.action === "logout") closeCloudConnections();
+      if (input.action === "logout") closed.push(...closeCloud());
       const result = await accountRequest(input);
       if (!["logout", "select", "select-router"].includes(input.action)) return result;
-      if (input.action !== "select-router") closeCloudConnections();
+      if (input.action !== "select-router") closed.push(...closeCloud());
     }
+    // Another computer is opened with the account's own sign-in.
+    if (input.action !== "select-router") relay.forget();
     await Promise.allSettled([...connections.values()].filter(c => !c.view.remote).map(c => c.client.refreshProviders()));
     startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
-    broadcast({ kind: "menu", data: { action: "account-changed" } });
+    // After a sign-out or account switch, windows showing another computer
+    // leave it; `closed` names the projects that closed.
+    broadcast({ kind: "menu", data: { action: "account-changed", ...(["logout", "select"].includes(input.action) ? { closed } : {}) } });
     return accountRequest({ action: "status" });
   });
   handle("connect", async (win, raw: unknown) => {
@@ -730,6 +811,8 @@ function installHandlers() {
         workspace: z.string().optional(),
         cloudWorkspace: z.string().uuid().optional(),
         cloudSession: z.string().uuid().optional(),
+        remoteHost: z.string().uuid().optional(),
+        remoteWorkspace: z.string().min(1).max(200).optional(),
         url: z.string().optional(),
         token: z.string().optional(),
         username: z.string().max(1024).optional(),
@@ -751,16 +834,18 @@ function installHandlers() {
         input.url ||
         input.recent ||
         input.cloudSession ||
-        input.cloudWorkspace)
+        input.cloudWorkspace ||
+        input.remoteHost)
     )
       throw new Error("A link can only open a folder on this computer");
     const recent = input.recent
       ? data().recent.find((item) => item.id === input.recent)
       : undefined;
     if (input.recent && !recent) throw new Error("Saved project was not found");
+    const remoteHost = input.remoteHost ?? recent?.remoteHost;
     const cloudSession = input.cloudSession ?? recent?.cloudSession;
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
-    if (cloudSession || cloudWorkspace) {
+    if (!remoteHost && (cloudSession || cloudWorkspace)) {
       const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
       // Removed from the sidebar while it connected: it stays removed.
       const kept = await rememberConnected({
@@ -768,6 +853,50 @@ function installHandlers() {
         saved: view,
         requested: input.recent,
         save: async (next) => {
+          data().recent = next;
+          await persist();
+        },
+        watch: () => watchNotifications(view.id, win.id),
+      });
+      return kept ? view : null;
+    }
+    if (remoteHost) {
+      const opened = await connectHost(
+        relay,
+        {
+          host: remoteHost,
+          workspace: input.remoteWorkspace ?? recent?.remoteWorkspace,
+          path: input.recent ? undefined : input.workspace,
+          apiUrl: recent?.cloudApiUrl,
+          project: recent?.project,
+          checkout: recent?.checkout,
+        },
+        say,
+      );
+      const { view } = opened;
+      connections.get(view.id)?.client.close();
+      connections.set(view.id, { ...opened, auth: { type: "none" } });
+      const kept = await rememberConnected({
+        recent: () => data().recent,
+        saved: {
+          id: view.id,
+          label: view.label,
+          workspace: view.workspace,
+          remote: true,
+          remoteHost,
+          remoteWorkspace: view.remoteWorkspace,
+          cloudApiUrl: view.cloudApiUrl,
+          // An older Desktop, which knows nothing of other computers, reads
+          // this as a Cloud workspace it cannot attach to, never as a folder
+          // of its own computer that happens to have the same path.
+          cloudWorkspace: remoteHost,
+          trust: false,
+          ...(view.project ? { project: view.project } : {}),
+          ...(view.checkout ? { checkout: view.checkout } : {}),
+        },
+        requested: input.recent,
+        save: async (next) => {
+          saveHostServer(remoteHost, input.label);
           data().recent = next;
           await persist();
         },
@@ -960,15 +1089,25 @@ function installHandlers() {
     await persist();
     broadcast({ kind: "projects", data: data().recent });
   });
-  handle("server", async (_, raw: unknown) => {
+  handle("server", async (win, raw: unknown) => {
     const input = z
       .object({
         id: z.string(),
-        action: z.enum(["rename", "remove"]),
+        action: z.enum(["rename", "remove", "host", "shown"]),
         label: z.string().trim().min(1).max(200).optional(),
       })
       .strict()
       .parse(raw);
+    if (input.action === "shown") {
+      shownServers.set(win.id, input.id);
+      quietOtherComputers();
+      return data().servers;
+    }
+    if (input.action === "host") {
+      saveHostServer(z.string().uuid().parse(input.id), input.label);
+      await persist();
+      return data().servers;
+    }
     return projectTransaction(input.id, async () => {
       const server = data().servers.find((item) => item.id === input.id);
       if (!server) throw new Error("Saved server was not found");
@@ -1029,10 +1168,10 @@ function installHandlers() {
       if (spec[0] === "GET")
         for (const [key, value] of Object.entries(input))
           url.searchParams.set(key, String(value));
-      const response = await fetch(url, {
+      const response = await (item.fetch ?? fetch)(url, {
         method: spec[0],
         headers: {
-          ...authorizationHeaders(item.auth),
+          ...authorizationHeaders(await connectionAuth(item)),
           "Content-Type": "application/json",
         },
         body: spec[0] === "GET" ? undefined : JSON.stringify(input),
@@ -1088,20 +1227,56 @@ function installHandlers() {
         send(win, { kind: "connection", connection: id, id: key, data: "opened" });
       return response;
     };
-    const client = new Haarness({
-      baseUrl: item.url,
-      auth: item.auth,
-      fetch: (request, init) => fetch(request, init).then(opened),
-    });
-    subscriptions.set(key, { owner: win.id, client });
+    const client = connectionClient(item, opened);
+    subscriptions.set(key, { owner: win.id, client, connection: id });
+    // Cloud ends a stream relayed to another computer when the sign-in it
+    // opened with expires, and when that computer's connector renews its own
+    // (each about every ten minutes; the computer is back within seconds). A
+    // stream that worked for a while follows on from its last event, as if
+    // nothing happened, trying for up to 15 s; a computer gone longer is
+    // reported. Following on needs the same server: one that started again
+    // meanwhile numbers its events afresh, so the window reads it again
+    // ("resync") instead of waiting for numbers it already has.
+    const relayed = !!item.view.remoteHost;
     void (async () => {
       try {
-        for await (const event of client.events({
-          after: cursor,
-          reconnect: false,
-          idleTimeoutMs: eventIdleMs(),
-        })) {
-          send(win, { kind: "server", connection: id, id: key, data: event });
+        let after = cursor;
+        let instance: string | undefined;
+        let quietUntil = 0;
+        let resuming = false;
+        for (;;) {
+          const started = Date.now();
+          let failure: unknown;
+          try {
+            if (resuming) {
+              const info = await item.client.info();
+              if (info.serverInstanceId !== (instance ?? item.view.info.serverInstanceId)) break;
+            }
+            for await (const event of client.events({
+              after,
+              reconnect: false,
+              idleTimeoutMs: eventIdleMs(),
+            })) {
+              send(win, { kind: "server", connection: id, id: key, data: event });
+              if ("eventId" in event) {
+                after = event.eventId;
+                instance = event.serverInstanceId;
+              }
+            }
+          } catch (error) {
+            failure = error;
+          }
+          if (!relayed || !subscriptions.has(key)) {
+            if (failure) throw failure;
+            break;
+          }
+          if (Date.now() - started > relayResumeAfterMs()) quietUntil = Date.now() + RELAY_RESUME_FOR_MS;
+          if (Date.now() >= quietUntil) {
+            if (failure) throw failure;
+            break;
+          }
+          resuming = true;
+          if (Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 1_000));
         }
         send(win, {
           kind: "connection",
@@ -1666,6 +1841,8 @@ function createWindow() {
       }
     terminals.close(win.id);
     answerers.forget(win.id);
+    shownServers.delete(win.id);
+    quietOtherComputers();
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);

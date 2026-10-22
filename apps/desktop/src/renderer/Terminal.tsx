@@ -15,6 +15,7 @@ import { terminalTheme, type ThemeId } from "../themes";
 import {
   inputQueue,
   linkWatch,
+  RELAYED_RECONNECTING_AFTER,
   reconnects,
   restoredLine,
   scrollPlaces,
@@ -265,6 +266,13 @@ export function TerminalPanel() {
           onClick={() => app.run(create)}
         />
         <div class="grow" />
+        {/* A terminal of another computer says so where commands are typed. */}
+        <Show when={app.state.connection?.remoteHost}>
+          <span class="badge host-badge" title={app.currentServer().label}>
+            <Icon name="host" size="xs" />
+            <span>{t("on {computer}", { computer: app.currentServer().label })}</span>
+          </span>
+        </Show>
         <Button
           icon="close"
           label={t("Hide terminal")}
@@ -490,7 +498,10 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     let focused = false;
     // What the view says while the connection is down; reconnects go on
     // whatever it says.
-    const watch = linkWatch({ onState: setLink });
+    const watch = linkWatch({
+      onState: setLink,
+      ...(app.state.connection?.remoteHost ? { quietMs: RELAYED_RECONNECTING_AFTER } : {}),
+    });
     // One attempt at a time (see reconnects). The first connects at once;
     // later ones ask the server first, which keeps them trying while it
     // cannot say. A shell that exited sends nothing more, and its tab says

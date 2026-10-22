@@ -28,6 +28,7 @@ import {
 import { Button, Icon, Forms, type IconName } from "./ui";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
+import { computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
 import { toastAnchor } from "./toast-anchors";
@@ -35,7 +36,7 @@ import { ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
 import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
 import { createOrdering, createOrderDropTarget } from "./Sortable";
-import { MenuButton } from "./MenuButton";
+import { MenuButton, type MenuAction } from "./MenuButton";
 import { UniversalSearch } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
@@ -106,12 +107,51 @@ const MemoryDialog = lazy(() => import("./MemoryDialog").then((module) => ({defa
 const Settings = lazy(() =>
   import("./Settings").then((module) => ({ default: module.Settings })),
 );
-/** This computer, a remote host, or Haarness Cloud, each with its own picture. */
-const serverIcon = (server: { url?: string; cloud?: boolean }): IconName =>
-  server.cloud ? "cloud" : server.url ? "server" : "computer";
+/** This computer, a remote server, Haarness Cloud or another of your
+ * computers, each with its own picture. */
+const serverIcon = (server: { url?: string; cloud?: boolean; host?: string }): IconName =>
+  server.cloud ? "cloud" : server.url ? "server" : server.host ? "host" : "computer";
 export function App() {
   const app = useApp();
   const { state, set } = app;
+  /** Your other computers in the server switcher, once the account has
+   * listed them; the one open now stays listed while it is read again. */
+  const computerItems = (): MenuAction[] => {
+    const active = app.currentServer().host;
+    const listed = computers.items.some((item) => item.id === active)
+      ? computers.items
+      : [
+          ...(active && computers.status !== "ready"
+            ? [{ id: active, name: app.currentServer().label, connected: true }]
+            : []),
+          ...computers.items,
+        ];
+    // While the first list is read, signed in, one quiet row holds the
+    // place, so the menu does not grow under the pointer.
+    if (!listed.length && signedIn() && ["idle", "loading"].includes(computers.status))
+      return [
+        {
+          label: t("Looking for your computers…"),
+          detail: "Haarness Cloud",
+          icon: "host",
+          disabled: true,
+          divider: true,
+          heading: t("Your computers"),
+        },
+      ];
+    return listed.map((computer, index) => ({
+      label: computer.name,
+      detail: computer.connected
+        ? platformName("platform" in computer ? computer.platform : null) || t("Connected")
+        : lastSeen(computer),
+      icon: computer.id === active ? "check" : "host",
+      // An away computer cannot be opened until it is back.
+      disabled: !computer.connected && computer.id !== active,
+      divider: index === 0,
+      heading: index === 0 ? t("Your computers") : undefined,
+      run: () => void app.run(() => app.openComputer(computer)),
+    }));
+  };
   onMount(() => {
     const pointer = () => document.documentElement.setAttribute("data-pointer-focus", "");
     const keyboard = (event: KeyboardEvent) => {
@@ -161,7 +201,16 @@ export function App() {
   const dockMax = () => Math.max(360, (workbench?.clientWidth ?? 1050) - 480);
   const dockVisible = () =>
     !!state.connection && !!dock() && state.panel === "chat";
+  /** Another computer's pages would all load through Haarness Cloud, and
+   * its relayed socket ends with each sign-in: the Browser is for projects on
+   * this computer and your servers. */
+  const browserHere = () => !state.connection?.remoteHost;
+  createEffect(() => {
+    if (!browserHere() && dock() === "browser")
+      setDock(dockTabs().filter((tab) => tab !== "browser").at(-1) ?? "tools");
+  });
   function openDock(value: Dock) {
+    if (value === "browser" && !browserHere()) return;
     setDock(value);
     if (!dockTabs().includes(value)) setDockTabs((tabs) => [...tabs, value]);
     if (value === "files") setFilesVisited(true);
@@ -176,6 +225,7 @@ export function App() {
   /** When the person last asked the Browser to pick an element; it opens to take the request. */
   const [pickRequest, setPickRequest] = createSignal(0);
   function pickElement() {
+    if (!browserHere()) return;
     openDock("browser");
     setPickRequest(Date.now());
   }
@@ -216,6 +266,7 @@ export function App() {
    * another panel or leaves another page for the chat.
    */
   function revealBrowser() {
+    if (!browserHere()) return;
     const step = agentReveal(browserStage(), browserAway());
     if (step === "none") return;
     if (!dockTabs().includes("browser"))
@@ -496,9 +547,9 @@ export function App() {
         state.platform,
       );
     const actions: SearchEntry[] = [
-      {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected,action:()=>openDock("browser")},
+      {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected||!browserHere(),action:()=>openDock("browser")},
       {key:"export-logs",group:"Commands",name:t("Export logs…"),keywords:"logs diagnostics zip support bug report share",icon:"download",action:()=>void app.run(exportLogs)},
-      {key:"pick",group:"Project panels",name:t("Pick an element in the browser"),keywords:"inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected,action:pickElement},
+      {key:"pick",group:"Project panels",name:t("Pick an element in the browser"),keywords:"inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected||!browserHere(),action:pickElement},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
       {
         key: "permission-mode",
@@ -915,7 +966,18 @@ export function App() {
               </span>
             </Show>
             <Show when={state.connection!.remote}>
-              <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
+              <Show
+                when={state.connection!.remoteHost}
+                fallback={
+                  <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
+                }
+              >
+                {/* Where prompts, tools and terminals run, on every screen. */}
+                <span class="badge host-badge" title={app.currentServer().label}>
+                  <Icon name="host" size="xs" />
+                  <span>{t("on {computer}", { computer: app.currentServer().label })}</span>
+                </span>
+              </Show>
             </Show>
           </Show>
         </div>
@@ -962,6 +1024,7 @@ export function App() {
               label={t("Switch server")}
               class="server-switcher-button"
               matchWidth
+              onOpen={() => void loadComputers()}
               content={
                 <>
                   <Icon name={serverIcon(app.currentServer())} size="md" />
@@ -970,19 +1033,24 @@ export function App() {
                 </>
               }
               items={[
-                ...app.servers().map((server) => ({
-                  label: t(server.label),
-                  detail:
-                    server.url ??
-                    t(server.cloud ? "Cloud sessions" : "Local projects"),
-                  icon: (server.id === state.activeServer
-                    ? "check"
-                    : serverIcon(server)) as IconName,
-                  run: () => void app.run(() => app.switchServer(server.id)),
-                })),
+                ...app
+                  .servers()
+                  .filter((server) => !server.host)
+                  .map((server) => ({
+                    label: t(server.label),
+                    detail:
+                      server.url ??
+                      t(server.cloud ? "Cloud sessions" : "Local projects"),
+                    icon: (server.id === state.activeServer
+                      ? "check"
+                      : serverIcon(server)) as IconName,
+                    run: () => void app.run(() => app.switchServer(server.id)),
+                  })),
+                ...computerItems(),
                 {
                   label: t("Manage servers"),
                   icon: "settings",
+                  divider: computerItems().length > 0,
                   run: () => {
                     void app.openSettings("servers");
                   },
@@ -1276,7 +1344,7 @@ export function App() {
               style={{ display: dockVisible() ? "flex" : "none" }}
             >
               <div class="dock-tabs">
-                <For each={panelTabs.ordered() as Dock[]}>
+                <For each={(panelTabs.ordered() as Dock[]).filter((tab) => tab !== "browser" || browserHere())}>
                   {(tab) => (
                     <div
                       class="dock-tab"
@@ -1336,7 +1404,7 @@ export function App() {
                 >
                   <h2>{t("Your tools, alongside chat")}</h2>
                   <p>{t("Open what you need without leaving the chat.")}</p>
-                  <For each={panelChoices}>
+                  <For each={panelChoices.filter((item) => item.shortcut !== "browser" || browserHere())}>
                     {(item) => (
                       <button
                         onClick={() =>
@@ -1382,7 +1450,9 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} pickRequest={pickRequest()} />
+              <Show when={browserHere()}>
+                <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} pickRequest={pickRequest()} />
+              </Show>
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>
