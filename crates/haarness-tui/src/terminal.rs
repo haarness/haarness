@@ -289,9 +289,20 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+/// Whether the TUI owns the terminal now (raw mode, its alternate screen).
+static ON_SCREEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the TUI is drawing on this terminal now. Anything else written to
+/// it meanwhile stays on screen over the TUI, which redraws only the cells it
+/// changed.
+fn on_screen() -> bool {
+    ON_SCREEN.load(Ordering::Relaxed)
+}
+
 /// Restore the terminal to a usable state. Safe to call more than once and
 /// from a panic hook: every step is best-effort and none can panic.
 pub fn restore_terminal() {
+    ON_SCREEN.store(false, Ordering::Relaxed);
     // Clear the title we set so the shell's own title comes back.
     let _ = write!(io::stdout(), "\x1b]0;\x07");
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
@@ -310,17 +321,46 @@ pub fn restore_terminal() {
 }
 
 /// Chain terminal restoration in front of the default panic handler, so a
-/// panic prints its message to a working terminal instead of wedging raw
-/// mode + alternate screen.
+/// panic that ends the TUI prints its message to a working terminal instead
+/// of wedging raw mode + alternate screen.
 fn install_panic_hook() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if !panic_ends_the_tui(on_screen(), std::thread::current().name()) {
+                log_panic(info);
+                return;
+            }
             restore_terminal();
             default_hook(info);
         }));
     });
+}
+
+/// The TUI's loop runs on the main thread; a panic elsewhere (a background
+/// task, which tokio catches, or a thread of its own) ends only that work
+/// while the TUI keeps drawing. Restoring the terminal then left the TUI
+/// running on a cooked, scrolling screen, and the message over it.
+fn panic_ends_the_tui(on_screen: bool, thread: Option<&str>) -> bool {
+    !on_screen || thread == Some("main")
+}
+
+/// A panic the TUI lives on: in the log only, with where it happened, as the
+/// CLI's own hook writes every other one.
+fn log_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let message = info
+        .payload()
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| info.payload().downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    tracing::error!(
+        location = info.location().map(ToString::to_string).as_deref(),
+        thread = std::thread::current().name(),
+        "panic: {}",
+        message.chars().take(500).collect::<String>()
+    );
 }
 
 impl TerminalGuard {
@@ -362,6 +402,7 @@ fn activate_terminal() -> Result<()> {
         restore_terminal();
         return Err(error);
     }
+    ON_SCREEN.store(true, Ordering::Relaxed);
     // Kitty keyboard protocol disambiguates Shift+Enter from Enter and
     // Ctrl+M from the models shortcut where the terminal supports it.
     let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -491,8 +532,8 @@ fn launch(target: &std::ffi::OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, osc_text, parse_background_variant,
-        parse_terminal_rgb,
+        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, osc_text, panic_ends_the_tui,
+        parse_background_variant, parse_terminal_rgb,
     };
 
     #[test]
@@ -532,5 +573,56 @@ mod tests {
         assert!(normal < drag && drag < motion && motion < sgr);
         assert!(MOUSE_TRACKING_DISABLE.contains("?1003l"));
         assert!(MOUSE_TRACKING_DISABLE.contains("?1006l"));
+    }
+
+    #[test]
+    fn only_a_panic_on_the_tuis_own_thread_gives_the_terminal_back() {
+        // The loop's thread: the TUI ends, so the message goes to a working
+        // terminal.
+        assert!(panic_ends_the_tui(true, Some("main")));
+        // A background task or thread: the TUI keeps drawing on its screen.
+        assert!(!panic_ends_the_tui(true, Some("tokio-runtime-worker")));
+        assert!(!panic_ends_the_tui(true, None));
+        // Not on screen (before the first frame, after it exits, while an
+        // editor or the shell has the terminal): printed as before.
+        assert!(panic_ends_the_tui(false, Some("tokio-runtime-worker")));
+    }
+
+    /// Run in a process of its own (it installs the process's panic hook):
+    /// the TUI on screen, a background thread panics, and the TUI must still
+    /// own its screen, with nothing printed over it.
+    #[test]
+    fn a_background_panic_leaves_the_tui_on_its_screen() {
+        if std::env::var_os("HAARNESS_TUI_PANIC_PROBE").is_some() {
+            super::ON_SCREEN.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::install_panic_hook();
+            let _ = std::thread::Builder::new()
+                .name("background-task".into())
+                .spawn(|| panic!("background failure"))
+                .unwrap()
+                .join();
+            println!("on screen after the panic: {}", super::on_screen());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal::tests::a_background_panic_leaves_the_tui_on_its_screen",
+                "--nocapture",
+            ])
+            .env("HAARNESS_TUI_PANIC_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("on screen after the panic: true"),
+            "{stdout}\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("\x1b[?1049l"),
+            "the terminal was given back"
+        );
+        assert!(!stderr.contains("background failure"), "{stderr}");
     }
 }
