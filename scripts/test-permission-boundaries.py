@@ -20,11 +20,15 @@
    outside the project inside `bash -c` or behind a wrapper asks for its folder; a command too
    long to read is refused by a deny under `--yolo` and by a skill's, and an ask needs a person; a
    line too large to read needs a person even when its first word is allowed.
+8. (October 22) A patch that deletes or moves a link removes the link and keeps the file it leads
+   to, inside the project or outside it, without asking about the outside folder; glob refuses a
+   `..` pattern and leaves out what `**` finds through a link out of the project; an
+   `external_directory` deny written through a folder link refuses a read of the folder it leads to.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
 of paths, headless, schedules, session_start, plugin_workflow, config_files, home_variable,
-frontmatter and shell_readings). No model is called.
+frontmatter, shell_readings and links). No model is called.
 """
 import json
 import os
@@ -390,8 +394,45 @@ def case_shell_readings():
     passed('a line too large to read needs a person even when its first word is allowed')
 
 
+def case_links():
+    """A link is removed by a patch, never followed by glob out of the project, and a rule may name it."""
+    outside = root / 'links-outside'
+    outside.mkdir()
+    (outside / 'kept.txt').write_text('OUTSIDE\n')
+    alias = root / 'links-outside-alias'
+    alias.symlink_to(outside)
+    links = project('links', {'permission': {'external_directory': {str(alias) + '/*': 'deny'}}})
+    (links / 'real.txt').write_text('real\n')
+    (links / 'alias.txt').symlink_to('real.txt')
+    (links / 'out.txt').symlink_to(outside / 'kept.txt')
+    patch = '*** Begin Patch\n*** Delete File: alias.txt\n*** Delete File: out.txt\n*** End Patch'
+    output = haarness(links, 'run', '!tool apply_patch ' + json.dumps({'input': patch})).stdout
+    assert 'deleted alias.txt' in output and 'deleted out.txt' in output, output
+    assert not os.path.lexists(links / 'alias.txt') and not os.path.lexists(links / 'out.txt')
+    assert (links / 'real.txt').read_text() == 'real\n' and (outside / 'kept.txt').read_text() == 'OUTSIDE\n'
+    (links / 'alias.txt').symlink_to('real.txt')
+    patch = '*** Begin Patch\n*** Update File: alias.txt\n*** Move to: moved.txt\n@@\n-real\n+moved\n*** End Patch'
+    haarness(links, 'run', '!tool apply_patch ' + json.dumps({'input': patch}))
+    assert not os.path.lexists(links / 'alias.txt') and (links / 'moved.txt').read_text() == 'moved\n'
+    assert (links / 'real.txt').read_text() == 'real\n'
+    passed('a patch that deletes or moves a link removes the link and keeps the file it leads to')
+    output = haarness(links, 'run', '!tool glob {"pattern":"../*"}', check=False)
+    shown = output.stdout + output.stderr
+    assert 'a glob pattern cannot contain `..`' in shown and 'links-outside' not in shown, shown
+    (links / 'escape').symlink_to(outside)
+    output = haarness(links, 'run', '!tool glob {"pattern":"**/*"}').stdout
+    assert 'kept.txt' not in output and 'real.txt' in output and 'escape' in output, output
+    passed('glob refuses a .. pattern and leaves out what ** finds through a link out of the project')
+    output = haarness(links, 'run', '!tool read ' + json.dumps({'path': str(outside / 'kept.txt')}), check=False)
+    shown = output.stdout + output.stderr
+    assert f"denied by permission rule 'external_directory:{alias}/*'" in shown, shown
+    assert 'OUTSIDE' not in shown, shown
+    passed('an external_directory deny written through a folder link refuses a read of where it leads')
+
+
 CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow',
-                                                       'config_files', 'home_variable', 'frontmatter', 'shell_readings']}
+                                                       'config_files', 'home_variable', 'frontmatter', 'shell_readings',
+                                                       'links']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:
