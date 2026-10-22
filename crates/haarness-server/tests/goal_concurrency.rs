@@ -1231,7 +1231,12 @@ async fn simultaneous_turn_starts_admit_exactly_one_runner() {
     repository.release_turn_start.add_permits(1);
     let admitted = first.await.unwrap().unwrap();
     let rejected = second.await.unwrap().unwrap_err();
-    assert!(rejected.to_string().contains("active turn"));
+    assert!(
+        rejected
+            .to_string()
+            .contains("This chat already has a turn running"),
+        "{rejected}"
+    );
 
     wait_provider_call(&provider).await;
     provider.release.add_permits(1);

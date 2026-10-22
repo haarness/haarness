@@ -7318,6 +7318,39 @@ async fn a_reconnecting_event_stream_gets_waiting_deltas_joined_and_unbuffered()
     handle.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_turn_sent_to_a_chat_busy_elsewhere_is_refused_in_a_sentence() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let thread = echo_thread(&runtime).await;
+    let busy = runtime
+        .start_turn(
+            thread.id,
+            turn_request("!tool bash {\"command\":\"sleep 2\"}"),
+        )
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{base}/v1/threads/{}/turns", thread.id))
+        .bearer_auth("activity-token")
+        .json(&turn_request("another message"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "conflict");
+    assert_eq!(
+        body["message"],
+        "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped."
+    );
+    wait_done(&runtime, &busy).await;
+    handle.shutdown().await.unwrap();
+}
+
 /// A server for `runtime` with the routes under test and nothing else.
 async fn activity_server(
     runtime: Arc<AgentRuntime>,
