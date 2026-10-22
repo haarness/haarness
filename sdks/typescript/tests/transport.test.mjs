@@ -418,3 +418,55 @@ test("a terminal ping counts anything the server sends, fails a socket gone mid-
   );
   assert.equal(blocked, true);
 });
+
+test("a streamed side question yields its events across chunk boundaries and stops on done", async () => {
+  const calls = [];
+  const frames = [
+    ": connected\n\n",
+    'data: {"type":"delta","text":"An "}\n\ndata: {"type":"del',
+    'ta","text":"answer"}\r\n\r\n',
+    'data: {"type":"done","answer":"An answer","inputTokens":7,"outputTokens":3}\n\n',
+    'data: {"type":"delta","text":"never read"}\n\n',
+  ];
+  const client = new Haarness({
+    baseUrl: "http://localhost:8080",
+    token: "fixture-token",
+    fetch: async (url, init) => {
+      calls.push([url, init]);
+      return new Response(new ReadableStream({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame));
+          controller.close();
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  const events = [];
+  for await (const event of client.btwStream("thread/1", { question: "Why?", history: [{ question: "What?", answer: "That." }] }))
+    events.push(event);
+  assert.deepEqual(events, [
+    { type: "delta", text: "An " },
+    { type: "delta", text: "answer" },
+    { type: "done", answer: "An answer", inputTokens: 7, outputTokens: 3 },
+  ]);
+  assert.match(calls[0][0], /\/v1\/threads\/thread%2F1\/btw\/stream$/);
+  assert.equal(calls[0][1].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0][1].body).history, [{ question: "What?", answer: "That." }]);
+  assert.equal(calls.length, 1);
+});
+
+test("a streamed side question that ends early, is refused, or goes quiet fails", async () => {
+  const respond = (body, status = 200) => new Haarness({
+    baseUrl: "http://localhost:8080",
+    fetch: async () => typeof body === "string"
+      ? new Response(body, { status, headers: { "content-type": status === 200 ? "text/event-stream" : "application/json" } })
+      : new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "text/event-stream" } }),
+  });
+  const drain = async (client, options) => { for await (const _ of client.btwStream("t", { question: "q" }, options)); };
+  await assert.rejects(drain(respond('data: {"type":"delta","text":"half"}\n\n')), TransportError);
+  await assert.rejects(
+    drain(respond(JSON.stringify({ code: "not_found", message: "thread not found", retryable: false }), 404)),
+    (error) => error instanceof ApiError && error.status === 404 && error.code === "not_found",
+  );
+  await assert.rejects(drain(respond(null), { idleTimeoutMs: 50 }), /sent nothing for 50 ms/);
+});

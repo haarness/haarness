@@ -2872,7 +2872,7 @@ async fn btw_command(
 ) -> Result<()> {
     let discovery = ensure_workspace_server(paths, workspace, trust).await?;
     let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
-    let response = client.btw(thread_id, question).await?;
+    let response = client.btw(thread_id, question, Vec::new()).await?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
