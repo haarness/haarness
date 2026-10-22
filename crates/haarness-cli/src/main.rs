@@ -7579,7 +7579,12 @@ async fn mcp_command(
                 .context("cannot bind the MCP OAuth loopback callback")?;
             let address = listener.local_addr()?;
             let redirect_uri = format!("http://{address}/mcp/oauth/callback");
-            let session = registry.begin_oauth(&name, &redirect_uri).await?;
+            // The refusal and rmcp's own errors read as sentences, without
+            // the `tool error:` category.
+            let session = registry
+                .begin_oauth(&name, &redirect_uri)
+                .await
+                .map_err(management::plain_error)?;
             println!("Authorize MCP server '{name}' in your browser:");
             println!("{}", session.authorization_url);
             if !no_browser && let Err(error) = open_browser(&session.authorization_url) {
@@ -7588,7 +7593,10 @@ async fn mcp_command(
             let callback_url =
                 receive_oauth_callback(&listener, &redirect_uri, &session.authorization_url)
                     .await?;
-            session.complete(&callback_url).await?;
+            session
+                .complete(&callback_url)
+                .await
+                .map_err(management::plain_error)?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
