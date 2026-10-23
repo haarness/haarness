@@ -41,6 +41,13 @@ export interface RequestOptions {
   timeoutMs?: number;
   headers?: Record<string, string>;
 }
+const REQUEST_OPTIONS = new Set(["signal", "timeoutMs", "headers"]);
+/** Whether `value`, passed where a method now takes a query, holds request
+ * options instead: a call written before the method took a query. */
+export function isRequestOptions(value: object): value is RequestOptions {
+  const keys = Object.keys(value);
+  return keys.length > 0 && keys.every((key) => REQUEST_OPTIONS.has(key));
+}
 type WireOptions = RequestOptions & {
   body?: unknown;
   query?: object;
