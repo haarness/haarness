@@ -181,6 +181,16 @@ fn config_dir() -> Option<PathBuf> {
     Some(directory)
 }
 
+/// The prompt history, as `save_scoped_history` keeps it.
+pub(crate) const HISTORY_FILE: &str = "tui-history-v2.json";
+
+/// The text of one of the TUI's own files, or nothing when it is missing.
+pub(crate) fn client_file_text(name: &str) -> String {
+    config_dir()
+        .and_then(|directory| std::fs::read_to_string(directory.join(name)).ok())
+        .unwrap_or_default()
+}
+
 fn history_path() -> Option<PathBuf> {
     config_dir().map(|directory| directory.join("tui-history.jsonl"))
 }
@@ -230,7 +240,7 @@ pub(crate) fn load_scoped_history(scope: &str, thread: &str) -> Vec<String> {
     let Some(root) = config_dir() else {
         return Vec::new();
     };
-    let path = root.join("tui-history-v2.json");
+    let path = root.join(HISTORY_FILE);
     // Do not copy the old global file into unrelated projects. Keep it intact;
     // legacy prompts are adopted by the first workspace that records a prompt.
     history_order(&scoped_entries(&path), scope, thread)
@@ -251,7 +261,7 @@ pub(crate) fn save_scoped_history(scope: &str, thread: &str, text: &str) -> std:
         .write(true)
         .open(root.join("tui-history-v2.lock"))?;
     lock.lock_exclusive()?;
-    let path = root.join("tui-history-v2.json");
+    let path = root.join(HISTORY_FILE);
     let mut entries: Vec<HistoryEntry> = match std::fs::read(&path) {
         Ok(body) => serde_json::from_slice(&body)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),

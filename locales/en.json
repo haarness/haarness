@@ -2770,5 +2770,16 @@
   "Resize side chat": "Resize side chat",
   "This server answers each question on its own": "This server answers each question on its own",
   "Outside this project": "Outside this project",
-  "Too large to show": "Too large to show"
+  "Too large to show": "Too large to show",
+  "MCP resource · {server}": "MCP resource · {server}",
+  "Read from {server} when the message is sent.": "Read from {server} when the message is sent.",
+  "MCP server": "MCP server",
+  "not read": "not read",
+  "agents · files · resources": "agents · files · resources",
+  "files · agents · resources": "files · agents · resources",
+  "Files, agents and resources": "Files, agents and resources",
+  "a rule keeps this resource from the model": "a rule keeps this resource from the model",
+  "did not answer within {seconds} s": "did not answer within {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "This server cannot read MCP resources. Remove them from the message, or update the server.",
+  "Sent again as it was read.": "Sent again as it was read."
 }

@@ -50,8 +50,8 @@ pub use permissions::{
 pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
-    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
-    refusal_reason, shorten_title,
+    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, ResourceMentionPolicy,
+    StaticProviderRegistry, refusal_reason, shorten_title,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,

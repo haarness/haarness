@@ -203,6 +203,7 @@ impl Service {
                     request_id: RequestId::new(),
                     text,
                     attachments,
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: self.auto_approve,
                     agent: None,

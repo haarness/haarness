@@ -465,6 +465,56 @@ pub struct DirectToolResult {
     pub is_error: bool,
 }
 
+/// What a person's own `@` mention of an MCP resource may reach in one chat
+/// (see [`AgentRuntime::resource_mention_policy`]). The chat's rules decide
+/// as they do for the model's `mcp_resource_read`, except that an ask is not
+/// asked: the person picked the resource, as they would attach a file.
+pub struct ResourceMentionPolicy {
+    engine: PermissionEngine,
+    configured: HashMap<String, bool>,
+    live: HashMap<String, bool>,
+    agent_tools: Option<HashMap<String, bool>>,
+    workspace: PathBuf,
+}
+
+impl ResourceMentionPolicy {
+    /// Whether a rule or setting takes every tool of `server` away for the
+    /// chat (`"mcp__docs__*": "deny"`, or `false` under `tools`), which keeps
+    /// its resources from the chat too.
+    #[must_use]
+    pub fn turned_off(&self, server: &str) -> bool {
+        let tools = mcp_server_tools(server);
+        !self
+            .live
+            .get(&tools)
+            .or_else(|| self.configured.get(&tools))
+            .copied()
+            .unwrap_or(true)
+            || self.agent_tools.as_ref().is_some_and(|agent_tools| {
+                crate::definitions::tool_override(agent_tools, &tools) == Some(false)
+            })
+            || self.engine.disables_tool(&tools)
+    }
+
+    /// Whether the chat's rules keep `uri` of `server` from it: its server is
+    /// turned off, or an `mcp_resource_read` rule denies `<server>:<uri>`.
+    #[must_use]
+    pub fn denies(&self, server: &str, uri: &str) -> bool {
+        self.turned_off(server)
+            || ask_plans(
+                "mcp_resource_read",
+                &json!({"server": server, "uri": uri}),
+                &self.workspace,
+            )
+            .iter()
+            .any(|plan| {
+                plan.patterns.iter().any(|pattern| {
+                    plan.evaluate(&self.engine, pattern).decision == PermissionDecision::Deny
+                })
+            })
+    }
+}
+
 fn plain_tool_output(text: String) -> ToolOutput {
     ToolOutput {
         text,
@@ -1537,6 +1587,123 @@ impl AgentRuntime {
         self.components().config.default_agent.clone()
     }
 
+    /// Whether chat `thread_id` already took request `request`: its turn
+    /// runs or ran, it was steered into a turn, or it waits in the queue. A
+    /// retry finds it there.
+    pub async fn request_admitted(
+        &self,
+        thread_id: ThreadId,
+        request: RequestId,
+    ) -> CoreResult<bool> {
+        if self
+            .active
+            .get(&thread_id)
+            .is_some_and(|active| active.request_id == request)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .repository
+            .has_input_admission(thread_id, request)
+            .await?
+            || self
+                .repository
+                .turn_for_request(thread_id, request)
+                .await?
+                .is_some())
+    }
+
+    /// The agent of the turn running in chat `thread_id`, if one runs.
+    #[must_use]
+    pub fn running_agent(&self, thread_id: ThreadId) -> Option<String> {
+        self.active
+            .get(&thread_id)
+            .map(|active| active.agent.id.clone())
+    }
+
+    /// The agent a turn a message to chat `thread_id` starts runs under,
+    /// when it is not the chat's own: the one it names, else the one its
+    /// command `command` names. `None` means the chat's agent.
+    #[must_use]
+    pub fn message_agent(&self, named: Option<&str>, command: Option<&str>) -> Option<String> {
+        if let Some(named) = named {
+            return Some(named.to_owned());
+        }
+        if let Some(name) = command
+            && let Some(agent) = self
+                .live_commands
+                .read()
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+                .filter(|command| !command.execution.fork)
+                .and_then(|command| command.agent.clone())
+        {
+            return Some(agent);
+        }
+        None
+    }
+
+    /// The rules a person's `@` mentions of MCP resources follow in chat
+    /// `thread_id` under `agent` (the agent the message runs under, which
+    /// wins over the chat's), or, before a chat exists, for `agent` alone
+    /// (the default agent when none is named). They are built as a direct
+    /// tool call's are: the configured and remembered rules, the agent's own
+    /// permissions and tool settings, and a parent chat's ceilings.
+    pub async fn resource_mention_policy(
+        &self,
+        thread_id: Option<ThreadId>,
+        agent: Option<&str>,
+    ) -> CoreResult<ResourceMentionPolicy> {
+        let components = self.components();
+        let thread = match thread_id {
+            Some(id) => Some(self.repository.get_thread(id).await?),
+            None => None,
+        };
+        let agent = agent
+            .map(str::to_owned)
+            .or_else(|| thread.as_ref().map(|thread| thread.agent.clone()))
+            .or_else(|| components.config.default_agent.clone())
+            .unwrap_or_else(|| "build".into());
+        if let Some(store) = &self.repository_approvals {
+            *self.repository_rules.lock() = store.load()?;
+        }
+        let mut engine = components
+            .config
+            .permission_defaults(&agent, "mcp_resource_read");
+        engine.set_workspace(&self.workspace);
+        for rule in self.repository_rules.lock().iter().cloned() {
+            engine.add_repository_grant(rule);
+        }
+        for rule in components.config.base_rules.iter().cloned() {
+            engine.add_rule(rule);
+        }
+        for rule in components
+            .config
+            .granted_rules
+            .iter()
+            .chain(self.session_rules.lock().iter())
+            .cloned()
+        {
+            engine.add_grant(rule);
+        }
+        let custom = self.custom_agent(&agent);
+        if let Some(custom) = &custom {
+            for rule in custom.permissions.iter().cloned() {
+                engine.add_rule(rule);
+            }
+        }
+        if let Some(parent_id) = thread.and_then(|thread| thread.parent_id) {
+            engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
+        }
+        Ok(ResourceMentionPolicy {
+            engine,
+            configured: components.config.tool_availability.clone(),
+            live: self.tool_availability.read().clone(),
+            agent_tools: custom.map(|custom| custom.tools),
+            workspace: self.workspace.clone(),
+        })
+    }
+
     #[must_use]
     pub fn model_defaults(&self) -> (Option<String>, Option<String>) {
         let components = self.components();
@@ -1866,6 +2033,19 @@ impl AgentRuntime {
                 turn: None,
             });
         }
+        // A steer that started a turn: its retry finds that turn instead of
+        // joining it as a second message.
+        if let Some(turn) = self
+            .repository
+            .turn_for_request(thread_id, request.request_id)
+            .await?
+        {
+            return Ok(QueueInputResponse {
+                queued: false,
+                item: None,
+                turn: Some(turn),
+            });
+        }
         if request.delivery == haarness_protocol::InputDelivery::Queue {
             return self.defer_input(thread_id, request).await;
         }
@@ -1996,6 +2176,7 @@ impl AgentRuntime {
                         request_id: input.id,
                         text: input.text.clone(),
                         attachments: input.attachments.clone(),
+                        resources: Vec::new(),
                         synthetic: false,
                         auto_approve: false,
                         agent: None,
@@ -2117,6 +2298,20 @@ impl AgentRuntime {
                 .get(&thread_id)
                 .map(|entry| Arc::clone(entry.value()));
             if let Some(active) = active_turn {
+                // This request started the running turn (a retry racing the
+                // steer that found the chat idle): it is that turn, not a
+                // message to steer into it.
+                if active.request_id == request.request_id {
+                    let turn = self.repository.get_turn(active.id).await?;
+                    if let Some(handoff) = handoff {
+                        handoff.release();
+                    }
+                    return Ok(QueueInputResponse {
+                        queued: false,
+                        item: None,
+                        turn: Some(turn),
+                    });
+                }
                 let changed = active.changed.notified();
                 let accepting = active.accepting.lock().await;
                 if *accepting {
@@ -2150,6 +2345,7 @@ impl AgentRuntime {
                         request_id: request.request_id,
                         text: request.text.clone(),
                         attachments: request.attachments.clone(),
+                        resources: Vec::new(),
                         synthetic: request.synthetic,
                         auto_approve,
                         agent: None,
@@ -2202,20 +2398,34 @@ impl AgentRuntime {
         request: &QueueInputRequest,
     ) -> CoreResult<QueueInputResponse> {
         let root = self.resolve_root(thread).await;
-        let item = self
-            .repository
-            .append_item(
-                thread.id,
-                Some(turn_id),
-                ItemData::UserMessage {
-                    text: request.text.clone(),
-                    attachments: request.attachments.clone(),
+        let data = ItemData::UserMessage {
+            text: request.text.clone(),
+            attachments: request.attachments.clone(),
+            queued: true,
+            synthetic: request.synthetic,
+            command_line: None,
+        };
+        // A person's steer is recorded by its request with the item, under
+        // the turn's gate, so a retry (even one racing it) is not delivered
+        // twice.
+        let item = if request.synthetic {
+            self.repository
+                .append_item(thread.id, Some(turn_id), data)
+                .await?
+        } else {
+            let Some(item) = self
+                .repository
+                .append_steered_input(thread.id, turn_id, request.request_id, data)
+                .await?
+            else {
+                return Ok(QueueInputResponse {
                     queued: true,
-                    synthetic: request.synthetic,
-                    command_line: None,
-                },
-            )
-            .await?;
+                    item: None,
+                    turn: None,
+                });
+            };
+            item
+        };
         self.events.publish_scoped(
             "item.created",
             Some(thread.id),
@@ -2899,6 +3109,7 @@ impl AgentRuntime {
                 request_id: handoff.request_id(),
                 text,
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: true,
             },
             false,
@@ -2948,6 +3159,7 @@ impl AgentRuntime {
                             request_id: RequestId::new(),
                             text,
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: true,
                         };
                         self.append_queued_input(&chat, active.id, &request).await?;
@@ -5443,6 +5655,7 @@ impl AgentRuntime {
                 request_id: RequestId::new(),
                 text: STOP_CONTINUATION.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: true,
             };
             if let Err(error) = self
@@ -10033,6 +10246,7 @@ impl RunnerTask {
                                 request_id: RequestId::new(),
                                 text: prompt,
                                 attachments: Vec::new(),
+                                resources: Vec::new(),
                                 synthetic: false,
                             },
                         )
@@ -10110,6 +10324,7 @@ impl RunnerTask {
             request_id: RequestId::new(),
             text: prompt,
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: self.request.auto_approve,
             agent: Some(agent.clone()),
@@ -10469,6 +10684,7 @@ impl RunnerTask {
                             request_id: handoff.request_id(),
                             text: envelope.clone(),
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: true,
                         },
                         task.delivery_auto_approve,

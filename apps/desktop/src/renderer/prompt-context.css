@@ -135,3 +135,14 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+/* A resource row names its server where other rows name their kind. */
+.mention-options .mention-kind {
+  flex-shrink: 0;
+  max-width: 12em;
+}
+/* A resource chip's preview ends with when it is read. */
+.prompt-context-note {
+  margin: var(--s2) 0 0;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}

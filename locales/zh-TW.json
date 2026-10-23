@@ -2770,5 +2770,16 @@
   "Resize side chat": "調整側邊對話大小",
   "This server answers each question on its own": "此伺服器會個別回答每個問題",
   "Outside this project": "不在此專案中",
-  "Too large to show": "太大，無法顯示"
+  "Too large to show": "太大，無法顯示",
+  "MCP resource · {server}": "MCP 資源 · {server}",
+  "Read from {server} when the message is sent.": "傳送訊息時從 {server} 讀取。",
+  "MCP server": "MCP 伺服器",
+  "not read": "未讀取",
+  "agents · files · resources": "代理程式 · 檔案 · 資源",
+  "files · agents · resources": "檔案 · 代理程式 · 資源",
+  "Files, agents and resources": "檔案、智能體與資源",
+  "a rule keeps this resource from the model": "規則禁止模型使用此資源",
+  "did not answer within {seconds} s": "{seconds} 秒內未回應",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "此伺服器無法讀取 MCP 資源。請將其從訊息中移除，或更新伺服器。",
+  "Sent again as it was read.": "依讀取時的內容再次傳送。"
 }

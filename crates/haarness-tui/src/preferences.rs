@@ -5,6 +5,9 @@ use haarness_protocol::{ManagementEntry, ManagementView};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// The prompts set aside with the stash.
+pub(crate) const STASH_FILE: &str = "tui-stash.json";
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct StashedPrompt {
     pub id: String,
@@ -42,7 +45,7 @@ impl App {
     }
     pub(crate) fn stash_view(&mut self, input: &Value) -> Result<ManagementView> {
         let action = input["action"].as_str().unwrap_or("view");
-        let mut prompts: Vec<StashedPrompt> = config::load_client_json("tui-stash.json")?;
+        let mut prompts: Vec<StashedPrompt> = config::load_client_json(STASH_FILE)?;
         match action {
             "save" => {
                 anyhow::ensure!(
@@ -54,7 +57,8 @@ impl App {
                     "Stash is full; restore or delete a saved prompt first"
                 );
                 prompts.insert(0, self.current_stash());
-                config::save_client_json("tui-stash.json", &prompts)?;
+                config::save_client_json(STASH_FILE, &prompts)?;
+                self.keep_picks(&[prompts[0].text.clone()]);
                 self.composer.clear();
                 self.attachments.clear();
                 self.shell_mode = false;
@@ -69,8 +73,9 @@ impl App {
                 // Swapping preserves the draft already in the composer.
                 if !self.composer.is_empty() || !self.attachments.is_empty() {
                     prompts.insert(0, self.current_stash());
+                    self.keep_picks(&[prompts[0].text.clone()]);
                 }
-                config::save_client_json("tui-stash.json", &prompts)?;
+                config::save_client_json(STASH_FILE, &prompts)?;
                 self.composer.set_text(restored.text);
                 self.attachments = restored.attachments;
                 self.shell_mode = restored.shell;
@@ -84,7 +89,7 @@ impl App {
             "delete" => {
                 let id = input["id"].as_str().context("Missing stash ID")?;
                 prompts.retain(|p| p.id != id);
-                config::save_client_json("tui-stash.json", &prompts)?;
+                config::save_client_json(STASH_FILE, &prompts)?;
             }
             "inspect" => {
                 let id = input["id"].as_str().context("Missing stash ID")?;

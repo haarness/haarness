@@ -2770,5 +2770,16 @@
   "Resize side chat": "사이드 채팅 크기 조절",
   "This server answers each question on its own": "이 서버는 질문마다 따로 답합니다",
   "Outside this project": "이 프로젝트 밖에 있음",
-  "Too large to show": "너무 커서 표시할 수 없음"
+  "Too large to show": "너무 커서 표시할 수 없음",
+  "MCP resource · {server}": "MCP 리소스 · {server}",
+  "Read from {server} when the message is sent.": "메시지를 보낼 때 {server}에서 읽습니다.",
+  "MCP server": "MCP 서버",
+  "not read": "읽지 못함",
+  "agents · files · resources": "에이전트 · 파일 · 리소스",
+  "files · agents · resources": "파일 · 에이전트 · 리소스",
+  "Files, agents and resources": "파일, 에이전트 및 리소스",
+  "a rule keeps this resource from the model": "규칙에 따라 이 리소스는 모델에 전달되지 않습니다",
+  "did not answer within {seconds} s": "{seconds}초 안에 응답하지 않았습니다",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "이 서버는 MCP 리소스를 읽을 수 없습니다. 메시지에서 제거하거나 서버를 업데이트하세요.",
+  "Sent again as it was read.": "읽었던 내용 그대로 다시 보냅니다."
 }

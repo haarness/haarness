@@ -593,6 +593,18 @@ impl Composer {
         self.history_index = None;
     }
 
+    /// Replace the whole content as [`Self::set_text`] does, `before` then
+    /// `after`, with the cursor between them. `before` ends where a
+    /// reference or paste does not continue.
+    pub fn set_text_split(&mut self, before: &str, after: &str) {
+        self.snapshot(LastEdit::Other);
+        self.load_expanded(before);
+        let cursor = self.text.len();
+        self.load_expanded(&format!("{before}{after}"));
+        self.cursor = cursor;
+        self.history_index = None;
+    }
+
     /// Replace a byte range (used by @-mention completion); the cursor lands
     /// after the replacement.
     pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {

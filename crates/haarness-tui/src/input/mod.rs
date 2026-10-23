@@ -366,6 +366,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.attachments.clear();
             app.undo_draft = None;
             app.mention_suggestions.clear();
+            app.mention_resources.want = None;
             app.shell_mode = false;
             app.autocomplete_hidden = false;
             app.selection = 0;
@@ -529,6 +530,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         app.composer.clear();
         app.attachments.clear();
         app.mention_suggestions.clear();
+        app.mention_resources.want = None;
         app.shell_mode = false;
         app.autocomplete_hidden = false;
         app.selection = 0;
@@ -618,7 +620,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     .filter_map(|index| question.choices.get(*index).cloned())
                     .collect::<Vec<_>>();
                 if question.custom && !app.composer.text().trim().is_empty() {
-                    let custom = app.composer.take();
+                    // A pick in an answer is its `@name`, never its marker.
+                    let custom = crate::resource_mentions::plain(&app.composer.take());
                     app.save_prompt_history();
                     answers.extend(
                         custom
@@ -635,7 +638,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             }
             KeyCode::Enter if plain => {
                 let answer = if custom_allowed && !app.composer.text().trim().is_empty() {
-                    let answer = app.composer.take();
+                    let answer = crate::resource_mentions::plain(&app.composer.take());
                     app.save_prompt_history();
                     Some(answer)
                 } else {
@@ -774,7 +777,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     }
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('p' | 'n'))
-        && (app.slash_suggestions().is_some() || !app.mention_suggestions.is_empty())
+        && (app.slash_suggestions().is_some() || !app.shown_mentions().is_empty())
     {
         app.move_selection(if key.code == KeyCode::Char('p') {
             -1
@@ -867,6 +870,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.selection_range = None;
             } else if !app.mention_suggestions.is_empty() || app.slash_suggestions().is_some() {
                 app.mention_suggestions.clear();
+                app.mention_resources.want = None;
                 app.autocomplete_hidden = true;
                 app.selection = 0;
             } else if app.shell_mode {
@@ -899,14 +903,14 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             }
         }
         KeyCode::Up => {
-            if app.slash_suggestions().is_some() || !app.mention_suggestions.is_empty() {
+            if app.slash_suggestions().is_some() || !app.shown_mentions().is_empty() {
                 app.move_selection(-1);
             } else if !app.composer.move_up() && app.composer.history_prev() {
                 app.selection = 0;
             }
         }
         KeyCode::Down => {
-            if app.slash_suggestions().is_some() || !app.mention_suggestions.is_empty() {
+            if app.slash_suggestions().is_some() || !app.shown_mentions().is_empty() {
                 app.move_selection(1);
             } else if !app.composer.move_down() {
                 app.composer.history_next();
@@ -987,7 +991,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             {
                 app.notice = "Commands cannot be queued. Use a normal message or Steer.".into();
             } else if app.shell_mode {
-                let command = app.composer.take();
+                let command = crate::resource_mentions::plain(&app.composer.take());
                 app.save_prompt_history();
                 if !command.trim().is_empty() {
                     app.notice = "Shell command started…".into();
@@ -1047,9 +1051,25 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 match sent {
                     Ok(true) => {
                         app.undo_draft = None;
+                        app.mention_resources.want = None;
+                        // An Esc before it hid that prompt's list, not the
+                        // next one's.
+                        app.autocomplete_hidden = false;
                         app.save_prompt_history();
                     }
-                    Ok(false) => app.composer.set_text(text),
+                    // A draft whose unknown picks became plain text comes
+                    // back that way, the cursor after the first and its `@`
+                    // list open on its resource, so Enter picks it again.
+                    Ok(false) => match app.mention_resources.returned.take() {
+                        Some(returned) => {
+                            let (before, after) = returned.text.split_at(returned.at);
+                            app.composer.set_text_split(before, after);
+                            app.mention_resources.want = Some(returned.row);
+                            app.autocomplete_hidden = false;
+                            refresh_mentions(app, client).await;
+                        }
+                        None => app.composer.set_text(text),
+                    },
                     Err(error) => {
                         app.composer.set_text(text);
                         return Err(error);
@@ -1202,7 +1222,7 @@ pub(crate) fn unknown_slash_command(app: &App) -> Option<String> {
 
 /// Complete the selected @-mention, when suggestions are showing.
 pub(crate) fn apply_mention(app: &mut App) -> bool {
-    if app.mention_suggestions.is_empty() {
+    if app.shown_mentions().is_empty() {
         return false;
     }
     let Some((start, query)) = app.composer.mention_query() else {
@@ -1212,6 +1232,9 @@ pub(crate) fn apply_mention(app: &mut App) -> bool {
     let Some(path) = selected(&app.mention_suggestions, app.selection).cloned() else {
         return false;
     };
+    if app.attach_resource(&path) {
+        return true;
+    }
     let end = start + 1 + query.len();
     let absolute = if let Some(rest) = path.strip_prefix("~/") {
         haarness_protocol::home_dir().map(|home| home.join(rest))
@@ -1280,10 +1303,18 @@ pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
                     file
                 }
             }));
+            // MCP resources follow agents and files, so a server with many
+            // never pushes files down; asked for the first time `@` opens.
+            suggestions.extend(crate::resource_mentions::suggestions(app, &query));
+            app.ask_resources(client);
             app.mention_suggestions = suggestions;
             app.selection = 0;
+            app.select_wanted();
         }
-        None => app.mention_suggestions.clear(),
+        None => {
+            app.mention_suggestions.clear();
+            app.mention_resources.want = None;
+        }
     }
 }
 
