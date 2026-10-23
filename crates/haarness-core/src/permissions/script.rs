@@ -113,7 +113,7 @@ pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Opti
         .take(MAX_TRIED)
         .find_map(|file| match file.withheld {
             Some(reason) => Some(withheld(&file.path, reason)),
-            None => read(&file.path, &readable),
+            None => read(&file.path, &file.outputs, &readable),
         })
 }
 
@@ -156,8 +156,9 @@ pub fn is_credential(path: &Path) -> bool {
 }
 
 /// `file` (absolute, as the command names it) read where it really is,
-/// links followed.
-fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
+/// links followed. Its own command's `outputs` may lead to it through a
+/// link: it is written before it runs then.
+fn read(file: &Path, outputs: &[PathBuf], readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
     let shown = named(file);
     let real = file.canonicalize().ok()?;
     if [&shown, &real]
@@ -165,6 +166,9 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
         .any(|path| super::is_secret_path(path) || is_credential(path) || !readable(path))
     {
         return None;
+    }
+    if outputs.iter().any(|output| same_file(output, &real)) {
+        return Some(withheld(file, ScriptWithheld::Written));
     }
     let mut bytes = read_bytes(&real)?;
     let seal = Seal {
@@ -210,6 +214,21 @@ fn named(file: &Path) -> PathBuf {
         .and_then(|folder| folder.canonicalize().ok())
         .zip(file.file_name())
         .map_or(lexical, |(folder, name)| folder.join(name))
+}
+
+/// Whether `path` leads to the file at `real`, through links of either
+/// kind.
+fn same_file(path: &Path, real: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let (Ok(one), Ok(other)) = (std::fs::metadata(path), std::fs::metadata(real)) else {
+            return false;
+        };
+        one.dev() == other.dev() && one.ino() == other.ino()
+    }
+    #[cfg(not(unix))]
+    path.canonicalize().is_ok_and(|path| path == real)
 }
 
 /// A path as the card shows it: [`displayed`], with its tabs and line
@@ -515,6 +534,26 @@ mod tests {
         // Without a link, `..` is what it always was.
         let script = bash_script("sh ../project/run.sh", &project, |_| true).unwrap();
         assert_eq!(Path::new(&script.path), project.join("run.sh"));
+    }
+
+    /// `./run.sh > log`, where `log` leads to `run.sh`: the shell empties the
+    /// script before it runs it, so its text is not shown.
+    #[cfg(unix)]
+    #[test]
+    fn output_sent_to_the_script_through_a_link_withholds_it() {
+        let fixture = Fixture::new();
+        let script = fixture.write("run.sh", "echo old\n");
+        std::os::unix::fs::symlink(&script, fixture.0.join("log")).unwrap();
+        std::fs::hard_link(&script, fixture.0.join("hard.log")).unwrap();
+        for command in ["./run.sh > log", "sh run.sh 2>> hard.log"] {
+            let shown = bash_script(command, &fixture.0, |_| true).unwrap();
+            assert_eq!(shown.withheld, Some(ScriptWithheld::Written), "{command}");
+            assert_eq!(shown.content, "", "{command}");
+        }
+        // Output to another file leaves it shown.
+        fixture.write("other.log", "");
+        let shown = bash_script("sh run.sh > other.log 2>&1", &fixture.0, |_| true).unwrap();
+        assert_eq!(shown.content, "echo old\n");
     }
 
     #[test]
