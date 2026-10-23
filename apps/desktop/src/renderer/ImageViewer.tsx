@@ -3,13 +3,15 @@ import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Button } from "./ui";
 
 /*
- * A conversation's images open full size here: an attachment, and an image
- * in a reply, thinking, a side chat or a read tool's preview that is shown
- * smaller than it is. It shows the address the image already shows (a data
- * or blob URL), so opening it loads nothing new, scaled to fill the window.
- * Esc, a click outside the image or Close shuts it, and the keyboard is back
- * on the image that opened it. The arrow keys step through the other images
- * of the same conversation on screen.
+ * A conversation's images open full size here: an attachment, or an image in
+ * a reply, thinking, a side chat or a read tool's preview, while it is shown
+ * smaller than it is (a thumbnail that already shows the whole image has
+ * nothing more to show). It shows the address the image already shows (a
+ * data or blob URL), so opening it loads nothing new, at its own size, or
+ * smaller to fit the window, never larger. Esc, a click outside the image or
+ * Close shuts it, and the keyboard is back on the image that opened it. The
+ * arrow keys step through the other images of the same conversation on
+ * screen.
  */
 
 /** The images the viewer opens: ones the page already holds, never an address it would fetch. */
@@ -136,11 +138,11 @@ export function ImageViewer() {
             height: dialog.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
           });
         };
-        /** The image scaled to fill that room, its ratio kept; a smaller one is scaled up to it. */
+        /** The image at its own size, or scaled down to fit that room with its ratio kept; never up. */
         const size = () => {
           const { width, height } = shown();
           if (!width || !height || !room().width) return {};
-          const scale = Math.min(room().width / width, room().height / height);
+          const scale = Math.min(1, room().width / width, room().height / height);
           return { width: `${Math.floor(width * scale)}px`, height: `${Math.floor(height * scale)}px` };
         };
         const close = () => {

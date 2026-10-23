@@ -352,10 +352,10 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   max-height: 120px;
 }
 /* An image the conversation shows smaller than it is opens full size (ImageViewer.tsx). */
-:is(.markdown, .tool-image) img[data-image-open] {
+:is(.markdown, .tool-image, .attachment-image) img[data-image-open] {
   cursor: zoom-in;
 }
-:root:not([data-pointer-focus]) :is(.markdown, .tool-image) img[data-image-open]:focus-visible {
+:root:not([data-pointer-focus]) :is(.markdown, .tool-image, .attachment-image) img[data-image-open]:focus-visible {
   outline: 1px solid var(--muted);
   outline-offset: 2px;
 }
@@ -1780,11 +1780,6 @@ html[dir="rtl"] .tool-target {
   height: auto;
   max-width: 180px;
   max-height: 120px;
-}
-/* An attached image opens full size. */
-.message .attachment-image {
-  min-height: 0;
-  cursor: zoom-in;
 }
 .dictation-status {
   color: var(--muted);
