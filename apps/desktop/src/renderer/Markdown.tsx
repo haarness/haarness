@@ -19,6 +19,7 @@ import {
   onProjectImageSettled,
   projectImageElement,
   imageProject,
+  projectRoots,
   readProjectImages,
   relabelProjectImages,
   shownProjectImage,
@@ -205,7 +206,7 @@ export function Markdown(props: {
       labels: imageLabels,
       project: conversation
         ? {
-            root: () => app.state.connection?.workspace ?? "",
+            root: () => (app.state.connection ? projectRoots(app.state.connection) : []),
             shown: (path) => {
               const connection = app.state.connection?.id;
               const now = connection ? shownProjectImage(connection, path) : undefined;

@@ -379,6 +379,14 @@ test("a read that returned an image shows it once its row is open", async () => 
   await expect(fresh.row.locator(".tool-console")).toBeVisible();
   await page.waitForTimeout(400);
   await expect(fresh.row.locator(".tool-image")).toHaveCount(0);
+
+  // A picture remembered from before the read, of another size, is read again and shows what the read saw.
+  await writeFile(join(workspace, "out/before.png"), chart(240, 120, [90, 160, 90]));
+  await expect((await reply("![Before](out/before.png)")).locator("img.project-image-loaded")).toHaveJSProperty("naturalWidth", 240);
+  await writeFile(join(workspace, "out/before.png"), chart(320, 160, [160, 90, 90]));
+  const later = await read("out/before.png");
+  const shownNow = await openPreview(later.row);
+  await expect(shownNow).toHaveJSProperty("naturalWidth", 320);
   expect(errors).toEqual([]);
 });
 

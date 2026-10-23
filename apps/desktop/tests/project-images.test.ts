@@ -8,6 +8,7 @@ import {
   holdProjectImages,
   imageHeader,
   imageType,
+  applyProjectEvent,
   inViewedTree,
   localProject,
   onProjectImageSettled,
@@ -15,12 +16,14 @@ import {
   projectEvent,
   projectFileWritten,
   projectImagePath,
+  projectRoots,
   readToolImage,
   relabelProjectImages,
   requestProjectImage,
   shownProjectImage,
   sniffImage,
   windowFocused,
+  windowsPath,
   type ShownImage,
 } from "../src/renderer/project-images";
 import { madeHere, replyAttribute } from "../src/renderer/remote-images";
@@ -189,7 +192,7 @@ test("an image's size in pixels comes from its header, without decoding it", () 
     ],
   ] as const)
     assert.deepEqual(imageHeader(base64(file)), { type: sniffImage(file), width, height }, name);
-  // An AVIF whose size is not near its start is only typed; its byte count still bounds it.
+  // An AVIF whose size is not near its start is only typed here; the window reads its size before decoding it.
   assert.deepEqual(imageHeader(base64(avif)), { type: "image/avif" });
   assert.equal(imageHeader(base64(ascii("<svg/>"))), undefined);
 });
@@ -242,46 +245,75 @@ test("a reply's own markup cannot dress as a project image or as one that opens 
   assert.equal(replyAttribute("data-image-opener", "x"), "x");
 });
 
-test("only the viewed chat's own work, or a write of the file itself, changes what its images show", () => {
+test("what each server event means for the images: the viewed chat's turn at once, another's once per turn, a write at its result", () => {
   const threads = [{ id: "child", parentId: "mine" }, { id: "mine" }, { id: "other" }];
   const viewing = (selected: string) => (thread?: string | null, root?: string | null) =>
     inViewedTree(selected, threads, thread, root);
   const viewed = viewing("mine");
-  const result = (name: string, threadId = "mine", rootThreadId: string | null = threadId, is_error = false) => ({
+  const result = (name: string, threadId = "mine", rootThreadId: string | null = threadId, is_error = false, call_id = "c0") => ({
     type: "item.created",
     threadId,
     rootThreadId,
-    payload: { data: { type: "tool_result", name, is_error } },
+    payload: { data: { type: "tool_result", name, is_error, call_id } },
   });
-  assert.deepEqual(projectEvent({ type: "files.updated", payload: { path: "out/a.png" } }, viewed), { path: "out/a.png" });
+  assert.deepEqual(projectEvent({ type: "files.updated", payload: { path: "out/a.png" } }, viewed), { written: "out/a.png" });
   assert.equal(projectEvent({ type: "files.updated", payload: {} }, viewed), undefined);
-  assert.equal(projectEvent({ type: "turn.finished", threadId: "mine" }, viewed), "changed");
-  for (const name of ["write", "edit", "apply_patch", "bash", "shell"]) assert.equal(projectEvent(result(name), viewed), "changed", name);
+  // The viewed chat's turn end reads its images again at once; another chat's, once per turn, after the wait.
+  assert.deepEqual(projectEvent({ type: "turn.finished", threadId: "mine" }, viewed), { changed: true, now: true });
+  assert.deepEqual(projectEvent({ type: "turn.finished", threadId: "other", rootThreadId: "other" }, viewed), {
+    changed: true,
+    now: false,
+  });
+  for (const name of ["write", "edit", "apply_patch", "bash", "shell"])
+    assert.deepEqual(projectEvent(result(name), viewed), { changed: true }, name);
   // Its subagents' work is its own.
-  assert.equal(projectEvent(result("bash", "grandchild", "mine"), viewed), "changed");
-  // Another chat's, however busy, is not; nor are reads, failures or streamed text.
-  assert.equal(projectEvent({ type: "turn.finished", threadId: "other", rootThreadId: "other" }, viewed), undefined);
-  assert.equal(projectEvent(result("bash", "other"), viewed), undefined);
-  for (const name of ["read", "grep", "webfetch"]) assert.equal(projectEvent(result(name), viewed), undefined, name);
-  assert.equal(projectEvent(result("write", "mine", "mine", true), viewed), undefined);
+  assert.deepEqual(projectEvent(result("bash", "grandchild", "mine"), viewed), { changed: true });
+  // Another chat's tools, however busy, change nothing but the write they finish; nor do reads or streamed text.
+  assert.deepEqual(projectEvent(result("bash", "other"), viewed), { finished: "c0" });
+  for (const name of ["read", "grep", "webfetch"]) assert.deepEqual(projectEvent(result(name), viewed), { finished: "c0" }, name);
+  assert.deepEqual(projectEvent(result("write", "mine", "mine", true), viewed), { finished: "c0", failed: true });
   assert.equal(projectEvent({ type: "turn.text_delta", threadId: "mine" }, viewed), undefined);
-  // A write or edit of the chat that names an image in the project writes that file.
-  const call = (name: string, args: Record<string, unknown>, threadId = "mine") => ({
+  // A write or edit that names an image in the project is writing it, until its result.
+  const call = (name: string, args: Record<string, unknown>, threadId = "mine", call_id = "c1") => ({
     type: "item.created",
     threadId,
     rootThreadId: threadId,
-    payload: { data: { type: "tool_call", name, arguments: args } },
+    payload: { data: { type: "tool_call", name, call_id, arguments: args } },
   });
-  assert.deepEqual(projectEvent(call("write", { path: "out/a.png" }), viewed, root), { path: "out/a.png" });
-  assert.deepEqual(projectEvent(call("functions.edit", { filePath: `${root}/out/b.PNG` }), viewed, root), { path: "out/b.PNG" });
+  assert.deepEqual(projectEvent(call("write", { path: "out/a.png" }), viewed, root), { writing: "out/a.png", call: "c1" });
+  assert.deepEqual(projectEvent(call("functions.edit", { filePath: `${root}/out/b.PNG` }), viewed, root), {
+    writing: "out/b.PNG",
+    call: "c1",
+  });
+  // On another chat too: the file is the same.
+  assert.deepEqual(projectEvent(call("write", { path: "out/a.png" }, "other"), viewed, root), { writing: "out/a.png", call: "c1" });
   assert.equal(projectEvent(call("write", { path: "src/a.ts" }), viewed, root), undefined);
   assert.equal(projectEvent(call("write", { path: "/etc/a.png" }), viewed, root), undefined);
-  assert.equal(projectEvent(call("write", { path: "out/a.png" }, "other"), viewed, root), undefined);
   assert.equal(projectEvent(call("read", { path: "out/a.png" }), viewed, root), undefined);
   // Viewing a child chat, its whole tree counts.
-  assert.equal(projectEvent(result("bash", "mine", "mine"), viewing("child")), "changed");
-  assert.equal(projectEvent(result("bash", "other"), viewing("child")), undefined);
+  assert.deepEqual(projectEvent(result("bash", "mine", "mine"), viewing("child")), { changed: true });
+  assert.deepEqual(projectEvent(result("bash", "other"), viewing("child")), { finished: "c0" });
   assert.equal(inViewedTree(undefined, threads, "mine", "mine"), false);
+});
+
+test("a project opened through a link, or by its Windows long path, holds the paths under its real folder", () => {
+  assert.deepEqual(projectRoots({ workspace: "/tmp/proj", info: { workspace: "/private/tmp/proj" } }), ["/tmp/proj", "/private/tmp/proj"]);
+  assert.deepEqual(projectRoots({ workspace: "/work/app", info: { workspace: "/work/app" } }), ["/work/app"]);
+  const linked = projectRoots({ workspace: "/tmp/proj", info: { workspace: "/private/tmp/proj" } });
+  for (const src of ["/private/tmp/proj/out/a.png", "/tmp/proj/out/a.png", "out/a.png", "file:///private/tmp/proj/out/a.png"])
+    assert.deepEqual(projectImagePath(src, linked), { path: "out/a.png" }, src);
+  assert.deepEqual(projectImagePath("/private/tmp/other/a.png", linked), { refused: "outside" });
+  // A read's canonical path on Windows carries \\?\; a share's \\?\UNC\ stays a network path.
+  const windows = projectRoots({ workspace: "C:\\Users\\me\\app", info: { workspace: "\\\\?\\C:\\Users\\me\\app" } });
+  assert.deepEqual(windows, ["C:\\Users\\me\\app"]);
+  assert.equal(windowsPath("\\\\?\\C:\\x"), "C:\\x");
+  assert.equal(windowsPath("\\\\?\\UNC\\host\\share\\x"), "\\\\?\\UNC\\host\\share\\x");
+  assert.deepEqual(projectImagePath("\\\\?\\C:\\Users\\me\\app\\shot.png", windows), { path: "shot.png" });
+  assert.equal(projectImagePath("\\\\?\\UNC\\host\\share\\shot.png", windows), undefined);
+  assert.deepEqual(
+    readToolImage("read", { is_error: false, metadata: { attachments: ["/private/tmp/proj/shot.png"], mime: "image/png", size: 9 } }, linked),
+    { path: "shot.png", size: 9 },
+  );
 });
 
 test("a reply asks for each of its images once, and for at most its share of paths", () => {
@@ -379,17 +411,20 @@ test("an image is read once for its project, shown to every reply, and read agai
   off();
 }));
 
+/** A server event of the project, as the window hears it, with "mine" the chat being viewed. */
+const hear = (value: Parameters<typeof projectEvent>[0], viewing = "mine") =>
+  applyProjectEvent("project", value, (thread, root) => inViewedTree(viewing, [], thread, root), root);
+const toolResult = (threadId: string, name = "bash", call_id = "c0", is_error = false) => ({
+  type: "item.created",
+  threadId,
+  rootThreadId: threadId,
+  payload: { data: { type: "tool_result", name, call_id, is_error } },
+});
+const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
 test("a live reply reads each image once while other chats, its own tools and the window keep busy", async () => {
   forgetProjectImages();
   const source = reader({ "a.png": png, "b.png": jpeg });
-  const viewed = (thread?: string | null, root?: string | null) => inViewedTree("mine", [], thread, root);
-  const event = (value: Parameters<typeof projectEvent>[0]) => {
-    const change = projectEvent(value, viewed);
-    if (change === "changed") projectChanged("project");
-    else if (change) projectFileWritten("project", change.path);
-  };
-  const busy = (threadId: string) =>
-    event({ type: "item.created", threadId, rootThreadId: threadId, payload: { data: { type: "tool_result", name: "bash" } } });
   // A reply streams in 60 pieces; each is drawn again, as Markdown.tsx does, while
   // another chat and a subagent of this one run commands and the window comes forward.
   const live = new AbortController();
@@ -398,41 +433,189 @@ test("a live reply reads each image once while other chats, its own tools and th
     askOnce(piece < 30 ? ["a.png"] : ["a.png", "b.png"], asked, (path) =>
       requestProjectImage("project", path, source.read, live.signal),
     );
-    busy("other");
-    event({ type: "item.created", threadId: "sub", rootThreadId: "mine", payload: { data: { type: "tool_result", name: "bash" } } });
+    hear(toolResult("other"));
+    hear({ ...toolResult("sub"), rootThreadId: "mine" });
     windowFocused();
     await settle();
   }
   assert.deepEqual(source.calls, ["a.png", "b.png"]);
+  // Another chat's tools, however many, leave its images alone.
+  for (let index = 0; index < 50; index++) hear(toolResult("other"));
+  requestProjectImage("project", "a.png", source.read, live.signal);
+  await settle();
+  assert.deepEqual(source.calls, ["a.png", "b.png"]);
+  forgetProjectImages();
+});
 
-  // Drawn again by a new reply, scrolled back into view, within the recheck time: still no read.
-  for (let draw = 0; draw < 5; draw++) {
-    busy("mine");
+test("drawn again within the recheck time after a change, an image is read once when it ends, and every reply takes it", async () => {
+  forgetProjectImages();
+  const recheck = PROJECT_IMAGE_LIMITS.recheck;
+  PROJECT_IMAGE_LIMITS.recheck = 80;
+  try {
+    const files = { "a.png": png } as Record<string, File | Uint8Array>;
+    const source = reader(files);
+    const { settled, off } = heard();
     requestProjectImage("project", "a.png", source.read, new AbortController().signal);
     await settle();
+    // The agent's command makes a new chart, and five replies draw it before the time is up.
+    files["a.png"] = jpeg;
+    hear(toolResult("mine"));
+    for (let draw = 0; draw < 5; draw++) requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+    await settle();
+    assert.deepEqual(source.calls, ["a.png"]);
+    await wait(120);
+    await settle();
+    assert.deepEqual(source.calls, ["a.png", "a.png"]);
+    assert.deepEqual(settled.at(-1), ["project", "a.png", { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length }]);
+    // Replies that have all gone leave nothing to read.
+    hear(toolResult("mine"));
+    const gone = new AbortController();
+    requestProjectImage("project", "a.png", source.read, gone.signal);
+    gone.abort();
+    await wait(120);
+    await settle();
+    assert.equal(source.calls.length, 2);
+    off();
+  } finally {
+    PROJECT_IMAGE_LIMITS.recheck = recheck;
+    forgetProjectImages();
   }
-  assert.deepEqual(source.calls, ["a.png", "b.png"]);
+});
 
-  // Another chat's work never makes it stale; the file API writing the file does, at once.
-  event({ type: "files.updated", payload: { path: "out/other.png" } });
-  requestProjectImage("project", "a.png", source.read, live.signal);
+test("a fast turn: the chart its command remade shows once the turn ends, not twenty seconds later", async () => {
+  forgetProjectImages();
+  const files = { "chart.png": png } as Record<string, File | Uint8Array>;
+  const source = reader(files);
+  const { settled, off } = heard();
+  requestProjectImage("project", "chart.png", source.read, new AbortController().signal);
   await settle();
-  assert.deepEqual(source.calls, ["a.png", "b.png"]);
-  event({ type: "files.updated", payload: { path: "a.png" } });
-  requestProjectImage("project", "a.png", source.read, live.signal);
-  requestProjectImage("project", "b.png", source.read, live.signal);
+  // The command remakes it and the live reply draws it at once: the old one shows for now.
+  files["chart.png"] = jpeg;
+  hear(toolResult("mine"));
+  const live = new AbortController();
+  requestProjectImage("project", "chart.png", source.read, live.signal);
   await settle();
-  assert.deepEqual(source.calls, ["a.png", "b.png", "a.png"]);
+  assert.equal(source.calls.length, 1);
+  // The viewed chat's turn ends: read at once, and the reply on screen takes the new chart.
+  hear({ type: "turn.finished", threadId: "mine", rootThreadId: "mine" });
+  await settle();
+  assert.equal(source.calls.length, 2);
+  assert.deepEqual(settled.at(-1)?.[2], { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+  // A reply drawn after it does not read it again.
+  requestProjectImage("project", "chart.png", source.read, new AbortController().signal);
+  await settle();
+  assert.equal(source.calls.length, 2);
+  off();
+  forgetProjectImages();
+});
 
-  // Past the recheck time, this chat's own change has it read again, once.
-  await rechecking(async () => {
-    busy("mine");
-    for (let draw = 0; draw < 3; draw++) requestProjectImage("project", "b.png", source.read, live.signal);
+test("a chat switch: a chart another chat remade shows when its chat is drawn again", async () => {
+  forgetProjectImages();
+  const recheck = PROJECT_IMAGE_LIMITS.recheck;
+  PROJECT_IMAGE_LIMITS.recheck = 80;
+  try {
+    const files = { "chart.png": png } as Record<string, File | Uint8Array>;
+    const source = reader(files);
+    requestProjectImage("project", "chart.png", source.read, new AbortController().signal);
     await settle();
-    requestProjectImage("project", "b.png", source.read, live.signal);
+    // Chat A remakes the chart and ends its turn while B is viewed: a change, once per turn.
+    files["chart.png"] = jpeg;
+    for (let index = 0; index < 20; index++) hear(toolResult("A"), "B");
+    hear({ type: "turn.finished", threadId: "A", rootThreadId: "A" }, "B");
+    // Back in A, its reply is drawn again within the recheck time: read when it ends.
+    requestProjectImage("project", "chart.png", source.read, new AbortController().signal);
     await settle();
-  });
-  assert.deepEqual(source.calls, ["a.png", "b.png", "a.png", "b.png"]);
+    assert.equal(source.calls.length, 1);
+    await wait(120);
+    await settle();
+    assert.equal(source.calls.length, 2);
+    assert.deepEqual(shownProjectImage("project", "chart.png"), { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+    // Past the recheck time it is read at the draw itself.
+    files["chart.png"] = png;
+    hear({ type: "turn.finished", threadId: "A", rootThreadId: "A" }, "B");
+    await wait(100);
+    requestProjectImage("project", "chart.png", source.read, new AbortController().signal);
+    await settle();
+    assert.equal(source.calls.length, 3);
+  } finally {
+    PROJECT_IMAGE_LIMITS.recheck = recheck;
+    forgetProjectImages();
+  }
+});
+
+test("a write tool marks its file once its result arrives, not at its call, so a draw in between reads nothing", async () => {
+  forgetProjectImages();
+  const files = { "out/a.png": png } as Record<string, File | Uint8Array>;
+  const source = reader(files);
+  const { settled, off } = heard();
+  const live = new AbortController();
+  requestProjectImage("project", "out/a.png", source.read, live.signal);
+  await settle();
+  const call = (call_id: string) =>
+    hear({
+      type: "item.created",
+      threadId: "other",
+      rootThreadId: "other",
+      payload: { data: { type: "tool_call", name: "write", call_id, arguments: { path: `${root}/out/a.png` } } },
+    });
+  // The call waits for approval; a reply drawn meanwhile reads nothing.
+  call("w1");
+  requestProjectImage("project", "out/a.png", source.read, new AbortController().signal);
+  await settle();
+  assert.equal(source.calls.length, 1);
+  // The write is done: its result marks the file, and the next draw reads it at once.
+  files["out/a.png"] = jpeg;
+  hear(toolResult("other", "write", "w1"));
+  requestProjectImage("project", "out/a.png", source.read, new AbortController().signal);
+  await settle();
+  assert.equal(source.calls.length, 2);
+  assert.deepEqual(settled.at(-1)?.[2], { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+  // A write that failed marks nothing.
+  call("w2");
+  hear(toolResult("other", "write", "w2", true));
+  requestProjectImage("project", "out/a.png", source.read, new AbortController().signal);
+  await settle();
+  assert.equal(source.calls.length, 2);
+  off();
+  forgetProjectImages();
+});
+
+test("a read that answers nothing keeps the picture and tries again; only an answer replaces it", async () => {
+  forgetProjectImages();
+  const recheck = PROJECT_IMAGE_LIMITS.recheck;
+  PROJECT_IMAGE_LIMITS.recheck = 80;
+  try {
+    const files = { "a.png": png } as Record<string, File | Uint8Array | Error>;
+    const source = reader(files);
+    const { settled, off } = heard();
+    requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+    await settle();
+    const picture = shownProjectImage("project", "a.png");
+    // The connection drops (or the server fails) while it is read again: the picture stays.
+    files["a.png"] = new Error("Error invoking remote method 'files': TypeError: fetch failed");
+    projectFileWritten("project", "a.png");
+    requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+    await settle();
+    assert.deepEqual(shownProjectImage("project", "a.png"), picture);
+    assert.equal(settled.length, 1);
+    // It is tried again once the recheck time is over, by a reply still showing it.
+    files["a.png"] = jpeg;
+    requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+    await wait(120);
+    await settle();
+    assert.equal(source.calls.length, 3);
+    assert.deepEqual(shownProjectImage("project", "a.png"), { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+    // An answer that the file is gone does replace it.
+    files["a.png"] = new Error("Error invoking remote method 'files': Error: This file no longer exists");
+    projectFileWritten("project", "a.png");
+    requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+    await settle();
+    assert.deepEqual(shownProjectImage("project", "a.png"), { note: "failed" });
+    off();
+  } finally {
+    PROJECT_IMAGE_LIMITS.recheck = recheck;
+    forgetProjectImages();
+  }
 });
 
 test("the window coming to the front reads a project on this computer again, never a remote host's", () => rechecking(async () => {

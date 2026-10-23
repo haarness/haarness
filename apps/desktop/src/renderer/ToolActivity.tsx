@@ -15,6 +15,8 @@ import {
 import {
   imageProject,
   onProjectImageSettled,
+  projectFileWritten,
+  projectRoots,
   readProjectImage,
   readToolImage,
   shownProjectImage,
@@ -142,7 +144,12 @@ export function ToolActivity(props: {
   const app = createMemo(() => (off() ? undefined : payload()));
   // A read that returned an image shows it once its row is open.
   const image = createMemo(
-    () => readToolImage(toolName(props.name), props.result, store.state.connection?.workspace ?? ""),
+    () =>
+      readToolImage(
+        toolName(props.name),
+        props.result,
+        store.state.connection ? projectRoots(store.state.connection) : [],
+      ),
     undefined,
     {
       equals: (a, b) =>
@@ -361,15 +368,17 @@ function ReadImage(props: { image: { data: string } | { path: string; size?: num
   const image = props.image;
   const project = imageProject(store.state);
   const connection = project?.connection;
-  /** The file as the read saw it: one changed since (another size) is not shown. */
+  /** The file as the read saw it: one of another size is not shown. */
   const same = (shown: ShownImage | undefined) =>
     shown?.data !== undefined && ("data" in image || image.size === undefined || shown.size === image.size)
       ? shown.data
       : undefined;
-  const [data, setData] = createSignal(
-    "data" in image ? image.data : connection ? same(shownProjectImage(connection, image.path)) : undefined,
-  );
+  const remembered = "path" in image && connection ? shownProjectImage(connection, image.path) : undefined;
+  const [data, setData] = createSignal("data" in image ? image.data : same(remembered));
   if ("path" in image && project) {
+    // A remembered picture of another size may be from before the read, or
+    // after it: the file is read again at once, as if it had been written.
+    if (remembered?.data !== undefined && !same(remembered)) projectFileWritten(project.connection, image.path);
     const reading = new AbortController();
     const off = onProjectImageSettled((scope, path, shown) => {
       // A picture the row shows stays when its file changes or goes.
