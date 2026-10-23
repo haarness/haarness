@@ -329,3 +329,40 @@ test("a plain click opens a preview tab that the next one replaces, until the ch
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("");
   expect(errors).toEqual([]);
 });
+
+test("the active chat tab stays in view in a strip that scrolls, and a working chat's tab shows a round dot", async () => {
+  await sidebar().getByRole("button", { name: "Reload two", exact: true }).click();
+  await expect(sidebar()).toHaveClass(/current/);
+  const titles = Array.from({ length: 12 }, (_, index) => `Strip ${index + 1}`);
+  const ids: Record<string, string> = {};
+  for (const title of titles)
+    ids[title] = (await client.createThread({ title, provider: "echo", model: "echo-1" })).id;
+  for (const title of titles)
+    await sidebar().getByRole("button", { name: title, exact: true }).click({ button: "middle" });
+  const strip = page.locator(".workspace-tabs");
+  expect(await strip.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+  const inStrip = async (name: string) => {
+    const view = (await strip.boundingBox())!;
+    const tab = (await page.locator(".workspace-tab").filter({ has: page.getByRole("tab", { name, exact: true }) }).boundingBox())!;
+    return tab.x >= view.x - 1 && tab.x + tab.width <= view.x + view.width + 1;
+  };
+  await expect.poll(() => inStrip("Strip 12")).toBe(true);
+  // Chosen anywhere else, a tab scrolled out of the strip comes back into it.
+  await sidebar().getByRole("button", { name: "Strip 1", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Strip 1", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => inStrip("Strip 1")).toBe(true);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Strip 12");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => inStrip("Strip 12")).toBe(true);
+  // A chat at work marks its tab with a 6px dot beside the title.
+  await client.startTurn(ids["Strip 12"], { requestId: randomUUID(), text: "!linger 4000 still working" });
+  const dot = page.getByRole("tab", { name: "Strip 12", exact: true }).locator(".session-status.running");
+  await expect(dot).toBeVisible();
+  expect(await dot.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    return [Math.round(box.width), Math.round(box.height), getComputedStyle(element).display];
+  })).toEqual([6, 6, "inline-block"]);
+  await expect.poll(() => client.activeTurns().then(turns => turns.length), { timeout: 30000 }).toBe(0);
+  expect(errors).toEqual([]);
+});

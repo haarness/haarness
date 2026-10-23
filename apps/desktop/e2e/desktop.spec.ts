@@ -1666,9 +1666,10 @@ test("whole rows reorder silently, project titles expand, and sessions have one 
   await expect(headings.first()).toHaveText("reorder-project");
   await source.press("Alt+End");
   await expect(headings).toHaveText(before);
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   for (const title of ["Menu One", "Menu Two"]) {
     await client.createThread({ title, provider: "echo", model: "echo-1" });
-    await project.getByRole("button", { name: title, exact: true }).click();
+    await project.getByRole("button", { name: title, exact: true }).dblclick();
   }
   const one = project.getByRole("button", { name: "Menu One", exact: true });
   const two = project.getByRole("button", { name: "Menu Two", exact: true });
@@ -3147,11 +3148,12 @@ test("conversation tab order survives reopening and uses horizontal keyboard con
     provider: "echo",
     model: "echo-1",
   });
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   for (const title of [first.title, second.title])
     await page
       .locator(".sessions")
       .getByRole("button", { name: title, exact: true })
-      .click();
+      .dblclick();
   const handle = page.getByRole("tab", {
     name: "Tab Two",
     exact: true,
@@ -3192,11 +3194,12 @@ test("closing a session tab returns to the previous active conversation", async 
   const titles = ["History A", "History B", "History C", "History D"];
   for (const title of titles)
     await client.createThread({ title, provider: "echo", model: "echo-1" });
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   const open = async (title: string) => {
     await page
       .locator(".sessions")
       .getByRole("button", { name: title, exact: true })
-      .click();
+      .dblclick();
     await expect(
       page.locator(".session-bar .workspace-tab.active, .session-bar-title"),
     ).toContainText(title);
@@ -4565,8 +4568,9 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     .getByRole("region", { name: "Project workspace", exact: true })
     .getByRole("button", { name: "workspace", exact: true });
   await expect(header).toBeVisible();
+  // Its chevron collapses it; its name would open it, as another project.
   if ((await header.getAttribute("aria-expanded")) === "true")
-    await header.click();
+    await page.getByRole("button", { name: "Collapse project workspace", exact: true }).click();
   await expect(header).toHaveAttribute("aria-expanded", "false");
   // Desktop's Auto for new chats covers chats Desktop starts. A chat another
   // client starts (the TUI, a phone, the API) stays in Review.
