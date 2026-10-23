@@ -470,7 +470,8 @@ test("a shell permission shows the script its command runs, and nothing when the
       permissionScript({ script: { path: "/work/app/gen.sh", content: "", withheld } }, "/work/app"),
       { path: "gen.sh", lines: [], truncated: false, withheld },
     );
-  assert.equal(permissionScript({ script: { ...script, withheld: "other" } })?.withheld, undefined);
+  // A reason a newer server gives reads like the cautious one.
+  assert.equal(permissionScript({ script: { ...script, withheld: "other" } })?.withheld, "changeable");
   // Outside the project, the path stays whole.
   assert.equal(permissionScript({ permission: "bash", script }, "/work/other")?.path, "/work/app/scripts/x.sh");
   assert.equal(permissionScript({ permission: "bash", script: { ...script, truncated: true } })?.truncated, true);

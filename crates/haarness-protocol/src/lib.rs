@@ -1107,9 +1107,13 @@ pub enum ScriptWithheld {
     /// The command writes the file before it runs it (`curl -o x.sh … &&
     /// bash x.sh`, `cat > x.sh <<EOF`).
     Written,
-    /// An earlier step of the command could change it: a program not known
-    /// to leave files alone (`make`, `git`, `bash -c …`, `eval`, a function).
+    /// The line is not of the trusted shape before it (or in its own
+    /// command): an earlier step may change it.
     Changeable,
+    /// A reason a newer server gives that this client does not know: shown
+    /// like `Changeable`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One unanswered model question, listable so clients can hydrate every
