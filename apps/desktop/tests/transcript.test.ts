@@ -7,6 +7,7 @@ import {
   describeTool,
   errorRecovery,
   permissionCommand,
+  permissionScript,
   shortPath,
   toolChanges,
   toolTarget,
@@ -453,6 +454,39 @@ test("a permission shows its command, and falls back to the raw payload", () => 
   assert.equal(permissionCommand({ path: "/tmp/x" }), "/tmp/x");
   assert.equal(permissionCommand({ nothing: 1 }), "");
   assert.equal(permissionCommand(null), "");
+});
+
+test("a shell permission shows the script its command runs, and nothing when there is none", () => {
+  const script = { path: "/work/app/scripts/x.sh", content: "echo hi\necho there\n", truncated: false };
+  assert.deepEqual(permissionScript({ permission: "bash", script }, "/work/app"), {
+    path: "scripts/x.sh",
+    lines: ["echo hi", "echo there"],
+    truncated: false,
+    withheld: undefined,
+  });
+  // A script whose text may not be what runs is named, with no text.
+  for (const withheld of ["written", "changeable"])
+    assert.deepEqual(
+      permissionScript({ script: { path: "/work/app/gen.sh", content: "", withheld } }, "/work/app"),
+      { path: "gen.sh", lines: [], truncated: false, withheld },
+    );
+  // A reason a newer server gives reads like the cautious one.
+  assert.equal(permissionScript({ script: { ...script, withheld: "other" } })?.withheld, "changeable");
+  // Outside the project, the path stays whole.
+  assert.equal(permissionScript({ permission: "bash", script }, "/work/other")?.path, "/work/app/scripts/x.sh");
+  assert.equal(permissionScript({ permission: "bash", script: { ...script, truncated: true } })?.truncated, true);
+  assert.deepEqual(permissionScript({ permission: "bash", script: { ...script, content: "" } })?.lines, []);
+  assert.equal(permissionScript({ permission: "bash" }), undefined);
+  assert.equal(permissionScript({ permission: "bash", script: "echo hi" }), undefined);
+  assert.equal(permissionScript({ permission: "bash", script: { path: 1, content: "x" } }), undefined);
+  // An outside folder's card, the one a shell command raises under the
+  // default rules, shows it too.
+  assert.equal(permissionScript({ permission: "external_directory", script })?.lines.length, 2);
+  // Tabs are drawn as spaces to the next stop of four.
+  assert.deepEqual(
+    permissionScript({ permission: "bash", script: { ...script, content: "\tif x; then\n\t\techo a\tb\n" } })?.lines,
+    ["    if x; then", "        echo a  b"],
+  );
 });
 
 test("credential failures offer the setting that fixes them", () => {

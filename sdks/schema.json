@@ -3736,6 +3736,17 @@
               }
             ]
           },
+          "script": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PermissionScript",
+                "description": "For any request a shell command raises (`bash`, and under the\ndefault rules `external_directory`), the script the command runs\n(`bash x.sh`, `./x.sh`, `source ./env.sh`; a `source` name without a\nslash is not claimed), read when it asked, for the person who\nanswers. Display only: it changes no pattern or rule. An Allow once\ndoes not run the command if the file is no longer what was read."
+              }
+            ]
+          },
           "threadId": {
             "$ref": "#/components/schemas/ThreadId"
           },
@@ -3841,6 +3852,39 @@
           "reject"
         ],
         "type": "string"
+      },
+      "PermissionScript": {
+        "description": "The script file a shell command runs, as the server read it when the\ncommand asked for permission.",
+        "properties": {
+          "content": {
+            "description": "Its text: at most its first 30,000 bytes, with line breaks as `\\n`\nand other control characters (tabs aside), bidirectional controls\nand marks, and Unicode line and paragraph separators shown as `\ufffd`.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The file the command names, as an absolute path (links are followed\nto read it, not here), with the replacements `content` has and its\ntabs and line breaks as `\ufffd` too.",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "The file goes on past `content`.",
+            "type": "boolean"
+          },
+          "withheld": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScriptWithheld",
+                "description": "Why the text is not shown (`content` is empty, and a card names the\nfile instead): what runs may not be what is on disk now."
+              }
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
       },
       "PluginActionRequest": {
         "properties": {
@@ -4612,6 +4656,15 @@
           "global",
           "local",
           "both"
+        ],
+        "type": "string"
+      },
+      "ScriptWithheld": {
+        "description": "Why a script's text is not shown on its card.",
+        "enum": [
+          "written",
+          "changeable",
+          "unknown"
         ],
         "type": "string"
       },

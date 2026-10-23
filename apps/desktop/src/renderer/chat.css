@@ -1972,6 +1972,94 @@ html[dir="rtl"] .tool-target {
 .approval-target code {
   font-family: var(--mono);
 }
+/* The script a command runs: a quiet toggle under the command, the file in
+   the change style once opened, scrolling inside its own short box so the
+   answers and the composer stay in view. */
+.approval-script {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s1);
+  min-width: 0;
+}
+/* A script the command writes before it runs it: one quiet line. */
+.approval-script-note {
+  margin: 0;
+  padding-inline: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.approval-script-note code {
+  font-family: var(--mono);
+}
+.approval-script-toggle {
+  min-height: 22px;
+  border: 0;
+  padding: 0 var(--s1);
+  background: none;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  gap: var(--s1);
+  border-radius: var(--r-sm);
+}
+.approval-script-toggle:hover:not(:disabled) {
+  background: none;
+  color: var(--text);
+}
+.approval-script-chevron {
+  flex: none;
+  color: var(--faint);
+  transition: transform var(--fast) var(--ease);
+}
+.approval-script.open .approval-script-chevron {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .approval-script:not(.open) .approval-script-chevron {
+  transform: rotate(180deg);
+}
+.approval-script-body {
+  align-self: stretch;
+}
+/* Code keeps left-to-right order in Arabic too, as in the diff view. */
+.approval-script-body .change-lines {
+  direction: ltr;
+  text-align: left;
+}
+/* A long path gives way from its start, so the file's own name stays in
+   view; the path itself still reads left to right. */
+.approval-script-body .change-path {
+  direction: rtl;
+  text-align: left;
+}
+.approval-script-body .change-path bdi {
+  direction: ltr;
+}
+.approval-script-body .change-lines {
+  max-height: 200px;
+  overflow-x: hidden;
+}
+/* A long line wraps whole rather than run past the edge: what it does at its
+   end is part of what is approved. */
+.approval-script-body .diff-line {
+  min-width: 0;
+}
+.approval-script-body .diff-line code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* The rows a line continues on hang in, so they do not read as lines of
+     their own. */
+  padding-inline-start: 2ch;
+  text-indent: -2ch;
+}
+:root:not([data-pointer-focus]) .approval-script-body .change-lines:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: -1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .approval-script-chevron {
+    transition: none;
+  }
+}
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */
 .approval-changes {
