@@ -643,6 +643,15 @@ export function Session() {
   /** The list's and the view's heights when a running step was opened:
    * following waits for more to be written, or for the view to change. */
   let quietUntil: { height: number; view: number } | undefined;
+  /** Back to following the newest output (End, Jump to latest, sending,
+   * another chat). A step's opening still settling gives way: once it
+   * settled, it would put the view back and pause following again. */
+  function resumeFollowing() {
+    toggled = undefined;
+    quietUntil = undefined;
+    pausedByToggle = undefined;
+    setFollow(true);
+  }
   function holdToggled(event: MouseEvent) {
     const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
     const row = control?.closest<HTMLElement>("[data-index]");
@@ -1334,9 +1343,7 @@ export function Session() {
     const target = promptTarget(move, prompts.length, reading, follow());
     if (target === undefined) return false;
     if (target === "latest") {
-      toggled = undefined;
-      quietUntil = undefined;
-      setFollow(true);
+      resumeFollowing();
       followLatest();
     } else jumpToPrompt(target);
     return true;
@@ -1612,8 +1619,7 @@ export function Session() {
               }
             });
         lastTop = 0;
-        quietUntil = undefined;
-        setFollow(true);
+        resumeFollowing();
       },
     ),
   );
@@ -1921,8 +1927,7 @@ export function Session() {
       const historyEntry = { text, attachments: originalAttachments, context, thread: selected ?? undefined };
       void app.run(() => history.record(historyKey(connection!), historyEntry));
       persistDraft();
-      quietUntil = undefined;
-      setFollow(true);
+      resumeFollowing();
       if (!state.connection && !state.openingProject) {
         if (!(await app.connect({ recent: project()!.id }, true))) return;
         connection = state.connection!.id;
@@ -2257,8 +2262,7 @@ export function Session() {
                 "input, textarea, select, [contenteditable]",
               )
             ) {
-              quietUntil = undefined;
-              setFollow(true);
+              resumeFollowing();
               settleAtEnd = true;
             }
           }}
@@ -2481,9 +2485,7 @@ export function Session() {
               aria-label={t("Jump to latest")}
               title={t("Jump to latest")}
               onClick={() => {
-                toggled = undefined;
-                quietUntil = undefined;
-                setFollow(true);
+                resumeFollowing();
                 followLatest();
               }}
             >
