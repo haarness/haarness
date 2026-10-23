@@ -417,7 +417,9 @@ refused (`403`), and its `/v1/info` leaves the capability out. Servers advertise
 `mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
 resources only when it is there. `GET /v1/mcp?threadId=<id>&agent=<agent>` (either one alone works; a named
 agent wins over the chat's) marks each server those rules take away with
-`turnedOff: true`, so an `@` list can leave its resources out.
+`turnedOff: true`, so an `@` list can leave its resources out. While a turn
+runs in that chat, it also marks those the running turn's agent or the
+chat's takes away, as a message sent then follows both.
 That POST returns a tagged `turn`, `workflow_run`, or `text` result and leaves
 the stable `POST /turns` contract unchanged. A workflow hidden by a configured
 direct command remains explicitly available as `/workflow run <name>`.

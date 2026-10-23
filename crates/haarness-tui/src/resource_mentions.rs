@@ -45,9 +45,8 @@ pub(crate) struct Listing {
     pub list: Vec<Resource>,
     /// When the listing in progress (or the last one) was asked for.
     pub asked: Option<Instant>,
-    /// The chat and agent the servers were asked about, and those it cannot
-    /// reach.
-    pub chat: Option<(ThreadId, String)>,
+    /// The chat the servers were asked about, and those it cannot reach.
+    pub chat: Option<Asking>,
     pub turned_off: HashSet<String>,
     /// No row of the listing asked at `asked` has come yet: the earlier
     /// rows stay until one does.
@@ -75,13 +74,18 @@ pub(crate) struct Returned {
     pub row: String,
 }
 
+/// What decides which servers a chat cannot reach: the chat, the agent its
+/// next prompt names, and whether a turn runs there (a message sent then
+/// follows that turn's agent and the chat's too).
+pub(crate) type Asking = (ThreadId, String, bool);
+
 /// What a listing off the event loop reports, tagged with when it was asked.
 #[derive(Debug)]
 pub(crate) enum Update {
     /// Which servers the chat cannot reach.
     Servers {
         asked: Instant,
-        chat: (ThreadId, String),
+        chat: Asking,
         turned_off: Vec<String>,
     },
     /// One server's rows.
@@ -142,7 +146,7 @@ fn rows(server: &str, listed: &[serde_json::Value]) -> Vec<Resource> {
 /// its own, sending what comes as it comes.
 async fn list(
     client: ApiClient,
-    chat: (ThreadId, String),
+    chat: Asking,
     asked: Instant,
     only_servers: bool,
     sender: tokio::sync::mpsc::Sender<Update>,
@@ -419,8 +423,14 @@ impl App {
             .mention_resources
             .asked
             .is_some_and(|asked| asked.elapsed() < TTL);
-        // The rules of the agent the next prompt runs under decide.
-        let chat = (self.thread.id, self.agent().to_owned());
+        // The rules of the agent the next prompt runs under decide, and
+        // while a turn runs that turn's agent's too: asked again when one
+        // starts or ends.
+        let chat = (
+            self.thread.id,
+            self.agent().to_owned(),
+            self.active_turn.is_some(),
+        );
         if fresh && self.mention_resources.chat.as_ref() == Some(&chat) {
             return;
         }
@@ -953,7 +963,7 @@ mod tests {
         app.server_info = Some(info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]));
         let asked = Instant::now();
         app.mention_resources.asked = Some(asked);
-        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned(), false));
         app.composer.set_text("Compare @se".into());
         app.mention_suggestions = vec!["src/setup.rs".into()];
         app.selection = 1;
@@ -1265,7 +1275,7 @@ mod tests {
             resource("docs", "docs://setup", "setup"),
         ];
         app.mention_resources.asked = Some(Instant::now());
-        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned(), false));
         let setup = mention("docs", "docs://setup", "setup");
         app.composer.set_text(format!(
             "Explain {} in two lines",
@@ -1333,6 +1343,42 @@ mod tests {
         assert_eq!(app.selection, 0);
     }
 
+    /// A turn starting in the chat asks again which servers it cannot reach
+    /// (a message sent then follows that turn's agent too), without listing
+    /// the resources again.
+    #[tokio::test]
+    async fn a_turn_starting_asks_again_which_servers_the_chat_cannot_reach() {
+        let mut app = app();
+        let capable = info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]);
+        app.server_info = Some(capable.clone());
+        let (sender, mut updates) = tokio::sync::mpsc::channel(8);
+        app.resources_tx = Some(sender);
+        let asked = Instant::now();
+        app.mention_resources.asked = Some(asked);
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned(), false));
+        let (url, requests) = answering(capable).await;
+        let client = ApiClient::new(&url, "token").unwrap();
+        app.ask_resources(&client);
+        app.active_turn = Some(haarness_protocol::TurnId::new());
+        app.ask_resources(&client);
+        let update = tokio::time::timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&update, Update::Servers { asked: when, chat: (_, _, true), .. } if *when == asked),
+            "{update:?}"
+        );
+        assert_eq!(app.mention_resources.asked, Some(asked));
+        let asked_servers = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with("GET /v1/mcp?"))
+            .count();
+        assert_eq!(asked_servers, 1);
+    }
+
     /// Esc hides the `@` list: a listing that comes afterwards does not fill
     /// it again, so Enter sends the text as typed and nothing hidden is
     /// picked or browsed. The rows wait for the next `@`.
@@ -1350,7 +1396,7 @@ mod tests {
         let asked = Instant::now();
         app.mention_resources.asked = Some(asked);
         app.mention_resources.stale = true;
-        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned(), false));
         app.mention_resources.want = Some(key("docs", "docs://setup"));
         app.composer.set_text("@set".into());
         app.mention_suggestions = vec!["settings.md".into()];

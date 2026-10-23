@@ -632,6 +632,27 @@ async fn a_mention_follows_the_agent_its_message_runs_under() {
         "text": "And this",
         "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
     });
+    // While that turn runs, the chat's `@` lists leave out what its agent
+    // takes away too, as a message sent now follows both.
+    let off = |thread: &Thread| {
+        let client = fixture.client.clone();
+        let url = format!("{}/v1/mcp?threadId={}", fixture.base, thread.id);
+        async move {
+            client
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<McpServerInfo>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|server| server.turned_off == Some(true))
+                .map(|server| server.name)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(off(&thread).await, ["docs", "hidden"]);
     // Its retry finds it steered: nothing is read or delivered twice.
     for _ in 0..2 {
         fixture
@@ -694,6 +715,7 @@ async fn a_mention_follows_the_agent_its_message_runs_under() {
         );
     }
     // With no turn running, only the chat's agent decides.
+    assert_eq!(off(&thread).await, ["hidden"]);
     input("Now this", "queue").await;
     let sent = settled(4).await;
     assert!(
