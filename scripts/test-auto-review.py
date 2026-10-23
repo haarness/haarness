@@ -107,6 +107,18 @@ def check(label):
     print('PASS ' + label, flush=True)
 
 
+def never_reviewing(label):
+    """Frames sampled until the turn ends: a quick review never says reviewing…."""
+    end = time.monotonic() + 25
+    while time.monotonic() < end:
+        pane = capture()
+        assert 'reviewing…' not in pane, label + ' showed reviewing…\n' + pane
+        if not api('/v1/turns/active'):
+            return
+        time.sleep(.03)
+    raise AssertionError(label + ' did not finish')
+
+
 def card(pane):
     """The approval card's rows, from its ⚠ title to its answers."""
     rows = pane.split('\n')
@@ -132,10 +144,11 @@ try:
     until(lambda: 'approvals: auto' in capture(), 'the TUI did not open in Auto')
 
     start(thread, 'printf allowed > allowed.txt')
+    never_reviewing('a quick approval')
     until(lambda: (workspace / 'allowed.txt').exists(), 'the reviewer did not approve')
     finished()
     assert not pending()
-    check('an approval runs the call once without a prompt')
+    check('an approval runs the call once without a prompt, and a quick review never reads reviewing…')
 
     start(thread, 'printf asked > asked.txt', 'ask')
     until(lambda: len(pending()) == 1, 'the ask was not shown')
@@ -151,6 +164,7 @@ try:
     check('an ask shows the ordinary card with the reviewer\'s note, and the person decides')
 
     start(thread, 'printf blocked > blocked.txt', 'deny')
+    never_reviewing('a quick block')
     finished()
     assert not (workspace / 'blocked.txt').exists()
     # The row; the echo provider's reply below it quotes the text the model got.
@@ -169,7 +183,7 @@ try:
     start(thread, 'printf failed > failed.txt', 'fail')
     until(lambda: len(pending()) == 1, 'a failed review did not ask')
     assert (pending()[0].get('review') or {}).get('status') == 'failed'
-    until(lambda: 'Auto review unavailable: It could not decide' in card(capture()), 'the card did not say the review was unavailable')
+    until(lambda: 'Auto review unavailable: It could not decide (' in card(capture()), 'the card did not say the review was unavailable')
     save('failed-card')
     time.sleep(.3)
     keys('n')
@@ -223,17 +237,23 @@ try:
     finished()
     check('run --auto at a terminal asks with the reviewer\'s note')
 
-    # Without a terminal: the run stops, saying why and how to allow it.
-    stopped = subprocess.run(
-        [str(binary), '--workspace', str(workspace), 'run', '--auto', '--title', 'Run stops',
-         '!tool bash ' + json.dumps({'command': 'printf run-stopped > run-stopped.txt'}) + ' [review:ask]'],
+    # Without a terminal: each request that still needs a person is refused
+    # with its reason, one line each, and the run goes on.
+    headless = subprocess.run(
+        [str(binary), '--workspace', str(workspace), 'run', '--auto', '--title', 'Run refuses',
+         '!multi ' + json.dumps([
+             {'name': 'bash', 'arguments': {'command': 'printf asked > run-asked-2.txt'}},
+             {'name': 'bash', 'arguments': {'command': 'printf mine > run-mine.txt'}},
+         ]) + ' [review:ask]'],
         env=env, input='', text=True, capture_output=True, timeout=120, start_new_session=True)
     finished()
-    assert stopped.returncode != 0, stopped.stdout
-    assert 'Auto review left it to a person (Test rule): Test verdict: ask.' in stopped.stderr, stopped.stderr
-    assert 'Allow it by adding' in stopped.stderr and 'run again with --yolo' in stopped.stderr, stopped.stderr
-    assert not (workspace / 'run-stopped.txt').exists()
-    check('run --auto without a terminal stops with the reviewer\'s reason and the rule that would allow it')
+    assert headless.returncode == 0, headless.stderr
+    refused = [line for line in headless.stderr.splitlines() if line.startswith('Refused: ')]
+    assert len(refused) == 2, headless.stderr
+    assert 'Auto review left it to a person (Test rule): Test verdict: ask. Nobody can approve that in this run; allow it by adding' in refused[0], refused
+    assert 'A permission rule asks a person for it. Nobody can approve that in this run' in refused[1], refused
+    assert not (workspace / 'run-asked-2.txt').exists() and not (workspace / 'run-mine.txt').exists()
+    check('run --auto without a terminal refuses each request that needs a person, with its reason, and goes on')
     print(f'{len(checks)} Auto review scenarios passed.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
