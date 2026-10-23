@@ -406,11 +406,11 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     // keys that answer it: anything else typed there goes to the composer, so
     // a message started while the card waits never answers it by accident.
     if app.permission_focus {
-        if let Some(step) = message_key(app, key) {
-            app.step_messages(step);
-            return Ok(AppAction::Continue);
-        }
         if app.first_pending_permission().is_some() {
+            if let Some(step) = message_key(app, key) {
+                app.step_messages(step);
+                return Ok(AppAction::Continue);
+            }
             let plain = key.modifiers.is_empty();
             if let KeyCode::Char(letter) = key.code
                 && (plain || key.modifiers == KeyModifiers::SHIFT)
