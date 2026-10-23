@@ -600,7 +600,7 @@ mod tests {
         assert!(shown.seal.is_none());
         // A file that does not exist yet (a download) is named too.
         let shown = find(
-            "curl -fsSLo fresh.sh https://example.test/fresh.sh && bash fresh.sh",
+            "curl -fsSL -o fresh.sh https://example.test/fresh.sh && bash fresh.sh",
             &fixture.0,
             |_| true,
         )
@@ -612,8 +612,8 @@ mod tests {
         assert_eq!(shown.script.withheld, Some(ScriptWithheld::Changeable));
         assert_eq!(shown.script.content, "");
         assert!(shown.seal.is_none());
-        // Read as it is when the line only reads it.
-        let shown = find("cp gen.sh copy.sh && bash gen.sh", &fixture.0, |_| true).unwrap();
+        // Read as it is when every step before it is a trusted one.
+        let shown = find("chmod +x gen.sh && bash gen.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(shown.script.withheld, None);
         assert_eq!(shown.script.content, "echo OLD\n");
         assert!(shown.seal.is_some());
