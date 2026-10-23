@@ -38,7 +38,7 @@ import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
 import { createOrdering, createOrderDropTarget } from "./Sortable";
 import { MenuButton, type MenuAction } from "./MenuButton";
-import { UniversalSearch } from "./UniversalSearch";
+import { UniversalSearch, archivedSearchRequested } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
@@ -181,6 +181,19 @@ export function App() {
   const loading = () =>
     !state.ready || !!state.openingProject || !!state.openingChat || !!state.loadingChat;
   const [palette, setPalette] = createSignal(false);
+  /** Search's scope when the sidebar opened it on archived chats. */
+  const [paletteArchived, setPaletteArchived] = createSignal<{ project?: string }>();
+  createEffect(
+    on(
+      archivedSearchRequested,
+      (request) => {
+        if (!request) return;
+        setPaletteArchived({ project: request.project });
+        setPalette(true);
+      },
+      { defer: true },
+    ),
+  );
   const [filesVisited, setFilesVisited] = createSignal(false);
   const [dock, setDock] = createSignal<Dock | "tools" | null>(null);
   const [dockTabs, setDockTabs] = createSignal<Dock[]>([]);
@@ -1059,8 +1072,10 @@ export function App() {
     else if (value === "files" || value === "diff") set("panel", value);
   }
   function openPalette() {
-    if (!document.querySelector("dialog[open]:not(.settings-dialog):not(.palette-dialog)"))
+    if (!document.querySelector("dialog[open]:not(.settings-dialog):not(.palette-dialog)")) {
+      setPaletteArchived(undefined);
       setPalette((value) => !value);
+    }
   }
   app.onMenu(dispatch);
   onMount(() => {
@@ -1747,7 +1762,7 @@ export function App() {
       <ImageViewer />
       <ServerConnect />
       <Show when={palette()}>
-        <UniversalSearch close={() => setPalette(false)} />
+        <UniversalSearch archived={paletteArchived()} close={() => setPalette(false)} />
       </Show>
     </div>
   );

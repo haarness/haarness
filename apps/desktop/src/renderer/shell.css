@@ -682,6 +682,22 @@ html[data-order-dragging] * {
   padding-inline: var(--s5) var(--s2);
   margin: 0;
 }
+/* "3 archived": quiet, but plainly something to press. */
+.sessions-archived {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--muted) 50%, transparent);
+  text-underline-offset: 2px;
+}
+.sessions-archived:hover {
+  text-decoration-color: currentColor;
+}
 
 .sidebar-footer {
   border-top: 1px solid var(--hairline);

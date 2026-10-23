@@ -17,7 +17,17 @@ import { searchEntries, type SearchEntry } from "./search";
 import { chatTitle } from "./chat-title";
 
 
-export function UniversalSearch(props: { close: () => void }) {
+/** Search opened on archived chats, a project's or every project's (the
+ * sidebar's "N archived" under a project with no open chats). */
+const [archivedRequest, setArchivedRequest] = createSignal<{ project?: string; at: number }>();
+export const archivedSearchRequested = archivedRequest;
+export const searchArchived = (project?: string) => setArchivedRequest({ project, at: Date.now() });
+
+export function UniversalSearch(props: {
+  close: () => void;
+  /** Only archived chats, of this project when it names one. */
+  archived?: { project?: string };
+}) {
   const app = useApp();
   const settings = createSettingsSearch(app, { inventory: false });
   let dialog!: HTMLDialogElement;
@@ -47,7 +57,7 @@ export function UniversalSearch(props: { close: () => void }) {
     setFiles([]);
     setProblem("");
     setLoading(false);
-    if (!q || !connection) return;
+    if (!q || !connection || props.archived) return;
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
@@ -68,8 +78,34 @@ export function UniversalSearch(props: { close: () => void }) {
       clearTimeout(timer);
     });
   });
+  type Conversation = ReturnType<typeof app.conversations>[number];
+  const chatEntry = ({ thread, location, key }: Conversation): SearchEntry => ({
+    key: "thread:" + key,
+    group: thread.archived ? "Archived chats" : "Chats",
+    name: chatTitle(thread.title),
+    detail:
+      (app.projects().find((item) => item.id === projectKey(location))
+        ?.label ?? location.label) +
+      (isWorktree(location) ? " · " + t(locationName(location)) : ""),
+    keywords: thread.id + " " + location.workspace,
+    icon: thread.archived ? "archive" : "chat",
+    action: (open) =>
+      app.chooseProjectSession(location.id, thread.id, open?.keep ? "keep" : "preview"),
+  });
   const entries = createMemo(() => {
     const q = query().trim();
+    const scope = props.archived;
+    if (scope)
+      return searchEntries(
+        app
+          .conversations(scope.project)
+          .filter(({ thread, location }) =>
+            thread.archived && !thread.isSubagent && location.checkout?.exists !== false,
+          )
+          .sort((a, b) => b.thread.updatedAt.localeCompare(a.thread.updatedAt))
+          .map(chatEntry),
+        q,
+      );
     const commands = app.searchCommands();
     const projects = app.projects().flatMap((project): SearchEntry[] => {
       const root = primaryLocation(project);
@@ -114,21 +150,7 @@ export function UniversalSearch(props: { close: () => void }) {
           (q || !thread.archived),
       )
       .sort((a, b) => b.thread.updatedAt.localeCompare(a.thread.updatedAt));
-    const threads = (q ? conversations : conversations.slice(0, 8)).map(
-      ({ thread, location, key }): SearchEntry => ({
-        key: "thread:" + key,
-        group: thread.archived ? "Archived chats" : "Chats",
-        name: chatTitle(thread.title),
-        detail:
-          (app.projects().find((item) => item.id === projectKey(location))
-            ?.label ?? location.label) +
-          (isWorktree(location) ? " · " + t(locationName(location)) : ""),
-        keywords: thread.id + " " + location.workspace,
-        icon: thread.archived ? "archive" : "chat",
-        action: (open) =>
-          app.chooseProjectSession(location.id, thread.id, open?.keep ? "keep" : "preview"),
-      }),
-    );
+    const threads = (q ? conversations : conversations.slice(0, 8)).map(chatEntry);
     const connection = app.state.connection?.id;
     const paths = files().map(
       (path): SearchEntry => ({
@@ -289,7 +311,15 @@ export function UniversalSearch(props: { close: () => void }) {
               entries().length ? "palette-option-" + index() : undefined
             }
             ref={(element) => queueMicrotask(() => element.focus())}
-            placeholder={t("Search anything in Haarness…")}
+            placeholder={
+              !props.archived
+                ? t("Search anything in Haarness…")
+                : props.archived.project
+                  ? t("Search archived chats in {name}…", {
+                      name: app.projects().find((item) => item.id === props.archived!.project)?.label ?? "",
+                    })
+                  : t("Search archived chats…")
+            }
             value={query()}
             onInput={(event) => {
               setQuery(event.currentTarget.value);
