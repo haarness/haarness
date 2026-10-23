@@ -104,7 +104,8 @@ export function createInputQueue(composer: {
     const pastes = parts.flatMap((part) =>
       part.kind === "paste" ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }] : [],
     );
-    const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("");
+    // A resource the server read stays in the text, as it was queued.
+    const typed = parts.flatMap((part) => (part.kind === "paste" ? [] : [part.text])).join("");
     composer.write({
       text: pastes.length ? typed.trimEnd() : typed,
       attachments: (item.attachments ?? []).map((data) => ({ data, name: attachmentName(data) })),
@@ -169,12 +170,17 @@ export function createInputQueue(composer: {
 
 export type InputQueueState = ReturnType<typeof createInputQueue>;
 
-/** A queued message as its row reads: what was typed, then each paste by its
- * label rather than its text. */
+/** A queued message as its row reads: what was typed, then each paste and
+ * each resource read into it by its label rather than its text. */
 function queuedLabel(text: string) {
   const parts = sentParts(text);
   const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("").trim();
-  return [typed, ...parts.flatMap((part) => (part.kind === "paste" ? [pasteLabel(part.text)] : []))]
+  return [
+    typed,
+    ...parts.flatMap((part) =>
+      part.kind === "paste" ? [pasteLabel(part.text)] : part.kind === "resource" ? ["@" + part.name] : [],
+    ),
+  ]
     .filter(Boolean)
     .join(" · ");
 }

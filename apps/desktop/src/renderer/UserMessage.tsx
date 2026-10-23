@@ -13,9 +13,61 @@ import { Markdown } from "./Markdown";
 import { Icon } from "./icons";
 import { Button } from "./ui";
 import { pasteLabel } from "./PromptContext";
-import { commandPrompt, countLines, sentParts } from "./prompt-context";
+import { commandPrompt, countLines, sentParts, type SentPart } from "./prompt-context";
 import { isOpen, setOpen } from "./disclosure";
 import "./user-message.css";
+
+/** A resource the server read into a sent message: its name and address,
+ * opening to what was read, or, when it could not be read, why. */
+function SentResource(props: {
+  part: Extract<SentPart, { kind: "resource" }>;
+  open: boolean;
+  toggle: (open: boolean) => void;
+}) {
+  const label = () => (
+    <span class="sent-resource-label">
+      <span>@{props.part.name}</span>
+      <Show when={props.part.address !== props.part.name}>
+        <small dir="ltr">{props.part.address}</small>
+      </Show>
+    </span>
+  );
+  return (
+    <div
+      class="sent-paste sent-resource"
+      classList={{ open: props.open && !props.part.failed, failed: props.part.failed }}
+      title={props.part.address}
+    >
+      <Show
+        when={!props.part.failed}
+        fallback={
+          <>
+            <div class="sent-paste-toggle sent-resource-unread">
+              <Icon name="error" size="xs" class="sent-paste-chevron" />
+              {label()}
+              <small>{t("not read")}</small>
+            </div>
+            <p class="sent-resource-reason">{props.part.content}</p>
+          </>
+        }
+      >
+        <button
+          type="button"
+          class="sent-paste-toggle"
+          aria-expanded={props.open}
+          onClick={() => props.toggle(!props.open)}
+        >
+          <Icon name="chevron" size="xs" class="sent-paste-chevron" />
+          <Icon name="file-text" size="xs" class="sent-resource-icon" />
+          {label()}
+        </button>
+        <Show when={props.open}>
+          <pre class="sent-paste-text">{props.part.content}</pre>
+        </Show>
+      </Show>
+    </div>
+  );
+}
 
 /** A prompt taller than this many lines folds to its first eight
  * (`user-message.css`), as the TUI folds one (`view/transcript.rs`), so a
@@ -25,8 +77,10 @@ const FOLD_LINES = 12;
 /**
  * The words of the user's bubble. A slash command reads as the line typed,
  * with the prompt it expanded to (what the model received) folded under
- * it. A paste sent as a chip reads as one folded block under its label. A
- * long message folds after a few lines with a fade and Show more.
+ * it. A paste sent as a chip reads as one folded block under its label, and
+ * so does a resource mentioned with `@`, by its name and address; one that
+ * could not be read says why on one quiet line instead. A long message folds
+ * after a few lines with a fade and Show more.
  */
 export function UserMessageBody(props: {
   id: string;
@@ -59,7 +113,7 @@ export function UserMessageBody(props: {
     if (!props.revealed) return;
     setOpen(foldKey(), true);
     parts().forEach((part, index) => {
-      if (part.kind === "paste") setOpen(pasteKey(index), true);
+      if (part.kind !== "text") setOpen(pasteKey(index), true);
     });
   });
   let body!: HTMLDivElement;
@@ -98,6 +152,15 @@ export function UserMessageBody(props: {
                 <Show when={part.text.trim()}>
                   <Markdown text={part.text} />
                 </Show>
+              ) : part.kind === "resource" ? (
+                <SentResource
+                  part={part}
+                  open={isOpen(pasteKey(index()))}
+                  toggle={(open) => {
+                    setOpen(pasteKey(index()), open);
+                    if (open) setOpen(foldKey(), true);
+                  }}
+                />
               ) : (
                 <div class="sent-paste" classList={{ open: isOpen(pasteKey(index())) }}>
                   <button
@@ -134,7 +197,7 @@ export function UserMessageBody(props: {
             // Show less returns the whole message to its short form.
             if (!open)
               parts().forEach((part, index) => {
-                if (part.kind === "paste") setOpen(pasteKey(index), false);
+                if (part.kind !== "text") setOpen(pasteKey(index), false);
               });
           }}
         >

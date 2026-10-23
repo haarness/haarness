@@ -2767,5 +2767,9 @@
   "Ask about this chat without adding to it": "Spørg om denne chat uden at tilføje til den",
   "Hide side chat": "Skjul sidechat",
   "Resize side chat": "Tilpas størrelsen på sidechat",
-  "This server answers each question on its own": "Denne server besvarer hvert spørgsmål for sig"
+  "This server answers each question on its own": "Denne server besvarer hvert spørgsmål for sig",
+  "MCP resource · {server}": "MCP-ressource · {server}",
+  "Read from {server} when the message is sent.": "Læses fra {server}, når beskeden sendes.",
+  "MCP server": "MCP-server",
+  "not read": "ikke læst"
 }

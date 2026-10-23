@@ -2767,5 +2767,9 @@
   "Ask about this chat without adding to it": "Fragen zu diesem Chat stellen, ohne ihn zu ergänzen",
   "Hide side chat": "Nebenchat ausblenden",
   "Resize side chat": "Größe des Nebenchats ändern",
-  "This server answers each question on its own": "Dieser Server beantwortet jede Frage für sich"
+  "This server answers each question on its own": "Dieser Server beantwortet jede Frage für sich",
+  "MCP resource · {server}": "MCP-Ressource · {server}",
+  "Read from {server} when the message is sent.": "Wird beim Senden der Nachricht aus {server} gelesen.",
+  "MCP server": "MCP-Server",
+  "not read": "nicht gelesen"
 }

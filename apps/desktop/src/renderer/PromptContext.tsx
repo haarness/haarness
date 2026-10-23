@@ -20,12 +20,22 @@ import {
   fileContext,
   mentionAgents,
   pasteSize,
+  RESOURCE_MENTIONS,
   type PromptContext,
+  type ResourceContext,
 } from "./prompt-context";
 import { shortPage, type ElementContext } from "./element-context";
+import {
+  cachedResources,
+  listResources,
+  searchResources,
+  type ResourceOption,
+} from "./resource-mentions";
 import "./prompt-context.css";
 
-type Option = { kind: "file" | "agent"; name: string; description?: string };
+type Option =
+  | { kind: "file" | "agent"; name: string; description?: string }
+  | ({ kind: "resource" } & ResourceOption);
 /** How a paste reads, in its chip and in the transcript: `Pasted text · 214
  * lines`, and its size once that matters, `· 2.4 MB`. */
 export function pasteLabel(text: string) {
@@ -37,10 +47,19 @@ export function pasteLabel(text: string) {
   const size = pasteSize(text, language());
   return size ? `${label} · ${size}` : label;
 }
-const chipLabel = (item: PromptContext) =>
-  item.kind === "paste" ? pasteLabel(item.text) : contextLabel(item);
-/** Hovering a picked element's chip says what and where it is. */
+/** A chip's words. A resource another server also has, under the same name,
+ * says which server it is read from. */
+const chipLabel = (item: PromptContext, items: PromptContext[] = []) =>
+  item.kind === "paste"
+    ? pasteLabel(item.text)
+    : item.kind === "resource" &&
+        items.some((other) => other !== item && other.kind === "resource" && other.name === item.name)
+      ? `${contextLabel(item)} · ${item.server}`
+      : contextLabel(item);
+/** Hovering a picked element's chip says what and where it is; a
+ * resource's, where it is read from. */
 function chipTitle(item: PromptContext) {
+  if (item.kind === "resource") return `${item.uri} · ${item.server}`;
   if (item.kind !== "element") return chipLabel(item);
   return [
     `${item.tag} · ${item.width}×${item.height}`,
@@ -49,6 +68,27 @@ function chipTitle(item: PromptContext) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+/** A mentioned resource: what it is and where the server reads it from. */
+function ResourcePreview(props: { item: ResourceContext }) {
+  return (
+    <>
+      <small>{t("MCP resource · {server}", { server: props.item.server })}</small>
+      <dl class="prompt-context-element">
+        <dt>URI</dt>
+        <dd dir="ltr">
+          <code>{props.item.uri}</code>
+        </dd>
+        <Show when={props.item.description}>
+          <dt>{t("Description")}</dt>
+          <dd dir="auto">{props.item.description}</dd>
+        </Show>
+      </dl>
+      <p class="prompt-context-note">
+        {t("Read from {server} when the message is sent.", { server: props.item.server })}
+      </p>
+    </>
+  );
 }
 /** A picked element as it was captured: where, what it said, its HTML. */
 function ElementPreview(props: { item: ElementContext }) {
@@ -98,6 +138,28 @@ export function PromptContextControls(props: {
     JSON.stringify([props.text, caret(), app.state.connection?.id]);
   const open = () =>
     !!mention() && dismissed() !== signature() && !props.disabled;
+  /** The connection's MCP resources, asked for the first time `@` opens
+   * there (`resource-mentions.ts`); an older server reads none. */
+  const [resources, setResources] = createSignal<{ connection: string; list: ResourceOption[] }>();
+  const offersResources = () =>
+    !!app.state.connection?.info.capabilities.includes(RESOURCE_MENTIONS);
+  createEffect(() => {
+    const connection = app.state.connection?.id;
+    if (!open() || !connection || !offersResources()) return;
+    void cachedResources(connection, () => listResources(connection))
+      .then((list) => {
+        // An answer for a project left meanwhile waits in the cache.
+        if (app.state.connection?.id !== connection) return;
+        if (resources()?.connection === connection && resources()?.list === list) return;
+        setResources({ connection, list });
+      })
+      .catch(() => undefined);
+  });
+  const resourceRows = (query: string): Option[] => {
+    const known = resources();
+    if (!known || known.connection !== app.state.connection?.id) return [];
+    return searchResources(query, known.list).map((item) => ({ kind: "resource" as const, ...item }));
+  };
   const options = (): Option[] => {
     if (!open()) return [];
     const q = mention()!.query.toLowerCase();
@@ -111,6 +173,9 @@ export function PromptContextControls(props: {
           description: "Delegate · " + agent.description,
         })),
       ...files().map((name) => ({ kind: "file" as const, name })),
+      // After agents and files, as in the TUI, so a server with many
+      // resources never pushes files down.
+      ...resourceRows(mention()!.query),
     ];
   };
   let generation = 0;
@@ -150,8 +215,17 @@ export function PromptContextControls(props: {
     setBusy(true);
     setError("");
     try {
-      const item =
-        option.kind === "agent"
+      const item: PromptContext =
+        option.kind === "resource"
+          ? {
+              kind: "resource",
+              server: option.server,
+              uri: option.uri,
+              name: option.name,
+              ...(option.description ? { description: option.description } : {}),
+              ...(option.mimeType ? { mimeType: option.mimeType } : {}),
+            }
+          : option.kind === "agent"
           ? { kind: "agent" as const, name: option.name }
           : await window.haarness
               .files<FileContent>(connection, "read", { path: option.name })
@@ -311,7 +385,9 @@ export function PromptContextControls(props: {
                         ? "pick"
                         : item.kind === "paste"
                           ? "paste"
-                          : "agents"
+                          : item.kind === "resource"
+                            ? "file-text"
+                            : "agents"
                   }
                   size="sm"
                 />
@@ -330,7 +406,7 @@ export function PromptContextControls(props: {
                   }}
                 >
                   <summary title={chipTitle(item)}>
-                    {chipLabel(item)}
+                    {chipLabel(item, app.promptContext())}
                     {item.kind === "file" && item.unsaved ? ` · ${t("unsaved")}` : ""}
                   </summary>
                   <div
@@ -373,6 +449,9 @@ export function PromptContextControls(props: {
                       <Match when={item.kind === "element" && item}>
                         {(element) => <ElementPreview item={element()} />}
                       </Match>
+                      <Match when={item.kind === "resource" && item}>
+                        {(resource) => <ResourcePreview item={resource()} />}
+                      </Match>
                     </Switch>
                   </div>
                 </details>
@@ -380,7 +459,7 @@ export function PromptContextControls(props: {
                   type="button"
                   class="icon-button"
                   disabled={props.disabled}
-                  aria-label={t("Remove context {name}", { name: chipLabel(item) })}
+                  aria-label={t("Remove context {name}", { name: chipLabel(item, app.promptContext()) })}
                   // Focus stays in the message box, so the next paste still
                   // reaches it.
                   onMouseDown={(event) => event.preventDefault()}
@@ -418,22 +497,27 @@ export function PromptContextControls(props: {
                   role="option"
                   aria-selected={cursor() === index()}
                   aria-disabled={busy()}
+                  data-kind={option.kind}
                   classList={{ highlighted: cursor() === index() }}
                   onPointerMove={() => setCursor(index())}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => void choose(option)}
                 >
                   <Icon
-                    name={option.kind === "file" ? "file" : "agents"}
+                    name={option.kind === "file" ? "file" : option.kind === "resource" ? "file-text" : "agents"}
                     size="sm"
                   />
                   <span>
                     <strong>{option.name}</strong>
-                    <Show when={option.description}>
-                      <small>{option.description}</small>
+                    <Show
+                      when={option.kind === "resource" ? option.description || option.uri : option.description}
+                    >
+                      {(detail) => <small dir="auto">{detail()}</small>}
                     </Show>
                   </span>
-                  <small>{option.kind === "agent" ? t("Agent") : t("File")}</small>
+                  <small class="mention-kind" title={option.kind === "resource" ? t("MCP server") : undefined}>
+                    {option.kind === "resource" ? option.server : option.kind === "agent" ? t("Agent") : t("File")}
+                  </small>
                 </div>
               )}
             </For>

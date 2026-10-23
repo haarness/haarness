@@ -2767,5 +2767,9 @@
   "Ask about this chat without adding to it": "询问此对话，但不向其中添加内容",
   "Hide side chat": "隐藏侧边对话",
   "Resize side chat": "调整侧边对话大小",
-  "This server answers each question on its own": "此服务器会单独回答每个问题"
+  "This server answers each question on its own": "此服务器会单独回答每个问题",
+  "MCP resource · {server}": "MCP 资源 · {server}",
+  "Read from {server} when the message is sent.": "发送消息时从 {server} 读取。",
+  "MCP server": "MCP 服务器",
+  "not read": "未读取"
 }
