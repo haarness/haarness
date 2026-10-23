@@ -289,7 +289,7 @@ A paste longer than eight lines or 1,000 bytes stays one `[#1 pasted 20 lines]` 
 
 **Ctrl+T** cycles the thinking display through Compact, Show and Hide, and the TUI keeps the choice for its next launch (`thinking` in `tui-state.toml`; `/reasoning` offers the same switch). Compact, the default, gives a thought one row: `⠋ Thinking · ` and the newest line of thought while the model thinks, then `▸ Thought for 12s`, which a click opens, so the transcript never jumps. Show writes the thinking out in full, and Hide leaves it out, marked `thinking hidden` on the prompt band.
 
-Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. See [TUI message browser](TUI-MESSAGES.md).
+Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. **Alt+Up**/**Alt+Down** move the transcript to the previous or next message, **Alt+Shift+Up**/**Alt+Shift+Down** between your prompts, **Alt+Home** to the start and **Alt+End** to your last prompt. See [TUI message browser](TUI-MESSAGES.md#move-between-messages).
 
 See [Side questions with `/btw`](SIDE-QUESTIONS.md) for isolated questions that leave the main transcript unchanged.
 

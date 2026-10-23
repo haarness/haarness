@@ -825,6 +825,9 @@ pub struct App {
     /// reflow to either more or fewer terminal rows as delimiters close.
     pub scroll_adjustment: std::cell::Cell<isize>,
     pub last_transcript_len: std::cell::Cell<usize>,
+    /// The messages of the most recently rendered transcript and the row each
+    /// starts on, top first: where the message keys step to.
+    pub transcript_messages: std::cell::RefCell<Vec<(haarness_protocol::ItemId, usize)>>,
     /// Context estimate of the shown thread, keyed by its item count, last
     /// sequence and undo boundary; the meters read it every frame.
     pub context_tokens: std::cell::Cell<Option<ContextEstimate>>,
@@ -1095,6 +1098,7 @@ impl App {
             transcript_rows: std::cell::Cell::new(0),
             scroll_adjustment: std::cell::Cell::new(0),
             last_transcript_len: std::cell::Cell::new(0),
+            transcript_messages: std::cell::RefCell::new(Vec::new()),
             context_tokens: std::cell::Cell::new(None),
             server_info: None,
             tick: 0,

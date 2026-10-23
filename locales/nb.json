@@ -2065,7 +2065,7 @@
   "Restore files undone by /undo": "Gjenopprett filer som ble angret med /undo",
   "Undo back to any earlier checkpoint in this session": "Angre tilbake til et tidligere sjekkpunkt i denne økten",
   "Fork this thread": "Forgren denne chatten",
-  "Search prompts and replies · jump, read, copy or fork · Alt+M": "Søk i prompter og svar · hopp, les, kopier eller forgren · Alt+M",
+  "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages": "Søk, hopp, les, kopier eller forgren · Alt+M · Alt+↑↓ mellom meldinger",
   "Rename this session: /rename [session-id] <title>": "Gi denne økten nytt navn: /rename [session-id] <title>",
   "Archive this thread and start a new one": "Arkiver denne chatten og start en ny",
   "Set effort or Ultracode orchestration: /reasoning high|xhigh|max|ultracode|off": "Angi innsats eller Ultracode-orkestrering: /reasoning high|xhigh|max|ultracode|off",

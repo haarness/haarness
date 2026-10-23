@@ -2065,7 +2065,7 @@
   "Restore files undone by /undo": "Restaura los archivos deshechos con /undo",
   "Undo back to any earlier checkpoint in this session": "Deshaz hasta cualquier punto de control anterior de esta sesión",
   "Fork this thread": "Bifurca este chat",
-  "Search prompts and replies · jump, read, copy or fork · Alt+M": "Busca prompts y respuestas · ir, leer, copiar o bifurcar · Alt+M",
+  "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages": "Buscar, ir, leer, copiar o bifurcar · Alt+M · Alt+↑↓ entre mensajes",
   "Rename this session: /rename [session-id] <title>": "Renombra esta sesión: /rename [session-id] <title>",
   "Archive this thread and start a new one": "Archiva este chat e inicia uno nuevo",
   "Set effort or Ultracode orchestration: /reasoning high|xhigh|max|ultracode|off": "Fija esfuerzo u orquestación Ultracode: /reasoning high|xhigh|max|ultracode|off",

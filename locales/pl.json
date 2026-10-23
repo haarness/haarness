@@ -2065,7 +2065,7 @@
   "Restore files undone by /undo": "Przywróć pliki cofnięte przez /undo",
   "Undo back to any earlier checkpoint in this session": "Cofnij do dowolnego wcześniejszego punktu kontrolnego w tej sesji",
   "Fork this thread": "Rozgałęź ten wątek",
-  "Search prompts and replies · jump, read, copy or fork · Alt+M": "Szukaj promptów i odpowiedzi · przejdź, czytaj, kopiuj lub rozgałęź · Alt+M",
+  "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages": "Szukaj, przejdź, czytaj, kopiuj lub rozgałęź · Alt+M · Alt+↑↓ między wiadomościami",
   "Rename this session: /rename [session-id] <title>": "Zmień nazwę tej sesji: /rename [session-id] <title>",
   "Archive this thread and start a new one": "Zarchiwizuj ten wątek i rozpocznij nowy",
   "Set effort or Ultracode orchestration: /reasoning high|xhigh|max|ultracode|off": "Ustaw poziom lub orkiestrację Ultracode: /reasoning high|xhigh|max|ultracode|off",
