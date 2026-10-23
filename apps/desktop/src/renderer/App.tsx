@@ -38,7 +38,7 @@ import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
 import { createOrdering, createOrderDropTarget } from "./Sortable";
 import { MenuButton, type MenuAction } from "./MenuButton";
-import { UniversalSearch } from "./UniversalSearch";
+import { UniversalSearch, archivedSearchRequested, type ArchivedScope } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
@@ -50,7 +50,7 @@ import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
 import { exportLogs } from "./Diagnostics";
 import { SideChatPanel, closeFrontSideThread, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
-import { SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
+import { CHAT_MIN, DOCK_MIN, SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
 type Dock = "files" | "diff" | "context" | "browser";
 
 /** Workbench panels and their launcher copy. */
@@ -109,6 +109,9 @@ const Explorer = lazy(() =>
 );
 import { Review } from "./Review";
 import { chatTitle } from "./chat-title";
+import { tabOrderScope } from "./chat-tabs";
+import { revealInStrip } from "./reveal";
+import { chatRowSelector, rovingRows, rowAfter } from "./roving-rows";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -178,6 +181,19 @@ export function App() {
   const loading = () =>
     !state.ready || !!state.openingProject || !!state.openingChat || !!state.loadingChat;
   const [palette, setPalette] = createSignal(false);
+  /** Search's scope when the sidebar opened it on archived chats. */
+  const [paletteArchived, setPaletteArchived] = createSignal<ArchivedScope>();
+  createEffect(
+    on(
+      archivedSearchRequested,
+      (request) => {
+        if (!request) return;
+        setPaletteArchived({ project: request.project, location: request.location });
+        setPalette(true);
+      },
+      { defer: true },
+    ),
+  );
   const [filesVisited, setFilesVisited] = createSignal(false);
   const [dock, setDock] = createSignal<Dock | "tools" | null>(null);
   const [dockTabs, setDockTabs] = createSignal<Dock[]>([]);
@@ -203,12 +219,39 @@ export function App() {
   const [sideWidth, setSideWidth] = createSignal(SIDE_WIDTH);
   const [sideFront, setSideFront] = createSignal(true);
   const [workbenchWidth, setWorkbenchWidth] = createSignal(1050);
-  // The side panel lies over the whole workbench in a window this narrow (shell.css).
-  const narrowQuery = window.matchMedia("(max-width: 1100px)");
-  const [narrow, setNarrow] = createSignal(narrowQuery.matches);
-  const followNarrow = () => setNarrow(narrowQuery.matches);
-  narrowQuery.addEventListener("change", followNarrow);
-  onCleanup(() => narrowQuery.removeEventListener("change", followNarrow));
+  const [windowWidth, setWindowWidth] = createSignal(window.innerWidth);
+  const followWindow = () => setWindowWidth(window.innerWidth);
+  window.addEventListener("resize", followWindow);
+  onCleanup(() => window.removeEventListener("resize", followWindow));
+  /** The room the conversation and the side panel need side by side. */
+  const besideRoom = CHAT_MIN + 1 + DOCK_MIN;
+  /** The side panel lies over the conversation when the workbench has no
+   * room for both (shell.css, `.dock-over`). */
+  const dockCovers = () => workbenchWidth() < besideRoom;
+  /** Shown again by the person while the sidebar made room for the side
+   * panel; it then stays until the panel closes. */
+  const [keepSidebar, setKeepSidebar] = createSignal(false);
+  /** The sidebar steps aside, before the side panel covers the chat, when
+   * that alone gives the two room side by side. */
+  const sidebarYields = () =>
+    sidebarVisible() &&
+    !keepSidebar() &&
+    dockVisible() &&
+    !dockExpanded() &&
+    windowWidth() - sidebarWidth() - 1 < besideRoom &&
+    windowWidth() >= besideRoom;
+  const sidebarShown = () => sidebarVisible() && !sidebarYields();
+  createEffect(() => {
+    if (!dockVisible()) setKeepSidebar(false);
+  });
+  function showSidebar() {
+    setSidebarVisible(true);
+    if (dockVisible()) setKeepSidebar(true);
+  }
+  function toggleSidebar() {
+    if (sidebarShown()) setSidebarVisible(false);
+    else showSidebar();
+  }
   /** Whether the sidebar groups chats under their project or lists them flat. */
   const [sidebarLayout, setSidebarLayout] = createSignal<"project" | "flat">(
     "project",
@@ -236,8 +279,8 @@ export function App() {
     sidePlace({
       width: workbenchWidth(),
       wanted: sideWidth(),
-      // In a narrow window the side panel lies over everything, expanded or not.
-      dock: !dockVisible() ? "none" : narrow() ? "overlay" : dockExpanded() ? "expanded" : "column",
+      // Without room beside the chat the side panel lies over everything, expanded or not.
+      dock: !dockVisible() ? "none" : dockCovers() ? "overlay" : dockExpanded() ? "expanded" : "column",
     }),
   );
   /** Both show side by side, or the one in front does. */
@@ -458,7 +501,7 @@ export function App() {
     sidebarGroups(projects.ordered(), state.projectMeta),
   );
   const sessionTabs = createOrdering(
-    () => "list:session-tabs:" + state.connection?.id,
+    () => tabOrderScope(state.connection?.id ?? ""),
     () => state.tabs,
   );
   const panelTabs = createOrdering(
@@ -475,9 +518,9 @@ export function App() {
         state.panel === "chat" && state.selected ? sessionTabs.ordered() : [],
       active: () => state.selected,
       select: (id) => void app.run(() => app.choose(id)),
-      // The chat loads (its message box and tabs hidden meanwhile, which
-      // drops the focus) before the keyboard goes back: to the message box
-      // when the step started there, else to the chat's tab.
+      // The chat loads (its message box hidden meanwhile, which drops the
+      // focus) before the keyboard goes back: to the message box when the
+      // step started there, else to the chat's tab.
       keep: (id, from) => {
         const composer = !!from?.matches("[data-composer-input]");
         let frames = 300;
@@ -523,9 +566,7 @@ export function App() {
   /** The chat rows the sidebar draws, top to bottom: rows inside a collapsed
    * project, checkout or schedule are not drawn and are passed over. */
   const chatRows = () => [
-    ...document.querySelectorAll<HTMLButtonElement>(
-      ".sidebar .session-row > button[aria-current]",
-    ),
+    ...document.querySelectorAll<HTMLButtonElement>(".sidebar " + chatRowSelector),
   ];
   /** Opens the chat `offset` rows from the open one, wrapping. The keyboard
    * goes back to the message box when the step started there. */
@@ -548,20 +589,58 @@ export function App() {
   /** Shows the sidebar and puts the keyboard on the open chat's row, opening
    * its project and checkout when they are collapsed. */
   async function focusSidebar() {
-    setSidebarVisible(true);
+    showSidebar();
     const project = app.currentProject();
     if (project) await app.expandProject(project.id, true);
     const location = app.project();
     if (location && app.state.expandedLocations[location.id] === false)
       await app.expandLocation(location.id, true);
-    setTimeout(() => {
-      const row =
-        chatRows().find((row) => row.getAttribute("aria-current") === "true") ??
-        chatRows()[0] ??
-        document.querySelector<HTMLElement>(".sidebar-lists button");
-      row?.focus();
-      row?.scrollIntoView({ block: "nearest" });
-    });
+    // The rows of a project just expanded are drawn by then.
+    await new Promise((resolve) => setTimeout(resolve));
+    const row =
+      chatRows().find((row) => row.getAttribute("aria-current") === "true") ??
+      chatRows()[0] ??
+      document.querySelector<HTMLElement>(".sidebar-lists button");
+    // Asked for by a key or a command, the row shows its keyboard ring even
+    // when a click came last (Search picked with the pointer).
+    document.documentElement.removeAttribute("data-pointer-focus");
+    row?.focus({ focusVisible: true } as FocusOptions);
+    row?.scrollIntoView({ block: "nearest" });
+  }
+  /** Whether a chat row has the focus only from a click (`rovingRows`). */
+  let rowClicked: (row: Element) => boolean = () => false;
+  /** Delete, or Command+Backspace (Control+Backspace elsewhere), on a chat
+   * row the keyboard is on archives it, as its archive button does (an open
+   * chat stays on screen with its Restore line), and leaves the keyboard on
+   * the row below. A row that only took the focus from a click is not on
+   * the keyboard, so a key meant for a message never archives it. Select
+   * chats has its own Archive. */
+  function archiveRow(event: KeyboardEvent) {
+    if (event.altKey || event.shiftKey || selection()) return false;
+    const mod = state.platform === "darwin" ? event.metaKey : event.ctrlKey;
+    const other = state.platform === "darwin" ? event.ctrlKey : event.metaKey;
+    const key =
+      (event.key === "Delete" && !mod) || (event.key === "Backspace" && mod);
+    if (!key || other) return false;
+    const rows = chatRows();
+    const row = document.activeElement as HTMLButtonElement;
+    const archive = rows.includes(row) && !rowClicked(row)
+      ? row.parentElement?.querySelector<HTMLButtonElement>(":scope > .icon-button")
+      : undefined;
+    if (!archive) return false;
+    const next = rowAfter(rows, row);
+    archive.click();
+    let frames = 120;
+    const land = () => {
+      if (row.isConnected) {
+        if (frames-- > 0) requestAnimationFrame(land);
+        return;
+      }
+      const focused = document.activeElement;
+      if (!focused || focused === document.body) next?.focus();
+    };
+    requestAnimationFrame(land);
+    return true;
   }
   /** On a chat row that has the keyboard, ↑ and ↓ move it to the row above
    * or below, and Home and End to the first or last, as in a list; Enter
@@ -588,7 +667,7 @@ export function App() {
   onMount(() => {
     const keys = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;
-      if (walkRows(event)) return void event.preventDefault();
+      if (walkRows(event) || archiveRow(event)) return void event.preventDefault();
       const { chatPrev, chatNext, focusSidebar: focus } = state.preferences.shortcuts;
       const offset =
         chatNext && matchesShortcut(event, chatNext, state.platform)
@@ -649,7 +728,6 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected||!browserHere(),action:()=>openDock("browser")},
-      {key:"export-logs",group:"Commands",name:t("Export logs…"),keywords:"logs diagnostics zip support bug report share",icon:"download",action:()=>void app.run(exportLogs)},
       {key:"pick",group:"Project panels",name:t("Pick an element in the browser"),keywords:"inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected||!browserHere(),action:pickElement},
       {key:"conversation:side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
       {key:"side-chat-new",group:"Project panels",name:t("New side chat"),keywords:"btw side question aside ask thread another",icon:"side-chat",disabled:!connected||!state.selected,action:()=>openSide(true)},
@@ -742,9 +820,9 @@ export function App() {
       {
         key: "sidebar",
         group: "Commands",
-        name: sidebarVisible() ? t("Hide sidebar") : t("Show sidebar"),
+        name: sidebarShown() ? t("Hide sidebar") : t("Show sidebar"),
         icon: "sidebar",
-        action: () => setSidebarVisible((value) => !value),
+        action: toggleSidebar,
       },
       {
         key: "focus-sidebar",
@@ -832,6 +910,8 @@ export function App() {
           }
         },
       },
+      // A support tool: listed after the everyday commands.
+      {key:"export-logs",group:"Commands",name:t("Export logs…"),keywords:"logs diagnostics zip support bug report share",icon:"download",action:()=>void app.run(exportLogs)},
       ...[
         ["new", "New window", "Mod+Shift+N"],
         ["zoom-in", "Zoom in", "Mod+Plus"],
@@ -1002,8 +1082,10 @@ export function App() {
     else if (value === "files" || value === "diff") set("panel", value);
   }
   function openPalette() {
-    if (!document.querySelector("dialog[open]:not(.settings-dialog):not(.palette-dialog)"))
+    if (!document.querySelector("dialog[open]:not(.settings-dialog):not(.palette-dialog)")) {
+      setPaletteArchived(undefined);
       setPalette((value) => !value);
+    }
   }
   app.onMenu(dispatch);
   onMount(() => {
@@ -1048,7 +1130,7 @@ export function App() {
       }
       data-platform={state.platform}
       style={{
-        "--sidebar-width": sidebarVisible() ? sidebarWidth() + "px" : "0px",
+        "--sidebar-width": sidebarShown() ? sidebarWidth() + "px" : "0px",
         "--dock-width": dockWidth() + "px",
         "--terminal-height": terminalHeight() + "px",
       }}
@@ -1057,16 +1139,15 @@ export function App() {
         <div class="window-toolbar">
           <Button
             icon="sidebar"
-            label={sidebarVisible() ? t("Hide sidebar") : t("Show sidebar")}
-            active={sidebarVisible()}
-            onClick={() => setSidebarVisible((value) => !value)}
+            label={sidebarShown() ? t("Hide sidebar") : t("Show sidebar")}
+            active={sidebarShown()}
+            onClick={toggleSidebar}
           />
         </div>
         <div class="titlebar-session">
-          <Show
-            when={state.connection}
-            fallback={<span class="titlebar-caption">{t("Haarness")}</span>}
-          >
+          {/* Nothing before a project opens: the sidebar's wordmark already
+              names the app. */}
+          <Show when={state.connection}>
             <Icon name="folder" size="sm" />
             <span class="titlebar-caption">
               {app.currentProject()?.label ?? app.project()?.label}
@@ -1127,7 +1208,7 @@ export function App() {
       <div class="app-body">
         <aside
           class="sidebar"
-          style={{ display: sidebarVisible() ? "flex" : "none" }}
+          style={{ display: sidebarShown() ? "flex" : "none" }}
         >
           <div class="sidebar-brand">
             <Wordmark class="wordmark" />
@@ -1188,7 +1269,7 @@ export function App() {
             </button>
           </nav>
           <div class="nav-group">
-            <button class="nav-row" aria-label={t("Search")} onClick={openPalette}>
+            <button class="nav-row" aria-label={t("Search")} data-search-button onClick={openPalette}>
               <Icon name="search" size="md" />
               {t("Search")}
               <kbd dir="ltr">
@@ -1207,47 +1288,44 @@ export function App() {
                 label={t("Open another project")}
                 onClick={() => app.run(open)}
               />
-              <MenuButton
-                icon="more"
-                label={t("Project list options")}
-                items={[
-                  {
-                    label: t("Organize sidebar"),
-                    submenu: [
-                      {
-                        label: t("By project"),
-                        checked: sidebarLayout() === "project",
-                        run: () => setSidebarLayout("project"),
-                      },
-                      {
-                        label: t("In one list"),
-                        checked: sidebarLayout() === "flat",
-                        run: () => setSidebarLayout("flat"),
-                      },
-                    ],
-                  },
-                ]}
-              />
+              {/* With no project yet there is nothing to organize. */}
+              <Show when={projects.ordered().length}>
+                <MenuButton
+                  icon="more"
+                  label={t("Project list options")}
+                  items={[
+                    {
+                      heading: t("Organize sidebar"),
+                      label: t("By project"),
+                      checked: sidebarLayout() === "project",
+                      run: () => setSidebarLayout("project"),
+                    },
+                    {
+                      label: t("In one list"),
+                      checked: sidebarLayout() === "flat",
+                      run: () => setSidebarLayout("flat"),
+                    },
+                  ]}
+                />
+              </Show>
             </div>
           </div>
           <div
             class="sidebar-lists"
+            ref={(element) =>
+              onMount(() => {
+                const rows = rovingRows(element);
+                rowClicked = rows.clicked;
+                onCleanup(rows.dispose);
+              })
+            }
             classList={{ "is-scrolling": sidebarScrolling() }}
             onScroll={showSidebarScrollbar}
           >
             <div class="project-list" {...unfiledDrop}>
-              <Show
-                when={projects.ordered().length}
-                fallback={
-                  <button
-                    class="project-heading"
-                    onClick={() => app.run(open)}
-                  >
-                    <Icon name="folder" size="md" />
-                    <span>{t("Open project")}</span>
-                  </button>
-                }
-              >
+              {/* With no project yet, Home's Open project (and the + above)
+                  is the way in; the list stays empty rather than repeat it. */}
+              <Show when={projects.ordered().length}>
                 <Show
                   when={sidebarLayout() === "project"}
                   fallback={<SessionList />}
@@ -1293,7 +1371,7 @@ export function App() {
             </button>
           </footer>
         </aside>
-        <Show when={sidebarVisible()}>
+        <Show when={sidebarShown()}>
           <ResizeHandle
             label={t("Resize sidebar")}
             value={sidebarWidth()}
@@ -1311,6 +1389,7 @@ export function App() {
             ref={workbench}
             classList={{
               "has-dock": dockOnScreen(),
+              "dock-over": dockOnScreen() && dockCovers(),
               "dock-expanded": dockOnScreen() && dockExpanded(),
               "side-over": sideOnScreen() && side().place === "over",
               "side-column": sideOnScreen() && side().place === "column",
@@ -1318,7 +1397,15 @@ export function App() {
             style={{ "--side-chat-room": sideRoom() + "px" }}
           >
             <div class="chat-pane" data-cycle-panel="chats">
-              <Show when={state.panel === "chat" && !!state.selected && !loading()}>
+              {/* The bar stays while another chat of this project loads its
+                  history (a tab chosen), so the tabs do not blink. */}
+              <Show
+                when={
+                  state.panel === "chat" &&
+                  !!state.selected &&
+                  (!loading() || (state.ready && !state.openingProject && !state.openingChat))
+                }
+              >
                 <div class="session-bar">
                   <Show when={selected()?.isSubagent && selected()?.parentId}>
                     <Button
@@ -1374,17 +1461,34 @@ export function App() {
                               active:
                                 id === state.selected &&
                                 state.panel === "chat",
+                              preview: id === state.preview,
                             }}
                           >
                             <button
                               role="tab"
                               data-cycle-tab={id}
                               aria-selected={id === state.selected}
+                              aria-description={
+                                id === state.preview
+                                  ? t("Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.")
+                                  : undefined
+                              }
                               title={tabTitle(id)}
-                              onClick={() => app.run(() => app.choose(id))}
+                              ref={(element) =>
+                                createEffect(() => {
+                                  if (id === state.selected && state.panel === "chat")
+                                    revealInStrip(element.parentElement!);
+                                })
+                              }
+                              onClick={(event) => {
+                                // Enter or Space on the preview's own tab keeps it.
+                                if (event.detail === 0 && id === state.selected) app.keepTab(id);
+                                void app.run(() => app.choose(id));
+                              }}
+                              onDblClick={() => app.keepTab(id)}
                             >
                               <Show when={running(id)}>
-                                <span class="session-status running" />
+                                <span class="session-status running" aria-hidden="true" />
                               </Show>
                               {tabTitle(id)}
                             </button>
@@ -1479,6 +1583,22 @@ export function App() {
               style={{ display: dockOnScreen() ? "flex" : "none" }}
             >
               <div class="dock-tabs">
+                {/* Laid over the chat, the strip leads with the way back to
+                    it; the side panel button brings the panel back. */}
+                <Show when={dockCovers()}>
+                  <button
+                    class="dock-return"
+                    aria-label={t("Return to chat")}
+                    onClick={() => {
+                      setDock(null);
+                      focusComposer();
+                    }}
+                  >
+                    <Icon name="chat" size="sm" />
+                    {t("Chat")}
+                  </button>
+                  <span class="dock-tabs-rule" aria-hidden="true" />
+                </Show>
                 <For each={(panelTabs.ordered() as Dock[]).filter((tab) => tab !== "browser" || browserHere())}>
                   {(tab) => (
                     <div
@@ -1493,7 +1613,7 @@ export function App() {
                       <button
                         data-cycle-tab={tab}
                         aria-current={tab === dock() ? "true" : undefined}
-                        aria-label={t("Show {name} panel", { name: tab })}
+                        aria-label={t("Show {name} panel", { name: t(dockNames[tab]) })}
                         aria-description={
                           tab === "browser" && browserMoved()
                             ? t("The agent opened another page")
@@ -1509,7 +1629,7 @@ export function App() {
                       </button>
                       <Button
                         icon="close"
-                        label={t("Close {name} panel", { name: tab })}
+                        label={t("Close {name} panel", { name: t(dockNames[tab]) })}
                         onClick={() => closeDock(tab)}
                       />
                     </div>
@@ -1654,7 +1774,7 @@ export function App() {
       <ImageViewer />
       <ServerConnect />
       <Show when={palette()}>
-        <UniversalSearch close={() => setPalette(false)} />
+        <UniversalSearch archived={paletteArchived()} close={() => setPalette(false)} />
       </Show>
     </div>
   );

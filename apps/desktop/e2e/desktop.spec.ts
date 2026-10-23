@@ -1669,9 +1669,10 @@ test("whole rows reorder silently, project titles expand, and sessions have one 
   await expect(headings.first()).toHaveText("reorder-project");
   await source.press("Alt+End");
   await expect(headings).toHaveText(before);
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   for (const title of ["Menu One", "Menu Two"]) {
     await client.createThread({ title, provider: "echo", model: "echo-1" });
-    await project.getByRole("button", { name: title, exact: true }).click();
+    await project.getByRole("button", { name: title, exact: true }).dblclick();
   }
   const one = project.getByRole("button", { name: "Menu One", exact: true });
   const two = project.getByRole("button", { name: "Menu Two", exact: true });
@@ -1769,10 +1770,10 @@ test("the project menu pins, renames, files under a section, reveals, archives c
   const headings = page.locator(".project-list .project-heading");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 
-  // Edit: a custom display name replaces the folder name wherever the project is shown.
+  // Rename: a custom display name replaces the folder name wherever the project is shown.
   await options("workspace").click();
-  await item("Edit").click();
-  const edit = page.getByRole("dialog", { name: "Edit project", exact: true });
+  await item("Rename…").click();
+  const edit = page.getByRole("dialog", { name: "Rename project", exact: true });
   await expect(edit.getByLabel("Folder")).toHaveAttribute("readonly", "");
   await edit.getByLabel("Name").fill("Client app");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
@@ -1866,7 +1867,7 @@ test("the project menu pins, renames, files under a section, reveals, archives c
 
   // An empty name restores the folder name, so later scenarios keep addressing "workspace".
   await options("Client app").click();
-  await item("Edit").click();
+  await item("Rename…").click();
   await edit.getByLabel("Name").fill("");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
   const original = page.getByRole("region", { name: "Project workspace", exact: true });
@@ -2020,7 +2021,6 @@ test("sidebar sections keep drag and keyboard ordering inside and across groups,
   const thread = await client.createThread({ title: "Flat list row", provider: "echo", model: "echo-1" });
   const layout = async (choice: "In one list" | "By project") => {
     await page.getByRole("button", { name: "Project list options", exact: true }).click();
-    await item("Organize sidebar").click();
     await page.getByRole("menuitemradio", { name: choice, exact: true }).click();
   };
   await layout("In one list");
@@ -2612,7 +2612,7 @@ test("side-panel launcher opens tools beside chat and supports tab ordering", as
   await expect(page.locator(".review")).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("header-and-project-tabs.png"), animations: "disabled" });
   const reviewHandle = page.getByRole("button", {
-    name: "Show diff panel",
+    name: "Show Review panel",
     exact: true,
   });
   await reviewHandle.focus();
@@ -3151,11 +3151,12 @@ test("conversation tab order survives reopening and uses horizontal keyboard con
     provider: "echo",
     model: "echo-1",
   });
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   for (const title of [first.title, second.title])
     await page
       .locator(".sessions")
       .getByRole("button", { name: title, exact: true })
-      .click();
+      .dblclick();
   const handle = page.getByRole("tab", {
     name: "Tab Two",
     exact: true,
@@ -3196,11 +3197,12 @@ test("closing a session tab returns to the previous active conversation", async 
   const titles = ["History A", "History B", "History C", "History D"];
   for (const title of titles)
     await client.createThread({ title, provider: "echo", model: "echo-1" });
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   const open = async (title: string) => {
     await page
       .locator(".sessions")
       .getByRole("button", { name: title, exact: true })
-      .click();
+      .dblclick();
     await expect(
       page.locator(".session-bar .workspace-tab.active, .session-bar-title"),
     ).toContainText(title);
@@ -4574,8 +4576,9 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     .getByRole("region", { name: "Project workspace", exact: true })
     .getByRole("button", { name: "workspace", exact: true });
   await expect(header).toBeVisible();
+  // Its chevron collapses it; its name would open it, as another project.
   if ((await header.getAttribute("aria-expanded")) === "true")
-    await header.click();
+    await page.getByRole("button", { name: "Collapse project workspace", exact: true }).click();
   await expect(header).toHaveAttribute("aria-expanded", "false");
   // Desktop's Auto for new chats covers chats Desktop starts. A chat another
   // client starts (the TUI, a phone, the API) stays in Review.
@@ -6783,7 +6786,7 @@ test("workspace panes stay beside chat, resize, preserve drafts and adapt to a s
     "A workspace beside my conversation",
   );
   await page
-    .getByRole("button", { name: "Show files panel", exact: true })
+    .getByRole("button", { name: "Show Files panel", exact: true })
     .click();
   await expect(page.locator(".file-preview .cm-content")).toContainText(
     "A draft kept while reviewing",

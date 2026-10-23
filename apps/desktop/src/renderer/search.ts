@@ -11,7 +11,9 @@ export interface SearchEntry {
   hint?: string;
   disabled?: boolean;
   destination?: "settings";
-  action: () => unknown;
+  /** `keep`: the reader asked for a tab of its own (Command/Control with the
+   * pick, or a middle-click); only chats read it. */
+  action: (open?: { keep?: boolean }) => unknown;
 }
 
 function normalizeSearch(text: string) {
@@ -27,7 +29,27 @@ function normalizeSearch(text: string) {
     .trim();
 }
 
-/** Exact titles first, then prefixes, words, aliases and compact fuzzy matches. */
+/** Scripts written without spaces between words: in them any letter can
+ * begin one, as 浏览器 does in 智能体浏览器控制. */
+const unspaced =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
+/** Where `phrase` starts a word of `title`, as "term" does in "Toggle
+ * terminal" (and not in "Deterministic"). Next to a script written without
+ * spaces, every position counts as a word's start. */
+function atWordStart(title: string, phrase: string) {
+  const first = [...phrase][0] ?? "";
+  for (let at = title.indexOf(phrase); at >= 0; at = title.indexOf(phrase, at + 1)) {
+    const before = [...title.slice(0, at)].at(-1);
+    if (!before || !/[\p{L}\p{N}]/u.test(before) || unspaced.test(before) || unspaced.test(first))
+      return true;
+  }
+  return false;
+}
+
+/** Exact titles first, then prefixes, words, aliases and compact fuzzy
+ * matches. A match inside a word counts for little, less than an alias:
+ * "term" is about "Terminal", hardly about "Deterministic". */
 function searchScore(entry: SearchEntry, query: string) {
   const title = normalizeSearch(entry.name);
   const words = normalizeSearch(query).split(" ").filter(Boolean);
@@ -39,15 +61,10 @@ function searchScore(entry: SearchEntry, query: string) {
       .filter(Boolean)
       .join(" "),
   );
-  let score = title.startsWith(phrase)
-    ? 500
-    : title.includes(phrase)
-      ? 350
-      : 0;
+  let score = title.startsWith(phrase) ? 500 : atWordStart(title, phrase) ? 350 : 0;
   for (const word of words) {
-    if (title.split(/[^\p{L}\p{N}]+/u).some((part) => part.startsWith(word)))
-      score += 100;
-    else if (title.includes(word)) score += 60;
+    if (atWordStart(title, word)) score += 100;
+    else if (title.includes(word)) score += 10;
     else if (content.includes(word)) score += 20;
     else {
       // Keep fuzzy matching within a title word so unrelated long descriptions
@@ -67,6 +84,9 @@ function searchScore(entry: SearchEntry, query: string) {
   return score;
 }
 
+/** Settings and their shortcuts give way to an action that matches as well. */
+const settingGroups = new Set(["Settings", "Shortcuts"]);
+
 export function searchEntries(entries: SearchEntry[], query: string) {
   const seen = new Set<string>();
   return entries
@@ -85,9 +105,33 @@ export function searchEntries(entries: SearchEntry[], query: string) {
       (a, b) =>
         b.score - a.score ||
         Number(!!a.entry.disabled) - Number(!!b.entry.disabled) ||
+        Number(settingGroups.has(a.entry.group)) - Number(settingGroups.has(b.entry.group)) ||
         a.index - b.index,
     )
     .map(({ entry }) => entry);
+}
+
+/** Words that say a search is about keys: whole, and ones a query may stop
+ * short of, beside `names` (the interface's own words for shortcuts, in its
+ * language). Command and Control read as "mod" (`normalizeSearch`). */
+const keyWords = ["key", "keys", "mod", "shift", "alt", "binding"];
+const keyStems = ["shortcut", "shortcuts", "keyboard", "hotkey", "keybind", "keybinding"];
+
+/**
+ * Whether `query` asks about keys or shortcuts: it names them ("shortcut",
+ * "key", a modifier such as ⌘ or Ctrl, or the start of such a word in
+ * `names`). Only then does Search list a "Shortcut: …" entry beside the
+ * action it belongs to, which shows its key anyway.
+ */
+export function asksForKeys(query: string, names: readonly string[] = []) {
+  const split = (text: string) => normalizeSearch(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const words = split(query);
+  const stems = [...keyStems, ...names.flatMap(split)];
+  return words.some(
+    (word) =>
+      keyWords.includes(word) ||
+      (word.length >= 3 && stems.some((stem) => stem.startsWith(word))),
+  );
 }
 
 /**

@@ -485,13 +485,18 @@ export function BrowserPanel(props: {
             </div>
           )}
         </For>
+        {/* After the tabs it is a "+" of its own row, under the side panel's
+            "+"; with no tab yet it says what it opens. */}
         <button
           class="browser-new"
-          aria-label={t("New browser tab")}
+          classList={{ labelled: !browser().tabs.length }}
+          aria-label={browser().tabs.length ? t("New browser tab") : undefined}
+          title={t("New browser tab")}
           disabled={!state.connection}
           onClick={() => void command({ type: "tabs.open" })}
         >
           <Icon name="plus" size="sm" />
+          <Show when={!browser().tabs.length}>{t("New browser tab")}</Show>
         </button>
       </div>
       <form
@@ -594,8 +599,9 @@ export function BrowserPanel(props: {
                 ? t("Open a tab or ask Haarness to browse.")
                 : t("Open a tab now. It will follow you into your next chat.")}
             </p>
+            {/* Without a chat, the line above already says tabs follow you. */}
             <small>
-              {state.selected ? t("Each chat has its own browser.") : t("Tabs follow you into your next chat.")}{" "}
+              {state.selected ? t("Each chat has its own browser.") + " " : ""}
               {t("Localhost uses this project’s server.")}
             </small>
           </div>

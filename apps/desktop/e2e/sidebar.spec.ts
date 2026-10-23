@@ -100,7 +100,6 @@ async function pin(name: string, pinned = true) {
 }
 async function layout(name: "By project" | "In one list") {
   await page.getByRole("button", { name: "Project list options", exact: true }).click();
-  await item("Organize sidebar").click();
   await page.getByRole("menuitemradio", { name, exact: true }).click();
 }
 async function reload() {
@@ -284,7 +283,10 @@ test("sidebar direct Electron input reorders sessions from text, status and arch
       ['button[aria-label="Archive chat One"]', "Two", ["Three", "Two", "One"]],
     ] as const) {
       const row = list.locator(".session-row").filter({ has: page.getByRole("button", { name: "One", exact: true }) });
-      await electronDrag(row.locator(handle), list.getByRole("button", { name: destination, exact: true }));
+      // The chip under the pointer carries the title alone, not the row's age.
+      await electronDrag(row.locator(handle), list.getByRole("button", { name: destination, exact: true }), {
+        inspect: () => expect(page.locator(".order-drag-preview")).toHaveText("One"),
+      });
       await expect(list.locator(".session-title")).toHaveText([...expected]);
       await expect(list.getByRole("button", { name: "Two", exact: true })).toHaveAttribute("aria-current", "true");
       await expect(page.locator(".order-drag-preview, [data-order-source], [data-drop-position]")).toHaveCount(0);
@@ -317,9 +319,10 @@ test("sidebar direct Electron input cancellation and tiny movements preserve cli
 
 test("sidebar shared pointer sorting reorders conversation and panel tabs using direct Electron input", async () => {
   const alpha = await open("alpha");
+  // Double-clicked, each chat keeps a tab of its own (a plain click previews).
   for (const title of ["One", "Two", "Three"]) {
     await alpha.createThread({ title, provider: "echo", model: "echo-1" });
-    await project("alpha").getByRole("button", { name: title, exact: true }).click();
+    await project("alpha").getByRole("button", { name: title, exact: true }).dblclick();
   }
   const tabs = page.locator(".workspace-tabs [role=tab]");
   await expect(tabs).toHaveText(["One", "Two", "Three"]);
@@ -331,16 +334,16 @@ test("sidebar shared pointer sorting reorders conversation and panel tabs using 
     await page.getByRole("button", { name: "Open panel", exact: true }).click();
     await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
   }
-  await electronDrag(page.getByRole("button", { name: "Show diff panel", exact: true }), page.getByRole("button", { name: "Show files panel", exact: true }));
+  await electronDrag(page.getByRole("button", { name: "Show Review panel", exact: true }), page.getByRole("button", { name: "Show Files panel", exact: true }));
   await expect(page.locator(".dock-tab > button:first-child")).toHaveText(["Review", "Files"]);
   await expect(page.locator(".review")).toBeVisible();
   await reload();
   // Reopen in a different sequence to verify the saved order, without
   // asserting that open tabs themselves survive a restart.
   for (const title of ["Two", "One", "Three"])
-    await project("alpha").getByRole("button", { name: title, exact: true }).click();
+    await project("alpha").getByRole("button", { name: title, exact: true }).dblclick();
   await expect(tabs).toHaveText(["Three", "One", "Two"]);
-  await page.getByRole("button", { name: "Close diff panel", exact: true }).click();
+  await page.getByRole("button", { name: "Close Review panel", exact: true }).click();
   for (const name of ["Files", "Review"]) {
     await page.getByRole("button", { name: "Open panel", exact: true }).click();
     await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
@@ -569,8 +572,8 @@ test("sidebar section menus rename, merge, cancel removal, and retain project me
   await createSection("gamma", "Personal");
   await pin("beta");
   await options("alpha");
-  await item("Edit").click();
-  const edit = page.getByRole("dialog", { name: "Edit project", exact: true });
+  await item("Rename…").click();
+  const edit = page.getByRole("dialog", { name: "Rename project", exact: true });
   await edit.getByLabel("Name", { exact: true }).fill("Client app");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
   await section("Clients").getByRole("button", { name: "Section options for Clients", exact: true }).click();
@@ -755,6 +758,50 @@ for (const gesture of ["keyboard", "drag"] as const) {
   });
 }
 
+/** Whether `locator` is wholly inside the sidebar's scrolled list. */
+async function inList(locator: Locator) {
+  const list = (await page.locator(".sidebar-lists").boundingBox())!;
+  const box = await locator.boundingBox();
+  return !!box && box.y >= list.y - 1 && box.y + box.height <= list.y + list.height + 1;
+}
+
+test("sidebar a project's name opens it with its chats shown; the chosen chat's row and its project's heading stay in view", async () => {
+  const alpha = await open("alpha");
+  for (let i = 1; i <= 40; i++) await alpha.createThread({ title: `Alpha ${i}`, provider: "echo", model: "echo-1" });
+  const beta = await open("beta");
+  await beta.createThread({ title: "Beta chat", provider: "echo", model: "echo-1" });
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "true");
+  // Another project's name opens it and keeps its list shown.
+  await heading("alpha").click();
+  await expect(project("alpha")).toHaveClass(/current/);
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  // The current project's name shows and hides its list.
+  await heading("alpha").click();
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "false");
+  await heading("alpha").click();
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "true");
+  // A chat chosen in Search far down the list comes into view, below its
+  // project's heading, which stays at the top of the list.
+  const oldest = project("alpha").getByRole("button", { name: "Alpha 1", exact: true });
+  expect(await inList(oldest)).toBe(false);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Alpha 1");
+  await page.keyboard.press("Enter");
+  await expect(oldest).toHaveAttribute("aria-current", "true");
+  await expect.poll(() => inList(oldest)).toBe(true);
+  await expect.poll(() => inList(heading("alpha"))).toBe(true);
+  const top = (await heading("alpha").boundingBox())!;
+  expect((await oldest.boundingBox())!.y).toBeGreaterThanOrEqual(top.y + top.height - 1);
+  // Another project's chat, chosen from Search: its row comes into view too.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Beta chat");
+  await page.keyboard.press("Enter");
+  const other = project("beta").getByRole("button", { name: "Beta chat", exact: true });
+  await expect(other).toHaveAttribute("aria-current", "true");
+  await expect.poll(() => inList(other)).toBe(true);
+});
+
 test("sidebar Alt and an arrow step the chats the sidebar shows; on a focused row they still move it", async () => {
   const alpha = await open("alpha");
   for (const title of ["One", "Two", "Three"])
@@ -818,12 +865,149 @@ test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the 
   await expect(row).toHaveAttribute("aria-current", "true");
   await page.keyboard.press("Enter");
   await expect(other).toHaveAttribute("aria-current", "true");
+  // Opened with Enter, the row keeps the keyboard.
+  await expect(other).toBeFocused();
   await other.focus();
   await page.keyboard.press("ArrowDown");
   await expect(row).toBeFocused();
   await page.keyboard.press("Alt+ArrowUp");
   await expect(project("alpha").locator(".session-title")).toHaveText(["Focus me", "Other chat"]);
   await expect(row).toBeFocused();
+});
+
+test("sidebar chat rows are one tab stop, and Delete on a row archives it as its button does", async () => {
+  const alpha = await open("alpha");
+  for (const title of ["Keep one", "Archive me", "Keep two"])
+    await alpha.createThread({ title, provider: "echo", model: "echo-1" });
+  const row = (title: string) => project("alpha").getByRole("button", { name: title, exact: true });
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
+  await row("Keep two").click();
+  await expect(row("Keep two")).toHaveAttribute("aria-current", "true");
+  // A click puts the keyboard in the chat's message box, so the next key
+  // edits the message and never archives the row.
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await expect(composer).toBeFocused();
+  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Delete");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
+  // Tab reaches the open chat's row and then leaves the list: no other row
+  // and no archive button is a stop of its own.
+  await expect(project("alpha").locator(".session-row > button[tabindex='0']")).toHaveCount(1);
+  await expect(project("alpha").locator(".session-row > .icon-button:not([tabindex='-1'])")).toHaveCount(0);
+  await project("alpha").getByRole("button", { name: "Project options for alpha", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(row("Keep two")).toBeFocused();
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => !!document.activeElement?.closest(".session-row"))).toBe(false);
+  // Nor does Delete on a row that holds the focus only from a press.
+  await row("Archive me").evaluate(element => {
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    element.focus();
+  });
+  await page.keyboard.press("Delete");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
+  // The row last walked to is the stop from then on.
+  await row("Keep two").focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(row("Archive me")).toBeFocused();
+  await expect(row("Archive me")).toHaveAttribute("tabindex", "0");
+  await expect(row("Keep two")).toHaveAttribute("tabindex", "-1");
+  // Delete archives it and leaves the keyboard on the row below; the open
+  // chat stays open.
+  await page.keyboard.press("Delete");
+  await expect(row("Archive me")).toHaveCount(0);
+  await expect(row("Keep one")).toBeFocused();
+  await expect(row("Keep two")).toHaveAttribute("aria-current", "true");
+  await expect.poll(async () => (await alpha.listThreads({ archived: true })).find(thread => thread.title === "Archive me")?.archived).toBe(true);
+  // Command+Backspace (Control+Backspace elsewhere) on the open chat's row
+  // archives it too; the chat stays on screen with its Restore line. A bare
+  // Backspace does not.
+  await row("Keep two").focus();
+  await page.keyboard.press("Backspace");
+  await expect(row("Keep two")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+Backspace");
+  await expect(row("Keep two")).toHaveCount(0);
+  await expect(page.locator(".archived-notice")).toContainText("This chat is archived.");
+  await expect(row("Keep one")).toBeFocused();
+  // Focus sidebar chosen in Search with the pointer still shows the ring.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Focus sidebar");
+  await page.getByRole("option", { name: "Focus sidebar", exact: true }).click();
+  await expect(row("Keep one")).toBeFocused();
+  expect(await row("Keep one").evaluate(element => element.matches(":focus-visible") && !document.documentElement.hasAttribute("data-pointer-focus"))).toBe(true);
+});
+
+test("sidebar the toggle keeps its place, and a side panel without room takes the sidebar's place before the chat's", async () => {
+  const alpha = await open("alpha");
+  await alpha.createThread({ title: "Roomy", provider: "echo", model: "echo-1" });
+  await project("alpha").getByRole("button", { name: "Roomy", exact: true }).click();
+  // The toggle does not move under the pointer, either way.
+  const hide = page.getByRole("button", { name: "Hide sidebar", exact: true });
+  const shown = (await hide.boundingBox())!;
+  await hide.click();
+  const show = page.getByRole("button", { name: "Show sidebar", exact: true });
+  const hidden = (await show.boundingBox())!;
+  expect([hidden.x, hidden.y]).toEqual([shown.x, shown.y]);
+  await show.click();
+  await expect(page.locator(".sidebar")).toBeVisible();
+  const size = await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const size = win.getContentSize();
+    win.setContentSize(1000, 700);
+    return size;
+  });
+  try {
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    const workbench = page.locator(".workbench");
+    await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+    await page.getByRole("button", { name: "Open Files", exact: true }).click();
+    // The sidebar steps aside, so the chat and the panel stand side by side.
+    await expect(page.locator(".sidebar")).toBeHidden();
+    await expect(page.getByRole("button", { name: "Show sidebar", exact: true })).toBeVisible();
+    await expect(workbench).not.toHaveClass(/dock-over/);
+    await expect(composer).toBeVisible();
+    await expect(page.getByRole("button", { name: "Return to chat", exact: true })).toHaveCount(0);
+    // Asked back, the sidebar stays; the panel then lies over the chat and
+    // its strip leads with the way back to it.
+    await page.getByRole("button", { name: "Show sidebar", exact: true }).click();
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await expect(workbench).toHaveClass(/dock-over/);
+    await expect(composer).toBeHidden();
+    await page.getByRole("button", { name: "Return to chat", exact: true }).click();
+    await expect(page.locator(".side-panel")).toBeHidden();
+    await expect(composer).toBeVisible();
+    await expect(composer).toBeFocused();
+    await expect(page.locator(".sidebar")).toBeVisible();
+  } finally {
+    await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(size[0], size[1]), size);
+  }
+});
+
+test("sidebar Search leads with New chat and Open project, ranks word starts first and lists shortcuts only for key searches", async () => {
+  await open("alpha");
+  const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
+  const options = page.getByRole("dialog", { name: "Universal search" }).getByRole("option");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(options.first()).toHaveAccessibleName("New chat");
+  await expect(options.nth(1)).toHaveAccessibleName("Open project");
+  // "term" is about the terminal, not "Deterministic test provider".
+  await search.fill("term");
+  const names = async () => (await options.evaluateAll(items => items.map(item => item.getAttribute("aria-label"))));
+  await expect.poll(async () => (await names()).indexOf("Toggle terminal")).toBeGreaterThanOrEqual(0);
+  // A match inside a word comes last in its group, after "Terminal text size".
+  const terms = await names();
+  expect(terms.indexOf("Terminal text size")).toBeLessThan(terms.indexOf("Deterministic test provider"));
+  expect(await page.getByRole("option", { name: "Deterministic test provider", exact: true })
+    .evaluate(option => !option.nextElementSibling || option.nextElementSibling.matches(".palette-group"))).toBe(true);
+  expect(terms.some(name => name?.startsWith("Shortcut:"))).toBe(false);
+  // The action, which shows its key, without a "Shortcut: New chat" beside it…
+  await search.fill("new chat");
+  await expect(page.getByRole("option", { name: "New chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "Shortcut: New chat", exact: true })).toHaveCount(0);
+  // …until the search is about keys.
+  await search.fill("shortcut new chat");
+  await expect(page.getByRole("option", { name: "Shortcut: New chat", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
 });
 
 test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {
@@ -864,6 +1048,29 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
   const quiet = project("alpha").getByRole("button", { name: "Quiet chat", exact: true });
   await expect(quiet.locator(".session-age")).toHaveText("now");
   await expect(quiet.locator(".session-age")).toHaveAttribute("aria-hidden", "true");
+  // The archive button keeps no room until the row is hovered; then it takes
+  // the age's place and the title stays where it was.
+  const title = quiet.locator(".session-title");
+  const before = (await title.boundingBox())!;
+  const archive = project("alpha").getByRole("button", { name: "Archive chat Quiet chat", exact: true });
+  await quiet.hover();
+  await expect(archive).toHaveCSS("opacity", "1");
+  await expect(quiet.locator(".session-age")).toHaveCSS("visibility", "hidden");
+  // Leaving, it comes back only once the button has faded out, so the two
+  // never show at once.
+  await page.mouse.move(900, 400);
+  const fade = await quiet.locator(".session-age").evaluate(element => {
+    const button = getComputedStyle(element.closest(".session-row")!.querySelector(".icon-button")!);
+    const opacity = button.transitionProperty.split(", ").indexOf("opacity");
+    return [getComputedStyle(element).transitionDelay, button.transitionDuration.split(", ")[opacity]];
+  });
+  expect(fade[0]).toBe(fade[1]);
+  expect(fade[0]).not.toBe("0s");
+  expect(await title.boundingBox()).toEqual(before);
+  const age = (await quiet.locator(".session-age").boundingBox())!;
+  const button = (await archive.boundingBox())!;
+  expect(button.x).toBeLessThanOrEqual(age.x + 1);
+  expect(button.x + button.width).toBeGreaterThanOrEqual(age.x + age.width - 1);
   const run = await alpha.createThread({
     title: "Scheduled run", provider: "echo", model: "echo-1",
     schedule: { id: crypto.randomUUID(), name: "Nightly" },
@@ -882,6 +1089,21 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
     .getByRole("button", { name: de["Archive chats"], exact: true }).click();
   await expect(page.locator(".toast")).toHaveText(de["Archived {count} chats"].replace("{count}", "2"));
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  // With every chat archived, the project says so and how many it archived;
+  // the count opens Search on just those chats.
+  const empty = project("alpha").locator(".sessions-empty");
+  await expect(empty).toHaveText("No open chats · 2 archived");
+  await empty.getByRole("button", { name: "2 archived", exact: true }).click();
+  const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
+  await expect(search).toHaveAttribute("placeholder", "Search archived chats in alpha…");
+  const options = page.getByRole("dialog", { name: "Universal search" }).getByRole("option");
+  await expect(options).toHaveCount(2);
+  for (const name of ["Quiet chat", "Scheduled run"])
+    await expect(page.getByRole("option", { name, exact: true })).toBeVisible();
+  await search.fill("quiet");
+  await expect(options).toHaveCount(1);
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".archived-notice")).toContainText("This chat is archived.");
 });
 
 test("sidebar Select chats archives several chats at once, notes a chat still working, and Escape leaves it", async () => {
