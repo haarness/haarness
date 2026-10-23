@@ -132,6 +132,28 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
  * shows the file of the project it names, or a placeholder while it is read
  * (project-images.ts).
  */
+/**
+ * A task list's boxes (`- [x] done`), the one input a reply keeps: each is
+ * replaced by a new checkbox that only says whether it is ticked and cannot
+ * be changed. Every other input the reply wrote is dropped.
+ */
+function taskBoxes(fragment: DocumentFragment) {
+  for (const input of Array.from(fragment.querySelectorAll("input"))) {
+    const item = input.parentElement?.closest("li");
+    if (input.getAttribute("type")?.toLowerCase() !== "checkbox" || !item) {
+      input.remove();
+      continue;
+    }
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.disabled = true;
+    box.checked = input.hasAttribute("checked");
+    if (box.checked) box.setAttribute("checked", "");
+    box.className = "task-box";
+    item.classList.add("task-item");
+    input.replaceWith(box);
+  }
+}
 export function createMarkdownDOM(
   host: HTMLElement,
   images?: {
@@ -165,9 +187,10 @@ export function createMarkdownDOM(
       if (block.html === html) return;
       const fragment = purifier.sanitize(html, {
         RETURN_DOM_FRAGMENT: true,
-        FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
+        FORBID_TAGS: ["style", "form", "button", "iframe"],
         FORBID_ATTR: ["style"],
       });
+      taskBoxes(fragment);
       const project = images?.project;
       if (project)
         holdProjectImages(
