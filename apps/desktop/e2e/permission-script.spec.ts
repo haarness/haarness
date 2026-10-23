@@ -241,13 +241,19 @@ test("a secret-named file, or a command that runs no script, shows no toggle", a
   }
 });
 
-test("a card that comes while the message box has the keyboard takes it, and gives it back once answered", async () => {
+test("a card never takes the keyboard from the message box: typing as it comes answers nothing", async () => {
   const box = page.locator("[data-composer-input]");
   await box.fill(" !tool bash " + JSON.stringify({ command: "printf keyboard > keyboard.txt" }));
   await box.press("Enter");
+  // Typing straight on, as the card comes: spaces, Enter and all.
+  await page.keyboard.type("also check tests");
   await expect(card()).toBeVisible();
-  const once = card().getByRole("button", { name: "Allow once", exact: true });
-  await expect(once).toBeFocused();
+  await page.keyboard.type(" and then the docs");
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue("also check tests and then the docs");
+  await page.keyboard.press(" ");
+  await expect(box).toHaveValue("also check tests and then the docs ");
+  expect((await api("listPermissions")).length).toBe(1);
   // Deny, Always allow and Allow once share one line.
   const tops = await Promise.all(
     ["Deny", "Always allow", "Allow once"].map(async (name) =>
@@ -255,24 +261,21 @@ test("a card that comes while the message box has the keyboard takes it, and giv
     ),
   );
   expect(new Set(tops).size).toBe(1);
-  // A key pressed as it came is not an answer; once that moment has passed,
-  // Enter answers, and the keyboard goes back to the message box.
-  await expect(card()).not.toHaveAttribute("data-arming");
+  // Enter sends the sentence as the person's own message; the card waits.
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("");
+  await page.waitForTimeout(300);
+  expect((await api("listPermissions")).length).toBe(1);
+  await expect(card()).toBeVisible();
+  // Its answers are a Shift+Tab away; one chosen there answers it, and the
+  // keyboard goes back to the message box.
+  await page.keyboard.press("Shift+Tab");
+  await expect(card().getByRole("button", { name: "Allow once", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
   await idle();
   await expect(card()).toHaveCount(0);
   await expect(box).toBeFocused();
   expect(await readFile(join(project, "keyboard.txt"), "utf8")).toBe("keyboard");
-  // A draft in the message box keeps the keyboard where it is.
-  await box.fill(" !tool bash " + JSON.stringify({ command: "printf draft > draft.txt" }));
-  await box.press("Enter");
-  await box.type("still typing");
-  await expect(card()).toBeVisible();
-  await expect(box).toBeFocused();
-  await expect(box).toHaveValue("still typing");
-  await card().getByRole("button", { name: "Deny", exact: true }).click();
-  await idle();
-  await box.fill("");
 });
 
 test("under the default rules the outside folder's card offers the script that runs there", async () => {
