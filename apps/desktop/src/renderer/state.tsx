@@ -1756,9 +1756,14 @@ function createApp(saved?: Preferences) {
   async function chooseProjectSession(project: string, thread: string, tab?: TabOpen) {
     const request = ++navigation;
     if (keepNext !== thread) keepNext = "";
-    // Another project shows the loading mark while it opens; a chat of the
-    // project already open loads in place, its tabs staying on screen.
-    if (!projectOpen(project)) set("openingChat", request);
+    // A chat of the project already open is chosen at once, in place: its
+    // tabs stay on screen, and the message box waits for it as for a tab
+    // chosen. Another project shows the loading mark while it opens.
+    if (projectOpen(project)) {
+      await Promise.all([expandLocation(project, true), choose(thread, "chat", { tab })]);
+      return;
+    }
+    set("openingChat", request);
     try {
       if (!(await activateProject(project)) || navigation !== request) return;
       await expandLocation(project, true);
