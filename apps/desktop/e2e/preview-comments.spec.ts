@@ -69,7 +69,7 @@ async function select(from: string, to = from, end = true) {
 
 async function showFiles() {
   if (await button("Show side panel").isVisible()) await button("Show side panel").click();
-  if (await button("Show files panel").isVisible()) await button("Show files panel").click();
+  if (await button("Show Files panel").isVisible()) await button("Show Files panel").click();
   else if (!(await page.locator(".explorer").isVisible())) {
     await button("Open panel").click();
     await button("Open Files").click();

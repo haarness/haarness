@@ -252,6 +252,16 @@ test("new-chat screen opens and navigates real browser tabs without creating a c
   await expect(
     panel().getByRole("button", { name: "Go", exact: true }),
   ).toBeEnabled();
+  // With no tab yet, the strip's one button says what it opens, and the
+  // empty page says each thing once.
+  await expect(
+    panel().getByRole("button", { name: "New browser tab", exact: true }),
+  ).toHaveText("New browser tab");
+  await expect(panel().locator(".browser-empty")).toHaveText(
+    "Browse alongside your work" +
+      "Open a tab now. It will follow you into your next chat." +
+      "Localhost uses this project’s server.",
+  );
   await panel()
     .getByRole("button", { name: "New browser tab", exact: true })
     .click();

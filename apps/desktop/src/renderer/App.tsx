@@ -1602,7 +1602,7 @@ export function App() {
                       <button
                         data-cycle-tab={tab}
                         aria-current={tab === dock() ? "true" : undefined}
-                        aria-label={t("Show {name} panel", { name: tab })}
+                        aria-label={t("Show {name} panel", { name: t(dockNames[tab]) })}
                         aria-description={
                           tab === "browser" && browserMoved()
                             ? t("The agent opened another page")
@@ -1618,7 +1618,7 @@ export function App() {
                       </button>
                       <Button
                         icon="close"
-                        label={t("Close {name} panel", { name: tab })}
+                        label={t("Close {name} panel", { name: t(dockNames[tab]) })}
                         onClick={() => closeDock(tab)}
                       />
                     </div>
