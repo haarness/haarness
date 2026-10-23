@@ -971,11 +971,11 @@ dialog .notifications {
   overflow-wrap: anywhere;
 }
 .settings-current-project-path {
+  display: flex;
+  width: fit-content;
   margin: 0 0 var(--s1);
   font-size: var(--ui);
   color: var(--muted);
-  overflow-wrap: anywhere;
-  user-select: text;
 }
 .settings-current-project > button {
   flex: none;
@@ -1006,6 +1006,41 @@ dialog .notifications {
 }
 .setting-row strong + .setting-tag {
   margin-inline-start: var(--s2);
+}
+/* "Current" beside the server or computer this window shows. */
+.badge.current-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--primary);
+}
+/* A path keeps its last folder whole and gives way in the middle. */
+.path-text {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: bottom;
+  white-space: nowrap;
+  user-select: text;
+}
+.path-text-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.path-text-tail {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.setting-row .path-text {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 2px;
+  font-size: var(--ui);
+  color: var(--muted);
 }
 .setting-row p {
   font-size: var(--ui);
@@ -1802,8 +1837,14 @@ p.settings-computers-note {
   min-width: 0;
   margin-inline-end: var(--s2);
 }
+.computer-row-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
 .computer-row strong {
   display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

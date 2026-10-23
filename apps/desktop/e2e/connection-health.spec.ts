@@ -112,7 +112,7 @@ async function addServer(name: string, url: string, token: string) {
   await form.getByLabel("Password", { exact: true }).fill(token);
   await form.getByRole("textbox", { name: "Name", exact: true }).fill(name);
   await form.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(pane.locator(".setting-row").filter({ hasText: name })).toContainText("Selected");
+  await expect(pane.locator(".setting-row").filter({ hasText: name }).locator(".current-tag")).toHaveText("Current");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   await page.getByRole("button", { name: "Close settings", exact: true }).click();
 }
