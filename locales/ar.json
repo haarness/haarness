@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "أرشفة المحادثة {title}",
   "Restore chat {title}": "استعادة المحادثة {title}",
   "Close chat tab": "إغلاق علامة تبويب المحادثة",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "علامة تبويب للمعاينة. تحل محلها المحادثة التالية التي تفتحها. انقر نقرًا مزدوجًا لإبقائها مفتوحة.",
   "Import chat archive": "استيراد أرشيف المحادثة",
   "Chat archive": "أرشيف المحادثة",
   "Chat archive imported": "تم استيراد أرشيف المحادثة",

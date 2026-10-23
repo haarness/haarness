@@ -11,7 +11,9 @@ export interface SearchEntry {
   hint?: string;
   disabled?: boolean;
   destination?: "settings";
-  action: () => unknown;
+  /** `keep`: the reader asked for a tab of its own (Command/Control with the
+   * pick, or a middle-click); only chats read it. */
+  action: (open?: { keep?: boolean }) => unknown;
 }
 
 function normalizeSearch(text: string) {

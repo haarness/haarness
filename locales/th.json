@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "เก็บถาวรแชท {title}",
   "Restore chat {title}": "กู้คืนแชท {title}",
   "Close chat tab": "ปิดแท็บแชท",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "แท็บแสดงตัวอย่าง แชทถัดไปที่คุณเปิดจะมาแทนที่ ดับเบิลคลิกเพื่อเปิดค้างไว้",
   "Import chat archive": "นำเข้าไฟล์เก็บถาวรของแชท",
   "Chat archive": "ไฟล์เก็บถาวรของแชท",
   "Chat archive imported": "นำเข้าไฟล์เก็บถาวรของแชทแล้ว",

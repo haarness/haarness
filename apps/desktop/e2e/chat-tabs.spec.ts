@@ -133,9 +133,11 @@ async function reload() {
 test("reloading the window keeps every open chat tab and the active one", async () => {
   const names = ["Reload one", "Reload two", "Reload three"];
   const ids: Record<string, string> = {};
+  // A double-click keeps each chat in a tab of its own (a plain click only
+  // previews it).
   for (const title of names) {
     ids[title] = (await client.createThread({ title, provider: "echo", model: "echo-1" })).id;
-    await sidebar().getByRole("button", { name: title, exact: true }).click();
+    await sidebar().getByRole("button", { name: title, exact: true }).dblclick();
   }
   const before = await tabs().allTextContents();
   expect(before.slice(-3)).toEqual(names);
@@ -161,7 +163,7 @@ test("archiving a chat closes its background tab, while the chat on screen stays
   const ids: Record<string, string> = {};
   for (const title of names) {
     ids[title] = (await client.createThread({ title, provider: "echo", model: "echo-1" })).id;
-    await sidebar().getByRole("button", { name: title, exact: true }).click();
+    await sidebar().getByRole("button", { name: title, exact: true }).dblclick();
   }
   await page.getByRole("tab", { name: "Archive kept", exact: true }).click();
   const tab = (name: string) => page.getByRole("tab", { name, exact: true });
@@ -216,7 +218,7 @@ test("each project keeps its own tabs across a switch to another project and bac
   await expect(tabs()).toHaveCount(0);
   for (const title of ["Second one", "Second two"]) {
     await other.createThread({ title, provider: "echo", model: "echo-1" });
-    await second.getByRole("button", { name: title, exact: true }).click();
+    await second.getByRole("button", { name: title, exact: true }).dblclick();
   }
   await expect(tabs()).toHaveText(["Second one", "Second two"]);
   // Back in the first project, through one of its chats: all of its tabs return.
@@ -238,7 +240,7 @@ test("an agent's own chat keeps its tab when the server archives it as the agent
   const parent = await client.createThread({ title: "Agent parent", provider: "echo", model: "echo-1" });
   const witness = await client.createThread({ title: "Agent witness", provider: "echo", model: "echo-1" });
   for (const title of ["Agent witness", "Agent parent"])
-    await sidebar().getByRole("button", { name: title, exact: true }).click();
+    await sidebar().getByRole("button", { name: title, exact: true }).dblclick();
   await client.startTurn(parent.id, {
     requestId: randomUUID(),
     text: "!tool task " + JSON.stringify({ description: "Tab child", agent: "general", prompt: "child says hello" }),
@@ -259,5 +261,71 @@ test("an agent's own chat keeps its tab when the server archives it as the agent
   await reload();
   await expect(childTab).toHaveCount(1);
   await expect(page.getByRole("tab", { name: "Agent parent", exact: true })).toHaveAttribute("aria-selected", "true");
+  expect(errors).toEqual([]);
+});
+
+test("a plain click opens a preview tab that the next one replaces, until the chat is used or kept", async () => {
+  await sidebar().getByRole("button", { name: "Reload two", exact: true }).click();
+  await expect(sidebar()).toHaveClass(/current/);
+  for (const title of ["Preview one", "Preview two", "Preview three", "Preview four"])
+    await client.createThread({ title, provider: "echo", model: "echo-1" });
+  const row = (name: string) => sidebar().getByRole("button", { name, exact: true });
+  const tab = (name: string) => page.getByRole("tab", { name, exact: true });
+  const preview = page.locator(".workspace-tab.preview");
+  const kept = await tabs().allTextContents();
+  expect(kept.length).toBeGreaterThan(1);
+  await expect(preview).toHaveCount(0);
+  // The first plain click adds the preview; the next replaces it in place.
+  await row("Preview one").click();
+  await expect(tabs()).toHaveText([...kept, "Preview one"]);
+  await expect(preview).toHaveText("Preview one");
+  await expect(tab("Preview one")).toHaveAttribute("aria-description", /^Preview tab\./);
+  expect(await preview.locator("[role=tab]").evaluate(element => getComputedStyle(element).fontStyle)).toBe("italic");
+  await row("Preview two").click();
+  await expect(tabs()).toHaveText([...kept, "Preview two"]);
+  await expect(tab("Preview two")).toHaveAttribute("aria-selected", "true");
+  // Choosing another tab leaves the preview as it is.
+  await tab(kept[0]).click();
+  await expect(preview).toHaveText("Preview two");
+  await tab("Preview two").click();
+  // A draft typed there keeps it, so the next click opens another preview.
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.fill("a draft keeps this tab");
+  await expect(preview).toHaveCount(0);
+  await row("Preview three").click();
+  await expect(tabs()).toHaveText([...kept, "Preview two", "Preview three"]);
+  await expect(preview).toHaveText("Preview three");
+  // A middle-click opens a tab of its own beside the preview.
+  await row("Preview one").click({ button: "middle" });
+  await expect(tabs()).toHaveText([...kept, "Preview two", "Preview three", "Preview one"]);
+  await expect(tab("Preview one")).toHaveAttribute("aria-selected", "true");
+  await expect(preview).toHaveText("Preview three");
+  // Double-clicking the preview's tab keeps it.
+  await tab("Preview three").dblclick();
+  await expect(preview).toHaveCount(0);
+  // A Search pick previews; with Command (Control elsewhere) held it keeps a tab.
+  const mod = process.platform === "darwin" ? "Meta" : "Control";
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Preview four");
+  await page.keyboard.press("Enter");
+  await expect(preview).toHaveText("Preview four");
+  await expect(composer).toBeFocused();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Reload two");
+  await page.keyboard.press(`${mod}+Enter`);
+  await expect(tab("Reload two")).toHaveAttribute("aria-selected", "true");
+  await expect(preview).toHaveText("Preview four");
+  // A preview on screen comes back as the preview after a reload; one
+  // behind another tab does not come back.
+  await tab("Preview four").click();
+  const open = await tabs().allTextContents();
+  await reload();
+  await expect(tabs()).toHaveText(open);
+  await expect(preview).toHaveText("Preview four");
+  await tab("Preview two").click();
+  await reload();
+  await expect(tabs()).toHaveText(open.filter(name => name !== "Preview four"));
+  await expect(preview).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("");
   expect(errors).toEqual([]);
 });
