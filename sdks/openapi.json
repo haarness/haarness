@@ -4149,6 +4149,17 @@
               }
             ]
           },
+          "script": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PermissionScript",
+                "description": "For a `bash` request, the script its command runs (`bash x.sh`,\n`./x.sh`, `source x.sh`), read when it asked, for the person who\nanswers. Display only: it changes no pattern or rule."
+              }
+            ]
+          },
           "threadId": {
             "$ref": "#/components/schemas/ThreadId"
           },
@@ -4254,6 +4265,28 @@
           "reject"
         ],
         "type": "string"
+      },
+      "PermissionScript": {
+        "description": "The script file a shell command runs, as the server read it when the\ncommand asked for permission.",
+        "properties": {
+          "content": {
+            "description": "Its text: at most its first 30,000 bytes, with line breaks as `\\n`\nand other control characters (tabs aside) and bidirectional controls\nshown as `\ufffd`.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The file the command names, as an absolute path (links are followed\nto read it, not here).",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "The file goes on past `content`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
       },
       "PluginActionRequest": {
         "properties": {

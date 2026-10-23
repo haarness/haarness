@@ -486,6 +486,9 @@ impl App {
                             patterns: string_list(&event.payload["patterns"]),
                             always_patterns: string_list(&event.payload["alwaysPatterns"]),
                             detail: event.payload["detail"].clone(),
+                            script: serde_json::from_value(event.payload["script"].clone())
+                                .ok()
+                                .flatten(),
                             thread_id: event.thread_id.unwrap_or(self.thread.id),
                             root_thread_id: event.root_thread_id,
                             turn_id: event.turn_id,

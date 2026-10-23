@@ -4191,6 +4191,7 @@ impl AgentRuntime {
             }
             let always_rules = plan.always_rules();
             let card = plan.card_detail(&arguments, asked);
+            let script = plan.script(&arguments, &self.workspace);
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
@@ -4218,6 +4219,7 @@ impl AgentRuntime {
                     patterns: asked.clone(),
                     always_rules: always_rules.clone(),
                     detail: card.clone(),
+                    script: script.clone(),
                     thread_id,
                     root_thread_id: root,
                     turn_id: None,
@@ -4270,6 +4272,7 @@ impl AgentRuntime {
                     "explicit": explicit,
                     "operation": operation,
                     "detail": card,
+                    "script": script,
                     "permission": plan.permission,
                     "patterns": asked,
                     "alwaysPatterns": always_rules,
@@ -6061,6 +6064,8 @@ struct PendingPermission {
     /// Full rules an "always" answer persists, e.g. `bash:git status *`.
     always_rules: Vec<String>,
     detail: serde_json::Value,
+    /// The script a bash request's command runs, for the card.
+    script: Option<haarness_protocol::PermissionScript>,
     thread_id: ThreadId,
     root_thread_id: ThreadId,
     turn_id: Option<TurnId>,
@@ -6309,6 +6314,7 @@ impl PendingPermission {
             patterns: self.patterns.clone(),
             always_patterns: self.always_rules.clone(),
             detail: self.detail.clone(),
+            script: self.script.clone(),
             thread_id: self.thread_id,
             root_thread_id: Some(self.root_thread_id),
             turn_id: self.turn_id,
@@ -9406,6 +9412,9 @@ impl RunnerTask {
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
+        // Read before the gate is taken: a file read never holds up a mode
+        // change or another chat's answer.
+        let script = plan.script(detail, &self.workspace);
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         // A chat in Auto approves eligible requests once, without a prompt.
@@ -9463,6 +9472,7 @@ impl RunnerTask {
                     patterns: plan.patterns.clone(),
                     always_rules: always_rules.clone(),
                     detail: detail.clone(),
+                    script: script.clone(),
                     thread_id: self.thread.id,
                     root_thread_id: self.root_thread_id,
                     turn_id: Some(self.turn.id),
@@ -9495,6 +9505,7 @@ impl RunnerTask {
                 "explicit": explicit,
                 "operation": operation,
                 "detail": detail,
+                "script": script,
                 "permission": plan.permission,
                 "patterns": plan.patterns,
                 "alwaysPatterns": always_rules,
@@ -11877,6 +11888,24 @@ impl AskPlan {
     /// The tool's arguments as a prompt about `patterns` shows them: with
     /// the rule a command met because a limit stopped reading it
     /// (`__readLimit`, without its `bash:`), so the card can say why it asks.
+    /// For a bash request, the script its command runs, read now for the
+    /// person answering (`permissions::script`). Display only: it decides
+    /// nothing, and hooks, Auto and rules never see it.
+    fn script(
+        &self,
+        detail: &serde_json::Value,
+        workspace: &Path,
+    ) -> Option<haarness_protocol::PermissionScript> {
+        if self.permission != "bash" {
+            return None;
+        }
+        let command = detail.get("command")?.as_str()?;
+        let cwd = match detail.get("workdir").and_then(serde_json::Value::as_str) {
+            Some(workdir) => crate::permissions::resolve_permission_path(workspace, workdir),
+            None => workspace.to_path_buf(),
+        };
+        crate::permissions::script::bash_script(command, &cwd)
+    }
     fn card_detail(&self, detail: &serde_json::Value, patterns: &[String]) -> serde_json::Value {
         let mut detail = detail.clone();
         if let Some(rule) = patterns.iter().find_map(|pattern| self.read_limit(pattern))
