@@ -369,3 +369,305 @@ fn a_serve_whose_stderr_nobody_reads_keeps_answering() {
     drop(stop);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A server that `haarness run` starts from an agent's shell command leaves
+/// out Haarness's own markers (`AGENT`, `HAARNESS`, that command's
+/// `HAARNESS_SESSION_ID`, and `AI_AGENT=haarness`): it outlives the command
+/// and serves a person's own `!` commands and terminals, which stay unmarked.
+/// Its agent commands are marked again, and an outer agent's own `AI_AGENT`
+/// is kept.
+#[cfg(unix)]
+#[test]
+fn a_server_started_from_an_agent_s_command_leaves_haarness_s_markers_out() {
+    for (ai_agent, outer) in [("haarness", false), ("outer-agent", true)] {
+        let root = std::env::temp_dir().join(format!("haarness-serve-markers-{}", Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        let home = root.join("home");
+        for directory in [&workspace, &data, &home] {
+            std::fs::create_dir_all(directory).expect("create fixture directory");
+        }
+        let show = |name: &str| {
+            format!(
+                r#"printf '%s|%s|%s|%s' "${{AGENT-unset}}" "${{HAARNESS-unset}}" "${{AI_AGENT-unset}}" "${{HAARNESS_SESSION_ID-unset}}" > '{}'"#,
+                workspace.join(name).display()
+            )
+        };
+        let seen = |name: &str| {
+            let path = workspace.join(name);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !path.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{name} was not written"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::fs::read_to_string(path).expect("read what the command saw")
+        };
+        // As an agent's command that runs `haarness run` has it.
+        let haarness = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_haarness"));
+            command
+                .arg("--workspace")
+                .arg(&workspace)
+                .arg("--data-dir")
+                .arg(&data)
+                .current_dir(&workspace)
+                .env("HOME", &home)
+                .env("HAARNESS_HOME", &home)
+                .env("HAARNESS_TEST_PROVIDER", "1")
+                .env("AGENT", "1")
+                .env("HAARNESS", "1")
+                .env("AI_AGENT", ai_agent)
+                .env("HAARNESS_SESSION_ID", "another-chat")
+                .env_remove("HAARNESS_SERVER_TOKEN")
+                .env_remove("HAARNESS_SERVER_PASSWORD")
+                .stdin(Stdio::null());
+            command
+        };
+        let stop = Cleanup(|| {
+            let _ = haarness()
+                .args(["serve", "--stop"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
+        let prompt = format!(
+            "!tool bash {}",
+            serde_json::json!({ "command": show("model.txt") })
+        );
+        let run = haarness()
+            .args(["run", "--provider", "echo", "-m", "echo-1", &prompt])
+            .output()
+            .expect("launch haarness run");
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let daemon = recorded_server(&data);
+        let url = daemon["url"].as_str().expect("daemon url").to_owned();
+        let token = daemon["token"].as_str().expect("daemon token").to_owned();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let thread = runtime.block_on(async {
+            let client = reqwest::Client::new();
+            let threads: serde_json::Value = client
+                .get(format!("{url}/v1/threads"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("threads")
+                .json()
+                .await
+                .expect("threads JSON");
+            let thread = threads[0]["id"]
+                .as_str()
+                .expect("the run's chat")
+                .to_owned();
+            // The person's own `!` command and a terminal.
+            let person = client
+                .post(format!("{url}/v1/threads/{thread}/shell"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "command": show("person.txt") }))
+                .send()
+                .await
+                .expect("person command");
+            assert_eq!(person.status(), reqwest::StatusCode::ACCEPTED);
+            let terminal = client
+                .post(format!("{url}/v1/ptys"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "command": "sh", "args": ["-c", show("terminal.txt")] }))
+                .send()
+                .await
+                .expect("terminal");
+            assert!(terminal.status().is_success(), "{}", terminal.status());
+            thread
+        });
+        let kept = if outer { ai_agent } else { "unset" };
+        assert_eq!(seen("model.txt"), format!("1|1|{ai_agent}|{thread}"));
+        assert_eq!(seen("person.txt"), format!("unset|unset|{kept}|unset"));
+        assert_eq!(seen("terminal.txt"), format!("unset|unset|{kept}|unset"));
+        let logs = std::fs::read_dir(data.join("data/logs"))
+            .expect("logs folder")
+            .flatten()
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+            .collect::<String>();
+        let marked: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains("agent shell environment set"))
+            .collect();
+        assert_eq!(marked.len(), 1, "{marked:?}");
+        assert!(
+            marked[0].ends_with(&format!(
+                "thread_id={thread} outer_marker_kept={outer} stale_id_replaced=false"
+            )),
+            "{marked:?}"
+        );
+        drop(stop);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// A `haarness serve` an agent's shell command runs in the foreground keeps
+/// the environment it was started with, markers included, and a person's
+/// later TUI, Desktop or `run` can use it. A person's own `!` command and a
+/// terminal there still get none of Haarness's own markers, and its agent
+/// commands count `AI_AGENT=haarness` as Haarness's own, not an outer agent's.
+#[cfg(unix)]
+#[test]
+fn a_foreground_serve_from_an_agent_s_command_keeps_a_person_s_commands_unmarked() {
+    let root = std::env::temp_dir().join(format!("haarness-serve-own-markers-{}", Uuid::now_v7()));
+    let workspace = root.join("workspace");
+    let data = root.join("data");
+    let home = root.join("home");
+    for directory in [&workspace, &data, &home] {
+        std::fs::create_dir_all(directory).expect("create fixture directory");
+    }
+    let show = |name: &str| {
+        format!(
+            r#"printf '%s|%s|%s|%s' "${{AGENT-unset}}" "${{HAARNESS-unset}}" "${{AI_AGENT-unset}}" "${{HAARNESS_SESSION_ID-unset}}" > '{}'"#,
+            workspace.join(name).display()
+        )
+    };
+    let seen = |name: &str| {
+        let path = workspace.join(name);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{name} was not written"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::read_to_string(path).expect("read what the command saw")
+    };
+    let mut server = Command::new(env!("CARGO_BIN_EXE_haarness"))
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["serve", "--port", "0"])
+        .current_dir(&workspace)
+        .env("HOME", &home)
+        .env("HAARNESS_HOME", &home)
+        .env("HAARNESS_TEST_PROVIDER", "1")
+        .env("HAARNESS_SERVER_TOKEN", "foreground-token")
+        .env_remove("HAARNESS_SERVER_PASSWORD")
+        .env("AGENT", "1")
+        .env("HAARNESS", "1")
+        .env("AI_AGENT", "haarness")
+        .env("HAARNESS_SESSION_ID", "another-chat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("launch haarness serve");
+    let stdout = server.stdout.take().expect("serve stdout");
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = sender.send(line);
+        }
+    });
+    let url = loop {
+        let Ok(line) = lines.recv_timeout(std::time::Duration::from_secs(30)) else {
+            let _ = server.kill();
+            panic!("the foreground serve did not listen");
+        };
+        if let Some(url) = line.strip_prefix("Haarness server listening on ") {
+            break url.trim().to_owned();
+        }
+    };
+    let stop = Cleanup(|| {
+        let _ = server.kill();
+        let _ = server.wait();
+    });
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let thread = runtime.block_on(async {
+        let client = reqwest::Client::new();
+        let post = |path: String, body: serde_json::Value| {
+            client
+                .post(format!("{url}/v1{path}"))
+                .bearer_auth("foreground-token")
+                .json(&body)
+                .send()
+        };
+        let thread: serde_json::Value = post(
+            "/threads".into(),
+            serde_json::json!({ "provider": "echo", "model": "echo-1", "title": "Markers" }),
+        )
+        .await
+        .expect("create a chat")
+        .json()
+        .await
+        .expect("chat JSON");
+        let thread = thread["id"].as_str().expect("chat id").to_owned();
+        let prompt = format!(
+            "!tool bash {}",
+            serde_json::json!({ "command": show("model.txt") })
+        );
+        let turn = post(
+            format!("/threads/{thread}/turns"),
+            serde_json::json!({ "requestId": Uuid::now_v7().to_string(), "text": prompt }),
+        )
+        .await
+        .expect("start a turn");
+        assert!(turn.status().is_success(), "{}", turn.status());
+        thread
+    });
+    assert_eq!(seen("model.txt"), format!("1|1|haarness|{thread}"));
+    runtime.block_on(async {
+        let client = reqwest::Client::new();
+        // Once the model's turn is over, the person's own `!` command.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let person = client
+                .post(format!("{url}/v1/threads/{thread}/shell"))
+                .bearer_auth("foreground-token")
+                .json(&serde_json::json!({ "command": show("person.txt") }))
+                .send()
+                .await
+                .expect("person command");
+            if person.status() == reqwest::StatusCode::ACCEPTED {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{}", person.status());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let terminal = client
+            .post(format!("{url}/v1/ptys"))
+            .bearer_auth("foreground-token")
+            .json(&serde_json::json!({ "command": "sh", "args": ["-c", show("terminal.txt")] }))
+            .send()
+            .await
+            .expect("terminal");
+        assert!(terminal.status().is_success(), "{}", terminal.status());
+    });
+    assert_eq!(seen("person.txt"), "unset|unset|unset|unset");
+    assert_eq!(seen("terminal.txt"), "unset|unset|unset|unset");
+    let logs = std::fs::read_dir(data.join("data/logs"))
+        .expect("logs folder")
+        .flatten()
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+        .collect::<String>();
+    let marked: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("agent shell environment set"))
+        .collect();
+    assert_eq!(marked.len(), 1, "{marked:?}");
+    assert!(
+        marked[0].ends_with(&format!(
+            "thread_id={thread} outer_marker_kept=false stale_id_replaced=true"
+        )),
+        "{marked:?}"
+    );
+    drop(stop);
+    let _ = std::fs::remove_dir_all(root);
+}

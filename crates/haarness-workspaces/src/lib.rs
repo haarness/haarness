@@ -1213,8 +1213,14 @@ fn git_output<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Resul
     git_command(path, args).output().map_err(git_start_error)
 }
 
+/// Git and the hooks it runs (`post-checkout` for a new worktree) need none
+/// of the server's credentials or OpenTelemetry settings, nor a chat id it
+/// inherited (`private_env_names`).
 fn git_command<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Command {
     let mut command = Command::new("git");
+    for name in haarness_core::private_env_names() {
+        command.env_remove(name);
+    }
     command.arg("-C").arg(path).args(args);
     command
 }
@@ -1613,6 +1619,38 @@ fn io_error(error: impl std::fmt::Display) -> WorkspaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Git and what it runs (here an alias's shell, as a `post-checkout`
+    /// hook would be) get none of the server's private variables
+    /// (`private_env_names`). Run again in a process whose own environment
+    /// holds them.
+    #[cfg(unix)]
+    #[test]
+    fn git_and_what_it_runs_get_none_of_the_server_s_private_variables() {
+        const NAME: &str = "tests::git_and_what_it_runs_get_none_of_the_server_s_private_variables";
+        if std::env::var_os("HAARNESS_GIT_PRIVATE_FIXTURE").is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("HAARNESS_GIT_PRIVATE_FIXTURE", "1")
+                .env("HAARNESS_SESSION_ID", "outer-chat")
+                .env("HAARNESS_SERVER_TOKEN", "server-secret")
+                .env("OTEL_EXPORTER_OTLP_HEADERS", "collector-key")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("git got nothing private"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let alias = r#"alias.seen=!printf '%s|%s|%s|%s' "${HAARNESS_SESSION_ID-unset}" "${HAARNESS_SERVER_TOKEN-unset}" "${OTEL_EXPORTER_OTLP_HEADERS-unset}" "${HAARNESS_GIT_PRIVATE_FIXTURE-unset}""#;
+        let seen = git_checked(&std::env::temp_dir(), ["-c", alias, "seen"]).unwrap();
+        // The variable this process set for itself reaches the alias.
+        assert_eq!(seen, "unset|unset|unset|1");
+        println!("git got nothing private");
+    }
 
     #[test]
     fn startup_metadata_keeps_missing_workspaces_and_get_refreshes_the_selected_branch() {
