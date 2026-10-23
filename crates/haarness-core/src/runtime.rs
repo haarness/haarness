@@ -4464,20 +4464,34 @@ impl AgentRuntime {
                 });
             // A shell command's card, whatever it asks about (under the
             // default rules, a folder outside the project), shows the script
-            // the command runs, in Auto as in Review: read for the person the
-            // card is shown to. A request Auto may answer without a card is
-            // not read now; if the reviewer leaves it to a person, it is read
-            // then, before the card is shown.
-            let reads_script = shows_script(name, &arguments);
-            let mut shown = if reads_script
-                && (forced || explicit || !self.approval_modes.is_auto(thread_id).await)
-            {
-                let readable = script_readable(engine.clone(), None, &self.workspace);
-                script_for_person(&arguments, &self.workspace, readable).await
-            } else {
-                None
+            // the command runs, in Auto as in Review: read once for the person
+            // the card is shown to, and set before the card is listed. Read
+            // now when a card surely follows (not in Auto, a request only a
+            // person answers, an ask a person configured); in Auto, once the
+            // reviewer leaves the request to a person. A request Auto answers
+            // without a card reads nothing.
+            let script_card = shows_script(name, &arguments);
+            let read_script = || {
+                let (engine, arguments, workspace) = (&engine, &arguments, &self.workspace);
+                async move {
+                    if script_card {
+                        let readable = script_readable(engine.clone(), None, workspace);
+                        script_for_person(arguments, workspace, readable).await
+                    } else {
+                        None
+                    }
+                }
             };
-            let mut script = shown.as_ref().map(|shown| shown.script.clone());
+            let card_follows = forced
+                || explicit
+                || (review_on && agent_work && reviewer.is_none())
+                || !self.approval_modes.is_auto(thread_id).await;
+            let mut script_read = false;
+            let mut shown = None;
+            if script_card && card_follows {
+                shown = read_script().await;
+                script_read = true;
+            }
             let approval_gate = self.approval_modes.gate.lock().await;
             let auto = !forced && !explicit && self.approval_modes.is_auto(thread_id).await;
             if auto && (!review_on || !agent_work) {
@@ -4505,14 +4519,15 @@ impl AgentRuntime {
                     patterns: asked.clone(),
                     always_rules: always_rules.clone(),
                     detail: card.clone(),
-                    script: script.clone(),
+                    script: shown.as_ref().map(|shown| shown.script.clone()),
                     thread_id,
                     root_thread_id: root,
                     turn_id: None,
                     agent: Some(thread.agent.clone()),
                     created_at: Utc::now(),
                     sender,
-                    announced: !review_now,
+                    // Listed now only with what its card shows.
+                    announced: !review_now && (script_read || !script_card),
                     stage: if review_now {
                         ReviewStage::Reviewing
                     } else {
@@ -4541,6 +4556,7 @@ impl AgentRuntime {
                     reviewer,
                     &cancel,
                     &mut receiver,
+                    &read_script,
                 )
                 .await?
                 {
@@ -4559,19 +4575,19 @@ impl AgentRuntime {
                         blocked = Some(review);
                         continue;
                     }
-                    Reviewed::Show => {}
+                    Reviewed::Show(read) => shown = read,
                 }
-            }
-            // Shown to a person after all (the reviewer left it to them, or
-            // Auto went off meanwhile): the card carries the script.
-            if reads_script && shown.is_none() {
-                let readable = script_readable(engine.clone(), None, &self.workspace);
-                shown = script_for_person(&arguments, &self.workspace, readable).await;
-                script = shown.as_ref().map(|shown| shown.script.clone());
-                if let Some(mut entry) = self.permissions.get_mut(&id) {
-                    entry.script.clone_from(&script);
+            } else if script_card && !script_read {
+                // Auto went off before the gate: a card shows at once after
+                // all, listed once its script is read.
+                shown = read_script().await;
+                let gate = self.approval_modes.gate.lock().await;
+                if let Some(entry) = self.permissions.get_mut(&id) {
+                    announce(entry, shown.as_ref());
                 }
+                drop(gate);
             }
+            let script = shown.as_ref().map(|shown| shown.script.clone());
             let review = self
                 .permissions
                 .get(&id)
@@ -6808,15 +6824,17 @@ enum Reviewed {
     /// Refused by the reviewer.
     Blocked(haarness_protocol::PermissionReview),
     /// For a person: the entry is now announced, with the reviewer's note
-    /// when it asked.
-    Show,
+    /// when it asked and the script its command runs, both set before it is
+    /// listed.
+    Show(Option<crate::permissions::script::Shown>),
 }
 
 /// Reviews the registered, unannounced request `id` outside every lock, then
 /// settles it under the approval gate in the mode that holds then: only an
 /// Auto that still answers it acts on the verdict, and a chat that left Auto
 /// meanwhile gets its prompt, never an approval. Stop removes the request.
-async fn review_registered(
+#[allow(clippy::too_many_arguments)]
+async fn review_registered<Prepared>(
     permissions: &DashMap<String, PendingPermission>,
     approval_modes: &crate::approval_mode::ApprovalModes,
     id: &str,
@@ -6824,7 +6842,11 @@ async fn review_registered(
     reviewer: &crate::auto_review::Reviewer,
     cancel: &CancellationToken,
     receiver: &mut oneshot::Receiver<PermissionResolution>,
-) -> CoreResult<Reviewed> {
+    script: impl Fn() -> Prepared,
+) -> CoreResult<Reviewed>
+where
+    Prepared: std::future::Future<Output = Option<crate::permissions::script::Shown>>,
+{
     loop {
         let abort = permissions
             .get(id)
@@ -6841,6 +6863,12 @@ async fn review_registered(
             }
             () = abort.cancelled() => None,
             outcome = reviewer.review() => Some(outcome),
+        };
+        // A card may follow: what it shows is read first, with no lock held,
+        // so it is listed with its script or not at all.
+        let mut prepared = match outcome {
+            Some(crate::auto_review::Outcome::Allow | crate::auto_review::Outcome::Deny(_)) => None,
+            _ => Some(script().await),
         };
         let gate = approval_modes.gate.lock().await;
         let auto = approval_modes.is_auto(thread_id).await;
@@ -6873,11 +6901,41 @@ async fn review_registered(
             }
             _ => entry.stage = ReviewStage::Unreviewed,
         }
-        entry.announced = true;
-        drop(entry);
+        let shown = match prepared.take() {
+            Some(shown) => shown,
+            // Approved or blocked as the chat left Auto: the card shows after
+            // all, once its script is read.
+            None => {
+                drop(entry);
+                drop(gate);
+                let shown = script().await;
+                let gate = approval_modes.gate.lock().await;
+                let Some(entry) = permissions.get_mut(id) else {
+                    drop(gate);
+                    return receiver
+                        .await
+                        .map(Reviewed::Resolved)
+                        .map_err(|_| CoreError::Cancelled);
+                };
+                announce(entry, shown.as_ref());
+                drop(gate);
+                return Ok(Reviewed::Show(shown));
+            }
+        };
+        announce(entry, shown.as_ref());
         drop(gate);
-        return Ok(Reviewed::Show);
+        return Ok(Reviewed::Show(shown));
     }
+}
+
+/// Lists a waiting request, with the script its card shows set first.
+/// Called under the approval gate.
+fn announce(
+    mut entry: dashmap::mapref::one::RefMut<'_, String, PendingPermission>,
+    shown: Option<&crate::permissions::script::Shown>,
+) {
+    entry.script = shown.map(|shown| shown.script.clone());
+    entry.announced = true;
 }
 
 /// Reviews a request already shown when its chat switched to Auto. It stays
@@ -10370,34 +10428,42 @@ impl RunnerTask {
         let detail = &plan.card_detail(detail, &plan.patterns);
         // A shell command's card, whatever it asks about (under the default
         // rules, a folder outside the project), shows the script the command
-        // runs, in Auto as in Review: it is read for the person the card is
-        // shown to, before the gate is taken, so a slow disk never holds up a
-        // mode change or another chat's answer. In Auto, which may answer
+        // runs, in Auto as in Review: read once for the person the card is
+        // shown to, with no lock held, so a slow disk never holds up a mode
+        // change or another chat's answer, and set before the card is listed.
+        // Read now when a card surely follows (not in Auto, a request only a
+        // person answers, an ask a person configured); in Auto, once the
+        // reviewer leaves the request to a person. A request Auto answers
         // without a card (the check under the gate below is the one that
-        // counts), it is read only once the request goes to a person: after
-        // the reviewer leaves it to them, or for an ask they configured.
+        // counts) reads nothing.
         let script_card = shows_script(tool.0, detail);
-        let read_script = || async {
-            let engine =
-                self.permission_engine_with_session_rules(agent, &self.session_rules.lock());
-            let readable = script_readable(engine, Some(self.skill_engine()), &self.workspace);
-            script_for_person(detail, &self.workspace, readable).await
+        let read_script = || async move {
+            if script_card {
+                let engine =
+                    self.permission_engine_with_session_rules(agent, &self.session_rules.lock());
+                let readable = script_readable(engine, Some(self.skill_engine()), &self.workspace);
+                script_for_person(detail, &self.workspace, readable).await
+            } else {
+                None
+            }
         };
-        let mut shown = if !script_card
-            || (!forced && !explicit && self.approval_modes.is_auto(self.thread.id).await)
-        {
-            None
-        } else {
-            read_script().await
-        };
-        let mut script = shown.as_ref().map(|shown| shown.script.clone());
+        let review_on = self.config.auto_review.enabled;
+        let card_follows = forced
+            || explicit
+            || (review_on && !reviewable)
+            || !self.approval_modes.is_auto(self.thread.id).await;
+        let mut script_read = false;
+        let mut shown = None;
+        if script_card && card_follows {
+            shown = read_script().await;
+            script_read = true;
+        }
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, mut receiver) = oneshot::channel();
         // In a chat in Auto, eligible requests go to the reviewer (or, with
         // it off, are approved once). The gate orders this with a mode
         // change: either Auto is visible here, or the change sees the
         // registered prompt and reviews or releases it.
-        let review_on = self.config.auto_review.enabled;
         let reviewer = (!forced && !explicit && reviewable && review_on)
             .then(|| Arc::new(self.reviewer(plan, detail, tool)));
         let approval_gate = self.approval_modes.gate.lock().await;
@@ -10447,14 +10513,15 @@ impl RunnerTask {
                     patterns: plan.patterns.clone(),
                     always_rules: always_rules.clone(),
                     detail: detail.clone(),
-                    script: script.clone(),
+                    script: shown.as_ref().map(|shown| shown.script.clone()),
                     thread_id: self.thread.id,
                     root_thread_id: self.root_thread_id,
                     turn_id: Some(self.turn.id),
                     agent: Some(self.thread.agent.clone()),
                     created_at: Utc::now(),
                     sender,
-                    announced: !review_now,
+                    // Listed now only with what its card shows.
+                    announced: !review_now && (script_read || !script_card),
                     stage: if review_now {
                         ReviewStage::Reviewing
                     } else {
@@ -10484,10 +10551,11 @@ impl RunnerTask {
                 reviewer,
                 &self.cancel,
                 &mut receiver,
+                &read_script,
             )
             .await;
             // A prompt shown next sets the turn's status itself.
-            running.end(!matches!(settled, Ok(Reviewed::Show)));
+            running.end(!matches!(settled, Ok(Reviewed::Show(_))));
             match settled? {
                 Reviewed::Resolved(resolution) => {
                     if resolution.allowed && resolution.review.is_none() {
@@ -10502,17 +10570,19 @@ impl RunnerTask {
                 Reviewed::Blocked(review) => {
                     return Err(CoreError::ReviewBlocked(Box::new(review)));
                 }
-                Reviewed::Show => {}
+                Reviewed::Show(read) => shown = read,
             }
-        }
-        // Shown to a person after all: the card carries the script.
-        if script_card && shown.is_none() {
+        } else if script_card && !script_read {
+            // Auto went off before the gate: a card shows at once after all,
+            // listed once its script is read.
             shown = read_script().await;
-            script = shown.as_ref().map(|shown| shown.script.clone());
-            if let Some(mut entry) = self.permissions.get_mut(&id) {
-                entry.script.clone_from(&script);
+            let gate = self.approval_modes.gate.lock().await;
+            if let Some(entry) = self.permissions.get_mut(&id) {
+                announce(entry, shown.as_ref());
             }
+            drop(gate);
         }
+        let script = shown.as_ref().map(|shown| shown.script.clone());
         let review = self
             .permissions
             .get(&id)

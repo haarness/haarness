@@ -7377,6 +7377,19 @@ async fn a_request_announced_again_updates_its_card_in_place() {
     app.permission_focus = true;
     let card = frame_text(&app, (120, 40));
     assert!(card.contains("Auto review: Shared branch."), "{card}");
+    // A card first known without its script takes it when announced again.
+    assert!(app.pending_permissions[0].script.is_none());
+    let mut again = announce(serde_json::json!({"status": "asked", "rationale": "Shared branch."}));
+    again.payload["script"] = serde_json::json!({"path": "/w/x.sh", "content": "echo hi\n"});
+    app.reduce(again, &client).await.unwrap();
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert_eq!(
+        app.pending_permissions[0]
+            .script
+            .as_ref()
+            .map(|script| script.path.as_str()),
+        Some("/w/x.sh")
+    );
 }
 
 #[tokio::test]
