@@ -165,8 +165,20 @@ async function reply(text: string, attachments?: string[]) {
  */
 async function openPreview(row: Locator) {
   const preview = row.locator(".tool-image img");
+  let clicked = false;
   await expect(async () => {
-    if ((await row.getAttribute("open")) === null) await row.locator("summary").click();
+    if ((await row.getAttribute("open")) === null) {
+      // Says whether the row closed again in place, or was drawn anew (a new node).
+      if (clicked)
+        console.log(
+          `openPreview: the row was closed again, ${await row.evaluate((element) =>
+            element.dataset.previewProbe ? "the same node" : "a new node (drawn anew)",
+          )}`,
+        );
+      await row.evaluate((element) => (element.dataset.previewProbe = "1"));
+      await row.locator("summary").click();
+      clicked = true;
+    }
     await expect(preview).toBeVisible({ timeout: 2000 });
   }).toPass({ timeout: 15_000 });
   return preview;
@@ -727,9 +739,18 @@ test("a read that returned an image shows it once its row is open", async () => 
   await writeFile(join(workspace, "out/fresh.png"), chart(200, 100, [90, 90, 200]));
   const fresh = await read("out/fresh.png");
   await writeProjectFile("out/fresh.png", chart(300, 150, [200, 90, 90]));
+  await app.evaluate(() => {
+    (globalThis as { haarnessReadLog?: string[] }).haarnessReadLog = [];
+  });
   await fresh.row.locator("summary").click();
   await expect(fresh.row.locator(".tool-console")).toBeVisible();
-  await page.waitForTimeout(400);
+  // The preview reads the file (the main process logs it under the test hook)...
+  await expect
+    .poll(() => app.evaluate(() => (globalThis as { haarnessReadLog?: string[] }).haarnessReadLog?.includes("out/fresh.png")))
+    .toBe(true);
+  await page.waitForTimeout(200);
+  // ...and, the row still open, shows no picture of a file that changed since the read.
+  await expect(fresh.row).toHaveAttribute("open", "");
   await expect(fresh.row.locator(".tool-image")).toHaveCount(0);
 
   // A picture remembered from before the read, of another size, is read again and shows what the read saw.
