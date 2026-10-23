@@ -1,6 +1,6 @@
 import { keepsRowsAbove, measureRow } from "./measure-row";
 import { toastAnchor } from "./toast-anchors";
-import { t, splitAround, parseLanguage, formatNumber } from "./i18n";
+import { t, splitAround, parseLanguage, formatNumber, language } from "./i18n";
 import { isOpen, setOpen } from "./disclosure";
 import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
@@ -1243,6 +1243,29 @@ export function Session() {
       cancelAnimationFrame(revealFrame);
     });
   });
+  /* One footer per assistant turn, under its last text: when the reply
+     ended, Copy for all of it and Fork. Earlier text of the turn keeps the
+     footer's height with nothing in it, so the footer moving on to newer
+     text never moves the transcript. */
+  const turnTexts = createMemo(() => {
+    const texts = new Map<string, T.Item[]>();
+    for (const item of rows())
+      if (item.data.type === "assistant_message") {
+        const key = item.turnId ?? item.id;
+        const list = texts.get(key);
+        if (list) list.push(item);
+        else texts.set(key, [item]);
+      }
+    return texts;
+  });
+  const reply = (item?: T.Item) => {
+    if (item?.data.type !== "assistant_message") return undefined;
+    const texts = turnTexts().get(item.turnId ?? item.id) ?? [item];
+    return {
+      last: texts.at(-1)?.id === item.id,
+      text: texts.map((text) => (text.data as { text: string }).text).join("\n\n"),
+    };
+  };
   // Older forks retain their source link but have no recorded boundary. Put
   // their marker at the beginning rather than guessing which history was copied.
   const forkDividerIndex = createMemo(() => {
@@ -1989,6 +2012,7 @@ export function Session() {
                       rows()[row.index],
                       thread()?.revert?.sequence,
                     )}
+                    reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
                   />
                 </div>
@@ -2584,6 +2608,21 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
+/** A message's time as it shows (short), with the full date and time on
+ * hover and for assistive technology. */
+function Timestamp(props: { value: string }) {
+  const date = () => new Date(props.value);
+  const valid = () => !Number.isNaN(date().getTime());
+  return (
+    <time
+      class="message-time"
+      dateTime={valid() ? date().toISOString() : undefined}
+      title={valid() ? date().toLocaleString(language(), { dateStyle: "full", timeStyle: "short" }) : undefined}
+    >
+      {time(props.value)}
+    </time>
+  );
+}
 /** What the person reads when a provider refused images that later requests leave out. */
 function mediaOmittedNotice(names: string[], guessed: boolean) {
   const list = names.join(", ");
@@ -2601,6 +2640,9 @@ function Message(props: {
   fork: () => Promise<unknown>;
   /** The message is the current Find match. */
   matched?: boolean;
+  /** For a reply: whether it is its turn's last text, which carries the
+   * turn's footer, and the turn's whole reply, which Copy takes. */
+  reply?: { last: boolean; text: string };
 }) {
   const app = useApp();
   const content = () => props.item?.data;
@@ -2662,7 +2704,7 @@ function Message(props: {
             return copy(
               data.type === "user_message"
                 ? plainMessage(data.command_line || data.text)
-                : (data as { text: string }).text,
+                : (props.reply?.text ?? (data as { text: string }).text),
             );
           })
         }
@@ -2740,7 +2782,7 @@ function Message(props: {
               </UserMessageBody>
             </div>
             <div class="message-footer">
-              <span class="message-time">{time(props.item.createdAt)}</span>
+              <Timestamp value={props.item.createdAt} />
               <MessageTools />
             </div>
           </Match>
@@ -2748,8 +2790,10 @@ function Message(props: {
           <Match when={content().type === "assistant_message"}>
             <Markdown text={(content() as { text: string }).text} />
             <div class="message-footer">
-              <span class="message-time">{time(props.item.createdAt)}</span>
-              <MessageTools />
+              <Show when={props.reply?.last ?? true}>
+                <Timestamp value={props.item.createdAt} />
+                <MessageTools />
+              </Show>
             </div>
           </Match>
 
@@ -2772,7 +2816,7 @@ function Message(props: {
           <Match when={content().type === "reasoning"}>
             <div class="message-label">
               <span class="author">{t("Thinking")}</span>
-              <span class="message-time">{time(props.item.createdAt)}</span>
+              <Timestamp value={props.item.createdAt} />
               <MessageTools />
             </div>
             <Markdown text={(content() as { text: string }).text} />

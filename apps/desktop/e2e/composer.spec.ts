@@ -514,6 +514,36 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
 });
 
 
+test("a turn's reply has one footer, under its last text, with its full time; Copy takes the whole reply", async ({}, info) => {
+  const { app, page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
+  });
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill('!preface read {"path":"README.md"}');
+    await input.press("Enter");
+    const replies = page.locator(".message.assistant");
+    await expect(replies.last()).toContainText("Tool read =>");
+    await expect(replies).toHaveCount(2);
+    const footers = replies.locator(".message-footer");
+    // The earlier text keeps the footer's height with nothing in it.
+    await expect(footers.first().locator("time")).toHaveCount(0);
+    await expect(footers.first().getByRole("button")).toHaveCount(0);
+    const heights = await Promise.all([footers.first(), footers.last()].map(async (footer) => (await footer.boundingBox())!.height));
+    expect(Math.abs(heights[0] - heights[1])).toBeLessThan(1);
+    const time = footers.last().locator("time");
+    await expect(time).toHaveAttribute("datetime", /^\d{4}-\d{2}-\d{2}T/);
+    await expect(time).toHaveAttribute("title", new RegExp(String(new Date().getFullYear())));
+    const text = await copied(app, page, footers.last().getByRole("button", { name: "Copy message" }));
+    expect(text).toMatch(/^I’ll inspect the repository first\.\n\nTool read => /);
+    await expect(footers.last().getByRole("button", { name: "Fork from message" })).toHaveCount(1);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+
 test("an edit's preview opens its file in Review, and an added file reads in one column", async ({}, info) => {
   const { page, errors, close } = await launch(info, async (workspace) => {
     await mkdir(join(workspace, "src"), { recursive: true });
