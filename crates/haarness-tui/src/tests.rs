@@ -10360,6 +10360,7 @@ fn sidebar_renders_on_wide_terminals_and_collapses_on_narrow() {
         scope: None,
         apps: None,
         app_tools: None,
+        turned_off: None,
     }];
     app.children.insert(
         "call-1".into(),
@@ -15863,6 +15864,7 @@ async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
                     request_id: haarness_protocol::RequestId::new(),
                     text: "hi".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,

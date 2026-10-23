@@ -832,6 +832,14 @@ pub struct App {
     pub terminal: Option<crate::pty_view::TerminalWorkspace>,
     /// Live @-mention completion results from the server.
     pub mention_suggestions: Vec<String>,
+    /// The attached server's MCP resources for the `@` list.
+    pub(crate) mention_resources: crate::resource_mentions::Listing,
+    /// Where a resource listing read off the event loop goes (see
+    /// `App::resources_arrived`); without it, none is asked for.
+    pub(crate) resources_tx: Option<tokio::sync::mpsc::Sender<crate::resource_mentions::Update>>,
+    /// Where a message sent with mentions off the event loop reports back
+    /// (see `App::mentions_sent`); without it, the send waits in place.
+    pub(crate) sends_tx: Option<tokio::sync::mpsc::Sender<crate::resource_mentions::Sent>>,
     /// Escape dismisses autocomplete without deleting the typed query. The
     /// next edit makes suggestions eligible again.
     pub autocomplete_hidden: bool,
@@ -1024,7 +1032,9 @@ impl App {
             crate::config::save_scoped_history(scope, &self.thread.id.to_string(), &text)
         {
             self.notice = format!("Prompt sent; history could not be saved: {error}");
+            return;
         }
+        self.keep_picks(&[text]);
     }
 
     pub fn new(
@@ -1117,6 +1127,9 @@ impl App {
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
+            mention_resources: crate::resource_mentions::Listing::default(),
+            resources_tx: None,
+            sends_tx: None,
             autocomplete_hidden: false,
             viewport_offset: 0,
             max_viewport_offset: std::cell::Cell::new(0),
@@ -2467,6 +2480,11 @@ impl App {
     }
 
     pub fn move_selection(&mut self, direction: isize) {
+        if matches!(self.overlay, Overlay::None) {
+            // The person chose a row: a returned pick's row no longer takes
+            // the highlight when its listing comes.
+            self.mention_resources.want = None;
+        }
         let length = self.current_selection_length();
         if length == 0 {
             self.selection = 0;
@@ -2511,7 +2529,17 @@ impl App {
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
-                .map_or_else(|| self.mention_suggestions.len(), |commands| commands.len()),
+                .map_or_else(|| self.shown_mentions().len(), |commands| commands.len()),
+        }
+    }
+
+    /// The `@` list rows the composer shows: none while Esc hides the list,
+    /// so a listing that comes meanwhile is neither picked nor browsed.
+    pub(crate) fn shown_mentions(&self) -> &[String] {
+        if self.autocomplete_hidden {
+            &[]
+        } else {
+            &self.mention_suggestions
         }
     }
 

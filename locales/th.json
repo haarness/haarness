@@ -2770,5 +2770,16 @@
   "Resize side chat": "ปรับขนาดแชทข้างเคียง",
   "This server answers each question on its own": "เซิร์ฟเวอร์นี้ตอบแต่ละคำถามแยกกัน",
   "Outside this project": "อยู่นอกโปรเจกต์นี้",
-  "Too large to show": "ใหญ่เกินกว่าจะแสดงได้"
+  "Too large to show": "ใหญ่เกินกว่าจะแสดงได้",
+  "MCP resource · {server}": "ทรัพยากร MCP · {server}",
+  "Read from {server} when the message is sent.": "อ่านจาก {server} เมื่อส่งข้อความ",
+  "MCP server": "เซิร์ฟเวอร์ MCP",
+  "not read": "อ่านไม่ได้",
+  "agents · files · resources": "เอเจนต์ · ไฟล์ · ทรัพยากร",
+  "files · agents · resources": "ไฟล์ · เอเจนต์ · ทรัพยากร",
+  "Files, agents and resources": "ไฟล์ เอเจนต์ และทรัพยากร",
+  "a rule keeps this resource from the model": "กฎกันทรัพยากรนี้ไว้จากโมเดล",
+  "did not answer within {seconds} s": "ไม่ตอบกลับภายใน {seconds} วินาที",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "เซิร์ฟเวอร์นี้อ่านทรัพยากร MCP ไม่ได้ นำออกจากข้อความ หรืออัปเดตเซิร์ฟเวอร์",
+  "Sent again as it was read.": "ส่งอีกครั้งตามที่อ่านไว้"
 }

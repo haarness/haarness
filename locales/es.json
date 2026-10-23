@@ -2770,5 +2770,16 @@
   "Resize side chat": "Cambiar el tamaño del chat lateral",
   "This server answers each question on its own": "Este servidor responde cada pregunta por separado",
   "Outside this project": "Fuera de este proyecto",
-  "Too large to show": "Demasiado grande para mostrarla"
+  "Too large to show": "Demasiado grande para mostrarla",
+  "MCP resource · {server}": "Recurso MCP · {server}",
+  "Read from {server} when the message is sent.": "Se lee de {server} al enviar el mensaje.",
+  "MCP server": "Servidor MCP",
+  "not read": "no leído",
+  "agents · files · resources": "agentes · archivos · recursos",
+  "files · agents · resources": "archivos · agentes · recursos",
+  "Files, agents and resources": "Archivos, agentes y recursos",
+  "a rule keeps this resource from the model": "una regla mantiene este recurso fuera del alcance del modelo",
+  "did not answer within {seconds} s": "no respondió en {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Este servidor no puede leer recursos MCP. Quítalos del mensaje o actualiza el servidor.",
+  "Sent again as it was read.": "Se envía de nuevo tal como se leyó."
 }

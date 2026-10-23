@@ -2770,5 +2770,16 @@
   "Resize side chat": "Promijeni veličinu usputnog razgovora",
   "This server answers each question on its own": "Ovaj server odgovara na svako pitanje zasebno",
   "Outside this project": "Izvan ovog projekta",
-  "Too large to show": "Prevelika za prikaz"
+  "Too large to show": "Prevelika za prikaz",
+  "MCP resource · {server}": "MCP resurs · {server}",
+  "Read from {server} when the message is sent.": "Čita se iz {server} kada se poruka pošalje.",
+  "MCP server": "MCP server",
+  "not read": "nije pročitano",
+  "agents · files · resources": "agenti · datoteke · resursi",
+  "files · agents · resources": "datoteke · agenti · resursi",
+  "Files, agents and resources": "Datoteke, agenti i resursi",
+  "a rule keeps this resource from the model": "pravilo drži ovaj resurs dalje od modela",
+  "did not answer within {seconds} s": "nije odgovorio u roku od {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Ovaj server ne može čitati MCP resurse. Uklonite ih iz poruke ili ažurirajte server.",
+  "Sent again as it was read.": "Šalje se ponovo onako kako je pročitan."
 }

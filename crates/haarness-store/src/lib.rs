@@ -895,6 +895,20 @@ impl ThreadRepository for SqliteStore {
             .collect()
     }
 
+    async fn turn_for_request(&self, id: ThreadId, request: RequestId) -> CoreResult<Option<Turn>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT id,thread_id,request_id,status,agent,provider,model,error,created_at,updated_at,ultracode
+                 FROM turns WHERE thread_id=?1 AND request_id=?2",
+                params![id.to_string(), request.to_string()],
+                raw_turn,
+            )
+            .optional()
+            .map_err(storage)?
+            .map(decode_turn)
+            .transpose()
+    }
     async fn has_input_admission(&self, id: ThreadId, request: RequestId) -> CoreResult<bool> {
         let owner: Option<String> = self
             .connection
@@ -925,6 +939,24 @@ impl ThreadRepository for SqliteStore {
         value: haarness_protocol::PendingInput,
     ) -> CoreResult<haarness_protocol::InputQueue> {
         input::enqueue(&mut self.connection.lock(), id, value)
+    }
+    async fn append_steered_input(
+        &self,
+        id: ThreadId,
+        turn: TurnId,
+        request: RequestId,
+        data: ItemData,
+    ) -> CoreResult<Option<Item>> {
+        let mut connection = self.connection.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        if !input::record_steer(&tx, id, request)? {
+            return Ok(None);
+        }
+        let item = Self::insert_item(&tx, id, Some(turn), data)?;
+        tx.commit().map_err(storage)?;
+        Ok(Some(item))
     }
     async fn change_input_queue(
         &self,
@@ -1827,6 +1859,7 @@ mod tests {
             request_id: RequestId::new(),
             text: "the prompt".into(),
             attachments: Vec::new(),
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -2141,6 +2174,7 @@ mod tests {
             request_id: RequestId::new(),
             text: "hello".into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -2432,6 +2466,7 @@ mod tests {
                     request_id: RequestId::new(),
                     text: "first".into(),
                     attachments: vec![],
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,
@@ -2718,6 +2753,7 @@ mod tests {
             request_id: RequestId::new(),
             text: text.into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -2805,6 +2841,7 @@ mod tests {
             request_id: RequestId::new(),
             text: text.into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -2937,6 +2974,7 @@ mod tests {
             request_id: RequestId::new(),
             text: text.into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -3080,6 +3118,7 @@ mod tests {
                     request_id: RequestId::new(),
                     text: "side effect".into(),
                     attachments: vec![],
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,
@@ -3160,6 +3199,7 @@ mod tests {
             request_id: RequestId::new(),
             text: text.into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,

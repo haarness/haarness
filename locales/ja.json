@@ -2770,5 +2770,16 @@
   "Resize side chat": "サイドチャットのサイズを変更",
   "This server answers each question on its own": "このサーバーは質問を一つずつ個別に答えます",
   "Outside this project": "このプロジェクトの外にあります",
-  "Too large to show": "大きすぎて表示できません"
+  "Too large to show": "大きすぎて表示できません",
+  "MCP resource · {server}": "MCP リソース · {server}",
+  "Read from {server} when the message is sent.": "メッセージの送信時に {server} から読み取ります。",
+  "MCP server": "MCP サーバー",
+  "not read": "読み取れませんでした",
+  "agents · files · resources": "エージェント · ファイル · リソース",
+  "files · agents · resources": "ファイル · エージェント · リソース",
+  "Files, agents and resources": "ファイル、エージェント、リソース",
+  "a rule keeps this resource from the model": "ルールにより、このリソースはモデルに渡されません",
+  "did not answer within {seconds} s": "{seconds} 秒以内に応答がありませんでした",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "このサーバーは MCP リソースを読み取れません。メッセージから削除するか、サーバーを更新してください。",
+  "Sent again as it was read.": "読み取ったときの内容のまま、もう一度送信します。"
 }

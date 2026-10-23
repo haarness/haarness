@@ -1,6 +1,7 @@
 import { formatNumber, language, t } from "./i18n";
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
   Match,
@@ -17,15 +18,30 @@ import {
   contextKey,
   contextLabel,
   countLines,
+  FILE_ROWS,
   fileContext,
+  keptFiles,
   mentionAgents,
   pasteSize,
+  RESOURCE_MENTIONS,
+  sentParts,
   type PromptContext,
+  type ResourceContext,
 } from "./prompt-context";
 import { shortPage, type ElementContext } from "./element-context";
+import {
+  listResources,
+  resourceEntry,
+  searchResources,
+  type Entry,
+  type ResourceOption,
+} from "./resource-mentions";
+import type * as T from "@haarness/sdk";
 import "./prompt-context.css";
 
-type Option = { kind: "file" | "agent"; name: string; description?: string };
+type Option =
+  | { kind: "file" | "agent"; name: string; description?: string }
+  | ({ kind: "resource" } & ResourceOption);
 /** How a paste reads, in its chip and in the transcript: `Pasted text · 214
  * lines`, and its size once that matters, `· 2.4 MB`. */
 export function pasteLabel(text: string) {
@@ -37,10 +53,19 @@ export function pasteLabel(text: string) {
   const size = pasteSize(text, language());
   return size ? `${label} · ${size}` : label;
 }
-const chipLabel = (item: PromptContext) =>
-  item.kind === "paste" ? pasteLabel(item.text) : contextLabel(item);
-/** Hovering a picked element's chip says what and where it is. */
+/** A chip's words. A resource another server also has, under the same name,
+ * says which server it is read from. */
+const chipLabel = (item: PromptContext, items: PromptContext[] = []) =>
+  item.kind === "paste"
+    ? pasteLabel(item.text)
+    : item.kind === "resource" &&
+        items.some((other) => other !== item && other.kind === "resource" && other.name === item.name)
+      ? `${contextLabel(item)} · ${item.server}`
+      : contextLabel(item);
+/** Hovering a picked element's chip says what and where it is; a
+ * resource's, where it is read from. */
 function chipTitle(item: PromptContext) {
+  if (item.kind === "resource") return `${item.uri} · ${item.server}`;
   if (item.kind !== "element") return chipLabel(item);
   return [
     `${item.tag} · ${item.width}×${item.height}`,
@@ -49,6 +74,59 @@ function chipTitle(item: PromptContext) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+/** Why the server left a mentioned resource unread, in the person's
+ * language when Haarness wrote the reason (an MCP server's own words stay
+ * as they are). */
+export function unreadReason(reason: string) {
+  if (reason === "a rule keeps this resource from the model") return t("a rule keeps this resource from the model");
+  const late = /^did not answer within (\d+) s$/.exec(reason);
+  return late ? t("did not answer within {seconds} s", { seconds: late[1] }) : reason;
+}
+/** A mentioned resource: what it is and where the server reads it from;
+ * one brought back from a sent message, what was read then. */
+function ResourcePreview(props: { item: ResourceContext }) {
+  const read = () => {
+    const part = props.item.block === undefined ? undefined : sentParts(props.item.block)[0];
+    return part?.kind === "resource" ? part : undefined;
+  };
+  return (
+    <>
+      <small>{t("MCP resource · {server}", { server: props.item.server })}</small>
+      <dl class="prompt-context-element">
+        <dt>URI</dt>
+        <dd dir="ltr">
+          <code>{props.item.uri}</code>
+        </dd>
+        <Show when={props.item.description}>
+          <dt>{t("Description")}</dt>
+          <dd dir="auto">{props.item.description}</dd>
+        </Show>
+      </dl>
+      <Show
+        when={read()}
+        fallback={
+          <p class="prompt-context-note">
+            {t("Read from {server} when the message is sent.", { server: props.item.server })}
+          </p>
+        }
+      >
+        {(part) => (
+          <Show
+            when={!part().failed}
+            fallback={
+              <p class="prompt-context-note">
+                {t("not read")}: {unreadReason(part().content)}
+              </p>
+            }
+          >
+            <pre>{part().content}</pre>
+            <p class="prompt-context-note">{t("Sent again as it was read.")}</p>
+          </Show>
+        )}
+      </Show>
+    </>
+  );
 }
 /** A picked element as it was captured: where, what it said, its HTML. */
 function ElementPreview(props: { item: ElementContext }) {
@@ -84,11 +162,18 @@ export function PromptContextControls(props: {
   /** Text into the message box at its caret, as typing it would. */
   insert: (text: string) => void;
   disabled: boolean;
+  /** Whether new MCP resources may be picked (not while a queued message,
+   * whose edit saves text only, is edited). */
+  resources?: boolean;
+  /** The chat (or, before one exists, the agent) whose rules decide which
+   * servers' resources are left out. */
+  chat?: { threadId?: string; agent?: string };
 }) {
   const app = useApp();
   const [caret, setCaret] = createSignal(0),
     [cursor, setCursor] = createSignal(0);
-  const [files, setFiles] = createSignal<string[]>([]),
+  /** The files the last search found, on its connection. */
+  const [found, setFound] = createSignal<{ connection?: string; names: string[] }>({ names: [] }),
     [error, setError] = createSignal("");
   const [loading, setLoading] = createSignal(false),
     [busy, setBusy] = createSignal(false);
@@ -98,6 +183,40 @@ export function PromptContextControls(props: {
     JSON.stringify([props.text, caret(), app.state.connection?.id]);
   const open = () =>
     !!mention() && dismissed() !== signature() && !props.disabled;
+  /** The connection's MCP resources, asked for the first time `@` opens
+   * there (`resource-mentions.ts`), and the servers this chat's rules take
+   * away; an older server reads none. */
+  const [resources, setResources] = createSignal<{ connection: string; entry: Entry; off: Set<string> }>();
+  const offersResources = () =>
+    props.resources !== false && !!app.state.connection?.info.capabilities.includes(RESOURCE_MENTIONS);
+  // Only opening the list (or a project or chat switch) asks; typing in it does not.
+  const opened = createMemo(open);
+  createEffect(() => {
+    const connection = app.state.connection?.id;
+    const chat = props.chat ?? {};
+    if (!opened() || !connection || !offersResources()) return;
+    void window.haarness
+      .api<T.McpServerInfo[]>(connection, "mcpServers", [chat])
+      .then((servers) => {
+        // An answer for a project left meanwhile is not shown.
+        if (app.state.connection?.id !== connection) return;
+        setResources({
+          connection,
+          entry: resourceEntry(connection, (add) => listResources(connection, servers, add)),
+          off: new Set(servers.filter((server) => server.turnedOff).map((server) => server.name)),
+        });
+      })
+      .catch(() => undefined);
+  });
+  const shownResources = () => {
+    const known = resources();
+    return known && known.connection === app.state.connection?.id && offersResources() ? known : undefined;
+  };
+  const resourceRows = (query: string): Option[] => {
+    const known = shownResources();
+    if (!known) return [];
+    return searchResources(query, known.entry.rows(), known.off).map((item) => ({ kind: "resource" as const, ...item }));
+  };
   const options = (): Option[] => {
     if (!open()) return [];
     const q = mention()!.query.toLowerCase();
@@ -111,8 +230,23 @@ export function PromptContextControls(props: {
           description: "Delegate · " + agent.description,
         })),
       ...files().map((name) => ({ kind: "file" as const, name })),
+      // After agents and files, as in the TUI, so a server with many
+      // resources never pushes files down; and only once this query's files
+      // have come, so a resource never sits where a file is about to go and
+      // a quick Enter never picks one in its place.
+      ...(loading() ? [] : resourceRows(mention()!.query)),
     ];
   };
+  /** The files the list shows: while a search runs, the last one's that
+   * the server would still find, in its order, so typing never empties the
+   * list and its top row is most likely the one the search puts there. */
+  const files = () => {
+    const last = found();
+    if (last.connection !== app.state.connection?.id) return [];
+    return loading() ? keptFiles(last.names, mention()?.query ?? "") : last.names;
+  };
+  /** The person moved the highlight since their last keystroke. */
+  let moved = false;
   let generation = 0;
   createEffect(() => {
     const active = open(),
@@ -120,19 +254,33 @@ export function PromptContextControls(props: {
       connection = app.state.connection?.id;
     const version = ++generation;
     setCursor(0);
-    setFiles([]);
+    moved = false;
     setError("");
     setLoading(false);
-    if (!active || !connection) return;
+    if (!active || !connection) {
+      setFound({ names: [] });
+      return;
+    }
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
-        .api<string[]>(connection, "searchFiles", [{ q: query, limit: 20 }])
-        .then((values) => {
-          if (version === generation) setFiles(values);
+        .api<string[]>(connection, "searchFiles", [{ q: query, limit: FILE_ROWS }])
+        .then((names) => {
+          if (version !== generation) return;
+          // A row the person moved to stays highlighted where the new files
+          // put it; otherwise the top row is.
+          const held = moved ? options()[cursor()] : undefined;
+          setFound({ connection, names });
+          setLoading(false);
+          const at = held
+            ? options().findIndex((option) => option.kind === held.kind && option.name === held.name)
+            : -1;
+          setCursor(Math.max(at, 0));
         })
         .catch((reason) => {
-          if (version === generation) setError(String(reason));
+          if (version !== generation) return;
+          setFound({ connection, names: [] });
+          setError(String(reason));
         })
         .finally(() => {
           if (version === generation) setLoading(false);
@@ -150,8 +298,17 @@ export function PromptContextControls(props: {
     setBusy(true);
     setError("");
     try {
-      const item =
-        option.kind === "agent"
+      const item: PromptContext =
+        option.kind === "resource"
+          ? {
+              kind: "resource",
+              server: option.server,
+              uri: option.uri,
+              name: option.name,
+              ...(option.description ? { description: option.description } : {}),
+              ...(option.mimeType ? { mimeType: option.mimeType } : {}),
+            }
+          : option.kind === "agent"
           ? { kind: "agent" as const, name: option.name }
           : await window.haarness
               .files<FileContent>(connection, "read", { path: option.name })
@@ -256,13 +413,14 @@ export function PromptContextControls(props: {
       }
       const values = options();
       if (!values.length) return;
-      if (event.key === "ArrowDown" || event.key === "ArrowUp")
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        moved = true;
         setCursor(
           (value) =>
             (value + (event.key === "ArrowDown" ? 1 : -1) + values.length) %
             values.length,
         );
-      else void choose(values[cursor()] ?? values[0]);
+      } else void choose(values[cursor()] ?? values[0]);
     };
     for (const event of ["input", "click", "keyup", "select"])
       input.addEventListener(event, update);
@@ -311,7 +469,9 @@ export function PromptContextControls(props: {
                         ? "pick"
                         : item.kind === "paste"
                           ? "paste"
-                          : "agents"
+                          : item.kind === "resource"
+                            ? "file-text"
+                            : "agents"
                   }
                   size="sm"
                 />
@@ -330,7 +490,7 @@ export function PromptContextControls(props: {
                   }}
                 >
                   <summary title={chipTitle(item)}>
-                    {chipLabel(item)}
+                    {chipLabel(item, app.promptContext())}
                     {item.kind === "file" && item.unsaved ? ` · ${t("unsaved")}` : ""}
                   </summary>
                   <div
@@ -373,6 +533,9 @@ export function PromptContextControls(props: {
                       <Match when={item.kind === "element" && item}>
                         {(element) => <ElementPreview item={element()} />}
                       </Match>
+                      <Match when={item.kind === "resource" && item}>
+                        {(resource) => <ResourcePreview item={resource()} />}
+                      </Match>
                     </Switch>
                   </div>
                 </details>
@@ -380,7 +543,7 @@ export function PromptContextControls(props: {
                   type="button"
                   class="icon-button"
                   disabled={props.disabled}
-                  aria-label={t("Remove context {name}", { name: chipLabel(item) })}
+                  aria-label={t("Remove context {name}", { name: chipLabel(item, app.promptContext()) })}
                   // Focus stays in the message box, so the next paste still
                   // reaches it.
                   onMouseDown={(event) => event.preventDefault()}
@@ -408,7 +571,11 @@ export function PromptContextControls(props: {
           <div
             id="prompt-mentions"
             role="listbox"
-            aria-label={t("Files and agents")}
+            aria-label={
+              shownResources()?.entry.rows().length
+                ? t("Files, agents and resources")
+                : t("Files and agents")
+            }
             class="mention-options"
           >
             <For each={options()}>
@@ -418,22 +585,30 @@ export function PromptContextControls(props: {
                   role="option"
                   aria-selected={cursor() === index()}
                   aria-disabled={busy()}
+                  data-kind={option.kind}
                   classList={{ highlighted: cursor() === index() }}
-                  onPointerMove={() => setCursor(index())}
+                  onPointerMove={() => {
+                    moved = true;
+                    setCursor(index());
+                  }}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => void choose(option)}
                 >
                   <Icon
-                    name={option.kind === "file" ? "file" : "agents"}
+                    name={option.kind === "file" ? "file" : option.kind === "resource" ? "file-text" : "agents"}
                     size="sm"
                   />
                   <span>
                     <strong>{option.name}</strong>
-                    <Show when={option.description}>
-                      <small>{option.description}</small>
+                    <Show
+                      when={option.kind === "resource" ? option.description || option.uri : option.description}
+                    >
+                      {(detail) => <small dir="auto">{detail()}</small>}
                     </Show>
                   </span>
-                  <small>{option.kind === "agent" ? t("Agent") : t("File")}</small>
+                  <small class="mention-kind" title={option.kind === "resource" ? t("MCP server") : undefined}>
+                    {option.kind === "resource" ? option.server : option.kind === "agent" ? t("Agent") : t("File")}
+                  </small>
                 </div>
               )}
             </For>
@@ -441,7 +616,7 @@ export function PromptContextControls(props: {
               <p class="muted">{t("No matching files or agents.")}</p>
             </Show>
           </div>
-          <Show when={loading()}>
+          <Show when={loading() && !files().length}>
             <p class="muted" role="status">
               {t("Searching files…")}
             </p>

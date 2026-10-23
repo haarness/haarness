@@ -2770,5 +2770,16 @@
   "Resize side chat": "Изменить размер побочного чата",
   "This server answers each question on its own": "Этот сервер отвечает на каждый вопрос отдельно",
   "Outside this project": "Вне этого проекта",
-  "Too large to show": "Слишком большое для показа"
+  "Too large to show": "Слишком большое для показа",
+  "MCP resource · {server}": "Ресурс MCP · {server}",
+  "Read from {server} when the message is sent.": "Читается из {server} при отправке сообщения.",
+  "MCP server": "Сервер MCP",
+  "not read": "не прочитан",
+  "agents · files · resources": "агенты · файлы · ресурсы",
+  "files · agents · resources": "файлы · агенты · ресурсы",
+  "Files, agents and resources": "Файлы, агенты и ресурсы",
+  "a rule keeps this resource from the model": "правило не допускает модель к этому ресурсу",
+  "did not answer within {seconds} s": "не ответил за {seconds} с",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Этот сервер не может читать ресурсы MCP. Удалите их из сообщения или обновите сервер.",
+  "Sent again as it was read.": "Отправляется снова в том виде, в каком был прочитан."
 }

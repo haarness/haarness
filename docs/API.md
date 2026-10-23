@@ -382,6 +382,44 @@ Connected servers expose tool list/call, resource and resource-template lists,
 resource reads, prompt lists, and prompt resolution through the corresponding
 `/v1/mcp/{name}/...` routes. Unsupported prompt/resource capabilities return
 an empty list rather than probing an undeclared server method.
+
+`POST /turns`, `/input` and `/commands` also accept `resources`, the MCP
+resources a person mentioned with `@`: `[{"server": "docs", "uri":
+"docs://setup", "name": "setup"}]` (`name` optional, at most 50). The server
+reads each from its MCP server when the request arrives, before the turn starts
+or the message is queued, all of them within 10 s together, and adds each after
+the text (after a command's string `arguments`) as a block under
+`MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
+50 KiB (128 KiB for all of a message's resources) with a note that says where
+the whole text was saved; its images and PDFs join `attachments` (10 MiB
+together). A resource that is not read is named in its block with
+`(not read)`, and the block holds only the reason: the MCP server's error, `did
+not answer within 10 s`, or `a rule keeps this resource from the model`. The
+chat's own rules decide as they do for `mcp_resource_read`, except that an ask
+is not asked (the person picked it, as they attach a file): a deny for
+`<server>:<uri>`, or a rule or tool setting that takes every tool of the server
+away, keeps it out. The rest of the message is still sent. The same server and
+URI twice is read once; two servers with one URI are two mentions. The rules are those of
+the agent the message runs under: the request's `agent` (or its command's),
+else the chat's. An `/input` sent while a turn runs may join that turn or run
+as a turn of its own (a steer can arrive as the turn ends, a queued message
+can be steered in), so both the running turn's agent and the chat's must
+allow a mention; a deny from either keeps it out. Its rules are those at
+arrival: if the chat's agent changes before a queued message runs, what was
+read stays. No `PreToolUse` hook runs: a mention is no tool call. A message
+with mentions is read and admitted on the server's own time, so a client that
+goes away meanwhile does not lose it; a retry with the same `requestId` (a
+turn, a queued message, a message steered into a running turn, or one that
+started a turn, each recorded for this) finds it without reading or
+delivering it again, even when retries race, and one sent while the first is
+still reading waits for it. A published chat's request with `resources` is
+refused (`403`), and its `/v1/info` leaves the capability out. Servers advertise
+`mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
+resources only when it is there. `GET /v1/mcp?threadId=<id>&agent=<agent>` (either one alone works; a named
+agent wins over the chat's) marks each server those rules take away with
+`turnedOff: true`, so an `@` list can leave its resources out. While a turn
+runs in that chat, it also marks those the running turn's agent or the
+chat's takes away, as a message sent then follows both.
 That POST returns a tagged `turn`, `workflow_run`, or `text` result and leaves
 the stable `POST /turns` contract unchanged. A workflow hidden by a configured
 direct command remains explicitly available as `/workflow run <name>`.

@@ -20,7 +20,10 @@ import {
 import { retainedItems } from "./conversation-history";
 import { PromptContextControls, pasteLabel } from "./PromptContext";
 import {
+  carriedResource,
   commandPrompt,
+  contextKey,
+  resourceToRead,
   countLines,
   mentionAgents,
   pasteFolds,
@@ -704,6 +707,8 @@ export function Session() {
     baseAttachments: { name: string; data: string }[];
     /** Chips the undone prompt's pastes came back as. */
     pastes?: string[];
+    /** Chips its resources came back as, by context key. */
+    resources?: string[];
   };
   let restoredDraft: RestoredDraft | undefined;
   const pristineUndoDraft = () =>
@@ -730,22 +735,28 @@ export function Session() {
     restored: (item) => {
       if (item?.data.type !== "user_message") return;
       // A slash command comes back as the line typed, so sending it again
-      // runs the command; pastes come back as their chips.
+      // runs the command; pastes come back as their chips, resources as
+      // chips holding what was read, and one that could not be read as a
+      // chip to read again.
       const parts = sentParts(item.data.command_line || item.data.text);
       const pastes = parts.flatMap((part) =>
         part.kind === "paste"
           ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }]
           : [],
       );
-      const text = pastes.length
-        ? parts
-            .flatMap((part) => (part.kind === "text" ? [part.text] : []))
-            .join("")
-            .trimEnd()
-        : parts.map((part) => part.text).join("");
+      const resources = parts.flatMap((part) =>
+        part.kind === "resource" ? [part.failed ? resourceToRead(part) : carriedResource(part)] : [],
+      );
+      const text =
+        pastes.length || resources.length
+          ? parts
+              .flatMap((part) => (part.kind === "text" ? [part.text] : []))
+              .join("")
+              .trimEnd()
+          : parts.map((part) => part.text).join("");
       const key = app.draftKey();
-      for (const paste of pastes)
-        void app.run(() => app.addPromptContext(paste, key));
+      for (const chip of [...pastes, ...resources])
+        void app.run(() => app.addPromptContext(chip, key));
       const baseText = pristineUndoDraft()
         ? restoredDraft!.baseText
         : /^\/(undo|redo|compact)\s*$/.test(draft())
@@ -774,6 +785,7 @@ export function Session() {
         baseText,
         baseAttachments,
         pastes: pastes.map((paste) => paste.id),
+        resources: resources.map(contextKey),
       };
       void window.haarness.storage("history-draft:" + owner(), restoredDraft);
       persistDraft();
@@ -785,12 +797,19 @@ export function Session() {
         change(restoredDraft!.baseText);
         setAttachments(restoredDraft!.baseAttachments);
         const pastes = new Set(restoredDraft!.pastes ?? []);
+        const resources = new Set(restoredDraft!.resources ?? []);
         const key = app.draftKey();
-        if (pastes.size)
+        if (pastes.size || resources.size)
           void app.run(() =>
             app.setPromptContext(
               key,
-              app.promptContext().filter((item) => item.kind !== "paste" || !pastes.has(item.id)),
+              app
+                .promptContext()
+                .filter(
+                  (item) =>
+                    !(item.kind === "paste" && pastes.has(item.id)) &&
+                    !(item.kind === "resource" && resources.has(contextKey(item))),
+                ),
             ),
           );
         persistDraft();
@@ -1381,9 +1400,15 @@ export function Session() {
   const waitingForModels = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
-      // A queued message keeps only its pastes among the chips.
+      // A queued message keeps only its pastes and the resources it held
+      // among the chips: its edit saves text.
       await queue.save({
-        text: promptWithContext(draft(), app.promptContext().filter((item) => item.kind === "paste")),
+        text: promptWithContext(
+          draft(),
+          app
+            .promptContext()
+            .filter((item) => item.kind === "paste" || (item.kind === "resource" && item.block !== undefined)),
+        ),
         attachments: attachments(),
       });
       return;
@@ -2265,6 +2290,11 @@ export function Session() {
                 change={change}
                 insert={insertText}
                 disabled={submitting() || stopping() || !state.ready}
+                // A queued message's edit saves text, so no new resource.
+                resources={!queue.editing()}
+                // The agent the next message runs under decides, as for the
+                // message itself.
+                chat={state.selected ? { threadId: state.selected, agent: selectedAgent() } : { agent: selectedAgent() }}
               />
               <Show when={slashOpen()}>
                 <div
