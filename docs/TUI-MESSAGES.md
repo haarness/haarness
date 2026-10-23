@@ -77,8 +77,10 @@ TUI from before these keys still reads the file.
 Alt with an arrow reaches the TUI wherever Option or Alt reaches the terminal
 at all. iTerm2 and other xterm-style terminals send Alt+Up as `ESC [1;3A`;
 macOS Terminal sends Option+Up as `ESC ESC [A` (Escape, then the arrow), which
-the TUI reads as the same key rather than as Escape; tmux passes both on as
-they are. Ctrl with an arrow was not used because macOS keeps Ctrl+Up and
+the TUI reads as the same key rather than as Escape, several in one read too;
+tmux usually re-encodes it as `ESC [1;3A`, and either form arrives as one key.
+An Escape followed by an arrow within the same read is likewise taken as Alt
+with that arrow. Ctrl with an arrow was not used because macOS keeps Ctrl+Up and
 Ctrl+Down for Mission Control.
 
 ## Verification
