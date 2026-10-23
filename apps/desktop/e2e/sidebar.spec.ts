@@ -976,6 +976,7 @@ test("sidebar the toggle keeps its place, and a side panel without room takes th
     await page.getByRole("button", { name: "Return to chat", exact: true }).click();
     await expect(page.locator(".side-panel")).toBeHidden();
     await expect(composer).toBeVisible();
+    await expect(composer).toBeFocused();
     await expect(page.locator(".sidebar")).toBeVisible();
   } finally {
     await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(size[0], size[1]), size);
@@ -1055,6 +1056,16 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
   await quiet.hover();
   await expect(archive).toHaveCSS("opacity", "1");
   await expect(quiet.locator(".session-age")).toHaveCSS("visibility", "hidden");
+  // Leaving, it comes back only once the button has faded out, so the two
+  // never show at once.
+  await page.mouse.move(900, 400);
+  const fade = await quiet.locator(".session-age").evaluate(element => {
+    const button = getComputedStyle(element.closest(".session-row")!.querySelector(".icon-button")!);
+    const opacity = button.transitionProperty.split(", ").indexOf("opacity");
+    return [getComputedStyle(element).transitionDelay, button.transitionDuration.split(", ")[opacity]];
+  });
+  expect(fade[0]).toBe(fade[1]);
+  expect(fade[0]).not.toBe("0s");
   expect(await title.boundingBox()).toEqual(before);
   const age = (await quiet.locator(".session-age").boundingBox())!;
   const button = (await archive.boundingBox())!;

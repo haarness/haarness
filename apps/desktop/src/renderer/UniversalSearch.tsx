@@ -15,18 +15,22 @@ import { dismissOnBackdrop, Icon } from "./ui";
 import { isWorktree, locationName, primaryLocation, projectKey } from "../projects";
 import { asksForKeys, searchEntries, type SearchEntry } from "./search";
 import { chatTitle } from "./chat-title";
+import { focusComposerWhenShown } from "./composer-focus";
 
 
-/** Search opened on archived chats, a project's or every project's (the
- * sidebar's "N archived" under a project with no open chats). */
-const [archivedRequest, setArchivedRequest] = createSignal<{ project?: string; at: number }>();
+/** Where Search lists archived chats: a project's, one checkout's of it, or
+ * every project's. */
+export type ArchivedScope = { project?: string; location?: string };
+/** Search opened on archived chats (the sidebar's "N archived" under a list
+ * with no open chats). */
+const [archivedRequest, setArchivedRequest] = createSignal<ArchivedScope & { at: number }>();
 export const archivedSearchRequested = archivedRequest;
-export const searchArchived = (project?: string) => setArchivedRequest({ project, at: Date.now() });
+export const searchArchived = (scope: ArchivedScope) => setArchivedRequest({ ...scope, at: Date.now() });
 
 export function UniversalSearch(props: {
   close: () => void;
-  /** Only archived chats, of this project when it names one. */
-  archived?: { project?: string };
+  /** Only archived chats, of this project or checkout when it names one. */
+  archived?: ArchivedScope;
 }) {
   const app = useApp();
   const settings = createSettingsSearch(app, { inventory: false });
@@ -100,7 +104,10 @@ export function UniversalSearch(props: {
         app
           .conversations(scope.project)
           .filter(({ thread, location }) =>
-            thread.archived && !thread.isSubagent && location.checkout?.exists !== false,
+            thread.archived &&
+            !thread.isSubagent &&
+            location.checkout?.exists !== false &&
+            (!scope.location || location.id === scope.location),
           )
           .sort((a, b) => b.thread.updatedAt.localeCompare(a.thread.updatedAt))
           .map(chatEntry),
@@ -230,6 +237,12 @@ export function UniversalSearch(props: {
           location.checkout?.exists !== false &&
           app.indexes()[location.id]?.loading,
       );
+  /** The project, and the checkout when it is a worktree, Search is limited to. */
+  const scopeName = () => {
+    const project = app.projects().find((item) => item.id === props.archived?.project);
+    const location = project?.locations.find((item) => item.id === props.archived?.location);
+    return (project?.label ?? "") + (isWorktree(location) ? " · " + t(locationName(location!)) : "");
+  };
   /** With Command (Control elsewhere) held, a chat opens in a tab that stays. */
   const keeps = (event: MouseEvent | KeyboardEvent) =>
     app.state.platform === "darwin" ? event.metaKey : event.ctrlKey;
@@ -252,22 +265,8 @@ export function UniversalSearch(props: {
       )
         return;
       await entry.action(open);
-      if (leads || opener) focusComposer(leads ? previous : opener);
+      if (leads || opener) focusComposerWhenShown(leads ? previous : opener);
     });
-  }
-  /** Puts the keyboard in the message box once it shows, unless the reader
-   * has put it somewhere else than `from` meanwhile. */
-  function focusComposer(from: Element | null) {
-    let frames = 120;
-    const land = () => {
-      const focused = document.activeElement;
-      if (focused && focused !== document.body && focused !== from) return;
-      const box = document.querySelector<HTMLElement>("[data-composer-input]");
-      if (box?.checkVisibility({ visibilityProperty: true }) && !box.matches(":disabled"))
-        box.focus();
-      else if (frames-- > 0) requestAnimationFrame(land);
-    };
-    requestAnimationFrame(land);
   }
   return (
       <dialog
@@ -326,9 +325,7 @@ export function UniversalSearch(props: {
               !props.archived
                 ? t("Search anything in Haarness…")
                 : props.archived.project
-                  ? t("Search archived chats in {name}…", {
-                      name: app.projects().find((item) => item.id === props.archived!.project)?.label ?? "",
-                    })
+                  ? t("Search archived chats in {name}…", { name: scopeName() })
                   : t("Search archived chats…")
             }
             value={query()}
