@@ -256,7 +256,7 @@ try:
     command = json.dumps({'command': 'echo --token fixture-command-secret > /dev/null'})
     api(f'/threads/{chat}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool bash {command}'})
     until(lambda: not api('/turns/active'), 'turn still active')
-    until(lambda: 'approved once (Auto)' in logs(), 'no Auto approval line in the log')
+    until(lambda: 'approved once (Auto' in logs(), 'no Auto approval line in the log')
     clean(logs(), 'daemon log')
     check("the Auto approval log line hides the command's token")
 

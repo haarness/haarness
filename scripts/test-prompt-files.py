@@ -139,8 +139,9 @@ try:
     check("Without prompt files `prompt show` prints the built-in prompt", builtin.startswith("You are Haarness, a local agentic coding harness."))
     listing = cli("prompt", "list").stdout
     check("`prompt list` lists every prompt as built-in", all(f"{name} " in listing for name in
-          ["system", "plan", "review", "explore", "compaction", "title", "preview", "ultracode", "max-steps", "goal"])
-          and listing.count("built-in") == 10)
+          ["system", "plan", "review", "explore", "compaction", "title", "preview", "ultracode", "max-steps", "goal",
+           "auto-review"])
+          and listing.count("built-in") == 11)
 
     # 4. The request without prompt files.
     connection = json.loads(subprocess.run([str(binary), "--workspace", str(project), "desktop"], input='{"action":"connect"}',
