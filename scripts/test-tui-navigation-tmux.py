@@ -301,6 +301,39 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         keys("Escape")
         checks.append("Answered elsewhere, a chat loses its mark and its place at the top")
 
+        # A person's own shortcut on a new default's key wins, and a setting
+        # that cannot apply is left out alone, said once on the status line.
+        config.write_text(base + '\n[tui.keybinds]\nsessions = "alt+up"\nfrobnicate = "alt+q"\nusage = "F6"\n')
+        tmux("respawn-pane", "-k", "-t", session, tui)
+        until(lambda: "Shortcuts not applied: frobnicate, messages_previous" in pane(), "the skipped shortcuts were not named")
+        screen("shortcuts-skipped")
+        keys("M-Up")
+        until(lambda: "Sessions" in pane() and len(rows()) >= 5, "Alt+Up did not open the session list it was given to")
+        keys("Escape")
+        keys("F6")
+        until(lambda: "usage" in pane().lower() and "context" in pane().lower(), "F6 from config.toml did not open usage")
+        keys("Escape")
+        # /keybinds saves only what differs from config.toml and the defaults.
+        text("/keybinds")
+        keys("Enter")
+        until(lambda: "Keyboard shortcuts" in pane(), "/keybinds did not open")
+        text("Prompt stash")
+        keys("Enter")
+        time.sleep(.5)
+        keys("C-u")
+        text("F7")
+        keys("Enter")
+        until(lambda: "F7" in pane(), "the stash shortcut was not edited")
+        text("Apply these values")  # the Save row; "Save" also finds "Save draft to stash"
+        keys("Enter")
+        state = root / "data" / "config" / "tui-state.toml"
+        until(lambda: state.exists() and "F7" in state.read_text(), "the save did not reach tui-state.toml")
+        saved = state.read_text().split("[keybindings]", 1)[-1].split("\n[", 1)[0]
+        assert "stash" in saved and not any(name in saved for name in ("messages_", "sessions", "usage", "agents")), saved
+        keys("Escape")
+        config.write_text(base)
+        checks.append("A shortcut from config.toml wins over a new default, a bad one is named and skipped, and /keybinds saves only the change")
+
         (EVIDENCE / "results.json").write_text(json.dumps({"checks": checks, "status": "passed"}, indent=2))
         print("PASS: " + "\nPASS: ".join(checks))
         print("Evidence: " + str(EVIDENCE))
