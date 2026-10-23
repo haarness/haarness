@@ -62,7 +62,7 @@ impl App {
                     .is_none_or(|info| info.thread_id != self.thread.id)
                 {
                     self.approval_mode = None;
-                    self.auto_permissions = false;
+                    self.keep_permission_choice(|app| app.auto_permissions = false);
                 }
             }
         }
@@ -72,7 +72,9 @@ impl App {
         if info.thread_id != self.thread.id {
             return;
         }
-        self.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        self.keep_permission_choice(|app| {
+            app.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        });
         self.approval_mode = Some(info);
     }
 

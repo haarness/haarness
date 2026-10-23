@@ -2999,12 +2999,48 @@ fn relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
 impl App {
     /// The permission prompt y/a/w/n answer next: oldest pending.
     pub fn set_auto_permissions(&mut self, enabled: bool) {
-        self.auto_permissions = enabled;
+        self.keep_permission_choice(|app| app.auto_permissions = enabled);
         self.notice = if enabled {
             "Auto on for this TUI launch · new requests allowed once · pending requests stay manual · ctrl+y to review"
         } else {
             "Review mode · permission requests need approval · ctrl+y to switch"
         }.into();
+    }
+
+    /// Change what the card offers (the chat's mode) and keep the answer it
+    /// had in focus: the same choice where it is still offered, otherwise
+    /// Allow once, never whichever neighbour slid into its place. Once + Auto
+    /// staged in a chat that is now in Auto has nothing left to confirm.
+    pub(crate) fn keep_permission_choice(&mut self, change: impl FnOnce(&mut Self)) {
+        // While an answer is staged the selection is confirm or cancel.
+        let before = PermissionChoice::available(self);
+        let focused = before
+            .get(
+                self.permission_selection
+                    .min(before.len().saturating_sub(1)),
+            )
+            .copied()
+            .filter(|_| self.confirm_always.is_none());
+        change(self);
+        if self.first_pending_permission().is_none() {
+            return;
+        }
+        if let Some(staged) = self.confirm_always {
+            if !(self.auto_permissions && staged == PermissionChoice::Auto.key()) {
+                return;
+            }
+            self.confirm_always = None;
+            self.update_permission_notice();
+        }
+        let after = PermissionChoice::available(self);
+        self.permission_selection = focused
+            .and_then(|choice| after.iter().position(|item| *item == choice))
+            .or_else(|| {
+                after
+                    .iter()
+                    .position(|item| *item == PermissionChoice::Once)
+            })
+            .unwrap_or(0);
     }
 
     pub fn first_pending_permission(&self) -> Option<&PendingPermissionInfo> {

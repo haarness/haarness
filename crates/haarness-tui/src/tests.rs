@@ -7379,6 +7379,120 @@ async fn a_request_announced_again_updates_its_card_in_place() {
 }
 
 #[tokio::test]
+async fn auto_turning_on_keeps_the_cards_focus_and_a_re_announce_keeps_every_card() {
+    use crate::state::PermissionChoice;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    let announce = |id: &str, review: serde_json::Value| {
+        fixture_event(
+            "permission.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "permissionId": id,
+                "operation": format!("bash:printf {id}"),
+                "detail": {"command": format!("printf {id}")},
+                "review": review,
+            }),
+        )
+    };
+    let mode = |auto: bool| {
+        fixture_event(
+            "approval_mode.changed",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "threadId": thread.id,
+                "mode": if auto { "auto" } else { "review" },
+                "sourceThreadId": thread.id,
+                "explicit": true,
+                "revision": "r1",
+            }),
+        )
+    };
+    let focused = |app: &App| {
+        let choices = PermissionChoice::available(app);
+        choices[app.permission_selection.min(choices.len() - 1)]
+    };
+    app.reduce(announce("perm-1", serde_json::Value::Null), &client)
+        .await
+        .unwrap();
+    app.reduce(announce("perm-2", serde_json::Value::Null), &client)
+        .await
+        .unwrap();
+    app.permission_focus = true;
+
+    // Focus on Once + Auto when Auto turns on elsewhere: that chip is gone,
+    // so the focus lands on Allow once, and Enter allows rather than rejects.
+    app.permission_selection = PermissionChoice::available(&app)
+        .iter()
+        .position(|choice| *choice == PermissionChoice::Auto)
+        .unwrap();
+    app.reduce(mode(true), &client).await.unwrap();
+    assert!(app.auto_permissions);
+    assert_eq!(focused(&app), PermissionChoice::Once);
+
+    // Both cards are announced again while the reviewer decides, then left
+    // to the person: each is updated where it stands, and the focus on
+    // Always stays on Always.
+    app.permission_selection = PermissionChoice::available(&app)
+        .iter()
+        .position(|choice| *choice == PermissionChoice::Always)
+        .unwrap();
+    for id in ["perm-1", "perm-2"] {
+        app.reduce(
+            announce(id, serde_json::json!({"status": "reviewing"})),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(focused(&app), PermissionChoice::Always);
+    for id in ["perm-2", "perm-1"] {
+        app.reduce(
+            announce(
+                id,
+                serde_json::json!({"status": "asked", "rationale": format!("Asked {id}.")}),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        app.pending_permissions
+            .iter()
+            .map(|pending| pending.permission_id.as_str())
+            .collect::<Vec<_>>(),
+        ["perm-1", "perm-2"]
+    );
+    for pending in &app.pending_permissions {
+        let review = pending.review.clone().unwrap();
+        assert_eq!(
+            review.status,
+            haarness_protocol::PermissionReviewStatus::Asked
+        );
+        assert_eq!(
+            review.rationale.as_deref(),
+            Some(format!("Asked {}.", pending.permission_id).as_str())
+        );
+    }
+    assert_eq!(focused(&app), PermissionChoice::Always);
+    assert!(app.permission_focus);
+
+    // Back in Review the chip returns at the end; the focus stays put.
+    app.reduce(mode(false), &client).await.unwrap();
+    assert_eq!(focused(&app), PermissionChoice::Always);
+
+    // Once + Auto staged when Auto turns on has nothing left to confirm.
+    app.confirm_always = Some(PermissionChoice::Auto.key());
+    app.reduce(mode(true), &client).await.unwrap();
+    assert_eq!(app.confirm_always, None);
+    assert_eq!(focused(&app), PermissionChoice::Once);
+}
+
+#[tokio::test]
 async fn in_a_chat_already_in_auto_u_types_instead_of_staging_auto() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
