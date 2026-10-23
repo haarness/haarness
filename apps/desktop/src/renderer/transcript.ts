@@ -408,6 +408,15 @@ export function ranInChrome(name: string, args: unknown, result?: ToolResult) {
 export function answeredByHook(name: string, result?: ToolResult) {
   return toolName(name) === "question" && object(result?.metadata)?.answeredBy === "hook";
 }
+/** The reason Auto's reviewer gave for blocking the call (`metadata.review`
+ * of status `blocked`; empty when it gave none), or undefined when it did
+ * not block it. */
+export function reviewBlock(result?: ToolResult): string | undefined {
+  if (!result?.is_error) return undefined;
+  const review = object(object(result.metadata)?.review);
+  if (review?.status !== "blocked") return undefined;
+  return typeof review.rationale === "string" ? review.rationale.trim() : "";
+}
 export function toolFailed(name: string, result?: ToolResult) {
   if (!result) return false;
   if (result.is_error) return true;

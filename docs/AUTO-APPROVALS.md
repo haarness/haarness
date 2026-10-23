@@ -57,7 +57,8 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 
 ## Desktop
 
-- Use the shield control at the left of the composer, which reads **Review** or **Auto**, or search for **Enable Auto approvals** / **Switch approvals to Review**. Its tooltip says what Review asks about by default: edits and commands inside the project run without asking.
+- Use the shield control at the left of the composer, which reads **Review** or **Auto**, or search for **Enable Auto approvals** / **Switch approvals to Review**. Its tooltip says what Review asks about by default (edits and commands inside the project run without asking), and, on a server whose reviewer is on, that in Auto a reviewer model approves routine requests once and asks you about the rest.
+- A prompt the reviewer left to you shows its note as one quiet line under the request ("Auto review · <rule>: <reason>", or that it was unavailable or paused), there from the card's first paint. Once a review has taken 800 ms the activity line reads **Reviewing…**; a quicker one shows nothing new. A call it blocked reads **Blocked by Auto review** in its row, in the quiet style of any refused step, and opening the row shows the reason. Nothing else appears: no toast, no new confirmation, no new setting.
 - With a conversation open, the control changes that conversation's mode on its server. From a child agent view it applies only to that child and its descendants; the parent and siblings keep their mode. A parent set to Review keeps its agents in Review.
 - On a new chat, the control sets the mode for new chats Desktop starts in that workspace/checkout. It applies to chats Desktop creates, not to chats started by the TUI, a phone or the API.
 - **Allow once + Auto** answers the visible request first and enables Auto only after the reply succeeds and the view/mode has not changed.
@@ -83,7 +84,7 @@ cargo test -p haarness-tui --lib
 cargo test -p haarness-server --test api -- approval auto_approves turning_auto_on delegated_agents auto_review::
 cargo build -p haarness-cli
 HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-auto-mode.py
-HAARNESS_BIN="$PWD/target/debug/haarness" npm --prefix apps/desktop run test:e2e -- --grep 'Auto approvals allow|Auto from a child|workspace Auto stays|SSE chat fabric|dictation inserts|universal search opens settings'
+HAARNESS_BIN="$PWD/target/debug/haarness" npm --prefix apps/desktop run test:e2e -- --grep "Auto approvals allow|Auto's reviewer|Auto from a child|workspace Auto stays|SSE chat fabric|dictation inserts|universal search opens settings"
 ```
 
 Under the deterministic test provider (`HAARNESS_TEST_PROVIDER=1`) the reviewer answers from `HAARNESS_TEST_AUTO_REVIEW` (`allow`, the default, `ask`, `deny`, `fail`, `slow` or `stall`), or from a `[review:<verdict>]` marker after a scripted call; real reviews never read either.
