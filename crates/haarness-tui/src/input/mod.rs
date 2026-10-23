@@ -14,8 +14,10 @@ use crate::state::{App, InterruptTarget, Overlay, PermissionChoice, PhaseInfo, s
 
 const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// What Ctrl+C on a draft says: the draft is cleared, not lost.
+/// What Ctrl+C on a draft says: the draft is cleared, not lost, as far as
+/// it comes back (↑ and undo bring back text, never attachments).
 const DRAFT_CLEARED: &str = "Draft cleared · ↑ brings it back";
+const DRAFT_TEXT_CLEARED: &str = "Draft cleared · ↑ brings back its text, not its attachments";
 
 fn confirm<T: Copy + PartialEq>(pending: &mut Option<(T, std::time::Instant)>, target: T) -> bool {
     let now = std::time::Instant::now();
@@ -372,7 +374,7 @@ fn message_key(app: &App, key: KeyEvent) -> Option<MessageStep> {
 /// The key bound to opening the fold nearest the prompt. Like the message
 /// keys it works while a card or a question holds the keyboard, and in a
 /// child agent's view: it only changes what is read.
-fn fold_key(app: &App, key: KeyEvent) -> bool {
+fn presses_fold_key(app: &App, key: KeyEvent) -> bool {
     crate::keybindings::resolve(&app.keybindings, key) == Some(crate::keybindings::FOLD_ACTION)
 }
 
@@ -566,6 +568,7 @@ pub async fn handle_key_at(
             app.notice = "Edit cancelled · draft restored".into();
         } else if !app.composer.is_empty() || !app.attachments.is_empty() || app.shell_mode {
             let kept = app.composer.discard();
+            let attached = !app.attachments.is_empty();
             app.attachments.clear();
             app.undo_draft = None;
             app.mention_suggestions.clear();
@@ -573,7 +576,13 @@ pub async fn handle_key_at(
             app.shell_mode = false;
             app.autocomplete_hidden = false;
             app.selection = 0;
-            app.notice = if kept { DRAFT_CLEARED } else { "Input cleared" }.into();
+            app.notice = match (kept, attached) {
+                (true, false) => DRAFT_CLEARED,
+                (true, true) => DRAFT_TEXT_CLEARED,
+                (false, true) => "Attachments removed",
+                (false, false) => "Input cleared",
+            }
+            .into();
         } else if let Some(turn) = app.active_turn {
             let target = InterruptTarget::Turn(turn);
             if confirm(&mut app.ctrl_c_action, target) {
@@ -615,7 +624,7 @@ pub async fn handle_key_at(
                 app.step_messages(step);
                 return Ok(AppAction::Continue);
             }
-            if fold_key(app, key) {
+            if presses_fold_key(app, key) {
                 app.toggle_nearest_fold();
                 return Ok(AppAction::Continue);
             }
@@ -796,7 +805,7 @@ pub async fn handle_key_at(
             app.step_messages(step);
             return Ok(AppAction::Continue);
         }
-        if fold_key(app, key) {
+        if presses_fold_key(app, key) {
             app.toggle_nearest_fold();
             return Ok(AppAction::Continue);
         }
@@ -1134,7 +1143,7 @@ pub async fn handle_key_at(
             } else if !app.composer.move_up() && app.composer.history_prev() {
                 app.selection = 0;
                 // Brought back, the cleared draft needs no more saying so.
-                if app.notice == DRAFT_CLEARED {
+                if app.notice == DRAFT_CLEARED || app.notice == DRAFT_TEXT_CLEARED {
                     app.notice.clear();
                 }
             }

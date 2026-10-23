@@ -12,7 +12,7 @@ pub(crate) const FOLD_ACTION: &str = "fold";
 
 pub(crate) const ACTIONS: &[(&str, &str, &str)] = &[
     ("commands", "Command palette", "ctrl+p"),
-    (FOLD_ACTION, "Expand or collapse output", "ctrl+r"),
+    (FOLD_ACTION, "Open or close a fold", "ctrl+r"),
     ("sessions", "Sessions", "ctrl+l"),
     ("messages", "Message browser", "alt+m"),
     ("models", "Models", "F2"),
@@ -284,8 +284,9 @@ pub(crate) fn overrides_default(bindings: &BTreeMap<String, String>, key: KeyEve
             && bindings.get(*name).is_some_and(|value| value != default)
     })
 }
-/// The chat's keys that are not shortcuts to rebind, listed above the
-/// shortcuts so every key can be found in one place.
+/// The chat's main keys that are not shortcuts to rebind, listed above the
+/// shortcuts. Editing keys (Ctrl+A/E/W/K/U, Ctrl+- undo) work as in any
+/// prompt and are left to the reference.
 const FIXED_KEYS: &[&str] = &[
     "Fixed: esc esc stop · ctrl+c clear, then stop · alt+enter queue · ctrl+g approval · tab agent · ctrl+y Auto · ctrl+b sidebar · ctrl+t thinking",
 ];

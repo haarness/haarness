@@ -923,9 +923,16 @@ fn apply_dialog(
     // A list being filtered keeps its top edge where it opened: it shortens
     // from the bottom instead of jumping to stay centred.
     let anchored = if app.overlay.is_filterable() {
+        // Which dialog this is: a list by its kind, an options dialog by its
+        // title (one kind opens many pages).
         let key = match &app.overlay {
             Overlay::Options { title, .. } => title.clone(),
-            other => format!("{:?}", std::mem::discriminant(other)),
+            Overlay::Commands => "commands".to_owned(),
+            Overlay::Threads => "sessions".to_owned(),
+            Overlay::Models => "models".to_owned(),
+            Overlay::Agents => "agents".to_owned(),
+            Overlay::Themes => "themes".to_owned(),
+            _ => String::new(),
         };
         let mut anchor = app.dialog_anchor.borrow_mut();
         let tallest = match anchor.as_ref() {

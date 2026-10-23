@@ -2574,7 +2574,10 @@ async fn a_question_in_view_has_a_key_legend_and_no_toast() {
     .unwrap();
     assert!(app.notification_toast.is_some());
     let text = frame_text(&app, (100, 30));
-    assert!(text.contains("↑↓ move · enter choose"), "{text}");
+    assert!(
+        text.contains("↑↓ move · enter choose · esc cancels"),
+        "{text}"
+    );
     assert!(!text.contains("Haarness needs your answer"), "{text}");
     // A dialog over it brings the toast back.
     app.open_overlay(crate::state::Overlay::Commands);
@@ -14689,7 +14692,7 @@ fn the_prompt_wraps_between_words_and_marks_hidden_rows() {
     );
     let rows = composer_rows(&app, (40, 20));
     assert_eq!(rows.len(), 6, "{rows:#?}");
-    assert!(rows[0].starts_with("↑ line 5"), "{rows:#?}");
+    assert!(rows[0].starts_with("▴ line 5"), "{rows:#?}");
     assert!(rows[5].starts_with("  line 10"), "{rows:#?}");
     // With the cursor at the top, the rows below are marked instead.
     for _ in 0..9 {
@@ -14697,7 +14700,7 @@ fn the_prompt_wraps_between_words_and_marks_hidden_rows() {
     }
     let rows = composer_rows(&app, (40, 20));
     assert!(rows[0].starts_with("  line 1"), "{rows:#?}");
-    assert!(rows[5].starts_with("↓ line 6"), "{rows:#?}");
+    assert!(rows[5].starts_with("▾ line 6"), "{rows:#?}");
 }
 
 /// The prompt's rows as text: the lines between the transcript and the rule
@@ -19582,6 +19585,29 @@ async fn clearing_input_reports_in_the_status_line_not_a_toast() {
         app.notification_toast.is_none(),
         "ambient feedback belongs to the status line"
     );
+    // Attachments are not brought back, and the notice does not say they are.
+    app.composer.set_text("look at this".into());
+    app.attachments = vec!["/tmp/shot.png".into()];
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.notice,
+        "Draft cleared · ↑ brings back its text, not its attachments"
+    );
+    app.attachments = vec!["/tmp/shot.png".into()];
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "Attachments removed");
     // Shell mode alone has no draft to bring back.
     app.shell_mode = true;
     crate::input::handle_key(
