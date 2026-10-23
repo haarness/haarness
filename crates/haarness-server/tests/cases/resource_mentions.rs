@@ -12,7 +12,11 @@ use serde_json::json;
 
 /// Two servers that expose the same URI (`docs` and `wiki`), and a third
 /// (`hidden`) whose tools a rule takes away. Reading `slow://` never answers.
-struct Docs;
+/// Every read is logged.
+#[derive(Default)]
+struct Docs {
+    reads: std::sync::Mutex<Vec<String>>,
+}
 #[async_trait]
 impl McpRegistry for Docs {
     fn tool_snapshot(&self) -> Vec<ToolDefinition> {
@@ -58,6 +62,7 @@ impl McpRegistry for Docs {
         Ok(vec![])
     }
     async fn read_resource(&self, server: &str, uri: &str) -> CoreResult<Value> {
+        self.reads.lock().unwrap().push(format!("{server}:{uri}"));
         match uri {
             "slow://" => std::future::pending().await,
             "docs://setup" | "docs://private" => Ok(
@@ -80,12 +85,18 @@ struct Fixture {
     base: String,
     client: reqwest::Client,
     runtime: Arc<AgentRuntime>,
+    docs: Arc<Docs>,
     handle: haarness_server::ServerHandle,
 }
 
 /// The echo provider, and rules that keep `docs://private` and every tool
-/// (so every resource) of `hidden` from the model.
+/// (so every resource) of `hidden` from the model; the agent `nodocs` has
+/// none of `docs`'s tools.
 async fn fixture() -> Fixture {
+    fixture_with(Arc::new(Echo)).await
+}
+
+async fn fixture_with(provider: Arc<dyn ModelProvider>) -> Fixture {
     let mut config = RuntimeConfig::default();
     for (pattern, decision) in [
         // Rules match last first: the ask is the default, the denies win.
@@ -101,17 +112,21 @@ async fn fixture() -> Fixture {
             decision,
         });
     }
+    config.custom_agents.push(haarness_core::CustomAgent {
+        id: "nodocs".into(),
+        tools: [("mcp__docs__*".to_owned(), false)].into_iter().collect(),
+        ..Default::default()
+    });
     let runtime = Arc::new(AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
-        Arc::new(StaticProviderRegistry::new(vec![
-            Arc::new(Echo) as Arc<dyn ModelProvider>
-        ])),
+        Arc::new(StaticProviderRegistry::new(vec![provider])),
         Arc::new(EmptyToolRegistry),
         EventBus::new(64),
         std::env::temp_dir(),
         String::new(),
         config,
     ));
+    let docs = Arc::new(Docs::default());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let handle = serve(
         listener,
@@ -120,7 +135,7 @@ async fn fixture() -> Fixture {
             browser: None,
             management: None,
             runtime: runtime.clone(),
-            mcp: Arc::new(Docs),
+            mcp: docs.clone(),
             skills: Arc::new(NoSkills),
             plugins: None,
             workflows: None,
@@ -148,6 +163,7 @@ async fn fixture() -> Fixture {
         base: format!("http://{}", handle.address),
         client,
         runtime,
+        docs,
         handle,
     }
 }
@@ -464,6 +480,20 @@ async fn a_slow_server_has_ten_seconds_and_a_client_that_leaves_keeps_its_messag
         .send()
         .await;
     assert!(gave_up.is_err(), "{gave_up:?}");
+    // Its retry while the reads still run waits for them, and reads nothing.
+    let retried: Turn = fixture
+        .client
+        .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retried.request_id, request);
     let sent = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let sent = user_messages(
@@ -498,18 +528,125 @@ async fn a_slow_server_has_ten_seconds_and_a_client_that_leaves_keeps_its_messag
     );
     assert!(sent[0].contains("# docs setup"), "{sent:?}");
     wait_idle(&fixture.runtime, thread.id).await;
-    // Its retry finds the turn the first request started, and adds nothing.
+    // A retry once it ran finds that turn at once, reading nothing either.
+    let started = std::time::Instant::now();
     let turn: Turn = fixture
         .client
         .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
-        .json(&json!({"requestId": request, "text": "Wait for it"}))
+        .json(&body)
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(turn.request_id, request);
     assert_eq!(user_messages(&fixture.items(&thread).await).len(), 1);
+    assert_eq!(
+        *fixture.docs.reads.lock().unwrap(),
+        ["docs:slow://", "docs:docs://setup"]
+    );
+    fixture.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_mention_follows_the_agent_its_message_runs_under() {
+    let fixture = fixture().await;
+    let thread = fixture.thread().await;
+    let off = |agent: Option<&str>| {
+        let url = match agent {
+            Some(agent) => format!(
+                "{}/v1/mcp?threadId={}&agent={agent}",
+                fixture.base, thread.id
+            ),
+            None => format!("{}/v1/mcp?threadId={}", fixture.base, thread.id),
+        };
+        let client = fixture.client.clone();
+        async move {
+            client
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<McpServerInfo>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|server| server.turned_off == Some(true))
+                .map(|server| server.name)
+                .collect::<Vec<_>>()
+        }
+    };
+    // The agent named wins over the chat's.
+    assert_eq!(off(None).await, ["hidden"]);
+    assert_eq!(off(Some("nodocs")).await, ["docs", "hidden"]);
+    let body = |agent: Option<&str>| {
+        json!({
+            "requestId": RequestId::new(),
+            "text": "Read it",
+            "agent": agent,
+            "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
+        })
+    };
+    for agent in [Some("nodocs"), None] {
+        fixture
+            .client
+            .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
+            .json(&body(agent))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        wait_idle(&fixture.runtime, thread.id).await;
+    }
+    let sent = user_messages(&fixture.items(&thread).await);
+    assert!(
+        sent[0].contains("(not read)</summary>\n\n```\na rule keeps this resource from the model"),
+        "{sent:?}"
+    );
+    assert!(sent[1].contains("# docs setup"), "{sent:?}");
+    fixture.handle.shutdown().await.unwrap();
+
+    // Steering, a message joins the running turn's agent.
+    let provider = SlowText::default();
+    let fixture = fixture_with(Arc::new(provider.clone())).await;
+    let thread = fixture.thread().await;
+    fixture
+        .client
+        .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
+        .json(&json!({"requestId": RequestId::new(), "text": "Hold on", "agent": "nodocs"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), provider.first_started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    fixture
+        .client
+        .post(format!("{}/v1/threads/{}/input", fixture.base, thread.id))
+        .json(&json!({
+            "requestId": RequestId::new(),
+            "text": "And this",
+            "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    provider.release_first.add_permits(1);
+    let sent = user_messages(&fixture.items(&thread).await);
+    assert!(
+        sent[1].starts_with("And this")
+            && sent[1].contains("a rule keeps this resource from the model"),
+        "{sent:?}"
+    );
+    assert!(fixture.docs.reads.lock().unwrap().is_empty());
     fixture.handle.shutdown().await.unwrap();
 }

@@ -895,6 +895,18 @@ impl ThreadRepository for SqliteStore {
             .collect()
     }
 
+    async fn has_turn_for_request(&self, id: ThreadId, request: RequestId) -> CoreResult<bool> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT 1 FROM turns WHERE thread_id=?1 AND request_id=?2",
+                params![id.to_string(), request.to_string()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|found| found.is_some())
+            .map_err(storage)
+    }
     async fn has_input_admission(&self, id: ThreadId, request: RequestId) -> CoreResult<bool> {
         let owner: Option<String> = self
             .connection

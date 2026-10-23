@@ -1587,11 +1587,66 @@ impl AgentRuntime {
         self.components().config.default_agent.clone()
     }
 
+    /// Whether chat `thread_id` already took request `request`: its turn
+    /// runs or ran, or it waits in the queue. A retry finds it there.
+    pub async fn request_admitted(
+        &self,
+        thread_id: ThreadId,
+        request: RequestId,
+    ) -> CoreResult<bool> {
+        if self
+            .active
+            .get(&thread_id)
+            .is_some_and(|active| active.request_id == request)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .repository
+            .has_input_admission(thread_id, request)
+            .await?
+            || self
+                .repository
+                .has_turn_for_request(thread_id, request)
+                .await?)
+    }
+
+    /// The agent a message to chat `thread_id` runs under, when it is not
+    /// the chat's own: the one it names, else the one its command `command`
+    /// names, else the running turn's (a message that steers or waits in the
+    /// queue joins it). `None` means the chat's agent.
+    #[must_use]
+    pub fn message_agent(
+        &self,
+        thread_id: ThreadId,
+        named: Option<&str>,
+        command: Option<&str>,
+    ) -> Option<String> {
+        if let Some(named) = named {
+            return Some(named.to_owned());
+        }
+        if let Some(name) = command
+            && let Some(agent) = self
+                .live_commands
+                .read()
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+                .filter(|command| !command.execution.fork)
+                .and_then(|command| command.agent.clone())
+        {
+            return Some(agent);
+        }
+        self.active
+            .get(&thread_id)
+            .map(|active| active.agent.id.clone())
+    }
+
     /// The rules a person's `@` mentions of MCP resources follow in chat
-    /// `thread_id`, or, before a chat exists, for `agent` (the default agent
-    /// when none is named). They are built as a direct tool call's are: the
-    /// configured and remembered rules, the agent's own permissions and tool
-    /// settings, and a parent chat's ceilings.
+    /// `thread_id` under `agent` (the agent the message runs under, which
+    /// wins over the chat's), or, before a chat exists, for `agent` alone
+    /// (the default agent when none is named). They are built as a direct
+    /// tool call's are: the configured and remembered rules, the agent's own
+    /// permissions and tool settings, and a parent chat's ceilings.
     pub async fn resource_mention_policy(
         &self,
         thread_id: Option<ThreadId>,
@@ -1602,10 +1657,9 @@ impl AgentRuntime {
             Some(id) => Some(self.repository.get_thread(id).await?),
             None => None,
         };
-        let agent = thread
-            .as_ref()
-            .map(|thread| thread.agent.clone())
-            .or_else(|| agent.map(str::to_owned))
+        let agent = agent
+            .map(str::to_owned)
+            .or_else(|| thread.as_ref().map(|thread| thread.agent.clone()))
             .or_else(|| components.config.default_agent.clone())
             .unwrap_or_else(|| "build".into());
         if let Some(store) = &self.repository_approvals {

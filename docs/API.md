@@ -399,14 +399,17 @@ chat's own rules decide as they do for `mcp_resource_read`, except that an ask
 is not asked (the person picked it, as they attach a file): a deny for
 `<server>:<uri>`, or a rule or tool setting that takes every tool of the server
 away, keeps it out. The rest of the message is still sent. The same server and
-URI twice is read once; two servers with one URI are two mentions. A message
-with mentions is read and admitted on the server's own time, so a client that
-goes away meanwhile does not lose it, and a retry with the same `requestId`
-finds it. A published chat's request with `resources` is refused (`403`), and
+URI twice is read once; two servers with one URI are two mentions. The rules are those of
+the agent the message runs under: the request's `agent` (or its command's),
+else the running turn's for `/input`, else the chat's. No `PreToolUse` hook
+runs: a mention is no tool call. A message with mentions is read and admitted
+on the server's own time, so a client that goes away meanwhile does not lose
+it; a retry with the same `requestId` finds it without reading again, and one
+sent while the first is still reading waits for it. A published chat's request with `resources` is refused (`403`), and
 its `/v1/info` leaves the capability out. Servers advertise
 `mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
-resources only when it is there. `GET /v1/mcp?threadId=<id>` (or `?agent=` for a
-chat not yet made) marks each server that chat's rules take away with
+resources only when it is there. `GET /v1/mcp?threadId=<id>&agent=<agent>` (either one alone works; a named
+agent wins over the chat's) marks each server those rules take away with
 `turnedOff: true`, so an `@` list can leave its resources out.
 That POST returns a tagged `turn`, `workflow_run`, or `text` result and leaves
 the stable `POST /turns` contract unchanged. A workflow hidden by a configured
