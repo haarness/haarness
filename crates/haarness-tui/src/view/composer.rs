@@ -414,8 +414,12 @@ fn status_band(app: &App, width: usize) -> Line {
         fitted = Some(cut);
         kept_mode = Some(short.clone());
     }
+    // A running turn has shorter states of its own to fall back on; a
+    // notice has only itself.
+    let notice_like = state.len() <= essential + 1;
     if fitted.is_none() {
-        'detail: for left in &identity {
+        let lefts = if notice_like { named } else { identity.len() };
+        'detail: for left in identity.iter().take(lefts) {
             for right in state.iter().take(essential + 1) {
                 if fits(left, right, 0) {
                     fitted = Some((left.clone(), right.clone()));
@@ -423,6 +427,24 @@ fn status_band(app: &App, width: usize) -> Line {
                 }
             }
         }
+    }
+    // A notice that fits nowhere whole beside the model keeps the model, cut
+    // to the room left, while the cut keeps two thirds of it; past that the
+    // model gives way to the notice. One rule at every width, so the band's
+    // left side does not change shape from one width to the next.
+    if fitted.is_none() && notice_like {
+        let notice = state.get(essential).cloned().unwrap_or_default();
+        let whole = measure(&notice);
+        let beside = |left: &Vec<Span>| width.saturating_sub(measure(left) + 3);
+        let named_left = &identity[named - 1];
+        // A child agent's view names its lifecycle there instead, which a
+        // passing notice never displaces.
+        let left = if app.is_child_view() || beside(named_left) * 3 >= whole * 2 {
+            named_left
+        } else {
+            &identity[identity.len() - 1]
+        };
+        fitted = Some((left.clone(), cut(notice, beside(left))));
     }
     if fitted.is_none() {
         'identity: for right in state.iter().skip(essential + 1) {
