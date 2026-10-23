@@ -654,7 +654,12 @@ impl App {
                     self.expanded.insert(item);
                 }
             }
-            None => self.notice = "Nothing to expand on screen".into(),
+            // While a card waits the band keeps its summary; a notice set
+            // now would stay in its place.
+            None if self.pending_permissions.is_empty() => {
+                self.notice = "Nothing to expand on screen".into();
+            }
+            None => {}
         }
     }
 

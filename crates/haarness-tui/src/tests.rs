@@ -11054,6 +11054,28 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
     assert!(!text.contains("waiting for approval  "), "{text}");
 }
 
+/// Ctrl+R with no fold on screen leaves the waiting card's summary in the
+/// band rather than a notice in its place.
+#[tokio::test]
+async fn ctrl_r_with_nothing_to_open_keeps_the_cards_summary() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(outside_write_event(&thread, "perm-r"), &offline_client())
+        .await
+        .unwrap();
+    let before = app.notice.clone();
+    let _ = app.lines((100, 30));
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, before);
+    assert!(!frame_text(&app, (100, 30)).contains("Nothing to expand"));
+}
+
 /// Before a first token the band says the turn is working; it says thinking
 /// only while reasoning streams. The empty prompt says what Enter does with
 /// a message meanwhile, as the project's input mode decides.
