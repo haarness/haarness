@@ -127,7 +127,9 @@ struct Cli {
     /// server's reviewer model then answers eligible requests (approving
     /// routine ones once, leaving the rest to a person), whichever app shows
     /// the chat, until someone switches it back to Review. Permission
-    /// denials and requests that always ask still hold.
+    /// denials and requests that always ask still hold. A `run` with no
+    /// terminal refuses each request that still needs a person and goes on
+    /// (five in a row stop it); it exits with status 3 when it refused any.
     #[arg(long, global = true, conflicts_with = "yolo")]
     auto: bool,
     /// Open a specific chat by id. `--session` is an alias.
@@ -1366,6 +1368,10 @@ struct ScheduleUpdateArgs {
 async fn main() -> Result<()> {
     let outcome = Box::pin(cli_main()).await;
     if let Err(error) = &outcome {
+        // Each refusal was already said on its own line.
+        if error.downcast_ref::<RunRefused>().is_some() {
+            std::process::exit(EXIT_REFUSED);
+        }
         record_start_failure(&format!("{error:#}"));
     }
     outcome
@@ -1728,7 +1734,9 @@ async fn cli_main() -> Result<()> {
     .await;
     // Returned from main, the error reaches only stderr, which a detached
     // server does not have and the TUI hides: the log keeps why it ended.
-    if let Err(error) = &outcome {
+    if let Err(error) = &outcome
+        && error.downcast_ref::<RunRefused>().is_none()
+    {
         tracing::error!(
             command = command_name,
             error = %haarness_core::redact::log_text(&format!("{error:#}"), 2_000),
@@ -4660,7 +4668,7 @@ async fn run_command(
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
-            let mut watch = RunWatch::new(yolo).auto(approvals.auto);
+            let mut watch = RunWatch::new(yolo).auto(approvals.auto).json(json_output);
             if let Some(workflow) = args.workflow {
                 let mut values = serde_json::Map::new();
                 if !prompt.trim().is_empty() {
@@ -4722,7 +4730,7 @@ async fn run_command(
                                 ),
                             }
                         }
-                        return Ok(());
+                        return Ok(watch.refused());
                     }
                     _ => anyhow::bail!(
                         "workflow {} ended as {:?}: {}",
@@ -4801,7 +4809,8 @@ async fn run_command(
                 args.format,
                 &watch,
             )
-            .await
+            .await?;
+            Ok(watch.refused())
         })
         .await
     }
@@ -4814,7 +4823,12 @@ async fn run_command(
             json!({"type": "error", "threadID": chat, "message": format!("{error:#}")})
         );
     }
-    result
+    // The run went on past each refusal by design; its exit status still
+    // tells a script that something was left undone.
+    match result? {
+        0 => Ok(()),
+        refused => Err(RunRefused(refused).into()),
+    }
 }
 
 /// `--file` paths as the server reads them. A folder is refused here rather
@@ -5180,7 +5194,94 @@ struct RunWatch {
     /// `--auto`: with nobody to ask, a request that still needs a person is
     /// refused with its reason and the run goes on.
     auto: bool,
+    /// `--format json`: each refusal is also a `refused` record on stdout.
+    json: bool,
+    refusals: std::sync::Mutex<Refusals>,
     activity: Option<RunActivity>,
+}
+
+/// What a `--auto` run with nobody to ask refused.
+#[derive(Default)]
+struct Refusals {
+    /// Refused since a call last succeeded in the chat that asked.
+    in_a_row: u32,
+    total: u32,
+    /// Calls that had succeeded in each chat when it last asked.
+    succeeded: HashMap<ThreadId, usize>,
+}
+
+impl Refusals {
+    /// Count a refusal in `thread`, where `succeeded` calls have succeeded so
+    /// far (when known); true once [`REFUSALS_IN_A_ROW`] came with no call
+    /// succeeding in between.
+    fn count(&mut self, thread: ThreadId, succeeded: Option<usize>) -> bool {
+        self.total += 1;
+        let before = self.succeeded.get(&thread).copied();
+        if let Some(now) = succeeded {
+            self.succeeded.insert(thread, now);
+        }
+        let progressed = before
+            .zip(succeeded)
+            .is_some_and(|(before, now)| now > before);
+        self.in_a_row = if progressed { 1 } else { self.in_a_row + 1 };
+        self.in_a_row >= REFUSALS_IN_A_ROW
+    }
+}
+
+/// A `--auto` run with nobody to ask stops after this many refusals with no
+/// call succeeding in between: the agent is not getting anywhere.
+const REFUSALS_IN_A_ROW: u32 = 5;
+
+/// `haarness run` finished, but refused requests that needed a person.
+#[derive(Debug)]
+struct RunRefused(u32);
+
+impl std::fmt::Display for RunRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the run refused {} request(s) that needed a person",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RunRefused {}
+
+/// The exit status of a run that finished but refused requests that needed a
+/// person (`--auto` with nobody to ask).
+const EXIT_REFUSED: i32 = 3;
+
+/// What the agent reads when `--auto` refuses a request with nobody to ask:
+/// why, in Haarness's words, never as if a person had answered it.
+fn refusal_feedback(review: Option<&haarness_protocol::PermissionReview>) -> String {
+    let Some(review) = review else {
+        return "A permission rule leaves this to a person and nobody can answer in this run"
+            .into();
+    };
+    let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Failed => {
+            "Auto review was unavailable, so this needs a person, and nobody can answer in this run"
+        }
+        haarness_protocol::PermissionReviewStatus::Paused => {
+            "Auto review paused for this turn, so this needs a person, and nobody can answer in this run"
+        }
+        _ => "Auto review left this to a person and nobody can answer in this run",
+    };
+    let words = |value: Option<&str>| {
+        value
+            .map(|value| value.trim().trim_end_matches('.').trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    match (
+        words(review.rule.as_deref()),
+        words(review.rationale.as_deref()),
+    ) {
+        (Some(rule), Some(reason)) => format!("{lead}: {rule}: {reason}"),
+        (None, Some(reason)) | (Some(reason), None) => format!("{lead}: {reason}"),
+        (None, None) => lead.into(),
+    }
 }
 
 impl RunWatch {
@@ -5198,6 +5299,8 @@ impl RunWatch {
             },
             yolo,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: terminal.then(RunActivity::start),
         }
     }
@@ -5208,6 +5311,43 @@ impl RunWatch {
         self
     }
 
+    /// The run writes JSON records (`--format json`).
+    fn json(mut self, json: bool) -> Self {
+        self.json = json;
+        self
+    }
+
+    /// How many requests the run refused with nobody to ask.
+    fn refused(&self) -> u32 {
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .total
+    }
+
+    /// Count a refusal in `thread`; true once [`REFUSALS_IN_A_ROW`] were
+    /// refused with no call succeeding in between in the chat that asked.
+    async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, thread: ThreadId) -> bool {
+        let succeeded = client.items(thread).await.ok().map(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.data,
+                        ItemData::ToolResult {
+                            is_error: false,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        });
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .count(thread, succeeded)
+    }
+
     /// A scheduled run: nobody watches. Its turn approves its own requests
     /// and the server refuses those that need a person, so nothing waits;
     /// anything else is left to the apps.
@@ -5216,6 +5356,8 @@ impl RunWatch {
             approver: Approver::OtherClients,
             yolo: false,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         }
     }
@@ -5299,24 +5441,64 @@ impl RunWatch {
             if self.approver == Approver::Nobody && self.auto {
                 // `--auto`: what still needs a person (the reviewer left it
                 // to one, or a rule asks for one) is refused with its reason,
-                // one line each, and the run goes on another way.
+                // one line each, and the run goes on another way. A request
+                // the reviewer is deciding is the reviewer's to answer.
+                if pending.review.as_ref().is_some_and(|review| {
+                    review.status == haarness_protocol::PermissionReviewStatus::Reviewing
+                }) {
+                    continue;
+                }
                 let why = pending.review.as_ref().map_or_else(
                     || "A permission rule asks a person for it.".to_owned(),
                     review_note,
                 );
-                let reason = why.trim_end_matches('.');
-                let _ = client
+                // Nobody's answer: it refuses this request alone, and the
+                // agent reads why in Haarness's words. A server older than
+                // `refuse` takes a rejection.
+                let feedback = refusal_feedback(pending.review.as_ref());
+                let refuse = |decision| PermissionReply {
+                    decision,
+                    feedback: Some(feedback.clone()),
+                };
+                if let Err(error) = client
                     .reply_permission(
                         &pending.permission_id,
-                        PermissionReply {
-                            decision: PermissionReplyDecision::Reject,
-                            feedback: Some(format!("{reason}, and nobody can answer in this run")),
-                        },
+                        refuse(PermissionReplyDecision::Refuse),
                     )
-                    .await;
+                    .await
+                {
+                    if haarness_tui::api::refusal_code(&error) == Some("not_found") {
+                        continue;
+                    }
+                    let _ = client
+                        .reply_permission(
+                            &pending.permission_id,
+                            refuse(PermissionReplyDecision::Reject),
+                        )
+                        .await;
+                }
                 self.notice(&format!(
                     "Refused: the agent asked to {request}. {why} Nobody can approve that in this run; allow it {rule}."
                 ));
+                if self.json {
+                    println!(
+                        "{}",
+                        json!({
+                            "type": "refused",
+                            "threadID": pending.thread_id,
+                            "permissionID": pending.permission_id,
+                            "request": request,
+                            "reason": why,
+                            "review": pending.review,
+                        })
+                    );
+                }
+                if self.tally_refusal(client, pending.thread_id).await {
+                    let _ = client.interrupt_session(root, false).await;
+                    anyhow::bail!(
+                        "Stopped: {REFUSALS_IN_A_ROW} requests in a row needed a person, and nobody can answer in this run. Allow what the agent needs with permission rules, or run it at a terminal."
+                    );
+                }
                 continue;
             }
             if self.approver == Approver::Nobody {
@@ -12271,9 +12453,9 @@ mod tests {
         wait_for_goal_client, write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
-        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example, auto_review_line,
-        default_run_model_client, describe_permission, discard_refused_chat, requested_run_model,
-        review_note, run_attachments, wait_for_turn_client,
+        Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
+        auto_review_line, default_run_model_client, describe_permission, discard_refused_chat,
+        refusal_feedback, requested_run_model, review_note, run_attachments, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -14829,6 +15011,8 @@ request_timeout = 0
             approver: Approver::Nobody,
             yolo: false,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -14933,6 +15117,8 @@ request_timeout = 0
             approver: Approver::Nobody,
             yolo: true,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         };
         tokio::time::timeout(
@@ -14956,6 +15142,8 @@ request_timeout = 0
             approver: Approver::Nobody,
             yolo: false,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -14977,6 +15165,8 @@ request_timeout = 0
             approver: Approver::Nobody,
             yolo: false,
             auto: true,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         };
         tokio::time::timeout(
@@ -14991,9 +15181,64 @@ request_timeout = 0
             TurnStatus::Completed
         );
         assert!(!outside.exists());
+        assert_eq!(headless.refused(), 1, "it exits with EXIT_REFUSED");
         server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refusal_says_why_in_haarnesss_words_and_five_in_a_row_stop_the_run() {
+        use haarness_protocol::{PermissionReview, PermissionReviewStatus};
+        let review = |status, rule: Option<&str>, rationale: Option<&str>| PermissionReview {
+            status,
+            risk: None,
+            rule: rule.map(str::to_owned),
+            rationale: rationale.map(str::to_owned),
+            reason: None,
+        };
+        assert_eq!(
+            refusal_feedback(Some(&review(
+                PermissionReviewStatus::Asked,
+                Some("Shared state"),
+                Some("It pushes to main.")
+            ))),
+            "Auto review left this to a person and nobody can answer in this run: Shared state: It pushes to main"
+        );
+        assert_eq!(
+            refusal_feedback(Some(&review(
+                PermissionReviewStatus::Failed,
+                None,
+                Some("It took longer than 60 seconds.")
+            ))),
+            "Auto review was unavailable, so this needs a person, and nobody can answer in this run: It took longer than 60 seconds"
+        );
+        assert_eq!(
+            refusal_feedback(None),
+            "A permission rule leaves this to a person and nobody can answer in this run"
+        );
+        for feedback in [
+            refusal_feedback(None),
+            refusal_feedback(Some(&review(PermissionReviewStatus::Paused, None, None))),
+        ] {
+            assert!(!feedback.contains("user"), "{feedback}");
+        }
+
+        // Five refusals with nothing succeeding in between stop the run; a
+        // call that succeeded in the chat that asks starts the count again.
+        let (one, two) = (ThreadId::new(), ThreadId::new());
+        let mut refusals = Refusals::default();
+        assert!(!refusals.count(one, Some(0)));
+        assert!(!refusals.count(two, Some(3)));
+        assert!(!refusals.count(one, Some(0)));
+        assert!(!refusals.count(one, None));
+        assert!(!refusals.count(one, Some(2)), "progress in that chat");
+        assert_eq!(refusals.in_a_row, 1);
+        for _ in 0..3 {
+            assert!(!refusals.count(two, Some(3)));
+        }
+        assert!(refusals.count(one, Some(2)));
+        assert_eq!(refusals.total, 9);
     }
 
     #[test]
@@ -15153,6 +15398,8 @@ request_timeout = 0
             approver: Approver::OtherClients,
             yolo: true,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         }
         .answer(&client, root)
@@ -15163,6 +15410,8 @@ request_timeout = 0
             approver: Approver::Nobody,
             yolo: true,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         }
         .answer(&client, root)
@@ -15337,6 +15586,8 @@ request_timeout = 0
             approver: Approver::Nobody,
             yolo: true,
             auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
             activity: None,
         };
 

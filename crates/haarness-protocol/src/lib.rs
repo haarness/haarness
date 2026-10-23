@@ -671,6 +671,11 @@ pub enum PermissionReplyDecision {
     /// Remember explicitly across linked worktrees of this Git repository.
     AlwaysRepository,
     Reject,
+    /// Nobody can answer (a run with no terminal): refuses this request
+    /// alone. Unlike `reject` it is no person's answer, so the chat's other
+    /// requests stay, and the agent reads `feedback` as why Haarness refused
+    /// it.
+    Refuse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

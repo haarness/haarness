@@ -169,7 +169,10 @@ a second Ctrl-C or SIGTERM still exits at once); a run without a terminal,
 such as one under `nohup`, leaves SIGHUP as it found it. A permission prompt during
 `haarness run` is asked at the terminal; without one (a script, CI), the run
 refuses it and stops, naming what was asked: allow it with a permission rule,
-or pass `--yolo`. After an ungraceful server/process failure,
+or pass `--yolo`. `haarness run --auto` without a terminal instead refuses each
+request that still needs a person and goes on, stopping after five refusals in
+a row; it exits with status 3 when it finished but refused any (see
+[Auto approvals](AUTO-APPROVALS.md)). After an ungraceful server/process failure,
 Haarness preserves recorded transcript work and marks orphaned effects
 interrupted; it never blindly replays shell, edit, or other side-effecting tools.
 Any active goal is restored as paused—not falsely pursuing—until new user input

@@ -4607,7 +4607,10 @@ impl AgentRuntime {
             decision
                 if pending.forced
                     && !explicit
-                    && !matches!(decision, PermissionReplyDecision::Reject) =>
+                    && !matches!(
+                        decision,
+                        PermissionReplyDecision::Reject | PermissionReplyDecision::Refuse
+                    ) =>
             {
                 true
             }
@@ -4681,11 +4684,13 @@ impl AgentRuntime {
                 release_covered_permissions(&self.permissions, &self.events, &rules);
                 true
             }
-            PermissionReplyDecision::Reject => false,
+            PermissionReplyDecision::Reject | PermissionReplyDecision::Refuse => false,
         };
         // A person's answer ends a review that turning Auto on started.
         pending.end_review();
-        if !allowed {
+        let refused = matches!(decision, PermissionReplyDecision::Refuse);
+        // A refusal is nobody's answer: it ends this request alone.
+        if !allowed && !refused {
             // Rejecting one prompt rejects every other prompt in the same
             // root conversation: the model is being told to stop, and
             // sibling child agents must not stay blocked forever.
@@ -4710,6 +4715,7 @@ impl AgentRuntime {
             allowed,
             feedback: reply.feedback,
             review: None,
+            refused,
         });
         Ok(())
     }
@@ -6566,6 +6572,7 @@ async fn review_waiting(
                 allowed: false,
                 feedback: None,
                 review: Some(review),
+                refused: false,
             },
             // Left to the person, with the reviewer's note; or the chat left
             // Auto, and the card is plain again. Either way it is announced
@@ -6828,6 +6835,9 @@ struct PermissionResolution {
     feedback: Option<String>,
     /// Auto's reviewer refused it (a request it reviewed while it waited).
     review: Option<haarness_protocol::PermissionReview>,
+    /// Nobody could answer it (`refuse`): `feedback` is Haarness's words,
+    /// not a person's.
+    refused: bool,
 }
 
 impl PermissionResolution {
@@ -6836,6 +6846,7 @@ impl PermissionResolution {
             allowed: true,
             feedback: None,
             review: None,
+            refused: false,
         }
     }
 
@@ -6844,6 +6855,7 @@ impl PermissionResolution {
             allowed: false,
             feedback,
             review: None,
+            refused: false,
         }
     }
 }
@@ -9685,6 +9697,20 @@ impl RunnerTask {
             }
             if !resolution.allowed {
                 let message = match resolution.feedback {
+                    // Nobody answered: the reason is Haarness's, and no
+                    // one is there to ask.
+                    Some(feedback) if resolution.refused && !feedback.trim().is_empty() => {
+                        format!(
+                            "{}. Do not retry it; take a different approach that needs no \
+                             approval, or finish and say what was left undone.",
+                            feedback.trim().trim_end_matches('.')
+                        )
+                    }
+                    _ if resolution.refused => "Nobody can approve this action in this run. Do \
+                                                not retry it; take a different approach that \
+                                                needs no approval, or finish and say what was \
+                                                left undone."
+                        .into(),
                     Some(feedback) if !feedback.trim().is_empty() => format!(
                         "The user rejected this action and said: {feedback}. Adjust your \
                          approach accordingly."
