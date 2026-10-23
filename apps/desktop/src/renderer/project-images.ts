@@ -618,7 +618,7 @@ function askAgain(entry: string, now = false) {
  * the last read ends.
  */
 function due(scope: string, entry: string, current: Marks): "now" | "fresh" | number {
-  const since = Date.now() - current.at;
+  const since = performance.now() - current.at;
   if (current.touch !== (touches.get(entry) ?? 0) || current.urgent !== urgent(scope)) {
     const wait = PROJECT_IMAGE_LIMITS.again - since;
     return wait > 0 ? wait : "now";
@@ -681,7 +681,8 @@ export function requestProjectImage(
         return;
       }
       active++;
-      const asked = { epoch: epoch(scope), urgent: urgent(scope), at: Date.now(), touch: touches.get(entry) ?? 0 };
+      // On the monotonic clock: a wall clock set back would hold reads off.
+      const asked = { epoch: epoch(scope), urgent: urgent(scope), at: performance.now(), touch: touches.get(entry) ?? 0 };
       let timer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<typeof UNSETTLED>(
         (done) => (timer = setTimeout(() => done(UNSETTLED), PROJECT_IMAGE_LIMITS.wait)),
@@ -708,9 +709,12 @@ export function requestProjectImage(
           if (shown === UNSETTLED) {
             // Nothing was learned: what showed keeps showing, and is read again on the next occasion.
             if (before) remember(entry, { ...before, ...asked, transient: true });
-            // Read before, its picture let go for room: replies show it still.
-            else if (reads.has(entry)) marked(entry, { ...asked, transient: true });
-            else {
+            // Read before, its picture let go for room: replies showing it keep
+            // it, and one drawn since, waiting for it, says it is not available.
+            else if (reads.has(entry)) {
+              marked(entry, { ...asked, transient: true });
+              settle(scope, path, { note: "failed" });
+            } else {
               remember(entry, { note: "failed", ...asked, transient: true });
               settle(scope, path, { note: "failed" });
             }

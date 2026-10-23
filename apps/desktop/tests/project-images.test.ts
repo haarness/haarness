@@ -652,6 +652,71 @@ test("a file written over and over is read at most once a second for the replies
   assert.ok(source.calls.length >= 2 && source.calls.length <= 5, String(source.calls.length));
 });
 
+test("a wall clock set back holds no re-read off", async () => {
+  const files = { "a.png": png } as Record<string, File | Uint8Array>;
+  const source = reader(files);
+  requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+  await settle();
+  const now = Date.now;
+  Date.now = () => now() - 3_600_000;
+  try {
+    files["a.png"] = jpeg;
+    hear({ type: "turn.finished", threadId: "mine", rootThreadId: "mine" });
+    await settle();
+    assert.equal(source.calls.length, 2);
+    assert.deepEqual(shownProjectImage("project", "a.png"), { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+  } finally {
+    Date.now = now;
+  }
+});
+
+test("the least time between reads delays a turn end's re-read of an image on screen, never drops it", async () => {
+  PROJECT_IMAGE_LIMITS.again = 60;
+  const files = { "a.png": png } as Record<string, File | Uint8Array>;
+  const source = reader(files);
+  const { settled, off } = heard();
+  requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+  await settle();
+  // The viewed chat's turn ends right after the image was read: not read yet...
+  files["a.png"] = jpeg;
+  hear({ type: "turn.finished", threadId: "mine", rootThreadId: "mine" });
+  await settle();
+  assert.equal(source.calls.length, 1);
+  // ...but once the least time has passed, and only once.
+  await wait(90);
+  await settle();
+  assert.equal(source.calls.length, 2);
+  assert.deepEqual(settled.at(-1)?.[2], { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+  await wait(90);
+  await settle();
+  assert.equal(source.calls.length, 2);
+  off();
+});
+
+test("a reply drawn after a picture was let go for room says it is not available when its read gets no answer", async () => {
+  const bytes = PROJECT_IMAGE_LIMITS.bytes;
+  PROJECT_IMAGE_LIMITS.bytes = `data:image/png;base64,${base64(png)}`.length;
+  try {
+    const files = { "1.png": png, "2.png": png } as Record<string, File | Uint8Array | Error>;
+    const source = reader(files);
+    const { settled, off } = heard();
+    requestProjectImage("project", "1.png", source.read, new AbortController().signal);
+    await settle();
+    requestProjectImage("project", "2.png", source.read, new AbortController().signal);
+    await settle();
+    assert.equal(shownProjectImage("project", "1.png"), undefined);
+    // A new reply draws 1.png (its placeholder waits) and the read gets no answer.
+    files["1.png"] = new Error("Error invoking remote method 'files': TypeError: fetch failed");
+    requestProjectImage("project", "1.png", source.read, new AbortController().signal);
+    await settle();
+    assert.equal(source.calls.length, 3);
+    assert.deepEqual(settled.at(-1), ["project", "1.png", { note: "failed" }]);
+    off();
+  } finally {
+    PROJECT_IMAGE_LIMITS.bytes = bytes;
+  }
+});
+
 test("a read asked again for the replies on screen stands while any of them is still there", async () => {
   const held = reader({}, true);
   const busy = new AbortController();
