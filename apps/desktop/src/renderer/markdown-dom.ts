@@ -3,7 +3,7 @@ import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-ta
 import type { MarkdownPatch } from "./markdown-project";
 import { holdRemoteImages, madeHere, replyAttribute, type RemoteImageLabels } from "./remote-images";
 import { holdProjectImages, type ProjectImageLabels, type ShownImage } from "./project-images";
-import { markOpenImages } from "./ImageViewer";
+import { openMark } from "./ImageViewer";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -91,7 +91,8 @@ function nodes(parent: Node, previous: Node[], next: Node[], end: Node | null = 
     if (current instanceof Text) { text(current, target.textContent ?? ""); continue; }
     if (!(current instanceof Element) || !(target instanceof Element)) continue;
     for (const attribute of current.getAttributeNames()) {
-      if (attribute === "data-language") continue;
+      // The language label and an image's marks for opening it are the app's, set after drawing.
+      if (attribute === "data-language" || openMark(current, attribute)) continue;
       if (!target.hasAttribute(attribute)) current.removeAttribute(attribute);
     }
     for (const attribute of target.attributes) {
@@ -129,7 +130,7 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
  * already loaded, or a placeholder whose button loads it (remote-images.ts).
  * With `project`, as in the conversation, an image whose source is a path
  * shows the file of the project it names, or a placeholder while it is read
- * (project-images.ts), and every image the page holds opens larger.
+ * (project-images.ts).
  */
 export function createMarkdownDOM(
   host: HTMLElement,
@@ -177,7 +178,6 @@ export function createMarkdownDOM(
           project.labels(),
         );
       if (images) holdRemoteImages(fragment, images.loaded, images.labels(), images.loading);
-      if (project) markOpenImages(fragment, project.labels().unnamed);
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);
       block.html = html;
     });

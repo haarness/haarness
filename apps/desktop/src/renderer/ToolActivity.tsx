@@ -20,7 +20,7 @@ import {
   shownProjectImage,
   type ShownImage,
 } from "./project-images";
-import { openImage } from "./ImageViewer";
+import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
@@ -353,7 +353,8 @@ export function ToolActivity(props: {
 /**
  * The image a read returned, inside its open row: the one its result
  * carries, or the project file it read, read again like a reply's image.
- * Nothing shows until the image is there; a click opens it full size.
+ * Nothing shows until the image is there; shown smaller than it is, a click
+ * opens it full size.
  */
 function ReadImage(props: { image: { data: string } | { path: string; size?: number }; alt: string }) {
   const store = useApp();
@@ -384,17 +385,15 @@ function ReadImage(props: { image: { data: string } | { path: string; size?: num
   return (
     <Show when={data()}>
       {(src) => (
-        <div class="tool-image">
-          <button
-            type="button"
-            class="tool-image-open"
-            data-image-open=""
-            aria-haspopup="dialog"
-            aria-label={props.alt || t("Image")}
-            onClick={(event) => openImage(event.currentTarget)}
-          >
-            <img src={src()} alt={props.alt} />
-          </button>
+        <div
+          class="tool-image"
+          ref={(element) => {
+            // Shown smaller than it is, it opens full size.
+            const opening = watchOpenImages(element, () => t("Image"));
+            onCleanup(opening.dispose);
+          }}
+        >
+          <img src={src()} alt={props.alt} />
         </div>
       )}
     </Show>
