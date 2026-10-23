@@ -600,6 +600,7 @@ test("a search jump marks its row without moving it, and Providers, Models and T
   await expect(anthropic).toHaveClass(/setting-search-target/);
   await expect(anthropic).toContainText("Not connected");
   await expect(anthropic.getByRole("button", { name: "Connect", exact: true })).not.toHaveClass(/primary/);
+  await expect(anthropic.getByRole("button", { name: "Connect", exact: true })).toBeFocused();
 
   // Models shows the connected providers' models; Show all adds the catalog.
   await openSettings("Models");

@@ -1625,9 +1625,13 @@ dialog .notifications {
 [data-setting]:not(button) {
   transition:
     background-color var(--slow) var(--ease),
+    border-color var(--slow) var(--ease),
     box-shadow var(--slow) var(--ease);
 }
+/* The ring stands for the row's own edge while it shows: a hairline under
+   the row would run across inside it. */
 .setting-search-target {
+  border-bottom-color: transparent;
   /* Opaque over the page, so the band covers the ring under it but its
      outer pixel. */
   --search-tint: color-mix(in srgb, var(--primary) 7%, var(--page));
