@@ -1008,22 +1008,23 @@ function Providers() {
   const local = () => !app.state.connection?.remote;
   const [adding, setAdding] = createSignal(false);
   const [addingRouter, setAddingRouter] = createSignal(false);
+  const [open, setOpen] = createSignal<Record<string, boolean>>({});
   const connected = () =>
     app.state.providers.filter((provider) => provider.authenticated);
-  const rows = () =>
-    [...app.state.providers].sort(
-      (a, b) => Number(b.authenticated) - Number(a.authenticated),
-    );
-  const summary = (provider: (typeof app.state.providers)[number]) => {
-    if (!provider.authenticated) return t("Not connected");
-    const count = provider.models.length;
-    return [
-      t("Connected"),
-      count === 1 ? t("1 model") : count ? t("{count} models", { count }) : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
+  // The page lists what is connected; the catalog lives in Connect a
+  // provider. Search still offers every provider, so one it opened that is
+  // not connected shows here too, for the jump to land on.
+  const sought = () => {
+    const target = app.state.settingsTarget;
+    return target?.startsWith("provider:")
+      ? app.state.providers.find((provider) => !provider.authenticated && "provider:" + provider.id === target)
+      : undefined;
   };
+  const rows = () => {
+    const extra = sought();
+    return extra ? [...connected(), extra] : connected();
+  };
+  const count = (models: number) => (models === 1 ? t("1 model") : t("{count} models", { count: models }));
   return (
     <>
       <div class="setting-block providers-hero" data-setting="Connect a provider">
@@ -1068,68 +1069,84 @@ function Providers() {
         <RouterConnectionDialog close={() => setAddingRouter(false)} />
       </Show>
       <For each={rows()}>
-        {(provider) => (
-          <div class="setting-block">
-            <header>
-              <div>
-                <h3 data-setting={"provider:" + provider.id}>
-                  <ProviderLabel provider={provider.id} size="lg">
-                    {provider.name}
-                  </ProviderLabel>
-                </h3>
-                <span classList={{ added: provider.authenticated }}>
-                  {summary(provider)}
-                </span>
-              </div>
-              <div class="toolbar">
-                {/* Haarness Cloud is the Haarness account, not a stored key:
-                    "Disconnect" removed nothing and "Reconnect" opened a
-                    picker that leaves Cloud out, so both go to the account. */}
-                <Show
-                  when={provider.id !== "haarness"}
-                  fallback={
-                    <button
-                      classList={{ primary: !provider.authenticated }}
-                      onClick={() => window.dispatchEvent(new Event("haarness:account"))}
-                    >
-                      {provider.authenticated ? t("Haarness account") : t("Sign in to Haarness")}
-                    </button>
-                  }
-                >
-                  <button
-                    classList={{ primary: !provider.authenticated }}
-                    onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
-                  >
-                    {provider.authenticated ? t("Reconnect") : t("Connect")}
-                  </button>
-                </Show>
-                <Show when={provider.authenticated && provider.id !== "haarness"}>
-                  <button
-                    onClick={() =>
-                      app.run(() => disconnectProvider(app, provider))
+        {(provider) => {
+          const expanded = () => !!open()[provider.id];
+          const list = "provider-models-" + provider.id.replace(/[^\w-]/g, "_");
+          return (
+            <div class="setting-block provider-row" data-setting={"provider:" + provider.id}>
+              <header>
+                <div>
+                  <h3>
+                    <ProviderLabel provider={provider.id} size="lg">
+                      {provider.name}
+                    </ProviderLabel>
+                  </h3>
+                  <p class="provider-status">
+                    <span classList={{ added: provider.authenticated }}>
+                      {provider.authenticated ? t("Connected") : t("Not connected")}
+                    </span>
+                    <Show when={provider.models.length}>
+                      <span aria-hidden="true">·</span>
+                      <button
+                        type="button"
+                        class="disclosure-toggle"
+                        aria-expanded={expanded()}
+                        aria-controls={list}
+                        onClick={() => setOpen((state) => ({ ...state, [provider.id]: !expanded() }))}
+                      >
+                        {count(provider.models.length)}
+                        <Icon name="chevron" size="xs" />
+                      </button>
+                    </Show>
+                  </p>
+                </div>
+                <div class="toolbar">
+                  {/* Haarness Cloud is the Haarness account, not a stored key:
+                      "Disconnect" removed nothing and "Reconnect" opened a
+                      picker that leaves Cloud out, so both go to the account. */}
+                  <Show
+                    when={provider.id !== "haarness"}
+                    fallback={
+                      <button onClick={() => window.dispatchEvent(new Event("haarness:account"))}>
+                        {provider.authenticated ? t("Haarness account") : t("Sign in to Haarness")}
+                      </button>
                     }
                   >
-                    {t("Disconnect")}
-                  </button>
-                </Show>
-              </div>
-            </header>
-            <details>
-              <summary>{t("Available models")}</summary>
-              <For each={provider.models}>
-                {(model) => (
-                  <p>
-                    <strong>
-                      {modelName(provider.id, model.id, app.state.providers)}
-                    </strong>{" "}
-                    <code>{model.id}</code> ·{" "}
-                    {t("{count} context", { count: model.contextWindow != null ? formatNumber(model.contextWindow) : t("Unknown") })}
-                  </p>
-                )}
-              </For>
-            </details>
-          </div>
-        )}
+                    <button
+                      onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
+                    >
+                      {provider.authenticated ? t("Reconnect") : t("Connect")}
+                    </button>
+                  </Show>
+                  <Show when={provider.authenticated && provider.id !== "haarness"}>
+                    <button
+                      onClick={() =>
+                        app.run(() => disconnectProvider(app, provider))
+                      }
+                    >
+                      {t("Disconnect")}
+                    </button>
+                  </Show>
+                </div>
+              </header>
+              <Show when={expanded()}>
+                <ul class="provider-models" id={list}>
+                  <For each={provider.models}>
+                    {(model) => (
+                      <li>
+                        <strong>{modelName(provider.id, model.id, app.state.providers)}</strong>
+                        <code>{model.id}</code>
+                        <span>
+                          {t("{count} context", { count: model.contextWindow != null ? formatNumber(model.contextWindow) : t("Unknown") })}
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+            </div>
+          );
+        }}
       </For>
     </>
   );
@@ -1137,72 +1154,118 @@ function Providers() {
 function Models() {
   const app = useApp();
   const [filter, setFilter] = createSignal("");
+  const [all, setAll] = createSignal(false);
+  // Search finds every model; one of a provider that is not connected opens
+  // the whole catalog so the jump lands on it.
+  createEffect(() => {
+    const target = app.state.settingsTarget;
+    if (!target?.startsWith("model:")) return;
+    const id = target.slice("model:".length);
+    if (app.state.providers.some((provider) => !provider.authenticated && id.startsWith(provider.id + ":")))
+      setAll(true);
+  });
+  const matches = (provider: T.ProviderInfo, model: T.ProviderInfo["models"][number]) =>
+    (modelName(provider.id, model.id, app.state.providers) + " " + model.id + " " + provider.name)
+      .toLowerCase()
+      .includes(filter().trim().toLowerCase());
+  const rows = () =>
+    app.state.providers
+      .filter((provider) => all() || provider.authenticated)
+      .flatMap((provider) => provider.models.map((model) => ({ provider, model })))
+      .filter(({ provider, model }) => matches(provider, model));
+  // While searching, say how many more the other providers have.
+  const elsewhere = () =>
+    all() || !filter().trim()
+      ? 0
+      : app.state.providers
+          .filter((provider) => !provider.authenticated)
+          .reduce((sum, provider) => sum + provider.models.filter((model) => matches(provider, model)).length, 0);
+  const anyConnected = () => app.state.providers.some((provider) => provider.authenticated);
   return (
     <>
-      <input
-        placeholder={t("Search models…")}
-        aria-label={t("Search models")}
-        value={filter()}
-        onInput={(event) => setFilter(event.currentTarget.value)}
-      />
-      <table>
-        <thead>
-          <tr>
-            <th>{t("Model")}</th>
-            <th>{t("Provider")}</th>
-            <th>{t("Context")}</th>
-            <th>{t("Capabilities")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <For
-            each={app.state.providers
-              .flatMap((provider) =>
-                provider.models.map((model) => ({ provider, model })),
-              )
-              .filter((item) =>
-                (
-                  modelName(
-                    item.provider.id,
-                    item.model.id,
-                    app.state.providers,
-                  ) +
-                  " " +
-                  item.model.id +
-                  " " +
-                  item.provider.name
-                )
-                  .toLowerCase()
-                  .includes(filter().toLowerCase()),
-              )}
+      <div class="toolbar models-toolbar">
+        <input
+          placeholder={t("Search models…")}
+          aria-label={t("Search models")}
+          value={filter()}
+          onInput={(event) => setFilter(event.currentTarget.value)}
+        />
+        <label class="quiet-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-description={t("Include models of providers that aren't connected")}
+            checked={all()}
+            onChange={(event) => setAll(event.currentTarget.checked)}
+          />
+          <span>{t("Show all")}</span>
+        </label>
+      </div>
+      <Show
+        when={rows().length}
+        fallback={
+          <Show
+            when={filter().trim() || all() || anyConnected()}
+            fallback={
+              <Empty
+                title={t("No provider connected yet")}
+                detail={t("Sign in with a ChatGPT subscription, or paste an API key from OpenAI, Anthropic, Google and more.")}
+              />
+            }
           >
-            {({ provider, model }) => (
-              <tr data-setting={"model:" + provider.id + ":" + model.id}>
-                <td>
-                  {modelName(provider.id, model.id, app.state.providers)}
-                  <small>{model.id}</small>
-                </td>
-                <td>
-                  <ProviderLabel provider={provider.id}>
-                    {provider.name}
-                  </ProviderLabel>
-                </td>
-                <td>{model.contextWindow != null ? formatNumber(model.contextWindow) : "—"}</td>
-                <td>
-                  {[
-                    model.tools ? t("Tools") : "",
-                    model.images ? t("Images") : "",
-                    model.video ? t("Video") : "",
-                    model.reasoning ? t("Reasoning") : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </td>
-              </tr>
-            )}
-          </For>
-        </tbody>
-      </table>
+            <p class="muted">{t("No model matches that search.")}</p>
+          </Show>
+        }
+      >
+        <table>
+          <thead>
+            <tr>
+              <th>{t("Model")}</th>
+              <th>{t("Provider")}</th>
+              <th>{t("Context")}</th>
+              <th>{t("Capabilities")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <For each={rows()}>
+              {({ provider, model }) => (
+                <tr data-setting={"model:" + provider.id + ":" + model.id}>
+                  <td>
+                    {modelName(provider.id, model.id, app.state.providers)}
+                    <small>{model.id}</small>
+                  </td>
+                  <td>
+                    <ProviderLabel provider={provider.id}>
+                      {provider.name}
+                    </ProviderLabel>
+                  </td>
+                  <td>{model.contextWindow != null ? formatNumber(model.contextWindow) : "—"}</td>
+                  <td>
+                    {[
+                      model.tools ? t("Tools") : "",
+                      model.images ? t("Images") : "",
+                      model.video ? t("Video") : "",
+                      model.reasoning ? t("Reasoning") : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </td>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
+      </Show>
+      <Show when={elsewhere()}>
+        <p class="models-elsewhere">
+          {elsewhere() === 1
+            ? t("1 more from providers that aren't connected.")
+            : t("{count} more from providers that aren't connected.", { count: elsewhere() })}{" "}
+          <button type="button" class="settings-link" onClick={() => setAll(true)}>
+            {t("Show all")}
+          </button>
+        </p>
+      </Show>
     </>
   );
 }

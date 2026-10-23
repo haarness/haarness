@@ -59,9 +59,13 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
 **Cmd+.** (Ctrl+. on Windows and Linux) switches the message box to the next agent and
 **Cmd+Shift+.** to the previous one; change them in **Settings → Keyboard shortcuts**.
 
-To connect another provider later, use **Settings → Providers**: **Connect a provider** opens the
-same dialog, and each provider row has **Connect** or **Reconnect** and **Disconnect**, next to
-**Refresh models**, custom endpoints and the Router. While no model is available, the composer's
+To connect another provider later, use **Settings → Providers**: it lists the providers that are
+connected (local ones it found included), each with **Reconnect** and **Disconnect** and its models
+behind their count, and **Connect a provider** opens the same dialog with the whole catalog, next to
+**Refresh models**, custom endpoints and the Router. A provider that Search opens and that is not
+connected is listed too, with **Connect**. **Settings → Models** lists the connected providers'
+models; **Show all** adds the rest of the catalog, and a search says how many more it has. While no
+model is available, the composer's
 model pill reads **Connect a provider** and opens the dialog. The e2e suite drives the key path and
 the code sign-in path against a fixture issuer (`HAARNESS_OPENAI_OAUTH_ISSUER`).
 
