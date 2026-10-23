@@ -7473,6 +7473,7 @@ mod agent_shell_tests {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    resources: Vec::new(),
                 },
             )
             .await
