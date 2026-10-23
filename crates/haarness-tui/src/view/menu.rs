@@ -21,18 +21,22 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 .map(|entry| (format!("/{}", entry.name), entry.description))
                 .collect(),
         ),
-        Overlay::Threads => (
-            "threads",
-            app.filtered_threads()
-                .into_iter()
-                .map(|thread| {
-                    (
-                        thread.title.clone(),
-                        short_id(&thread.id.to_string()).into(),
-                    )
-                })
-                .collect(),
-        ),
+        Overlay::Threads => {
+            let waiting = app.waiting_chats();
+            (
+                "threads",
+                app.filtered_threads()
+                    .into_iter()
+                    .map(|thread| {
+                        let title = match waiting.get(&thread.id).copied().map(waiting_sign) {
+                            Some(sign) => format!("{sign} {}", thread.title),
+                            None => thread.title.clone(),
+                        };
+                        (title, short_id(&thread.id.to_string()).into())
+                    })
+                    .collect(),
+            )
+        }
         Overlay::Models => (
             "models",
             app.filtered_models()
@@ -367,19 +371,27 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                 .map(|entry| SelectorRow::new(format!("/{}", entry.name), entry.description, false))
                 .collect(),
         ),
-        Overlay::Threads => (
-            "Sessions",
-            app.filtered_threads()
-                .into_iter()
-                .map(|thread| {
-                    SelectorRow::new(
-                        thread.title.clone(),
-                        app.session_detail(thread),
-                        thread.id == app.thread.id,
-                    )
-                })
-                .collect(),
-        ),
+        Overlay::Threads => {
+            let waiting = app.waiting_chats();
+            (
+                "Sessions",
+                app.filtered_threads()
+                    .into_iter()
+                    .map(|thread| {
+                        let waits = waiting.get(&thread.id).copied();
+                        let row = SelectorRow::new(
+                            thread.title.clone(),
+                            app.session_detail(thread, waits),
+                            thread.id == app.thread.id,
+                        );
+                        match waits.map(waiting_sign) {
+                            Some(sign) => row.with_alert(sign),
+                            None => row,
+                        }
+                    })
+                    .collect(),
+            )
+        }
         Overlay::Models => (
             "Select model",
             app.filtered_models()
@@ -609,6 +621,15 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     Some(out)
 }
 
+/// A waiting chat's sign: the approval card's ⚠ for an approval, Upstream's
+/// `?` for a question.
+const fn waiting_sign(waiting: crate::state::Waiting) -> &'static str {
+    match waiting {
+        crate::state::Waiting::Approval => "⚠",
+        crate::state::Waiting::Answer => "?",
+    }
+}
+
 /// One choice in a picker: what it is, what it means, whether it is the
 /// current one, and — for the theme picker — the palette it stands for.
 struct SelectorRow {
@@ -618,6 +639,9 @@ struct SelectorRow {
     /// Already set up (a connected provider): a check in the gutter, so the
     /// names stay in one column.
     checked: bool,
+    /// Waits for the reader (a chat with an approval or a question): this
+    /// sign in the gutter, in the accent, before the current-choice dot.
+    alert: Option<&'static str>,
     swatch: Option<[haarness_opentui::Color; 4]>,
     /// The shelf this row opens, and whether a blank row separates it from
     /// the shelf before.
@@ -632,10 +656,16 @@ impl SelectorRow {
             detail: detail.into(),
             current,
             checked: false,
+            alert: None,
             swatch: None,
             heading: None,
             gap: false,
         }
+    }
+
+    const fn with_alert(mut self, sign: &'static str) -> Self {
+        self.alert = Some(sign);
+        self
     }
 
     const fn with_swatch(mut self, swatch: [haarness_opentui::Color; 4]) -> Self {
@@ -674,17 +704,20 @@ impl SelectorRow {
     }
 
     fn lines(&self, theme: &crate::theme::Theme, layout: &SelectorLayout) -> Vec<Line> {
-        let (marker, marker_color) = if self.current {
+        let (marker, marker_color) = if let Some(sign) = self.alert {
+            (sign, theme.accent)
+        } else if self.current {
             ("●", theme.primary)
         } else if self.checked {
             ("✓", theme.success())
         } else {
             (" ", theme.muted)
         };
-        let mut primary = vec![
-            Span::new(marker, marker_color),
-            Span::new("  ", theme.muted),
-        ];
+        let mut marker = Span::new(marker, marker_color);
+        if self.alert.is_some() {
+            marker = marker.with_attributes(attr::BOLD);
+        }
+        let mut primary = vec![marker, Span::new("  ", theme.muted)];
         if let Some(swatch) = self.swatch {
             for color in swatch {
                 primary.push(Span::new("█", color));

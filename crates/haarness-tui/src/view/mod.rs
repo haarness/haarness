@@ -237,6 +237,7 @@ impl App {
         }
         if width < 40 || height < 12 {
             self.max_viewport_offset.set(0);
+            self.transcript_messages.borrow_mut().clear();
             let mut hits = Vec::new();
             let mut lines = compact_frame(self, width, height, &mut hits);
             apply_dialog(self, &mut lines, &mut hits, width, height);
@@ -365,6 +366,7 @@ impl App {
                     .find(|(message, _)| *message == id)
                     .map(|(_, row)| *row)
             });
+        self.transcript_messages.replace(body.messages.clone());
         let offset = if let Some(row) = jump {
             body.lines.len().saturating_sub(row + transcript_height)
         } else if previous_offset == 0 || previous_len == 0 {

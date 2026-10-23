@@ -12154,7 +12154,10 @@ async fn idle_root_with_live_child_stays_working_and_cancels_the_session_not_the
         "the root turn is genuinely idle"
     );
     assert_eq!(app.root_descendant_active_count(), 1);
-    assert!(app.session_detail(&root).contains("current · working"));
+    assert!(
+        app.session_detail(&root, None)
+            .contains("current · working")
+    );
     let rendered = crate::view::composer::composer_lines(&app, 100)
         .iter()
         .map(Line::text)
@@ -12207,7 +12210,7 @@ fn activity_from_an_unrelated_root_does_not_mark_the_current_session_working() {
     app.hydrate_active_turns(vec![fixture_running_turn(unrelated_child.id)]);
 
     assert_eq!(app.root_descendant_active_count(), 0);
-    assert!(!app.session_detail(&root).contains("working"));
+    assert!(!app.session_detail(&root, None).contains("working"));
 }
 
 #[tokio::test]
@@ -13288,6 +13291,217 @@ fn root_composer_floats_on_the_page_between_a_rule_and_the_band() {
     );
 }
 
+/// The session list's rows, top first: each chat's title and gutter sign
+/// (the sidebar names chats too, without a detail column).
+fn session_rows(app: &App) -> Vec<(String, String)> {
+    let lines = app.lines((110, 32));
+    app.filtered_threads()
+        .iter()
+        .map(|thread| {
+            let row = lines
+                .iter()
+                .map(line_text)
+                .find(|text| text.contains(thread.title.as_str()) && text.contains(" · updated "))
+                .unwrap_or_default();
+            let sign = row
+                .trim_start()
+                .chars()
+                .next()
+                .filter(|sign| !sign.is_alphanumeric())
+                .map(String::from)
+                .unwrap_or_default();
+            (thread.title.clone(), sign)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_chat() {
+    let now = Utc::now();
+    let thread = |title: &str, minutes: i64| {
+        let mut thread = fixture_thread();
+        thread.title = title.into();
+        thread.updated_at = now - chrono::Duration::minutes(minutes);
+        thread
+    };
+    let current = thread("Current chat", 120);
+    let recent = thread("Recent chat", 3);
+    let old = thread("Old chat", 300);
+    let mut fork = thread("Forked chat", 60);
+    fork.parent_id = Some(recent.id);
+    let mut child = thread("Child agent", 1);
+    child.parent_id = Some(old.id);
+    child.is_subagent = true;
+    let mut app = App::new(
+        current.clone(),
+        vec![
+            current.clone(),
+            recent.clone(),
+            old.clone(),
+            fork.clone(),
+            child.clone(),
+        ],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let client = offline_client();
+    let titles = |app: &App| {
+        app.filtered_threads()
+            .iter()
+            .map(|thread| thread.title.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        titles(&app),
+        ["Recent chat", "Forked chat", "Current chat", "Old chat"]
+    );
+    app.open_overlay(crate::state::Overlay::Threads);
+    app.selection = 2;
+    // A child agent's approval waits in the chat that started it; a fork's
+    // question in the fork, though the server's root for it is the chat it
+    // was forked from.
+    app.reduce(
+        fixture_event(
+            "permission.requested",
+            child.id,
+            old.id,
+            serde_json::json!({"permissionId": "child-approval", "operation": "bash:ls", "permission": "bash"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.reduce(
+        fixture_event(
+            "question.requested",
+            fork.id,
+            recent.id,
+            serde_json::json!({"questionId": "fork-question", "prompt": "Which one?"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        titles(&app),
+        ["Forked chat", "Old chat", "Recent chat", "Current chat"]
+    );
+    assert_eq!(app.filtered_threads()[app.selection].title, "Current chat");
+    assert_eq!(
+        session_rows(&app),
+        [
+            ("Forked chat".into(), "?".into()),
+            ("Old chat".into(), "⚠".into()),
+            ("Recent chat".into(), String::new()),
+            ("Current chat".into(), "●".into()),
+        ]
+    );
+    assert!(
+        app.session_detail(&old, app.waiting_chats().get(&old.id).copied())
+            .starts_with("waiting for approval · ")
+    );
+    // A compact terminal draws the same signs.
+    let compact = app
+        .lines((38, 24))
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>();
+    assert!(
+        compact
+            .iter()
+            .any(|row| row.contains("? ") && row.contains("Forked chat"))
+            && compact
+                .iter()
+                .any(|row| row.contains("⚠") && row.contains("Old chat")),
+        "{compact:#?}"
+    );
+    app.live_threads.entry(child.id).or_default();
+    assert!(
+        !app.session_detail(&old, app.waiting_chats().get(&old.id).copied())
+            .contains("working"),
+        "a chat stopped on the reader is not working"
+    );
+    app.live_threads.clear();
+    assert!(
+        app.session_detail(&fork, app.waiting_chats().get(&fork.id).copied())
+            .starts_with("waiting for your answer · ")
+    );
+    // An approval outranks a question in the same chat, and the current chat
+    // shows the sign over its dot.
+    app.selection = 1;
+    app.hydrate_questions(vec![
+        haarness_protocol::PendingQuestionInfo {
+            question_id: "fork-question".into(),
+            prompt: "Which one?".into(),
+            choices: vec![],
+            multiple: false,
+            custom: true,
+            thread_id: fork.id,
+            root_thread_id: Some(recent.id),
+            turn_id: None,
+            created_at: now,
+        },
+        haarness_protocol::PendingQuestionInfo {
+            question_id: "current-question".into(),
+            prompt: "Go on?".into(),
+            choices: vec![],
+            multiple: false,
+            custom: true,
+            thread_id: current.id,
+            root_thread_id: Some(current.id),
+            turn_id: None,
+            created_at: now,
+        },
+    ]);
+    app.hydrate_permissions(
+        vec![pending_permission_fixture(&current, "current-approval")],
+        &client,
+    )
+    .await;
+    assert_eq!(
+        titles(&app),
+        ["Forked chat", "Current chat", "Recent chat", "Old chat"],
+        "a full list replaces what waited before"
+    );
+    assert_eq!(app.filtered_threads()[app.selection].title, "Old chat");
+    assert!(
+        app.session_detail(&current, app.waiting_chats().get(&current.id).copied())
+            .starts_with("waiting for approval · current")
+    );
+    assert_eq!(session_rows(&app)[1], ("Current chat".into(), "⚠".into()));
+    // Answered here or anywhere else, a chat goes back to its place.
+    app.permission_answered("current-approval");
+    app.reduce(
+        fixture_event(
+            "question.resolved",
+            current.id,
+            current.id,
+            serde_json::json!({"questionId": "current-question"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.reduce(
+        fixture_event(
+            "question.resolved",
+            fork.id,
+            recent.id,
+            serde_json::json!({"questionId": "fork-question"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        titles(&app),
+        ["Recent chat", "Forked chat", "Current chat", "Old chat"]
+    );
+    assert_eq!(app.filtered_threads()[app.selection].title, "Old chat");
+    assert_eq!(session_rows(&app)[2], ("Current chat".into(), "●".into()));
+}
+
 #[test]
 fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
     let now = Utc::now();
@@ -13318,7 +13532,7 @@ fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
         vec![recent.id, current.id],
         "normal session browsing hides archived entries and sorts by activity"
     );
-    let current_detail = app.session_detail(&current);
+    let current_detail = app.session_detail(&current, None);
     assert!(
         current_detail.contains("current · working"),
         "{current_detail}"
@@ -13326,7 +13540,7 @@ fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
     assert!(current_detail.contains("GPT-5.4"), "{current_detail}");
 
     app.session_include_archived = true;
-    let archived_detail = app.session_detail(&archived);
+    let archived_detail = app.session_detail(&archived, None);
     assert!(archived_detail.contains("archived"), "{archived_detail}");
     let archived_id = archived.id.to_string();
     assert!(
