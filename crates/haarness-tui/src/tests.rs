@@ -9211,6 +9211,29 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
     let text = frame_text(&app, (100, 40));
     assert!(text.contains("Script: …"), "{text}");
     assert!(text.contains("/tools/run.sh · 1 line"), "{text}");
+    // Narrower, the size goes before the name is cut; narrower still, the
+    // path takes rows of its own. Never a bare "…".
+    let name = format!("{}.sh", "n".repeat(40));
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: format!("/elsewhere/{}{name}", "deep/".repeat(10)),
+        content: "echo one\n".into(),
+        truncated: false,
+        rewritten: false,
+    });
+    let text = frame_text(&app, (60, 40));
+    assert!(text.contains("Script: …"), "{text}");
+    assert!(text.contains(&format!("/{name}")), "{text}");
+    assert!(!text.contains("1 line"), "{text}");
+    let long = format!("{}.sh", "n".repeat(70));
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: format!("/elsewhere/{long}"),
+        content: "echo one\n".into(),
+        truncated: false,
+        rewritten: false,
+    });
+    let text = frame_text(&app, (60, 40));
+    assert!(text.contains("Script · 1 line"), "{text}");
+    assert!(text.contains("/elsewhere/nnnn"), "{text}");
     // A script the command writes before it runs it: one quiet line, no
     // text and no size.
     app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
