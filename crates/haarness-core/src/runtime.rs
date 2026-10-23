@@ -4195,8 +4195,9 @@ impl AgentRuntime {
             // default rules, a folder outside the project), shows the script
             // the command runs. It is read for a person, so not in Auto, which
             // approves this without one (the check under the gate below is
-            // the one that counts). When the Auto reviewer hands a request to
-            // a person, it reads the script there with `script_for_person`.
+            // the one that counts). To be wired with the Auto reviewer: when
+            // it hands a request to a person, it reads the script there with
+            // `script_for_person`.
             let shown = if !shows_script(name, &arguments)
                 || (!forced && !explicit && self.approval_modes.is_auto(thread_id).await)
             {
@@ -9530,9 +9531,9 @@ impl RunnerTask {
         // runs. It is read for a person, so not in Auto, which approves this
         // without one (the check under the gate below is the one that
         // counts), and before the gate is taken, so a slow disk never holds
-        // up a mode change or another chat's answer. When the Auto reviewer
-        // hands a request to a person, it reads the script there with
-        // `script_for_person`.
+        // up a mode change or another chat's answer. To be wired with the
+        // Auto reviewer: when it hands a request to a person, it reads the
+        // script there with `script_for_person`.
         let shown = if !shows_script(tool, detail)
             || (!forced && !explicit && self.approval_modes.is_auto(self.thread.id).await)
         {
