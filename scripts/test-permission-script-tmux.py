@@ -38,6 +38,7 @@ deploy = [
     ''.join(f'echo big-{line:04} {"x" * 100}\n' for line in range(1, 401))
 )
 (workspace / '.env.local').write_text('TOKEN=fixture-only\n')
+(workspace / '.envrc').write_text('export TOKEN=fixture-only\n')
 variant = os.environ.get('HAARNESS_TUI_VARIANT')
 binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve())
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
@@ -156,6 +157,7 @@ try:
     approval()
     # The count of a cut file is of what was read.
     until(lambda: 'Script: scripts/big.sh · first ' in capture(), 'cut script size')
+    check('a cut script counts only the lines that were read', 'cut-size')
     keys('C-e')
     for _ in range(60):
         keys('PageDown')
@@ -168,7 +170,7 @@ try:
     keys('n')
     finish(started)
 
-    for command in ['source .env.local', 'printf plain']:
+    for command in ['source .env.local', 'source ./.envrc', 'printf plain']:
         started = turn(command)
         pending = approval()
         assert 'script' not in pending, pending
@@ -176,7 +178,7 @@ try:
         assert 'Script:' not in screen and command in screen, screen
         keys('n')
         finish(started)
-    check('a secret-named file or a command that runs no script shows nothing more', 'none')
+    check('a secret-named file, a credential file or a command that runs no script shows nothing more', 'none')
     (root / 'results.json').write_text(json.dumps(checks, indent=2))
     print('PASS', len(checks), 'script card scenarios.', flush=True)
 finally:
