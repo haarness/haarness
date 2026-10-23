@@ -199,6 +199,19 @@ test("only the viewed chat's own work, or a write of the file itself, changes wh
   for (const name of ["read", "grep", "webfetch"]) assert.equal(projectEvent(result(name), viewed), undefined, name);
   assert.equal(projectEvent(result("write", "mine", "mine", true), viewed), undefined);
   assert.equal(projectEvent({ type: "turn.text_delta", threadId: "mine" }, viewed), undefined);
+  // A write or edit of the chat that names an image in the project writes that file.
+  const call = (name: string, args: Record<string, unknown>, threadId = "mine") => ({
+    type: "item.created",
+    threadId,
+    rootThreadId: threadId,
+    payload: { data: { type: "tool_call", name, arguments: args } },
+  });
+  assert.deepEqual(projectEvent(call("write", { path: "out/a.png" }), viewed, root), { path: "out/a.png" });
+  assert.deepEqual(projectEvent(call("functions.edit", { filePath: `${root}/out/b.PNG` }), viewed, root), { path: "out/b.PNG" });
+  assert.equal(projectEvent(call("write", { path: "src/a.ts" }), viewed, root), undefined);
+  assert.equal(projectEvent(call("write", { path: "/etc/a.png" }), viewed, root), undefined);
+  assert.equal(projectEvent(call("write", { path: "out/a.png" }, "other"), viewed, root), undefined);
+  assert.equal(projectEvent(call("read", { path: "out/a.png" }), viewed, root), undefined);
   // Viewing a child chat, its whole tree counts.
   assert.equal(projectEvent(result("bash", "mine", "mine"), viewing("child")), "changed");
   assert.equal(projectEvent(result("bash", "other"), viewing("child")), undefined);
