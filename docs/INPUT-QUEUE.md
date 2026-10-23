@@ -13,7 +13,7 @@ Queued prompts remain outside the conversation transcript until delivery. They r
 
 ## Stop, failures and resuming
 
-- **Stop** cancels the current work and dismisses its approval prompts in connected clients. If you sent steering the agent has not answered yet, the agent answers it next instead of dropping it.
+- **Stop** cancels the current work and dismisses its approval prompts in connected clients. In Desktop, Esc in the empty message box and **File → Stop response** (Cmd+. on macOS, Ctrl+. elsewhere) do the same. If you sent steering the agent has not answered yet, the agent answers it next instead of dropping it.
 - After Stop the queue **pauses**, even once that steering has been answered. It also stays idle after a daemon restart.
 - If a turn **fails**, prompts queued behind it still run. If a queued prompt's own turn fails, the rest of the queue pauses.
 - Resume a paused queue in either of two ways:

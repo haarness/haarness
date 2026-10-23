@@ -505,6 +505,9 @@ export function Session() {
   let composer!: HTMLTextAreaElement;
   let conversation!: HTMLElement;
 
+  /** The new chat a first message is making, which the message box's text
+   * moves to with the view. */
+  let carriedTo: string | undefined;
   let historyIndex = -1;
   let recalled: PromptHistoryEntry[] = [];
   let savedPrompt: PromptHistoryEntry | undefined;
@@ -780,6 +783,14 @@ export function Session() {
       setStopping(false);
     }
   };
+  // File → Stop response (Cmd+. on macOS, Ctrl+. elsewhere) stops the shown
+  // chat's work; with nothing running it does nothing.
+  onCleanup(
+    window.haarness.onEvent((event) => {
+      if (event.kind !== "menu" || event.data !== "stop-response") return;
+      if (active() && !stopping() && editable()) void app.run(stop);
+    }),
+  );
   const stream = () => (active() ? state.streams[active()!.id] : undefined);
   const [findOpen, setFindOpen] = createSignal(false);
   const [findMatch, setFindMatch] = createSignal("");
@@ -799,12 +810,31 @@ export function Session() {
     restoredDraft?.owner === owner() &&
     restoredDraft.text === draft() &&
     restoredDraft.attachments === JSON.stringify(attachments());
+  /** What had the keyboard when Find opened, which gets it back. */
+  let findOpener: HTMLElement | undefined;
   const closeFind = () => {
     setFindOpen(false);
     setFindMatch("");
-    scrolling?.focus({ preventScroll: true });
+    const opener = findOpener;
+    findOpener = undefined;
+    const back =
+      opener?.isConnected && !(opener as HTMLButtonElement).disabled && opener.getClientRects().length
+        ? opener
+        : editable() && composer?.isConnected && !composer.disabled
+          ? composer
+          : scrolling;
+    back?.focus({ preventScroll: true });
   };
   const openFind = () => {
+    const active = document.activeElement;
+    // From the palette or a menu, which close, the message box takes it back.
+    if (
+      !findOpen() &&
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      !active.closest("dialog, [role='dialog'], [role='menu'], .conversation-find")
+    )
+      findOpener = active;
     set("panel", "chat");
     setFindOpen(true);
     queueMicrotask(() =>
@@ -906,6 +936,7 @@ export function Session() {
     on(owner, (key) => {
       setFindOpen(false);
       setFindMatch("");
+      findOpener = undefined;
       restoredDraft = undefined;
       void window.haarness.storage("history-draft:" + key).then((value) => {
         if (
@@ -1038,6 +1069,7 @@ export function Session() {
               name: t("Stop response"),
               keywords: "interrupt cancel turn",
               icon: "stop" as const,
+              hint: shortcutLabel("Mod+.", state.platform),
               disabled: stopping(),
               action: stop,
             },
@@ -1423,7 +1455,10 @@ export function Session() {
       ([, id]) => {
         // Navigation can happen before the typing debounce has saved the draft.
         persistDraft();
-        setDraft(state.drafts[draftKey()] ?? "");
+        const carried = carriedTo === owner() ? draft() : undefined;
+        carriedTo = undefined;
+        if (carried !== undefined) change(carried);
+        else setDraft(state.drafts[draftKey()] ?? "");
         fileDrop.reset();
         const key = draftKey();
         const current = owner();
@@ -1514,10 +1549,52 @@ export function Session() {
     if (project()) {
       set("drafts", draftKey(), text);
       clearTimeout(draftTimer);
-      const key = "draft:" + draftScope() + ":" + state.selected;
-      draftSave = { key, text };
+      draftSave = { key: storedDraftKey(), text };
       draftTimer = setTimeout(persistDraft, 500);
     }
+  }
+  /** Where the message box's text is kept between launches. */
+  function storedDraftKey() {
+    return "draft:" + draftScope() + ":" + state.selected;
+  }
+  // An input method composing text owns the message box until it ends: the
+  // box's text is only replaced after that, so the composition is not lost.
+  let composingText = false;
+  let afterComposition: (() => void)[] = [];
+  function whenComposed(run: () => void) {
+    if (composingText) afterComposition.push(run);
+    else run();
+  }
+  function compositionEnded() {
+    composingText = false;
+    const runs = afterComposition;
+    afterComposition = [];
+    // The composed text reaches the box with the input that follows.
+    setTimeout(() => runs.forEach((run) => run()));
+  }
+  /** Takes the text being sent out of the message box, keeping whatever was
+   * typed after it. */
+  function takeSent(text: string, from: string) {
+    whenComposed(() => {
+      if (owner() !== from) return;
+      const value = draft();
+      if (value === text) change("");
+      else if (text && value.startsWith(text)) change(value.slice(text.length).replace(/^\s+/, ""));
+    });
+  }
+  /** Puts text that was not sent back where it was typed, ahead of anything
+   * typed since; into the box when that chat is still shown. */
+  function putBack(text: string, places: string[], key: string, stored: string) {
+    if (!text) return;
+    const joined = (value: string) => (value.trim() ? text + "\n\n" + value : text);
+    if (places.includes(owner())) {
+      whenComposed(() => change(joined(draft())));
+      return;
+    }
+    const value = joined(state.drafts[key] ?? "");
+    set("drafts", key, value);
+    if (draftSave?.key === stored) draftSave = undefined;
+    void app.run(() => window.haarness.storage(stored, value));
   }
   /** The chats whose Enter waits for the model choices. */
   const waitingForModels = new Set<string>();
@@ -1610,8 +1687,9 @@ export function Session() {
       submitting() ||
       controls.busy() ||
       stopping() ||
-      (!showStop() &&
-        !draft().trim() &&
+      // Nothing to send: Enter in an empty box does nothing, also while work
+      // runs (Stop has a button of its own, and Esc).
+      (!draft().trim() &&
         !attachments().length &&
         !app.promptContext().length)
     )
@@ -1654,7 +1732,15 @@ export function Session() {
     const originProject = draftProject();
     const text = draft();
     const contextKey = app.draftKey();
+    const storedKey = storedDraftKey();
+    const keyboard = document.activeElement === composer;
     setSubmissions((items) => [...items, origin]);
+    // The message box empties as the message goes and keeps the keyboard,
+    // so the next one can be typed at once. A second Enter waits for this
+    // send; text that is not sent comes back.
+    takeSent(text, origin);
+    persistDraft();
+    let sent = false;
     try {
       await app.loadAttachmentDraft(contextKey);
       await app.loadPromptContext(contextKey);
@@ -1682,7 +1768,6 @@ export function Session() {
       if (!state.connection && !state.openingProject) {
         if (!(await app.connect({ recent: project()!.id }, true))) return;
         connection = state.connection!.id;
-        setDraft(text);
       }
       // Continuing an archived chat brings it back to the sidebar, as
       // resuming one does in the TUI; the server leaves that to clients.
@@ -1697,6 +1782,9 @@ export function Session() {
             app.setPromptContext(sessionKey(connection!, id), context),
           );
           createdOwner = connection + ":" + id;
+          // The view moves to the new chat, and the box goes with it as it
+          // is then, with what was typed while the chat was being made.
+          if (owner() === origin) carriedTo = createdOwner;
           // Commit the destination before removing the persisted starter
           // attachments. A failed disk write must leave the original recoverable.
           void app.run(async () => {
@@ -1717,6 +1805,7 @@ export function Session() {
         context,
         delivery,
       );
+      sent = true;
       void app.run(() =>
         history.record(historyKey(connection!), {
           text,
@@ -1731,15 +1820,25 @@ export function Session() {
           sessionKey(connection!, threadId),
           context,
         );
-      if (
+      const shown =
         state.connection?.id === connection &&
         (state.selected === selected ||
-          (!selected && state.selected === threadId))
-      ) {
-        if (draft() === text) {
-          setDraft("");
-          composer.focus();
-        }
+          (!selected && state.selected === threadId));
+      // A first message moves the view to its new chat; the keyboard stays
+      // in the message box, unless the person has put it elsewhere since.
+      if (
+        shown &&
+        keyboard &&
+        composer?.isConnected &&
+        (!document.activeElement || document.activeElement === document.body)
+      )
+        composer.focus({ preventScroll: true });
+      // What was typed while that chat was being made went to it with the
+      // view (state.tsx), so the new-chat draft starts empty again.
+      if (!selected && shown) {
+        set("drafts", "new:" + originProject, "");
+        if (draftSave?.key === storedKey) draftSave = undefined;
+        await window.haarness.storage(storedKey, "");
       }
       // app.send already clears the shared text draft. Attachments have
       // their own lifecycle, and files added during the request must survive.
@@ -1756,6 +1855,7 @@ export function Session() {
       setSubmissions((items) =>
         items.filter((item) => item !== origin && item !== createdOwner),
       );
+      if (!sent) putBack(text, [origin, createdOwner], contextKey, storedKey);
     }
   }
   async function model(value: string) {
@@ -2332,8 +2432,9 @@ export function Session() {
                 aria-activedescendant={
                   slashOpen() ? "slash-command-" + slashIndex() : undefined
                 }
+                // Not while a message is being sent: what is typed then is
+                // the next message (`send` waits for the first).
                 disabled={
-                  submitting() ||
                   controls.busy() ||
                   !project() ||
                   !state.ready ||
@@ -2355,6 +2456,11 @@ export function Session() {
                 }
                 value={draft()}
                 onInput={(event) => change(event.currentTarget.value)}
+                onCompositionStart={() => (composingText = true)}
+                onCompositionEnd={compositionEnded}
+                onBlur={() => {
+                  if (composingText) compositionEnded();
+                }}
                 onKeyDown={(event) => {
                   if (event.isComposing || event.defaultPrevented) return;
                   if (event.key === "Enter" && event.altKey && !event.shiftKey && state.connection?.info.capabilities.includes("input-queue.v1")) {
@@ -2397,6 +2503,21 @@ export function Session() {
                     event.preventDefault();
                     event.stopPropagation();
                     queue.cancel();
+                    return;
+                  }
+                  // Esc in an empty message box stops the work, as Stop
+                  // does; a menu or popover of the box takes it first.
+                  if (
+                    event.key === "Escape" &&
+                    !event.shiftKey &&
+                    !event.altKey &&
+                    !event.metaKey &&
+                    !event.ctrlKey &&
+                    showStop() &&
+                    !findOpen()
+                  ) {
+                    event.preventDefault();
+                    if (!event.repeat && !stopping()) void app.run(stop);
                     return;
                   }
                   if (
@@ -3214,8 +3335,14 @@ function Permission(props: {
         ]
       : []),
   ];
+  let dock!: HTMLElement;
+  const cardFocus = holdCardFocus(() => dock, () => allowOnce);
   return (
     <section
+      ref={(element) => {
+        dock = element;
+        cardFocus.attach(element);
+      }}
       class="prompt-dock approval"
       role="alert"
       aria-label={t("Permission request")}
@@ -3425,7 +3552,7 @@ function Permission(props: {
           >
             {t("Deny")}
           </button>
-          <button disabled={answered()} onClick={() => decide("once")}>
+          <button ref={allowOnce} disabled={answered()} onClick={() => decide("once")}>
             {t("Allow once")}
           </button>
           <button
@@ -3533,6 +3660,101 @@ function chromeRequestText(category: ChromeField) {
 }
 /** How long a card answered elsewhere says so before it goes. */
 const SETTLED_NOTE_MS = 1500;
+/** How long a card that took the keyboard by itself keeps keys that were
+ * meant for the message box: a key pressed as it came was not an answer. */
+const CARD_ARMING_MS = 400;
+/** Whether a card that just docked may take the keyboard: it was in the
+ * message box (holding no draft) or one of its controls, or nowhere. */
+function cardMayTakeKeyboard(dock: Element) {
+  const active = document.activeElement;
+  if (!active || active === document.body) return true;
+  if (dock.contains(active) || !active.closest(".composer")) return false;
+  return !typingElsewhere(active, dock, document.querySelector("[data-composer-input]"));
+}
+/**
+ * The keyboard around a card docked above the message box. A card that may
+ * take it (`may`) takes it on `primary` as it comes; one answered with the
+ * keyboard inside it gives the keyboard back to the message box (or, in an
+ * agent's chat, to the transcript). Enter and Space held down never answer.
+ * For a moment after the card took the keyboard by itself, and until the
+ * person moves in it, Enter on that button does nothing and what is typed
+ * there goes back to the message box, so typing that went on as it came is
+ * neither an answer nor lost. The card says so with `data-arming`.
+ */
+function holdCardFocus(
+  dock: () => HTMLElement | undefined,
+  primary: () => HTMLElement | undefined,
+  may: (dock: Element) => boolean = cardMayTakeKeyboard,
+) {
+  let holding = false;
+  let arming: { target: HTMLElement; timer: ReturnType<typeof setTimeout> } | undefined;
+  const disarm = () => {
+    if (!arming) return;
+    clearTimeout(arming.timer);
+    arming = undefined;
+    delete dock()?.dataset.arming;
+  };
+  onMount(() => {
+    const element = dock(),
+      target = primary();
+    if (!element || !target || !may(element)) return;
+    target.focus({ preventScroll: true });
+    if (document.activeElement !== target || !(target instanceof HTMLButtonElement)) return;
+    element.dataset.arming = "";
+    arming = { target, timer: setTimeout(disarm, CARD_ARMING_MS) };
+  });
+  onCleanup(() => {
+    disarm();
+    if (!holding) return;
+    queueMicrotask(() => {
+      const active = document.activeElement;
+      // The next card took it, or the person put it somewhere.
+      if (active && active !== document.body && active.isConnected) return;
+      const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
+      (box && !box.disabled ? box : document.querySelector<HTMLElement>(".transcript"))?.focus({
+        preventScroll: true,
+      });
+    });
+  });
+  return {
+    attach(element: HTMLElement) {
+      element.addEventListener("focusin", (event) => {
+        holding = true;
+        if (arming && event.target !== arming.target) disarm();
+      });
+      element.addEventListener("focusout", (event) => {
+        // Focus lost with its button (answered, disabled) is still held here.
+        const next = event.relatedTarget;
+        if (next instanceof Node && !element.contains(next)) holding = false;
+      });
+      element.addEventListener("pointerdown", disarm, true);
+      const guard = (event: KeyboardEvent) => {
+        if (!(event.target instanceof HTMLButtonElement)) return;
+        const answers = event.key === "Enter" || event.key === " ";
+        if (answers && event.repeat) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (!arming || event.target !== arming.target || event.metaKey || event.ctrlKey || event.altKey) return;
+        const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
+        if (event.key === "Enter" || (event.key.length === 1 && box && !box.disabled)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        if (event.type !== "keydown" || event.key.length !== 1 || !box || box.disabled) return;
+        disarm();
+        box.focus({ preventScroll: true });
+        if (!document.execCommand("insertText", false, event.key)) {
+          box.setRangeText(event.key, box.selectionStart, box.selectionEnd, "end");
+          box.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      };
+      element.addEventListener("keydown", guard, true);
+      element.addEventListener("keyup", guard, true);
+    },
+  };
+}
 /** Enter that confirms an input method's composition belongs to the input method. */
 const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 
@@ -3565,25 +3787,32 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       }
     });
   };
+  let firstChoice: HTMLButtonElement | undefined;
+  const choosing = () => !!props.question.choices?.length;
   // A question with nothing to pick is answered by typing, so it opens in
-  // its answer field, unless someone is typing elsewhere.
-  onMount(() => {
-    if (!input || props.question.choices?.length) return;
-    const active = document.activeElement;
-    if (
-      active?.closest("dialog, [role='dialog']") ||
-      typingElsewhere(
-        active,
-        dock,
-        document.querySelector("[data-composer-input]"),
-      )
-    )
-      return;
-    input.focus({ preventScroll: true });
-  });
+  // its answer field, unless someone is typing elsewhere. One with choices
+  // opens on its first choice, as a permission opens on Allow once.
+  const cardFocus = holdCardFocus(
+    () => dock,
+    () => (choosing() ? firstChoice : input),
+    (element) => {
+      if (choosing()) return cardMayTakeKeyboard(element);
+      const active = document.activeElement;
+      return !(
+        active?.closest("dialog, [role='dialog']") ||
+        typingElsewhere(active, element, document.querySelector("[data-composer-input]"))
+      );
+    },
+  );
+  // One answer, and nothing to write instead: choosing it is the reply, as
+  // Enter on it is (and as in the TUI).
+  const answersOnClick = () => !props.question.multiple && props.question.custom === false;
   return (
     <section
-      ref={dock}
+      ref={(element) => {
+        dock = element;
+        cardFocus.attach(element);
+      }}
       class="prompt-dock question"
       aria-label={t("A question for you")}
       onKeyDown={(event) => {
@@ -3609,14 +3838,18 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       <p class="question-prompt">{props.question.prompt}</p>
       <div class="question-options">
         <For each={props.question.choices ?? []}>
-          {(choice) => (
+          {(choice, index) => (
             <button
+              ref={(button) => {
+                if (index() === 0) firstChoice = button;
+              }}
               classList={{ active: choices().includes(choice) }}
               aria-pressed={choices().includes(choice)}
               onClick={() => {
                 if (!props.question.multiple) {
                   setChoices([choice]);
                   setAnswer("");
+                  if (answersOnClick()) submit();
                   return;
                 }
                 setChoices((old) =>

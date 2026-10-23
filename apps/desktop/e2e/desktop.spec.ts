@@ -4885,6 +4885,10 @@ test("a question answers from the keyboard, and only a deliberate key sends it",
   // On a question that takes several answers, Enter marks and unmarks and never
   // sends; Cmd/Ctrl+Enter replies with what is marked, from a choice or the field.
   await ask({ prompt: "Which platforms?", choices: ["macOS", "Linux", "Windows"], multiple: true });
+  // The card took the keyboard on its first choice as it came; a key
+  // pressed in that moment is not an answer, so wait it out.
+  await expect(choice("macOS")).toBeFocused();
+  await expect(question).not.toHaveAttribute("data-arming");
   await choice("macOS").press("Enter");
   await choice("Linux").press("Enter");
   await choice("Windows").press("Enter");

@@ -241,6 +241,40 @@ test("a secret-named file, or a command that runs no script, shows no toggle", a
   }
 });
 
+test("a card that comes while the message box has the keyboard takes it, and gives it back once answered", async () => {
+  const box = page.locator("[data-composer-input]");
+  await box.fill(" !tool bash " + JSON.stringify({ command: "printf keyboard > keyboard.txt" }));
+  await box.press("Enter");
+  await expect(card()).toBeVisible();
+  const once = card().getByRole("button", { name: "Allow once", exact: true });
+  await expect(once).toBeFocused();
+  // Deny, Always allow and Allow once share one line.
+  const tops = await Promise.all(
+    ["Deny", "Always allow", "Allow once"].map(async (name) =>
+      Math.round((await card().getByRole("button", { name, exact: true }).boundingBox())!.y),
+    ),
+  );
+  expect(new Set(tops).size).toBe(1);
+  // A key pressed as it came is not an answer; once that moment has passed,
+  // Enter answers, and the keyboard goes back to the message box.
+  await expect(card()).not.toHaveAttribute("data-arming");
+  await page.keyboard.press("Enter");
+  await idle();
+  await expect(card()).toHaveCount(0);
+  await expect(box).toBeFocused();
+  expect(await readFile(join(project, "keyboard.txt"), "utf8")).toBe("keyboard");
+  // A draft in the message box keeps the keyboard where it is.
+  await box.fill(" !tool bash " + JSON.stringify({ command: "printf draft > draft.txt" }));
+  await box.press("Enter");
+  await box.type("still typing");
+  await expect(card()).toBeVisible();
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue("still typing");
+  await card().getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  await box.fill("");
+});
+
 test("under the default rules the outside folder's card offers the script that runs there", async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
