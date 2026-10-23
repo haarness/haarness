@@ -603,8 +603,11 @@ export function Session() {
   // End scrolls to the bottom known when the key went down; virtual rows
   // measured meanwhile move it. Re-pin once that scroll settles.
   let settleAtEnd = false;
-  function pauseFollowing() {
+  /** Scrolling away, or (`focus`) a control brought into view. Only the
+   * person's own scrolling makes a step's opening no longer the reason. */
+  function pauseFollowing(focus = false) {
     settleAtEnd = false;
+    if (!focus) pausedByToggle = undefined;
     revealTarget = undefined;
     cancelAnimationFrame(revealFrame);
     if (scrolling.scrollHeight <= scrolling.clientHeight + 4) return;
@@ -615,8 +618,10 @@ export function Session() {
   /* A step or thought the reader opens or closes stays where it was clicked:
      following pins streamed output to the bottom, not the row's own growth.
      When opening it pushes the latest output out of view, following pauses,
-     as scrolling up would, and Jump to latest offers the way back; when
-     closing it brings the end of the chat into view, following resumes. */
+     as scrolling up would, and Jump to latest offers the way back (not for
+     a step of the work under way, whose output following shows as it
+     comes); when closing it brings the end of the chat into view, or closes
+     the step whose opening paused it, following resumes. */
   let toggled:
     | {
         control: Element;
@@ -630,11 +635,13 @@ export function Session() {
         until: number;
       }
     | undefined;
+  /** The step whose opening paused following, until something else moves the view. */
+  let pausedByToggle: HTMLElement | undefined;
   function holdToggled(event: MouseEvent) {
     const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
     const row = control?.closest<HTMLElement>("[data-index]");
     if (!control || !row || !scrolling.contains(row)) return;
-    toggled = {
+    const hold = {
       control,
       row,
       top: control.getBoundingClientRect().top,
@@ -645,23 +652,27 @@ export function Session() {
       // A click that opens nothing gives the view back soon.
       until: performance.now() + 500,
     };
+    // One hold at a time: a click on another step replaces this one.
+    toggled = hold;
     cancelAnimationFrame(scrollFrame);
     scrollFrame = 0;
-    requestAnimationFrame(keepToggled);
+    requestAnimationFrame(() => keepToggled(hold));
   }
-  function keepToggled() {
-    const held = toggled;
-    if (!held) return;
+  function keepToggled(held: NonNullable<typeof toggled>) {
+    if (toggled !== held) return;
     const grown = held.row.isConnected ? held.row.offsetHeight - held.height : 0;
     // The body draws after the toggle event, and a thought's text after
     // that (Markdown renders in a worker); the list takes the row's new
     // height a frame or more later still.
+    // (Closing the step whose opening paused following needs no height:
+    // following comes back either way.)
     const drawing =
       !grown ||
       !!held.row.querySelector('.markdown[data-markdown-ready="false"]') ||
-      (grown > 0 && scrolling.scrollHeight < held.scrollHeight + grown - 1);
+      (grown > 0 && scrolling.scrollHeight < held.scrollHeight + grown - 1) ||
+      (grown < 0 && pausedByToggle !== held.row && scrolling.scrollHeight > held.scrollHeight + grown + 1);
     if (held.row.isConnected && drawing && performance.now() < held.until) {
-      requestAnimationFrame(keepToggled);
+      requestAnimationFrame(() => keepToggled(held));
       return;
     }
     toggled = undefined;
@@ -679,13 +690,31 @@ export function Session() {
       if (lift > 0) scrolling.scrollTop += lift;
     }
     lastTop = scrolling.scrollTop;
-    // What lies below the view now: what did before, pushed down by the
-    // row's growth, less what the view moved. Read from the row, not from
-    // the list's height, so a reply streaming meanwhile changes nothing.
-    const below = held.below + grown - (scrolling.scrollTop - held.scrollTop);
-    if (grown > 0 && below > 4) setFollow(false);
-    else if (below <= 4) setFollow(true);
-    followLatest();
+    // What lies below the view now. Opened, it is what did before, pushed
+    // down by the row's growth, less what the view moved: read from the
+    // row, not from the list's height, so a reply streaming meanwhile
+    // changes nothing. Closed, the list's own height says it, once it has
+    // given the row's height back.
+    const below =
+      grown > 0
+        ? held.below + grown - (scrolling.scrollTop - held.scrollTop)
+        : scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
+    // A step of the turn under way is the latest work: opened, the view
+    // goes on following what it and the rest of the turn write, from where
+    // it stands now.
+    const item = rows()[Number(held.row.dataset.index)];
+    const latest =
+      !!item &&
+      (Number(held.row.dataset.index) === rows().length - 1 || (!!active() && item.turnId === active()!.id));
+    if (grown > 0 && below > 4 && !latest) {
+      if (follow()) pausedByToggle = held.row;
+      setFollow(false);
+    } else if (below <= 4 || (grown < 0 && pausedByToggle === held.row)) {
+      // Closing the step whose opening paused following takes it back up.
+      pausedByToggle = undefined;
+      setFollow(true);
+    }
+    if (!(latest && grown > 0)) followLatest();
   }
   function followLatest() {
     if (!follow() || scrollFrame || toggled) return;
@@ -716,7 +745,7 @@ export function Session() {
     // the previous scroll position as well as its already-visible bounds.
     if (scrolling.scrollTop >= lastTop - 2 && box.top >= view.top && box.bottom <= view.bottom)
       return;
-    pauseFollowing();
+    pauseFollowing(true);
     lastTop = scrolling.scrollTop;
   }
   onMount(() => {

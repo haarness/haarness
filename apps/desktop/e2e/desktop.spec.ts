@@ -9663,6 +9663,8 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   });
   const activity = page.locator(".message.step > .tool-call").last();
   await expect(activity.locator(":scope > summary")).toContainText("printf");
+  // The approval card docks first and moves the step up; then it is opened.
+  await expect(page.getByRole("alert", { name: "Permission request" })).toBeVisible();
   await activity.locator(":scope > summary").click();
   await expect(activity.locator(".tool-empty")).toHaveText(
     "Waiting for output…",
@@ -9724,6 +9726,11 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   await expect(activity.locator(".change-lines .add .diff-sign")).toHaveText("+");
   await expect(activity.locator(".change-lines .remove .diff-sign")).toHaveText("−");
   await expect(activity).not.toContainText('"old":');
+  // Opening a finished step whose body pushed the end out of view paused
+  // following; closing it takes following back up for the next turn.
+  await activity.locator(":scope > summary").click();
+  await expect(activity.locator(".change-preview")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
   const waiting = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
     text:
