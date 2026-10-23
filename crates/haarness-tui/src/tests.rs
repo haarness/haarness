@@ -2555,6 +2555,32 @@ fn a_question_a_hook_answered_says_so_on_its_row() {
     assert!(row("asked").contains("·  Unit tests"), "{text:#?}");
 }
 
+/// A single-choice question says how to answer it as a multiple-choice one
+/// does, and its toast stays hidden while the question itself is in view.
+#[tokio::test]
+async fn a_question_in_view_has_a_key_legend_and_no_toast() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        fixture_event(
+            "question.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({"questionId": "q-one", "prompt": "Which database?", "choices": ["Postgres", "SQLite"]}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.notification_toast.is_some());
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("↑↓ move · enter choose"), "{text}");
+    assert!(!text.contains("Haarness needs your answer"), "{text}");
+    // A dialog over it brings the toast back.
+    app.open_overlay(crate::state::Overlay::Commands);
+    assert!(frame_text(&app, (100, 30)).contains("Haarness needs your answer"));
+}
+
 /// A long question is asked in full, wrapped under its mark, whatever the
 /// terminal's width.
 #[tokio::test]

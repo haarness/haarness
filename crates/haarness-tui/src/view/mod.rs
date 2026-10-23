@@ -490,12 +490,17 @@ impl App {
         // The approval card is the attention surface whenever it is on
         // screen; a toast repeating it would only cover the conversation (or,
         // on a short terminal, the card itself).
-        let toast_repeats_card = card_shown
-            && matches!(self.overlay, Overlay::None)
-            && self
-                .notification_toast
-                .as_ref()
-                .is_some_and(|toast| toast.approval);
+        // So is a question shown in the conversation: it waits at the end of
+        // it, or its choices are in view.
+        let question_shown = self.first_pending_question().is_some()
+            && (offset == 0
+                || hits
+                    .iter()
+                    .any(|hit| matches!(hit.target, frame::HitTarget::QuestionChoice(_))));
+        let toast_repeats_card = matches!(self.overlay, Overlay::None)
+            && self.notification_toast.as_ref().is_some_and(|toast| {
+                (toast.approval && card_shown) || (toast.question && question_shown)
+            });
         if !toast_repeats_card {
             apply_toast(self, &mut lines, &mut hits, width, height);
         }
