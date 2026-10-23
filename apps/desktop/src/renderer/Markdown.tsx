@@ -31,20 +31,24 @@ import { watchOpenImages } from "./ImageViewer";
  * What is read in the transcript's view: the first text that starts inside
  * it, under its middle. Starting inside the view, it holds nothing above it,
  * so an image growing there moves it whole; an image or a placeholder, which
- * may be the one about to come in, is passed over.
+ * may be the one about to come in, is passed over. When no text starts
+ * inside it (a tall picture or code block fills it), the end of the row under
+ * its centre, which any growth above the view moves as well.
  */
-function readingAnchor(list: HTMLElement, view: DOMRect) {
+function readingAnchor(list: HTMLElement, view: DOMRect): { element: HTMLElement; edge: "top" | "bottom" } | undefined {
+  const x = view.left + view.width / 2;
   for (let y = view.top + 1; y < view.bottom; y += 12) {
-    const point = document.elementFromPoint(view.left + view.width / 2, y);
+    const point = document.elementFromPoint(x, y);
     if (!(point instanceof HTMLElement) || point === list || !list.contains(point)) continue;
     if (point instanceof HTMLImageElement || point.closest(".project-image, .remote-image")) continue;
-    if (point.getBoundingClientRect().top >= view.top) return point;
+    if (point.getBoundingClientRect().top >= view.top) return { element: point, edge: "top" };
   }
-  return undefined;
+  const row = document.elementFromPoint(x, view.top + view.height / 2)?.closest<HTMLElement>("[data-index]");
+  return row && list.contains(row) ? { element: row, edge: "bottom" } : undefined;
 }
 
-/** Transcripts with a correction of the reading position waiting for its rows to be measured. */
-const correcting = new WeakSet<HTMLElement>();
+/** Each transcript's correction of the reading position that waits for its rows to be measured. */
+const correcting = new WeakMap<HTMLElement, object>();
 
 /**
  * Makes `change` (an image coming into `host`) without moving what is being
@@ -58,28 +62,44 @@ const correcting = new WeakSet<HTMLElement>();
  * kept is counted) and before they are painted, the view moves by as much as
  * that moved. One correction waits per transcript: images coming in while it
  * waits, in this reply or another (your own message showing the same image),
- * are counted in it. The image is decoded before it comes in, so it takes its
- * final size at once.
+ * are counted in it; if no measure comes within two frames, it is given up.
+ * Text with no box (inside a closed disclosure) moves nothing, so it is just
+ * changed. The image is decoded before it comes in, so it takes its final
+ * size at once.
  */
 function keepReading(element: HTMLElement, host: HTMLElement, change: () => void) {
   const list = element.closest<HTMLElement>(".transcript");
   const view = list?.getBoundingClientRect();
-  if (!list || !view || element.getBoundingClientRect().top >= view.top || correcting.has(list)) return change();
+  if (
+    !list ||
+    !view ||
+    !host.getClientRects().length ||
+    !element.getClientRects().length ||
+    element.getBoundingClientRect().top >= view.top ||
+    correcting.has(list)
+  )
+    return change();
   const anchor = readingAnchor(list, view);
-  const where = () =>
-    (anchor ? anchor.getBoundingClientRect().top : host.getBoundingClientRect().bottom) -
-    list.getBoundingClientRect().top;
+  const where = () => {
+    const box = (anchor?.element ?? host).getBoundingClientRect();
+    return (anchor?.edge === "top" ? box.top : box.bottom) - list.getBoundingClientRect().top;
+  };
   const before = where();
-  correcting.add(list);
+  const token = {};
+  correcting.set(list, token);
   change();
-  const measured = new ResizeObserver(() => {
+  const done = () => {
     measured.disconnect();
-    correcting.delete(list);
-    if (anchor && !anchor.isConnected) return;
+    if (correcting.get(list) === token) correcting.delete(list);
+  };
+  const measured = new ResizeObserver(() => {
+    done();
+    if (anchor && !anchor.element.isConnected) return;
     const moved = where() - before;
     if (moved) list.scrollTop += moved;
   });
   measured.observe(host);
+  requestAnimationFrame(() => requestAnimationFrame(done));
 }
 
 /**
