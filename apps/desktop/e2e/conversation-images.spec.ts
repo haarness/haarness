@@ -1,6 +1,7 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { Haarness } from "@haarness/sdk";
-import { mkdtemp, mkdir, writeFile, realpath, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, symlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -19,6 +20,7 @@ const shots = process.env.HAARNESS_IMAGE_SCREENSHOTS;
 let app: ElectronApplication, page: Page, client: Haarness;
 let temporary: string, workspace: string, binary: string, env: Record<string, string>;
 let thread = "";
+let api: { url: string; token: string };
 const errors: string[] = [];
 
 /** A PNG of `width`×`height` whose pixels `paint` gives, without an image library. */
@@ -105,6 +107,7 @@ test.beforeAll(async () => {
       timeout: 120000,
     }),
   );
+  api = { url: connection.url, token: connection.token };
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   thread = (await client.createThread({ title: "Images", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "Images", exact: true }).click();
@@ -123,6 +126,17 @@ test.afterAll(async () => {
     } catch {}
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
+
+/** Writes a project file through the server's file API, as the Files panel does. */
+async function writeProjectFile(path: string, bytes: Buffer) {
+  const revision = createHash("sha256").update(await readFile(join(workspace, path))).digest("hex");
+  const response = await fetch(`${api.url}/v1/files/content`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${api.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ path, content: bytes.toString("base64"), encoding: "base64", revision }),
+  });
+  expect(response.status).toBe(200);
+}
 
 /**
  * Sends `text`, which the echo provider repeats as the reply, and returns that
@@ -202,12 +216,20 @@ test("a reply's image from the project shows, fitted no taller than 320px and ne
   expect(await size(images.nth(2))).toEqual({ natural: [100, 1000], shown: [32, 320] });
   // Nothing in the conversation names a path for the window to load by itself.
   await expect(page.locator('.transcript .markdown img:not([src^="data:"])')).toHaveCount(0);
-  // The person's own message shows the same images.
-  await expect(page.locator(".message.user").last().locator("img.project-image-loaded")).toHaveCount(3);
+  // The person's own message shows the same images as thumbnails, which never fold it.
+  const own = page.locator(".message.user").last();
+  await expect(own.locator("img.project-image-loaded")).toHaveCount(3);
+  expect(await own.locator("img.project-image-loaded").evaluateAll((images) =>
+    images.map((image) => Math.round(image.getBoundingClientRect().height)),
+  )).toEqual([120, 120, 120]);
+  await expect(own.locator(".bubble-body")).not.toHaveClass(/folded/);
+  await expect(own.getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
   // Following the conversation, it stays at the newest output once the images are in.
   await expect
     .poll(() => page.locator(".transcript").evaluate((list) => list.scrollHeight - list.scrollTop - list.clientHeight))
     .toBeLessThan(4);
+  await own.scrollIntoViewIfNeeded();
+  await pictures(own, "own-message-image");
   const shown = await reply("Here is this week's chart:\n\n![Weekly chart](out/chart.png)\n\nThursday was the busiest day.");
   await expect(shown.locator("img.project-image-loaded")).toBeVisible();
   await pictures(shown, "reply-image");
@@ -242,7 +264,7 @@ test("a path out of the project, through a link or not, is never read and says w
   expect(errors).toEqual([]);
 });
 
-test("a reply drawn again shows its image at once, and a changed file shows anew after the turn", async () => {
+test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
   // Leaving the chat and coming back draws its replies anew: no placeholder appears in between.
   await page.evaluate(() => {
@@ -262,8 +284,8 @@ test("a reply drawn again shows its image at once, and a changed file shows anew
   await expect(page.locator(".message.assistant img.project-image-loaded[data-project-path='out/chart.png']").first()).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { placeholders: string[] }).placeholders)).toEqual([]);
 
-  // The agent made a new chart: the next reply naming it shows the new one.
-  await writeFile(join(workspace, "out/chart.png"), chart(360, 200, [230, 120, 40]));
+  // A new chart written through the file API: the next reply naming it shows the new one at once.
+  await writeProjectFile("out/chart.png", chart(360, 200, [230, 120, 40]));
   const message = await reply("Updated: ![Weekly chart](out/chart.png)");
   await expect
     .poll(() => message.locator("img.project-image-loaded").evaluate((image: HTMLImageElement) => image.naturalWidth))

@@ -346,6 +346,11 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   height: auto;
   object-fit: contain;
 }
+/* In your own message an image is a thumbnail, as an attachment is, and it
+   opens full size; it never folds the message (UserMessage.tsx). */
+.bubble .markdown img {
+  max-height: 120px;
+}
 /* An image the conversation shows opens full size (ImageViewer.tsx). */
 .markdown img[data-image-open] {
   cursor: zoom-in;
