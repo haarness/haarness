@@ -23,8 +23,10 @@ for line in sys.stdin:
                 file.write('called\n')
             sys.exit(0)
         if request['params']['name'] == 'wait':
-            # A call that takes a while, then says it finished.
+            # A call that takes a while, then says (and logs) it finished.
             time.sleep(float(request['params'].get('arguments', {}).get('seconds', 1)))
+            with open(os.environ['CALL_LOG'], 'a') as file:
+                file.write('waited\n')
             result = {'content': [{'type': 'text', 'text': 'waited'}], 'isError': False}
         else:
             result = {'content': [{'type': 'text', 'text': 'pong'}], 'isError': False}

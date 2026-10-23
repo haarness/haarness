@@ -4420,19 +4420,28 @@ mod recovery_tests {
             .configure("fixture", config(&log, "0"))
             .await
             .unwrap();
-        let (called, disconnected) = tokio::join!(
-            registry.call(
-                "fixture",
-                "mcp__fixture__wait",
-                serde_json::json!({"seconds": 1})
-            ),
-            async {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                registry.disconnect("fixture").await
-            },
+        // Stop ends the wait for its answer; the call itself goes on.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                registry.call(
+                    "fixture",
+                    "mcp__fixture__wait",
+                    serde_json::json!({"seconds": 1})
+                ),
+            )
+            .await
+            .is_err()
         );
-        disconnected.unwrap();
-        assert_eq!(called.unwrap().text, "waited");
+        registry.disconnect("fixture").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("waited")) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the call was stopped with its server");
+        std::fs::remove_file(log).unwrap();
     }
 
     #[tokio::test]
