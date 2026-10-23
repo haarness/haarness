@@ -1774,7 +1774,9 @@ pub struct ScriptFile {
 /// `exec`. One a wrapper runs in another folder (`env -C`, `sudo -D`,
 /// `sudo -i`) is not named, nor a relative one once the folder is unknown
 /// (after a `cd` the line does not spell out, or one that may have failed),
-/// nor any in a line the tree cannot read whole.
+/// nor any in a line the tree cannot read whole. On Windows, whose `cmd`
+/// reads a line otherwise (quotes, `^`, `%CD%`, `\`, drives), none is named
+/// at all.
 ///
 /// Its text may be shown only in the shape people run: the line's first
 /// statement, its steps before the script joined by `&&` and each a `cd` to
@@ -1789,7 +1791,7 @@ pub struct ScriptFile {
 /// withholds everything after it.
 #[must_use]
 pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
-    if command.len() > MAX_COMMAND_BYTES {
+    if cfg!(windows) || command.len() > MAX_COMMAND_BYTES {
         return Vec::new();
     }
     let mut parser = tree_sitter::Parser::new();
@@ -1848,8 +1850,7 @@ fn statements(root: tree_sitter::Node<'_>) -> Vec<Statement<'_>> {
     let mut statements: Vec<Statement<'_>> = Vec::new();
     for child in root.children(&mut root.walk()) {
         match child.kind() {
-            // `cmd`, the shell on Windows, runs `a & b` one after the other.
-            "&" if cfg!(not(windows)) => {
+            "&" => {
                 if let Some(statement) = statements.last_mut() {
                     statement.background = true;
                 }
@@ -2102,8 +2103,6 @@ impl Line<'_> {
 
     /// Where a file the line names is, from where the shell is.
     fn place(&self, file: &Path) -> Option<PathBuf> {
-        // Rooted is where it says on every system (`/tmp/x.sh` has no drive
-        // on Windows).
         if file.has_root() {
             return Some(file.to_path_buf());
         }
@@ -3452,7 +3451,7 @@ mod readings {
 
 /// [`script_files`]: which file a command line runs as a script, and when
 /// its text may be shown.
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod scripts {
     use super::*;
     use haarness_protocol::ScriptWithheld::{Changeable, Written};
@@ -3779,7 +3778,6 @@ mod scripts {
 
     /// A script started with `&` runs alongside what follows it: shown only
     /// when nothing but `wait` does. Its `cd`s stay in its own subshell.
-    #[cfg(not(windows))]
     #[test]
     fn a_backgrounded_statement_shows_only_with_nothing_after_it_but_wait() {
         for command in [
@@ -3987,5 +3985,33 @@ mod scripts {
     fn a_line_too_long_to_read_runs_no_known_script() {
         let line = format!("bash x.sh # {}", "a".repeat(MAX_COMMAND_BYTES));
         assert!(found(&line).is_empty());
+    }
+}
+
+/// On Windows, `cmd` reads a line otherwise than the shell grammar the card
+/// reads it by: the card names no script there.
+#[cfg(all(test, windows))]
+mod scripts_on_windows {
+    use super::*;
+
+    #[test]
+    fn no_script_is_named() {
+        for command in [
+            "python 'x.py'",
+            "python x^.py",
+            "python %CD%\\x.py",
+            "python sub\\x.py",
+            "python ~/x.py",
+            "cd D:/tools && python x.py",
+            "python /tmp/x.py",
+            "bash run.sh",
+            "./run.sh",
+            "cd sub && ./run.sh",
+        ] {
+            assert!(
+                script_files(command, Path::new("C:\\project")).is_empty(),
+                "{command}"
+            );
+        }
     }
 }

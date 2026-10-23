@@ -1,6 +1,8 @@
 //! A shell request that asks a person carries the script its command runs,
 //! for the card to show: display only, so its patterns, its Always rules
-//! and its answers are what they were without it.
+//! and its answers are what they were without it. On Windows the card names
+//! no script (`permissions::bash::script_files`).
+#![cfg(not(windows))]
 use super::*;
 use haarness_core::{PermissionDecision as D, PermissionRule};
 use haarness_protocol::{PermissionReply, PermissionReplyDecision as Reply};

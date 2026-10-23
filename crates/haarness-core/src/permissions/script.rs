@@ -241,7 +241,7 @@ fn shown_path(path: &Path) -> String {
 /// past the cap. A pipe or device is never opened, and the open file is
 /// checked again in case one was put there since.
 fn read_bytes(real: &Path) -> Option<Vec<u8>> {
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     tests::wait_if_slow(real);
     if !std::fs::metadata(real).ok()?.is_file() {
         return None;
@@ -350,7 +350,7 @@ fn displayed(text: &str) -> String {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 
@@ -783,5 +783,23 @@ mod tests {
                 .content,
             "echo caf\u{fffd}\n"
         );
+    }
+}
+
+/// On Windows the card names no script (see `bash::script_files`).
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn no_script_is_read() {
+        let folder = std::env::temp_dir().join(format!("haarness-script-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("x.py"), "print(1)\n").unwrap();
+        std::fs::write(folder.join("run.sh"), "echo hi\n").unwrap();
+        for command in ["python x.py", "python 'x.py'", "bash run.sh", "./run.sh"] {
+            assert!(find(command, &folder, |_| true).is_none(), "{command}");
+        }
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }
