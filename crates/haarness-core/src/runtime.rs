@@ -1588,7 +1588,8 @@ impl AgentRuntime {
     }
 
     /// Whether chat `thread_id` already took request `request`: its turn
-    /// runs or ran, or it waits in the queue. A retry finds it there.
+    /// runs or ran, it was steered into a turn, or it waits in the queue. A
+    /// retry finds it there.
     pub async fn request_admitted(
         &self,
         thread_id: ThreadId,
@@ -1613,14 +1614,16 @@ impl AgentRuntime {
 
     /// The agent a message to chat `thread_id` runs under, when it is not
     /// the chat's own: the one it names, else the one its command `command`
-    /// names, else the running turn's (a message that steers or waits in the
-    /// queue joins it). `None` means the chat's agent.
+    /// names, else, for a message that steers (`steer`), the running turn's.
+    /// A queued message runs later as a turn of its own, under the chat's
+    /// agent. `None` means the chat's agent.
     #[must_use]
     pub fn message_agent(
         &self,
         thread_id: ThreadId,
         named: Option<&str>,
         command: Option<&str>,
+        steer: bool,
     ) -> Option<String> {
         if let Some(named) = named {
             return Some(named.to_owned());
@@ -1635,6 +1638,9 @@ impl AgentRuntime {
                 .and_then(|command| command.agent.clone())
         {
             return Some(agent);
+        }
+        if !steer {
+            return None;
         }
         self.active
             .get(&thread_id)
@@ -2383,6 +2389,13 @@ impl AgentRuntime {
                 },
             )
             .await?;
+        // A person's retry of the same request finds it, and is not
+        // delivered twice.
+        if !request.synthetic {
+            self.repository
+                .record_steered_input(thread.id, request.request_id)
+                .await?;
+        }
         self.events.publish_scoped(
             "item.created",
             Some(thread.id),

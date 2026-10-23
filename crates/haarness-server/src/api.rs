@@ -1616,10 +1616,12 @@ async fn start_turn(
         .into());
     }
     let resources = std::mem::take(&mut request.resources);
-    let agent =
-        state
-            .runtime
-            .message_agent(id, request.agent.as_deref(), request.command.as_deref());
+    let agent = state.runtime.message_agent(
+        id,
+        request.agent.as_deref(),
+        request.command.as_deref(),
+        false,
+    );
     let turn = admit(resources.is_empty(), async move {
         let _reading = read_mentions(
             &state,
@@ -1671,9 +1673,10 @@ async fn execute_command(
             }
         });
     }
-    let agent = state
-        .runtime
-        .message_agent(id, request.agent.as_deref(), Some(&request.name));
+    let agent =
+        state
+            .runtime
+            .message_agent(id, request.agent.as_deref(), Some(&request.name), false);
     // Boxed: a command's future is large.
     let response = admit(
         resources.is_empty(),
@@ -2417,8 +2420,14 @@ async fn queue_input(
     Json(mut request): Json<QueueInputRequest>,
 ) -> ApiResult<(StatusCode, Json<QueueInputResponse>)> {
     let resources = std::mem::take(&mut request.resources);
-    // Steering, or waiting in the queue, it joins the running turn's agent.
-    let agent = state.runtime.message_agent(id, None, None);
+    // Steering, it joins the running turn's agent; queued, it runs later as a
+    // turn of its own under the chat's.
+    let agent = state.runtime.message_agent(
+        id,
+        None,
+        None,
+        request.delivery == haarness_protocol::InputDelivery::Steer,
+    );
     let response = admit(resources.is_empty(), async move {
         let _reading = read_mentions(
             &state,
