@@ -2850,7 +2850,14 @@ pub fn outside_deletions(
         // After a link the line made, any path may lead through it; but `rm`
         // of a bare name in the folder (`tar -xzf x.tgz && rm x.tgz`)
         // removes at most a link, never what it points to.
+        // Only in the folder the line started in: after a `cd` (into a link,
+        // say) the name is in a folder nobody placed.
+        let after_cd = match (&analysis.directories, deletion.at) {
+            (Some(steps), Some(at)) => steps.iter().any(|(start, _)| *start < at),
+            _ => analysis.changes_directory,
+        };
         let bare_name = relative
+            && !after_cd
             && deletion.effect == Effect::Deletes
             && !deletion.value.contains('/')
             && !matches!(deletion.value.as_str(), "." | "..");
@@ -4467,6 +4474,17 @@ mod readings {
             effects(&format!("rm -f {}", file.display())),
             [Effect::Deletes]
         );
+        // A bare name after a `cd` (into a link the line made, say) is in a
+        // folder nobody placed.
+        for (command, written) in [
+            ("ln -s ~ pkg && cd pkg && rm -rf x", "x"),
+            (
+                "tar -xzf a.tgz && cd pkg && rm -rf node_modules",
+                "node_modules",
+            ),
+        ] {
+            assert_eq!(found(command), vec![unplaced(written)], "{command}");
+        }
         // What makes links, and a link made in a loop, leave later (or any)
         // deletions unplaceable.
         for command in [
