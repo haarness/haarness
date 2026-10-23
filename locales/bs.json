@@ -2534,6 +2534,7 @@
   "Previous tab": "Prethodna kartica",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "U razgovorima, terminalu, datotekama, pregledniku ili bočnom panelu koji ima tastaturu",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Priložite sliku, PDF, audio ili video datoteku. Da biste uputili na izvorni kod, koristite njegovu putanju u radnom prostoru.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "Mogu se priložiti samo slike, PDF, audio i video. Datoteku projekta spomenite sa @.",
   "Show and hide Haarness from any app": "Prikaži i sakrij Haarness iz bilo koje aplikacije",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Dovodi Haarness u prvi plan iz bilo koje aplikacije i ponovo ga skriva kada je u prvom planu. Dok je uključeno, druge aplikacije više ne primaju tu kombinaciju.",
   "Global shortcut": "Globalna prečica",

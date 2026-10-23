@@ -2534,6 +2534,7 @@
   "Previous tab": "Önceki sekme",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "Klavyenin bulunduğu sohbetlerde, terminalde, dosyalarda, tarayıcıda veya yan panelde",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Bir görsel, PDF, ses veya video dosyası ekleyin. Kaynak koda başvurmak için çalışma alanındaki yolunu kullanın.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "Yalnızca görsel, PDF, ses ve video eklenebilir. Bir proje dosyasından @ ile bahsedin.",
   "Show and hide Haarness from any app": "Haarness’ı herhangi bir uygulamadan göster ve gizle",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Haarness’ı herhangi bir uygulamadan öne getirir, öndeyken yeniden gizler. Açıkken diğer uygulamalar bu tuş birleşimini artık almaz.",
   "Global shortcut": "Genel kısayol",

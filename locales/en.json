@@ -2534,6 +2534,7 @@
   "Previous tab": "Previous tab",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "In the chats, terminal, files, browser or side panel that has the keyboard",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "Only images, PDFs, audio and video can be attached. Mention a project file with @.",
   "Show and hide Haarness from any app": "Show and hide Haarness from any app",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.",
   "Global shortcut": "Global shortcut",

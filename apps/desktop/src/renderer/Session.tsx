@@ -26,6 +26,7 @@ import {
   contextKey,
   resourceToRead,
   countLines,
+  fileContext,
   mentionAgents,
   pasteFolds,
   pastedText,
@@ -91,6 +92,7 @@ import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
+import type { FileContent } from "../shared";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
@@ -269,32 +271,53 @@ export function Session() {
     () => !!project() && editable(),
   );
   /**
-   * Dropped or pasted files: media attaches to the draft, and any other file
-   * of this computer (source code, a folder) is referred to by its path,
-   * written at the message box's caret. A remote project's server cannot
-   * read this computer's files, so there they are refused as before.
+   * Dropped or pasted files: media attaches to the draft. Any other file of
+   * this computer inside the project is mentioned, as `@` would (a chip that
+   * carries its text); one outside it, a folder or a file that is not text is
+   * referred to by its path, written at the message box's caret. A remote
+   * project's server cannot read this computer's files, so there they are
+   * not taken, and a quiet notice says what can be attached.
    */
   async function receiveFiles(files: File[], uris = "") {
     const key = app.draftKey();
+    const connection = state.connection;
     const media: File[] = [],
       paths: string[] = [];
+    let refused = 0;
     for (const file of files) {
-      const path =
-        !state.connection?.remote && !(await attachable(file))
-          ? droppedPath(file, uris, window.haarness.pathForFile(file))
-          : "";
+      if (await attachable(file)) {
+        media.push(file);
+        continue;
+      }
+      const path = connection?.remote ? "" : droppedPath(file, uris, window.haarness.pathForFile(file));
       if (path) paths.push(path);
-      else media.push(file);
+      else refused++;
     }
-    if (paths.length && app.draftKey() === key && composer?.isConnected && !composer.disabled)
+    const root = (connection?.workspace ?? "").replace(/\/+$/, "") + "/";
+    const written: string[] = [];
+    for (const path of paths) {
+      const mention =
+        connection && root.length > 1 && path.startsWith(root)
+          ? await window.haarness
+              .files<FileContent>(connection.id, "read", { path: path.slice(root.length) })
+              .then((file) => (file.encoding === "utf8" ? fileContext(file.path, file.content) : undefined))
+              .catch(() => undefined)
+          : undefined;
+      if (mention && app.draftKey() === key && state.connection?.id === connection?.id)
+        await app.addPromptContext(mention, key);
+      else written.push(path);
+    }
+    if (written.length && app.draftKey() === key && composer?.isConnected && !composer.disabled)
       insertText(
         pathText(
-          paths,
+          written,
           state.connection?.workspace ?? "",
           composer.value.slice(0, composer.selectionStart),
           composer.value.slice(composer.selectionEnd),
         ),
       );
+    if (refused)
+      app.notify(t("Only images, PDFs, audio and video can be attached. Mention a project file with @."), "blocked");
     if (media.length) await app.attachFiles(key, media);
   }
   const [choices, setChoices] = createSignal<

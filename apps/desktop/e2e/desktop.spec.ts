@@ -2188,11 +2188,13 @@ test("file drops attach across the chat area and preserve text drop behavior", a
     return event.defaultPrevented;
   });
   expect(textDropPrevented).toBe(false);
+  // A file Desktop cannot attach or point to (made by the page, so it has
+  // no path) gets a quiet notice, not an error.
   const invalid = await fileTransfer("unsupported.txt", "text/plain");
   await chat.dispatchEvent("drop", { dataTransfer: invalid });
-  await expect(page.getByText("Attach an image, PDF, audio, or video file.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Only images, PDFs, audio and video can be attached.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
   await expect(page.locator(".composer-attachments > span")).toHaveCount(3);
-  await page.getByRole("button", { name: "Dismiss error", exact: true }).click();
   await send("Dropped files are sent once");
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(page.locator('.transcript img[alt="Attached image"]')).toHaveCount(4);
@@ -2200,10 +2202,33 @@ test("file drops attach across the chat area and preserve text drop behavior", a
   await invalid.dispose();
 });
 
-test("a dropped file that is not media goes into the message as its path at the caret, and undo takes it out", async () => {
+test("a dropped text file of the project is mentioned, any other goes into the message as its path at the caret, and undo takes it out", async () => {
   await newSession();
   const chat = page.getByRole("region", { name: "Chat", exact: true });
   const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const chips = page.getByLabel("Attached context", { exact: true }).locator(".prompt-context-item");
+  const drop = async (path: string, name: string) => {
+    const transfer = await page.evaluateHandle(({ path, name }) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["# spec"], name, { type: "text/markdown" }));
+      // A file the page makes has no path of its own; a real drop's file URL
+      // names it, as Electron's own path would.
+      transfer.setData("text/uri-list", "file://" + encodeURI(path));
+      return transfer;
+    }, { path, name });
+    for (const type of ["dragenter", "dragover", "drop"])
+      await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+    await transfer.dispose();
+  };
+  // A text file of the project becomes a mention, as choosing it after @ would.
+  await mkdir(join(workspace, "docs"), { recursive: true });
+  await writeFile(join(workspace, "docs", "dropped notes.md"), "# Dropped notes\n");
+  await drop(join(workspace, "docs", "dropped notes.md"), "dropped notes.md");
+  await expect(chips.filter({ hasText: "docs/dropped notes.md" })).toHaveCount(1);
+  await expect(input).toHaveValue("");
+  await chips.filter({ hasText: "docs/dropped notes.md" }).getByRole("button", { name: /Remove/ }).click();
+  await expect(chips).toHaveCount(0);
+
   const before = "Hello\n\nsee this path: ";
   const after = "\n\nAlso!";
   await input.fill(before + after);
@@ -2212,24 +2237,14 @@ test("a dropped file that is not media goes into the message as its path at the 
     element.setSelectionRange(at, at);
     element.blur();
   }, before.length);
-  const spec = join(workspace, "docs", "drop spec.md");
-  const transfer = await page.evaluateHandle((path) => {
-    const transfer = new DataTransfer();
-    transfer.items.add(new File(["# spec"], "drop spec.md", { type: "text/markdown" }));
-    // A file the page makes has no path of its own; a real drop's file URL
-    // names it, as Electron's own path would.
-    transfer.setData("text/uri-list", "file://" + encodeURI(path));
-    return transfer;
-  }, spec);
-  for (const type of ["dragenter", "dragover", "drop"])
-    await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+  // One the project cannot read (here, not there at all) is named by its path.
+  await drop(join(workspace, "docs", "drop spec.md"), "drop spec.md");
   await expect(input).toHaveValue(before + '"docs/drop spec.md"' + after);
   await expect(input).toBeFocused();
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(chat).not.toHaveClass(/file-drop-active/);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(input).toHaveValue(before + after);
-  await transfer.dispose();
   await input.fill("");
   expect(errors).toEqual([]);
 });
