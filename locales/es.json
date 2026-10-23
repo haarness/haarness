@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "Archivar el chat {title}",
   "Restore chat {title}": "Restaurar el chat {title}",
   "Close chat tab": "Cerrar la pestaña del chat",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Pestaña de vista previa. El próximo chat que abras la reemplaza. Haz doble clic para mantenerla abierta.",
   "Import chat archive": "Importar un archivo de chat",
   "Chat archive": "Archivo de chat",
   "Chat archive imported": "Archivo de chat importado",

@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "Arkiver chatten {title}",
   "Restore chat {title}": "Gjenopprett chatten {title}",
   "Close chat tab": "Lukk chatfanen",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Forhåndsvisningsfane. Den neste chatten du åpner, erstatter den. Dobbeltklikk for å holde den åpen.",
   "Import chat archive": "Importer chatarkiv",
   "Chat archive": "Chatarkiv",
   "Chat archive imported": "Chatarkivet er importert",

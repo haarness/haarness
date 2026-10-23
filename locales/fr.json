@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "Archiver la discussion {title}",
   "Restore chat {title}": "Restaurer la discussion {title}",
   "Close chat tab": "Fermer l’onglet de discussion",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Onglet d’aperçu. La prochaine discussion que vous ouvrez le remplace. Double-cliquez pour le garder ouvert.",
   "Import chat archive": "Importer une archive de discussion",
   "Chat archive": "Archive de discussion",
   "Chat archive imported": "Archive de discussion importée",

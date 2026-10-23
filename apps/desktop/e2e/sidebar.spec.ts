@@ -317,9 +317,10 @@ test("sidebar direct Electron input cancellation and tiny movements preserve cli
 
 test("sidebar shared pointer sorting reorders conversation and panel tabs using direct Electron input", async () => {
   const alpha = await open("alpha");
+  // Double-clicked, each chat keeps a tab of its own (a plain click previews).
   for (const title of ["One", "Two", "Three"]) {
     await alpha.createThread({ title, provider: "echo", model: "echo-1" });
-    await project("alpha").getByRole("button", { name: title, exact: true }).click();
+    await project("alpha").getByRole("button", { name: title, exact: true }).dblclick();
   }
   const tabs = page.locator(".workspace-tabs [role=tab]");
   await expect(tabs).toHaveText(["One", "Two", "Three"]);
@@ -338,7 +339,7 @@ test("sidebar shared pointer sorting reorders conversation and panel tabs using 
   // Reopen in a different sequence to verify the saved order, without
   // asserting that open tabs themselves survive a restart.
   for (const title of ["Two", "One", "Three"])
-    await project("alpha").getByRole("button", { name: title, exact: true }).click();
+    await project("alpha").getByRole("button", { name: title, exact: true }).dblclick();
   await expect(tabs).toHaveText(["Three", "One", "Two"]);
   await page.getByRole("button", { name: "Close diff panel", exact: true }).click();
   for (const name of ["Files", "Review"]) {

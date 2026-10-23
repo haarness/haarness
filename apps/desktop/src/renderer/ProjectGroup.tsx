@@ -765,12 +765,14 @@ export function SessionList(props: {
                 aria-current={selected()}
                 aria-pressed={picking() ? picked() : undefined}
                 title={chatTitle(row().thread.title)}
+                {...openRow(app, () => row(), picking)}
                 onClick={(event) => {
                   if (pick(event)) return;
                   void app.run(() =>
                     app.chooseProjectSession(
                       row().location.id,
                       row().thread.id,
+                      "preview",
                     ),
                   );
                 }}
@@ -908,6 +910,32 @@ export function SessionList(props: {
 type Conversation = ReturnType<
   ReturnType<typeof useApp>["conversations"]
 >[number];
+
+/** A chat row's other ways in: a plain click opens the chat as the preview
+ * tab, a middle-click opens it in a tab that stays, and a double-click keeps
+ * the preview it opened. In Select chats, clicks only pick. */
+function openRow(
+  app: ReturnType<typeof useApp>,
+  row: () => Conversation,
+  picking: () => boolean,
+) {
+  return {
+    onMouseDown(event: MouseEvent) {
+      // No autoscroll (or paste) from the middle button.
+      if (event.button === 1) event.preventDefault();
+    },
+    onAuxClick(event: MouseEvent) {
+      if (event.button !== 1 || picking()) return;
+      event.preventDefault();
+      void app.run(() =>
+        app.chooseProjectSession(row().location.id, row().thread.id, "keep"),
+      );
+    },
+    onDblClick() {
+      if (!picking()) app.keepTab(row().thread.id);
+    },
+  };
+}
 function ScheduledSessions(props: { rows: Conversation[] }) {
   const app = useApp();
   const groups = createMemo(() => splitSchedules(props.rows).groups);
@@ -1021,11 +1049,13 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                 })}
                                 aria-current={active()}
                                 title={chatTitle(row().thread.title)}
+                                {...openRow(app, () => row(), () => false)}
                                 onClick={() =>
                                   app.run(() =>
                                     app.chooseProjectSession(
                                       row().location.id,
                                       row().thread.id,
+                                      "preview",
                                     ),
                                   )
                                 }

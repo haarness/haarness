@@ -853,6 +853,19 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 .workspace-tab.active > button:first-child {
   color: var(--text);
 }
+/* The preview tab, which the next chat opened replaces, is set in italics,
+   as an editor's preview tab is. */
+.workspace-tab.preview > button:first-child {
+  font-style: italic;
+}
+/* The tab's label is a block (it ellipsises), so the dot is set inline with
+   a size of its own rather than collapsing to a sliver over the first letter. */
+.workspace-tab > button:first-child > .session-status {
+  display: inline-block;
+  vertical-align: middle;
+  margin-block-start: -2px;
+  margin-inline-end: var(--s2);
+}
 .workspace-tab > .icon-button {
   width: 18px;
   height: 18px;

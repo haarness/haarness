@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "Zarchiwizuj czat {title}",
   "Restore chat {title}": "Przywróć czat {title}",
   "Close chat tab": "Zamknij kartę czatu",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Karta podglądu. Zastąpi ją następny otwarty czat. Kliknij dwukrotnie, aby pozostała otwarta.",
   "Import chat archive": "Importuj archiwum czatu",
   "Chat archive": "Archiwum czatu",
   "Chat archive imported": "Zaimportowano archiwum czatu",

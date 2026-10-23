@@ -125,7 +125,8 @@ export function UniversalSearch(props: { close: () => void }) {
           (isWorktree(location) ? " · " + t(locationName(location)) : ""),
         keywords: thread.id + " " + location.workspace,
         icon: thread.archived ? "archive" : "chat",
-        action: () => app.chooseProjectSession(location.id, thread.id),
+        action: (open) =>
+          app.chooseProjectSession(location.id, thread.id, open?.keep ? "keep" : "preview"),
       }),
     );
     const connection = app.state.connection?.id;
@@ -196,10 +197,20 @@ export function UniversalSearch(props: { close: () => void }) {
           location.checkout?.exists !== false &&
           app.indexes()[location.id]?.loading,
       );
-  function run(entry?: SearchEntry) {
+  /** With Command (Control elsewhere) held, a chat opens in a tab that stays. */
+  const keeps = (event: MouseEvent | KeyboardEvent) =>
+    app.state.platform === "darwin" ? event.metaKey : event.ctrlKey;
+  function run(entry?: SearchEntry, open: { keep?: boolean } = {}) {
     if (!entry || entry.disabled) return;
     executing = true;
     props.close();
+    // Closing the dialog gives the keyboard back to what had it, often the
+    // sidebar's Search button. A chat or project leads to its message box;
+    // any other pick that leaves the keyboard on that button (or nowhere)
+    // sends it to the message box too, while one that took the keyboard
+    // somewhere (a dialog, the terminal) keeps it there.
+    const leads = /^(thread|project|worktree):/.test(entry.key);
+    const opener = previous?.matches("[data-search-button]") ? previous : null;
     void app.run(async () => {
       if (
         entry.destination !== "settings" &&
@@ -207,8 +218,23 @@ export function UniversalSearch(props: { close: () => void }) {
         !(await app.closeSettings())
       )
         return;
-      await entry.action();
+      await entry.action(open);
+      if (leads || opener) focusComposer(leads ? previous : opener);
     });
+  }
+  /** Puts the keyboard in the message box once it shows, unless the reader
+   * has put it somewhere else than `from` meanwhile. */
+  function focusComposer(from: Element | null) {
+    let frames = 120;
+    const land = () => {
+      const focused = document.activeElement;
+      if (focused && focused !== document.body && focused !== from) return;
+      const box = document.querySelector<HTMLElement>("[data-composer-input]");
+      if (box?.checkVisibility({ visibilityProperty: true }) && !box.matches(":disabled"))
+        box.focus();
+      else if (frames-- > 0) requestAnimationFrame(land);
+    };
+    requestAnimationFrame(land);
   }
   return (
       <dialog
@@ -247,7 +273,7 @@ export function UniversalSearch(props: { close: () => void }) {
           }
           if (event.key === "Enter") {
             event.preventDefault();
-            run(entries()[index()]);
+            run(entries()[index()], { keep: keeps(event) });
           }
         }}
       >
@@ -304,7 +330,13 @@ export function UniversalSearch(props: { close: () => void }) {
                         setIndex(position());
                         setSelection(key);
                       }}
-                      onClick={() => run(entry())}
+                      onClick={(event) => run(entry(), { keep: keeps(event) })}
+                      onMouseDown={(event) => {
+                        if (event.button === 1) event.preventDefault();
+                      }}
+                      onAuxClick={(event) => {
+                        if (event.button === 1) run(entry(), { keep: true });
+                      }}
                     >
                       <Show
                         when={entry().provider}

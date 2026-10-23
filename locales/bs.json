@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "Arhiviraj razgovor {title}",
   "Restore chat {title}": "Vrati razgovor {title}",
   "Close chat tab": "Zatvori karticu razgovora",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Kartica za pregled. Sljedeći razgovor koji otvorite zamjenjuje je. Dvaput kliknite da ostane otvorena.",
   "Import chat archive": "Uvezi arhivu razgovora",
   "Chat archive": "Arhiva razgovora",
   "Chat archive imported": "Arhiva razgovora uvezena",

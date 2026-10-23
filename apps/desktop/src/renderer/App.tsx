@@ -109,6 +109,8 @@ const Explorer = lazy(() =>
 );
 import { Review } from "./Review";
 import { chatTitle } from "./chat-title";
+import { tabOrderScope } from "./chat-tabs";
+import { revealInStrip } from "./reveal";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -458,7 +460,7 @@ export function App() {
     sidebarGroups(projects.ordered(), state.projectMeta),
   );
   const sessionTabs = createOrdering(
-    () => "list:session-tabs:" + state.connection?.id,
+    () => tabOrderScope(state.connection?.id ?? ""),
     () => state.tabs,
   );
   const panelTabs = createOrdering(
@@ -475,9 +477,9 @@ export function App() {
         state.panel === "chat" && state.selected ? sessionTabs.ordered() : [],
       active: () => state.selected,
       select: (id) => void app.run(() => app.choose(id)),
-      // The chat loads (its message box and tabs hidden meanwhile, which
-      // drops the focus) before the keyboard goes back: to the message box
-      // when the step started there, else to the chat's tab.
+      // The chat loads (its message box hidden meanwhile, which drops the
+      // focus) before the keyboard goes back: to the message box when the
+      // step started there, else to the chat's tab.
       keep: (id, from) => {
         const composer = !!from?.matches("[data-composer-input]");
         let frames = 300;
@@ -1188,7 +1190,7 @@ export function App() {
             </button>
           </nav>
           <div class="nav-group">
-            <button class="nav-row" aria-label={t("Search")} onClick={openPalette}>
+            <button class="nav-row" aria-label={t("Search")} data-search-button onClick={openPalette}>
               <Icon name="search" size="md" />
               {t("Search")}
               <kbd dir="ltr">
@@ -1318,7 +1320,15 @@ export function App() {
             style={{ "--side-chat-room": sideRoom() + "px" }}
           >
             <div class="chat-pane" data-cycle-panel="chats">
-              <Show when={state.panel === "chat" && !!state.selected && !loading()}>
+              {/* The bar stays while another chat of this project loads its
+                  history (a tab chosen), so the tabs do not blink. */}
+              <Show
+                when={
+                  state.panel === "chat" &&
+                  !!state.selected &&
+                  (!loading() || (state.ready && !state.openingProject && !state.openingChat))
+                }
+              >
                 <div class="session-bar">
                   <Show when={selected()?.isSubagent && selected()?.parentId}>
                     <Button
@@ -1374,17 +1384,30 @@ export function App() {
                               active:
                                 id === state.selected &&
                                 state.panel === "chat",
+                              preview: id === state.preview,
                             }}
                           >
                             <button
                               role="tab"
                               data-cycle-tab={id}
                               aria-selected={id === state.selected}
+                              aria-description={
+                                id === state.preview
+                                  ? t("Preview tab. The next chat you open replaces it. Double-click to keep it open.")
+                                  : undefined
+                              }
                               title={tabTitle(id)}
+                              ref={(element) =>
+                                createEffect(() => {
+                                  if (id === state.selected && state.panel === "chat")
+                                    revealInStrip(element.parentElement!);
+                                })
+                              }
                               onClick={() => app.run(() => app.choose(id))}
+                              onDblClick={() => app.keepTab(id)}
                             >
                               <Show when={running(id)}>
-                                <span class="session-status running" />
+                                <span class="session-status running" aria-hidden="true" />
                               </Show>
                               {tabTitle(id)}
                             </button>

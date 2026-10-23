@@ -1842,6 +1842,7 @@
   "Archive chat {title}": "Архивировать чат {title}",
   "Restore chat {title}": "Восстановить чат {title}",
   "Close chat tab": "Закрыть вкладку чата",
+  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Вкладка предпросмотра. Следующий открытый чат заменит её. Дважды щёлкните, чтобы оставить её открытой.",
   "Import chat archive": "Импортировать архив чата",
   "Chat archive": "Архив чата",
   "Chat archive imported": "Архив чата импортирован",
