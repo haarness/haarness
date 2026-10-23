@@ -1103,4 +1103,87 @@ mod tests {
         let bodies = server.await.unwrap();
         assert_eq!(bodies[0]["answer"], "Use @setup please");
     }
+
+    /// A server that answers `/v1/info` with `info` and anything else with
+    /// `[]`, until the test ends.
+    async fn answering(info: haarness_protocol::ServerInfo) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let info = serde_json::to_string(&info).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let Ok(read) = socket.read(&mut chunk).await else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let body = if request.starts_with(b"GET /v1/info") {
+                    info.clone()
+                } else {
+                    "[]".into()
+                };
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        format!("http://{address}")
+    }
+
+    /// A pick this TUI does not know comes back as plain `@setup` with its
+    /// `@` list open, so one Enter picks it again.
+    #[tokio::test]
+    async fn an_unknown_pick_comes_back_with_its_list_open_to_pick_it_again() {
+        let mut app = app();
+        app.providers = vec![haarness_protocol::ProviderInfo {
+            id: "echo".into(),
+            name: "Echo".into(),
+            authenticated: true,
+            models: Vec::new(),
+        }];
+        let capable = info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]);
+        app.server_info = Some(capable.clone());
+        app.mention_resources.list = vec![resource("docs", "docs://setup", "setup")];
+        app.mention_resources.asked = Some(Instant::now());
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
+        let setup = mention("docs", "docs://setup", "setup");
+        app.composer
+            .set_text(format!("Explain {}", marker(&setup, "not-a-pick")));
+        let client = ApiClient::new(&answering(capable).await, "token").unwrap();
+        let enter = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        crate::input::handle_key(&mut app, enter, &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "Explain @setup");
+        assert_eq!(app.notice, "Pick @setup again to include it");
+        assert_eq!(
+            app.mention_suggestions
+                .iter()
+                .filter_map(|key| find(&app, key))
+                .map(|resource| resource.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["docs://setup"]
+        );
+        // One Enter picks it again.
+        crate::input::handle_key(&mut app, enter, &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "Explain [@setup] ");
+    }
 }
