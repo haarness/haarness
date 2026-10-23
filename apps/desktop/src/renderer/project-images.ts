@@ -44,6 +44,8 @@ export const PROJECT_IMAGE_LIMITS = {
   recheck: 20_000,
   /** An image with more pixels is not decoded ("Too large to show"): 50 megapixels. */
   pixels: 50_000_000,
+  /** The least time between two reads of an image on screen, however often its file is written. */
+  again: 1_000,
 };
 
 // Raster types the window draws. An SVG is a document, so it is not read.
@@ -308,10 +310,26 @@ export type ShownImage = { data: string; size?: number; note?: undefined } | { d
  * the file then. `transient` marks one the read could not settle (a timeout,
  * a dropped connection): it is read again as after a change.
  */
-type Entry = ShownImage & { epoch: number; urgent: number; at: number; touch: number; transient?: boolean };
+type Marks = { epoch: number; urgent: number; at: number; touch: number; transient?: boolean };
+type Entry = ShownImage & Marks;
 
 const remembered = new Map<string, Entry>();
 let rememberedBytes = 0;
+/**
+ * When each image was last read and after which changes, kept when its
+ * picture is let go for room: an image on screen whose picture was let go is
+ * read again for a change on the same terms as one remembered.
+ */
+const reads = new Map<string, Marks>();
+
+function marked(entry: string, value: Marks) {
+  reads.delete(entry);
+  reads.set(entry, { epoch: value.epoch, urgent: value.urgent, at: value.at, touch: value.touch, transient: value.transient });
+  for (const oldest of reads.keys()) {
+    if (reads.size <= 5000) break;
+    reads.delete(oldest);
+  }
+}
 /** Each project's changes since this window started: those read again after the recheck time, and those at once. */
 const epochs = new Map<string, number>();
 const urgents = new Map<string, number>();
@@ -324,6 +342,7 @@ const epoch = (scope: string) => epochs.get(scope) ?? 0;
 const urgent = (scope: string) => urgents.get(scope) ?? 0;
 
 function remember(entry: string, value: Entry) {
+  marked(entry, value);
   const limit = PROJECT_IMAGE_LIMITS.bytes;
   const previous = remembered.get(entry);
   if (previous) {
@@ -574,30 +593,38 @@ function enlist(entry: string, signal: AbortSignal, asker: Asker) {
 }
 
 /**
- * Asks again for the image at `entry` for one reply still showing it, whose
+ * Asks again for the image at `entry` for the replies still showing it, whose
  * answer reaches them all: read now, or when the recheck time ends, as `due`
- * says. With `now`, a read waiting for the recheck time is dropped first.
+ * says. Each of them asks, so the read stands while any of them is on screen;
+ * a read running or waiting, and one waiting for the recheck time, is shared.
+ * With `now`, a read waiting for the recheck time is dropped first.
  */
 function askAgain(entry: string, now = false) {
   if (now) {
     clearTimeout(trailing.get(entry));
     trailing.delete(entry);
   }
-  for (const [signal, asker] of askers.get(entry) ?? []) {
-    if (signal.aborted) continue;
-    const at = entry.indexOf("\n");
-    return requestProjectImage(entry.slice(0, at), entry.slice(at + 1), asker.read, signal, asker.decode);
-  }
+  const at = entry.indexOf("\n");
+  for (const [signal, asker] of [...(askers.get(entry) ?? [])])
+    if (!signal.aborted)
+      requestProjectImage(entry.slice(0, at), entry.slice(at + 1), asker.read, signal, asker.decode, true);
 }
 
 /**
- * When the image remembered as `current` is read again: now, never (nothing
- * changed it), or in so many milliseconds, when the recheck time ends.
+ * When the image read as `current` is read again: now, never (nothing changed
+ * it), or in so many milliseconds. A write of the file or the viewed chat's
+ * turn end reads it at once, but not twice within `PROJECT_IMAGE_LIMITS.again`;
+ * another change, or a read that got no answer, once the recheck time since
+ * the last read ends.
  */
-function due(scope: string, entry: string, current: Entry): "now" | "fresh" | number {
-  if (current.touch !== (touches.get(entry) ?? 0) || current.urgent !== urgent(scope)) return "now";
+function due(scope: string, entry: string, current: Marks): "now" | "fresh" | number {
+  const since = Date.now() - current.at;
+  if (current.touch !== (touches.get(entry) ?? 0) || current.urgent !== urgent(scope)) {
+    const wait = PROJECT_IMAGE_LIMITS.again - since;
+    return wait > 0 ? wait : "now";
+  }
   if (current.epoch === epoch(scope) && !current.transient) return "fresh";
-  const wait = current.at + PROJECT_IMAGE_LIMITS.recheck - Date.now();
+  const wait = PROJECT_IMAGE_LIMITS.recheck - since;
   return wait > 0 ? wait : "now";
 }
 
@@ -620,11 +647,14 @@ export function requestProjectImage(
   read: ImageReader,
   signal: AbortSignal,
   decode: Decode = async () => true,
+  again = false,
 ) {
   if (signal.aborted) return;
   const entry = key(scope, path);
   enlist(entry, signal, { read, decode });
-  const current = remembered.get(entry);
+  // A reply drawing it needs its picture; one showing it already asks again
+  // on the terms its last read set, though its picture was let go for room.
+  const current = remembered.get(entry) ?? (again ? reads.get(entry) : undefined);
   const when = current ? due(scope, entry, current) : "now";
   if (when === "fresh") return;
   if (when !== "now") {
@@ -677,8 +707,13 @@ export function requestProjectImage(
           const before = remembered.get(entry);
           if (shown === UNSETTLED) {
             // Nothing was learned: what showed keeps showing, and is read again on the next occasion.
-            remember(entry, before ? { ...before, ...asked, transient: true } : { note: "failed", ...asked, transient: true });
-            if (!before) settle(scope, path, { note: "failed" });
+            if (before) remember(entry, { ...before, ...asked, transient: true });
+            // Read before, its picture let go for room: replies show it still.
+            else if (reads.has(entry)) marked(entry, { ...asked, transient: true });
+            else {
+              remember(entry, { note: "failed", ...asked, transient: true });
+              settle(scope, path, { note: "failed" });
+            }
             return;
           }
           // A file gone or no longer an image says so from now on; a reply
@@ -694,7 +729,7 @@ export function requestProjectImage(
           // The project changed while it was read (a draw that joined it
           // wants the file after that change), or the read got no answer:
           // read again for the replies showing it, now or after the wait.
-          if (remembered.has(entry)) askAgain(entry);
+          askAgain(entry);
         });
     },
   };
@@ -707,6 +742,7 @@ export function requestProjectImage(
 export function forgetProjectImages() {
   remembered.clear();
   rememberedBytes = 0;
+  reads.clear();
   epochs.clear();
   urgents.clear();
   touches.clear();

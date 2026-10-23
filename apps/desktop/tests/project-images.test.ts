@@ -1,4 +1,4 @@
-import test, { afterEach } from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   PROJECT_IMAGE_LIMITS,
@@ -29,8 +29,16 @@ import {
 import { madeHere, replyAttribute } from "../src/renderer/remote-images";
 
 const root = "/Users/me/work/app";
-// Reads waiting for the recheck time end with each test.
-afterEach(() => forgetProjectImages());
+// Reads waiting for the recheck time end with each test, and the least time
+// between two reads of an image on screen is tried on its own (below).
+const AGAIN = PROJECT_IMAGE_LIMITS.again;
+beforeEach(() => {
+  PROJECT_IMAGE_LIMITS.again = 0;
+});
+afterEach(() => {
+  forgetProjectImages();
+  PROJECT_IMAGE_LIMITS.again = AGAIN;
+});
 const ascii = (text: string) => Uint8Array.from(text, (char) => char.charCodeAt(0));
 const join = (...parts: Uint8Array[]) => Uint8Array.from(parts.flatMap((part) => [...part]));
 const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
@@ -626,6 +634,101 @@ test("many subagent turn ends with many images on screen read each image once, a
   } finally {
     PROJECT_IMAGE_LIMITS.recheck = recheck;
   }
+});
+
+test("a file written over and over is read at most once a second for the replies showing it", async () => {
+  PROJECT_IMAGE_LIMITS.again = 60;
+  const source = reader({ "a.png": png });
+  requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+  await settle();
+  for (let write = 0; write < 30; write++) {
+    hear({ type: "files.updated", payload: { path: "a.png" } });
+    await wait(5);
+  }
+  await settle();
+  // Thirty writes within about 150ms: a few reads, one per 60ms here, not thirty.
+  await wait(80);
+  await settle();
+  assert.ok(source.calls.length >= 2 && source.calls.length <= 5, String(source.calls.length));
+});
+
+test("a read asked again for the replies on screen stands while any of them is still there", async () => {
+  const held = reader({}, true);
+  const busy = new AbortController();
+  const files = { "a.png": png } as Record<string, File | Uint8Array>;
+  const source = reader(files);
+  const [first, second] = [new AbortController(), new AbortController()];
+  requestProjectImage("project", "a.png", source.read, first.signal);
+  requestProjectImage("project", "a.png", source.read, second.signal);
+  await settle();
+  // Every slot is taken, so the read asked again waits; the reply that first asked leaves meanwhile.
+  for (let index = 0; index < PROJECT_IMAGE_LIMITS.parallel; index++)
+    requestProjectImage("project", `busy-${index}.png`, held.read, busy.signal);
+  files["a.png"] = jpeg;
+  hear({ type: "turn.finished", threadId: "mine", rootThreadId: "mine" });
+  first.abort();
+  await settle();
+  // The reply holding the slots leaves too, so its reads are not asked again.
+  busy.abort();
+  for (let index = 0; index < PROJECT_IMAGE_LIMITS.parallel; index++) held.release();
+  await settle();
+  assert.deepEqual(source.calls, ["a.png", "a.png"]);
+  assert.deepEqual(shownProjectImage("project", "a.png"), { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length });
+});
+
+test("an image on screen whose picture was let go for room is read again for a change after the wait, like the others", async () => {
+  const bytes = PROJECT_IMAGE_LIMITS.bytes;
+  const recheck = PROJECT_IMAGE_LIMITS.recheck;
+  const one = `data:image/png;base64,${base64(png)}`.length;
+  PROJECT_IMAGE_LIMITS.bytes = one;
+  PROJECT_IMAGE_LIMITS.recheck = 80;
+  try {
+    const source = reader({ "1.png": png, "2.png": png });
+    const reply = new AbortController();
+    requestProjectImage("project", "1.png", source.read, reply.signal);
+    await settle();
+    requestProjectImage("project", "2.png", source.read, reply.signal);
+    await settle();
+    // Only one picture fits: the first was let go, though its reply shows it still.
+    assert.equal(shownProjectImage("project", "1.png"), undefined);
+    for (let focus = 0; focus < 5; focus++) {
+      localProject("project");
+      windowFocused();
+      await settle();
+    }
+    assert.equal(source.calls.length, 2);
+    await wait(120);
+    await settle();
+    assert.equal(source.calls.length, 4);
+  } finally {
+    PROJECT_IMAGE_LIMITS.bytes = bytes;
+    PROJECT_IMAGE_LIMITS.recheck = recheck;
+  }
+});
+
+test("two chats writing with the same call id each mark their own file", async () => {
+  const files = { "out/a.png": png, "out/b.png": png } as Record<string, File | Uint8Array>;
+  const source = reader(files);
+  const reply = new AbortController();
+  requestProjectImage("project", "out/a.png", source.read, reply.signal);
+  requestProjectImage("project", "out/b.png", source.read, reply.signal);
+  await settle();
+  const call = (thread: string, path: string) =>
+    hear({
+      type: "item.created",
+      threadId: thread,
+      rootThreadId: thread,
+      payload: { data: { type: "tool_call", name: "write", call_id: "same", arguments: { path } } },
+    });
+  call("A", "out/a.png");
+  call("B", "out/b.png");
+  // B's result marks b.png only; A's, a.png.
+  hear(toolResult("B", "write", "same"));
+  await settle();
+  assert.deepEqual(source.calls.slice(2), ["out/b.png"]);
+  hear(toolResult("A", "write", "same"));
+  await settle();
+  assert.deepEqual(source.calls.slice(2), ["out/b.png", "out/a.png"]);
 });
 
 test("a chat switch: a chart another chat remade shows when its chat is drawn again", async () => {
