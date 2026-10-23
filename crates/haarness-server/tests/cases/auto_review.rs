@@ -686,4 +686,26 @@ async fn a_workflows_calls_are_reviewed_and_a_persons_own_are_approved_once() {
         1,
         "a person's own command is not reviewed"
     );
+    // Waiting in Review, it is released when Auto turns on, as before.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    let runtime = Arc::new(runtime);
+    let waiting = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move {
+            runtime
+                .run_direct_tool(
+                    thread.id,
+                    "bash",
+                    json!({"command": "printf waited > waited.txt"}),
+                    CancellationToken::new(),
+                )
+                .await
+        }
+    });
+    pending(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let own = waiting.await.unwrap().unwrap();
+    assert!(!own.is_error, "{}", own.output.text);
+    assert!(workspace.0.join("waited.txt").exists());
+    assert_eq!(reviews(&provider), 1);
 }
