@@ -2775,5 +2775,19 @@
   "reviewing…": "gennemgår…",
   "Reviewing…": "Gennemgår…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: En gennemgangsmodel tillader rutinemæssige tilladelsesanmodninger i denne chat og dens agenter én gang og spørger dig om resten. Klik for at skifte til Gennemgang.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: En gennemgangsmodel tillader rutinemæssige tilladelsesanmodninger i nye chats her én gang og spørger dig om resten. Klik for at skifte til Gennemgang."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: En gennemgangsmodel tillader rutinemæssige tilladelsesanmodninger i nye chats her én gang og spørger dig om resten. Klik for at skifte til Gennemgang.",
+  "Auto review is deciding…": "Auto-gennemgang beslutter…",
+  "It took more than {seconds} s.": "Det tog mere end {seconds} s.",
+  "The action is too long to review whole.": "Handlingen er for lang til at blive gennemgået i sin helhed.",
+  "No model was available to review this request.": "Ingen model var tilgængelig til at gennemgå denne anmodning.",
+  "It could not decide ({detail}).": "Den kunne ikke beslutte ({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "Den blokerede {count} handlinger i træk, så resten af denne tur er din at godkende.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Den blokerede {count} handlinger i denne tur, så resten er din at godkende.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "Dette sletter {path} uden for projektet, og dine beskeder nævner det ikke.",
+  "It rated this action critical risk.": "Den vurderede handlingen som kritisk risiko.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "Den vurderede handlingen som lav risiko, og dine beskeder beder ikke tydeligt om den.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "Den vurderede handlingen som mellem risiko, og dine beskeder beder ikke tydeligt om den.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "Den vurderede handlingen som høj risiko, og dine beskeder beder ikke tydeligt om den.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "Automatisk slået til for denne chat · en gennemgangsmodel besvarer anmodninger · ctrl+y for gennemgang",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "tillad én gang og skift denne chat til automatisk: en gennemgangsmodel besvarer senere anmodninger"
 }

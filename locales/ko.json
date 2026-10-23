@@ -2775,5 +2775,19 @@
   "reviewing…": "검토 중…",
   "Reviewing…": "검토 중…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "자동: 검토 모델이 이 채팅과 에이전트의 일상적인 권한 요청을 한 번 허용하고 나머지는 물어봅니다. 클릭하면 검토로 전환합니다.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "자동: 검토 모델이 여기서 시작하는 새 채팅의 일상적인 권한 요청을 한 번 허용하고 나머지는 물어봅니다. 클릭하면 검토로 전환합니다."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "자동: 검토 모델이 여기서 시작하는 새 채팅의 일상적인 권한 요청을 한 번 허용하고 나머지는 물어봅니다. 클릭하면 검토로 전환합니다.",
+  "Auto review is deciding…": "자동 검토가 판단하는 중…",
+  "It took more than {seconds} s.": "{seconds}초 넘게 걸렸습니다.",
+  "The action is too long to review whole.": "작업이 너무 길어 전체를 검토할 수 없습니다.",
+  "No model was available to review this request.": "이 요청을 검토할 모델이 없었습니다.",
+  "It could not decide ({detail}).": "판단하지 못했습니다({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "연속으로 {count}개의 작업을 차단했으므로 이번 턴의 나머지는 직접 승인해야 합니다.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "이번 턴에 {count}개의 작업을 차단했으므로 나머지는 직접 승인해야 합니다.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "프로젝트 밖의 {path}을(를) 삭제하는데, 메시지에서 이를 언급하지 않았습니다.",
+  "It rated this action critical risk.": "이 작업을 치명적 위험으로 평가했습니다.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "이 작업을 낮은 위험으로 평가했고, 메시지에서 명확히 요청하지 않았습니다.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "이 작업을 중간 위험으로 평가했고, 메시지에서 명확히 요청하지 않았습니다.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "이 작업을 높은 위험으로 평가했고, 메시지에서 명확히 요청하지 않았습니다.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "이 채팅은 자동 승인 중 · 검토 모델이 요청에 답합니다 · ctrl+y로 검토",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "한 번 허용하고 이 채팅을 자동으로 전환: 이후 요청에는 검토 모델이 답합니다"
 }

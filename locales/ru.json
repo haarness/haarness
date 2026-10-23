@@ -2775,5 +2775,19 @@
   "reviewing…": "проверка…",
   "Reviewing…": "Проверка…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Авто: модель-проверяющий один раз разрешает обычные запросы разрешений в этом чате и его агентах, а об остальном спрашивает вас. Нажмите, чтобы переключиться на Обзор.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Авто: модель-проверяющий один раз разрешает обычные запросы разрешений в новых чатах здесь, а об остальном спрашивает вас. Нажмите, чтобы переключиться на Обзор."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Авто: модель-проверяющий один раз разрешает обычные запросы разрешений в новых чатах здесь, а об остальном спрашивает вас. Нажмите, чтобы переключиться на Обзор.",
+  "Auto review is deciding…": "Авто-проверка решает…",
+  "It took more than {seconds} s.": "Это заняло больше {seconds} с.",
+  "The action is too long to review whole.": "Действие слишком длинное, чтобы проверить его целиком.",
+  "No model was available to review this request.": "Не нашлось модели, чтобы проверить этот запрос.",
+  "It could not decide ({detail}).": "Не удалось решить ({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "Заблокировано {count} действий подряд, поэтому остаток этого хода одобряете вы.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "За этот ход заблокировано {count} действий, поэтому остаток одобряете вы.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "Это удаляет {path} вне проекта, а ваши сообщения этого не называют.",
+  "It rated this action critical risk.": "Действие оценено как критически рискованное.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "Действие оценено как малорискованное, а ваши сообщения явно его не просят.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "Действие оценено как среднего риска, а ваши сообщения явно его не просят.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "Действие оценено как высокого риска, а ваши сообщения явно его не просят.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "Авто для этого чата · на запросы отвечает модель-проверяющий · ctrl+y для обзора",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "разрешить один раз и переключить этот чат в авто: на следующие запросы ответит модель-проверяющий"
 }

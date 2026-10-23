@@ -2775,5 +2775,19 @@
   "reviewing…": "przeglądanie…",
   "Reviewing…": "Przeglądanie…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: model przeglądający raz zatwierdza rutynowe prośby o uprawnienia w tym czacie i jego agentach, a o resztę pyta ciebie. Kliknij, aby przełączyć na Przegląd.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: model przeglądający raz zatwierdza rutynowe prośby o uprawnienia w nowych czatach tutaj, a o resztę pyta ciebie. Kliknij, aby przełączyć na Przegląd."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: model przeglądający raz zatwierdza rutynowe prośby o uprawnienia w nowych czatach tutaj, a o resztę pyta ciebie. Kliknij, aby przełączyć na Przegląd.",
+  "Auto review is deciding…": "Przegląd Auto decyduje…",
+  "It took more than {seconds} s.": "Trwało to dłużej niż {seconds} s.",
+  "The action is too long to review whole.": "Działanie jest zbyt długie, by przejrzeć je w całości.",
+  "No model was available to review this request.": "Żaden model nie był dostępny do przejrzenia tej prośby.",
+  "It could not decide ({detail}).": "Nie udało się zdecydować ({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "Zablokował {count} działania z rzędu, więc resztę tej tury zatwierdzasz ty.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Zablokował {count} działań w tej turze, więc resztę zatwierdzasz ty.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "To usuwa {path}, poza projektem, a twoje wiadomości tego nie wymieniają.",
+  "It rated this action critical risk.": "Ocenił to działanie jako krytycznie ryzykowne.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "Ocenił to działanie jako niskiego ryzyka, a twoje wiadomości wyraźnie o nie nie proszą.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "Ocenił to działanie jako średniego ryzyka, a twoje wiadomości wyraźnie o nie nie proszą.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "Ocenił to działanie jako wysokiego ryzyka, a twoje wiadomości wyraźnie o nie nie proszą.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "Automat włączony dla tego czatu · model przeglądający odpowiada na żądania · ctrl+y, aby przeglądać",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "zezwól raz i przełącz ten czat na automat: model przeglądający odpowie na kolejne żądania"
 }

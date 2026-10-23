@@ -2775,5 +2775,19 @@
   "reviewing…": "جارٍ المراجعة…",
   "Reviewing…": "جارٍ المراجعة…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "تلقائي: يوافق نموذج مراجعة مرة واحدة على طلبات الأذونات الروتينية في هذه المحادثة ووكلائها، ويسألك عن الباقي. انقر للتبديل إلى المراجعة.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "تلقائي: يوافق نموذج مراجعة مرة واحدة على طلبات الأذونات الروتينية في المحادثات الجديدة هنا، ويسألك عن الباقي. انقر للتبديل إلى المراجعة."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "تلقائي: يوافق نموذج مراجعة مرة واحدة على طلبات الأذونات الروتينية في المحادثات الجديدة هنا، ويسألك عن الباقي. انقر للتبديل إلى المراجعة.",
+  "Auto review is deciding…": "المراجعة التلقائية تقرّر…",
+  "It took more than {seconds} s.": "استغرقت أكثر من {seconds} ث.",
+  "The action is too long to review whole.": "الإجراء أطول من أن يُراجَع كاملًا.",
+  "No model was available to review this request.": "لم يتوفر نموذج لمراجعة هذا الطلب.",
+  "It could not decide ({detail}).": "تعذّر عليها أن تقرّر ({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "حظرت {count} إجراءات متتالية، لذا فالموافقة على بقية هذا الدور لك.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "حظرت {count} إجراءً في هذا الدور، لذا فالموافقة على بقيته لك.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "هذا يحذف {path} خارج المشروع، ورسائلك لا تذكره.",
+  "It rated this action critical risk.": "قيّمت هذا الإجراء بأنه بالغ الخطورة.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "قيّمت هذا الإجراء بأنه منخفض الخطورة، ورسائلك لا تطلبه بوضوح.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "قيّمت هذا الإجراء بأنه متوسط الخطورة، ورسائلك لا تطلبه بوضوح.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "قيّمت هذا الإجراء بأنه عالي الخطورة، ورسائلك لا تطلبه بوضوح.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "الموافقة التلقائية مفعّلة لهذه المحادثة · يجيب نموذج مراجعة عن الطلبات · ctrl+y للمراجعة",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "السماح مرة واحدة وتحويل هذه المحادثة إلى التلقائي: يجيب نموذج مراجعة عن الطلبات اللاحقة"
 }

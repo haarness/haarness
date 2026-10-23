@@ -2775,5 +2775,19 @@
   "reviewing…": "กำลังตรวจสอบ…",
   "Reviewing…": "กำลังตรวจสอบ…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "อัตโนมัติ: โมเดลตรวจสอบจะอนุญาตคำขอสิทธิ์ทั่วไปในแชทนี้และเอเจนต์ของแชทหนึ่งครั้ง และถามคุณเกี่ยวกับส่วนที่เหลือ คลิกเพื่อสลับเป็นตรวจสอบ",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "อัตโนมัติ: โมเดลตรวจสอบจะอนุญาตคำขอสิทธิ์ทั่วไปในแชทใหม่ที่นี่หนึ่งครั้ง และถามคุณเกี่ยวกับส่วนที่เหลือ คลิกเพื่อสลับเป็นตรวจสอบ"
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "อัตโนมัติ: โมเดลตรวจสอบจะอนุญาตคำขอสิทธิ์ทั่วไปในแชทใหม่ที่นี่หนึ่งครั้ง และถามคุณเกี่ยวกับส่วนที่เหลือ คลิกเพื่อสลับเป็นตรวจสอบ",
+  "Auto review is deciding…": "การตรวจสอบอัตโนมัติกำลังตัดสินใจ…",
+  "It took more than {seconds} s.": "ใช้เวลานานกว่า {seconds} วินาที",
+  "The action is too long to review whole.": "การดำเนินการยาวเกินกว่าจะตรวจสอบได้ทั้งหมด",
+  "No model was available to review this request.": "ไม่มีโมเดลที่พร้อมตรวจสอบคำขอนี้",
+  "It could not decide ({detail}).": "ตัดสินใจไม่ได้ ({detail})",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "บล็อกการดำเนินการติดต่อกัน {count} รายการ ส่วนที่เหลือของรอบนี้คุณต้องอนุมัติเอง",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "บล็อกการดำเนินการ {count} รายการในรอบนี้ ส่วนที่เหลือคุณต้องอนุมัติเอง",
+  "This deletes {path}, outside the project, and your messages do not name it.": "สิ่งนี้ลบ {path} ซึ่งอยู่นอกโปรเจกต์ และข้อความของคุณไม่ได้ระบุถึง",
+  "It rated this action critical risk.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงร้ายแรง",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงต่ำ และข้อความของคุณไม่ได้ขออย่างชัดเจน",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงปานกลาง และข้อความของคุณไม่ได้ขออย่างชัดเจน",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงสูง และข้อความของคุณไม่ได้ขออย่างชัดเจน",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "เปิดอัตโนมัติสำหรับแชตนี้ · โมเดลตรวจสอบตอบคำขอ · ctrl+y เพื่อตรวจทาน",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "อนุญาตครั้งเดียวและเปลี่ยนแชตนี้เป็นอัตโนมัติ: โมเดลตรวจสอบจะตอบคำขอต่อจากนี้"
 }

@@ -2775,5 +2775,19 @@
   "reviewing…": "审查中…",
   "Reviewing…": "审查中…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "自动：审查模型会将此对话及其智能体的常规权限请求允许一次，其余的会询问你。点击切换为审查。",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自动：审查模型会将此处新对话的常规权限请求允许一次，其余的会询问你。点击切换为审查。"
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自动：审查模型会将此处新对话的常规权限请求允许一次，其余的会询问你。点击切换为审查。",
+  "Auto review is deciding…": "自动审查正在判断…",
+  "It took more than {seconds} s.": "耗时超过 {seconds} 秒。",
+  "The action is too long to review whole.": "此操作太长，无法完整审查。",
+  "No model was available to review this request.": "没有可用于审查此请求的模型。",
+  "It could not decide ({detail}).": "无法作出判断（{detail}）。",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "已连续拦截 {count} 个操作，本轮其余部分需要你来批准。",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "本轮已拦截 {count} 个操作，其余部分需要你来批准。",
+  "This deletes {path}, outside the project, and your messages do not name it.": "这会删除项目之外的 {path}，而你的消息没有提到它。",
+  "It rated this action critical risk.": "将此操作评为严重风险。",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "将此操作评为低风险，且你的消息并未明确要求。",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "将此操作评为中等风险，且你的消息并未明确要求。",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "将此操作评为高风险，且你的消息并未明确要求。",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "此聊天已开启自动批准 · 由审查模型回应请求 · ctrl+y 切换为审查",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "允许一次并将此聊天切换为自动：之后的请求由审查模型回应"
 }

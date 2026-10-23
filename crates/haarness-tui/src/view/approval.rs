@@ -345,10 +345,14 @@ pub fn summary(pending: &PendingPermissionInfo, language: Language) -> String {
 /// "always" rule lives in the server: Always lasts until that server stops
 /// and covers every chat it runs, while This folder and Repository are saved
 /// and outlast restarts. Once + Auto changes how this whole chat is answered.
-pub fn staged_lead(choice: char, pending: &PendingPermissionInfo) -> &'static str {
+pub fn staged_lead(choice: char, pending: &PendingPermissionInfo, reviewer: bool) -> &'static str {
     // A remembered agent switch belongs to its own chat; the rule row says so.
     let one_chat = category(pending) == "agent_switch";
     match choice {
+        // Where Auto asks a reviewer, it is what answers later requests.
+        'u' if reviewer => {
+            "allow once and switch this chat to Auto: a reviewer model answers later requests"
+        }
         'u' => "allow once and switch this chat to Auto: later requests are allowed without asking",
         'r' => "always allow in this repository and its worktrees",
         'w' if one_chat => "always allow, kept across restarts",
@@ -358,11 +362,70 @@ pub fn staged_lead(choice: char, pending: &PendingPermissionInfo) -> &'static st
     }
 }
 
+/// Haarness's own words for a note it wrote itself, by its code, in the
+/// person's language; `None` for the reviewer's own words or a code this
+/// client does not know (its English `rationale` is shown then).
+fn review_reason(
+    review: &haarness_protocol::PermissionReview,
+    language: Language,
+) -> Option<String> {
+    use haarness_protocol::{ReviewReason, ReviewRisk};
+    let text = |key: &str, name: &str, value: &str| {
+        language.text(key).replace(&format!("{{{name}}}"), value)
+    };
+    Some(match review.reason.as_ref()? {
+        ReviewReason::Timeout { seconds } => text(
+            "It took more than {seconds} s.",
+            "seconds",
+            &seconds.to_string(),
+        ),
+        ReviewReason::TooLong => language
+            .text("The action is too long to review whole.")
+            .into(),
+        ReviewReason::NoModel => language
+            .text("No model was available to review this request.")
+            .into(),
+        ReviewReason::Error { detail } => text("It could not decide ({detail}).", "detail", detail),
+        ReviewReason::Streak { count } => text(
+            "It blocked {count} actions in a row, so the rest of this turn is yours to approve.",
+            "count",
+            &count.to_string(),
+        ),
+        ReviewReason::TurnLimit { count } => text(
+            "It blocked {count} actions this turn, so the rest of it is yours to approve.",
+            "count",
+            &count.to_string(),
+        ),
+        ReviewReason::UnnamedDeletion { path } => text(
+            "This deletes {path}, outside the project, and your messages do not name it.",
+            "path",
+            path,
+        ),
+        ReviewReason::Rated => language
+            .text(match review.risk {
+                Some(ReviewRisk::Critical) => "It rated this action critical risk.",
+                Some(ReviewRisk::Low) => {
+                    "It rated this action low risk, and your messages do not clearly ask for it."
+                }
+                Some(ReviewRisk::Medium) => {
+                    "It rated this action medium risk, and your messages do not clearly ask for it."
+                }
+                _ => "It rated this action high risk, and your messages do not clearly ask for it.",
+            })
+            .into(),
+        ReviewReason::Unknown => return None,
+    })
+}
+
 /// Why Auto's reviewer left the request to a person, in one line: "Auto
-/// review · <rule>: <reason>", or that it was unavailable or paused.
+/// review · <rule>: <reason>", that it was unavailable or paused, or that it
+/// is deciding a request already shown.
 pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
     let review = pending.review.as_ref()?;
     let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Reviewing => {
+            return Some(language.text("Auto review is deciding…").into());
+        }
         haarness_protocol::PermissionReviewStatus::Failed => "Auto review unavailable",
         haarness_protocol::PermissionReviewStatus::Paused => "Auto review paused",
         _ => "Auto review",
@@ -377,8 +440,8 @@ pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Optio
         note.push_str(" · ");
         note.push_str(rule);
     }
-    if let Some(reason) = review
-        .rationale
+    let reason = review_reason(review, language).or_else(|| review.rationale.clone());
+    if let Some(reason) = reason
         .as_deref()
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
@@ -431,7 +494,7 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     // a row where it reaches wider than the subject already shown; with none
     // to list, the sentence simply lands on the subject above it.
     let lead_rows = staged.map_or_else(Vec::new, |choice| {
-        let lead = language.text(staged_lead(choice, pending));
+        let lead = language.text(staged_lead(choice, pending, app.approval_reviewer));
         let lead = if rules.is_empty() || choice == 'u' {
             lead.to_owned()
         } else {
@@ -478,9 +541,17 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let show_scroll =
         !subject_rows.is_empty() && (overflows || expanded) && spend(&mut room, 1) == 1;
     let show_footer = spend(&mut room, footer_rows) == 1;
-    // Why the reviewer asks is worth more than the subject's later rows.
-    let note = review_note(pending, language);
-    let show_note = spend(&mut room, usize::from(note.is_some())) == 1;
+    // Why the reviewer asks is worth more than the subject's later rows; a
+    // second row for a long one comes after them.
+    let note_rows: Vec<String> = review_note(pending, language)
+        .map(|note| {
+            textwrap::wrap(&note, inner.saturating_sub(2).max(10))
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut note_count = spend(&mut room, usize::from(!note_rows.is_empty()));
     let subject_count = if subject_rows.is_empty() {
         0
     } else {
@@ -506,6 +577,9 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
             && room > 0,
     };
     app.permission_fit.set(fit);
+    if note_count == 1 && note_rows.len() > 1 {
+        note_count += spend(&mut room, 1);
+    }
     let show_allows = spend(&mut room, usize::from(allows.is_some())) == 1;
     let show_spacer = spend(&mut room, 1) == 1;
     // A preview needs its blank row and at least one changed line.
@@ -588,16 +662,16 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
         }
     }
 
-    if let Some(note) = note.filter(|_| show_note) {
+    for (index, row) in note_rows.iter().take(note_count).enumerate() {
+        // The last row shown ends in an ellipsis when the note goes on.
+        let row = if index + 1 == note_count && note_rows.len() > note_count {
+            single_line(&format!("{row} …"), inner.saturating_sub(2))
+        } else {
+            row.clone()
+        };
         push_row(
             &mut panel,
-            vec![
-                Span::new(
-                    format!("  {}", single_line(&note, inner.saturating_sub(2))),
-                    theme.muted,
-                )
-                .on(theme.overlay),
-            ],
+            vec![Span::new(format!("  {row}"), theme.muted).on(theme.overlay)],
             width,
             theme,
             focused,
@@ -879,7 +953,11 @@ pub fn compact_lines(app: &App, width: usize) -> Option<CompactCard> {
     let staged = app.confirm_always.filter(|_| app.permission_focus);
     let text = staged.map_or_else(
         || summary(pending, app.language),
-        |choice| app.language.text(staged_lead(choice, pending)).to_owned(),
+        |choice| {
+            app.language
+                .text(staged_lead(choice, pending, app.approval_reviewer))
+                .to_owned()
+        },
     );
     let headline = Line::new(vec![
         Span::new("⚠ ", theme.accent).with_attributes(attr::BOLD),

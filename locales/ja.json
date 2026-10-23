@@ -2775,5 +2775,19 @@
   "reviewing…": "レビュー中…",
   "Reviewing…": "レビュー中…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "自動: レビューモデルが、このチャットとそのエージェントの定型的な権限リクエストを1回許可し、それ以外は確認します。クリックするとレビューに切り替わります。",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自動: レビューモデルが、ここで始める新しいチャットの定型的な権限リクエストを1回許可し、それ以外は確認します。クリックするとレビューに切り替わります。"
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自動: レビューモデルが、ここで始める新しいチャットの定型的な権限リクエストを1回許可し、それ以外は確認します。クリックするとレビューに切り替わります。",
+  "Auto review is deciding…": "自動レビューが判断中…",
+  "It took more than {seconds} s.": "{seconds} 秒を超えました。",
+  "The action is too long to review whole.": "アクションが長すぎるため、全体をレビューできません。",
+  "No model was available to review this request.": "このリクエストをレビューできるモデルがありませんでした。",
+  "It could not decide ({detail}).": "判断できませんでした（{detail}）。",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "{count} 件のアクションを続けてブロックしたため、このターンの残りはあなたが承認します。",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "このターンで {count} 件のアクションをブロックしたため、残りはあなたが承認します。",
+  "This deletes {path}, outside the project, and your messages do not name it.": "これはプロジェクト外の {path} を削除しますが、あなたのメッセージには書かれていません。",
+  "It rated this action critical risk.": "このアクションを重大なリスクと評価しました。",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "このアクションを低リスクと評価しましたが、あなたのメッセージは明確に求めていません。",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "このアクションを中リスクと評価しましたが、あなたのメッセージは明確に求めていません。",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "このアクションを高リスクと評価しましたが、あなたのメッセージは明確に求めていません。",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "このチャットは自動承認中 · レビューモデルがリクエストに答えます · ctrl+y でレビュー",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "今回は許可し、このチャットを自動に切り替え：以降のリクエストにはレビューモデルが答えます"
 }

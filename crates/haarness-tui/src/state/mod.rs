@@ -373,6 +373,9 @@ pub struct PhaseInfo {
     pub tool: Option<String>,
     pub call_id: Option<String>,
     pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this client heard of the phase: a delay before saying what it
+    /// is runs on this clock, never the server's.
+    pub received: Option<std::time::Instant>,
 }
 
 /// In-flight rendering state belongs to its thread. Keeping it keyed avoids
@@ -406,10 +409,10 @@ impl PhaseInfo {
             .map_or(0, |since| (chrono::Utc::now() - since).num_seconds().max(0))
     }
 
-    pub fn elapsed_millis(&self) -> i64 {
-        self.since.map_or(0, |since| {
-            (chrono::Utc::now() - since).num_milliseconds().max(0)
-        })
+    /// How long ago this client heard of the phase.
+    pub fn heard_millis(&self) -> u128 {
+        self.received
+            .map_or(0, |received| received.elapsed().as_millis())
     }
 }
 
@@ -773,6 +776,8 @@ pub struct App {
     pub auto_permissions_seen: std::collections::HashMap<String, bool>,
     /// The server applies Auto itself, for every client.
     pub approval_server: bool,
+    /// The server's Auto asks a reviewer model (`approval-review.v1`).
+    pub approval_reviewer: bool,
     /// Launched with `--yolo`: this TUI answers every request its open
     /// conversation raises once, and its turns approve their own. The server
     /// is not a yolo server, so other clients' chats still ask.
@@ -1086,6 +1091,7 @@ impl App {
             children,
             pending_permissions: Vec::new(),
             auto_permissions: false,
+            approval_reviewer: false,
             auto_permissions_seen: std::collections::HashMap::new(),
             approval_server: false,
             yolo: false,
