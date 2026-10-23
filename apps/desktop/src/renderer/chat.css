@@ -1937,6 +1937,16 @@ html[dir="rtl"] .tool-target {
   gap: var(--s1);
   min-width: 0;
 }
+/* A script the command writes before it runs it: one quiet line. */
+.approval-script-note {
+  margin: 0;
+  padding-inline: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.approval-script-note code {
+  font-family: var(--mono);
+}
 .approval-script-toggle {
   min-height: 22px;
   border: 0;

@@ -54,8 +54,9 @@ const KEY_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
 #[derive(Debug, Clone)]
 pub struct Shown {
     pub script: PermissionScript,
-    /// Checked again when the person answers: see [`Seal::holds`].
-    pub seal: Seal,
+    /// Checked again when the person answers: see [`Seal::holds`]. None
+    /// for a script the command writes before it runs it.
+    pub seal: Option<Seal>,
 }
 
 /// What a shown script was read from. The person may answer minutes later,
@@ -110,7 +111,28 @@ pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Opti
     super::bash::script_files(command, cwd)
         .iter()
         .take(MAX_TRIED)
-        .find_map(|file| read(file, &readable))
+        .find_map(|file| {
+            if file.rewritten {
+                Some(rewritten(&file.path))
+            } else {
+                read(&file.path, &readable)
+            }
+        })
+}
+
+/// A script the command writes before it runs it: what is on disk now is
+/// not what runs, so nothing of it is read or shown, only its path, and
+/// there is nothing to check again.
+fn rewritten(file: &Path) -> Shown {
+    Shown {
+        script: PermissionScript {
+            path: shown_path(&super::normalize_absolute(file)),
+            content: String::new(),
+            truncated: false,
+            rewritten: true,
+        },
+        seal: None,
+    }
 }
 
 /// Whether `path` names a file that holds or exports credentials: a private
@@ -169,12 +191,19 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
     }
     Some(Shown {
         script: PermissionScript {
-            path: displayed(&shown.to_string_lossy()).replace(['\n', '\t'], "\u{FFFD}"),
+            path: shown_path(&shown),
             content,
             truncated,
+            rewritten: false,
         },
-        seal,
+        seal: Some(seal),
     })
+}
+
+/// A path as the card shows it: [`displayed`], with its tabs and line
+/// breaks as `�` too.
+fn shown_path(path: &Path) -> String {
+    displayed(&path.to_string_lossy()).replace(['\n', '\t'], "\u{FFFD}")
 }
 
 /// The bytes of the regular file at `real` (a resolved path), up to one
@@ -505,12 +534,12 @@ mod tests {
         let shown = for_prompt("bash x.sh".into(), fixture.0.clone(), |_| true)
             .await
             .unwrap();
-        assert!(shown.seal.holds().await);
+        assert!(shown.seal.as_ref().unwrap().holds().await);
         // Changed, even back to the same length.
         std::fs::write(&file, "echo other\n").unwrap();
-        assert!(!shown.seal.holds().await);
+        assert!(!shown.seal.as_ref().unwrap().holds().await);
         std::fs::write(&file, "echo shown\n").unwrap();
-        assert!(shown.seal.holds().await);
+        assert!(shown.seal.as_ref().unwrap().holds().await);
         // The rest of a cut file was never shown; a cut file made whole is
         // another file.
         let long = fixture.write("long.sh", "a".repeat(MAX_SCRIPT_BYTES + 10));
@@ -518,14 +547,14 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(&long, "a".repeat(MAX_SCRIPT_BYTES + 20)).unwrap();
-        assert!(cut.seal.holds().await);
+        assert!(cut.seal.as_ref().unwrap().holds().await);
         std::fs::write(&long, "a".repeat(MAX_SCRIPT_BYTES)).unwrap();
-        assert!(!cut.seal.holds().await);
+        assert!(!cut.seal.as_ref().unwrap().holds().await);
         // Gone, or too slow to read again.
         SLOW.lock().unwrap().push(file.clone());
-        assert!(!shown.seal.holds().await);
+        assert!(!shown.seal.as_ref().unwrap().holds().await);
         std::fs::remove_file(&file).unwrap();
-        assert!(!shown.seal.holds().await);
+        assert!(!shown.seal.as_ref().unwrap().holds().await);
         // A link moved to another file with the same text.
         #[cfg(unix)]
         {
@@ -536,10 +565,10 @@ mod tests {
             let shown = for_prompt("./run.sh".into(), fixture.0.clone(), |_| true)
                 .await
                 .unwrap();
-            assert!(shown.seal.holds().await);
+            assert!(shown.seal.as_ref().unwrap().holds().await);
             std::fs::remove_file(&link).unwrap();
             std::os::unix::fs::symlink(fixture.0.join("two/run.sh"), &link).unwrap();
-            assert!(!shown.seal.holds().await);
+            assert!(!shown.seal.as_ref().unwrap().holds().await);
         }
     }
 
@@ -555,6 +584,37 @@ mod tests {
         std::fs::rename(fixture.0.join("a"), fixture.0.join("old")).unwrap();
         std::os::unix::fs::symlink(fixture.0.join("b"), fixture.0.join("a")).unwrap();
         assert!(read_bytes(&real).is_none());
+    }
+
+    #[test]
+    fn a_script_the_command_writes_first_shows_its_path_only() {
+        let fixture = Fixture::new();
+        fixture.write("gen.sh", "echo OLD\n");
+        let shown = find(
+            "cat > gen.sh <<'EOF'\necho NEW\nEOF\nbash gen.sh",
+            &fixture.0,
+            |_| true,
+        )
+        .unwrap();
+        assert!(shown.script.rewritten);
+        assert_eq!(shown.script.content, "");
+        assert_eq!(Path::new(&shown.script.path), fixture.0.join("gen.sh"));
+        // Nothing to check again: what runs was never shown.
+        assert!(shown.seal.is_none());
+        // A file that does not exist yet (a download) is named too.
+        let shown = find(
+            "curl -fsSLo fresh.sh https://example.test/fresh.sh && bash fresh.sh",
+            &fixture.0,
+            |_| true,
+        )
+        .unwrap();
+        assert!(shown.script.rewritten);
+        assert_eq!(Path::new(&shown.script.path), fixture.0.join("fresh.sh"));
+        // Read as it is when the line only reads it.
+        let shown = find("cp gen.sh copy.sh && bash gen.sh", &fixture.0, |_| true).unwrap();
+        assert!(!shown.script.rewritten);
+        assert_eq!(shown.script.content, "echo OLD\n");
+        assert!(shown.seal.is_some());
     }
 
     #[test]

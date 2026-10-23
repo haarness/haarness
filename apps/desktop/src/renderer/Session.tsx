@@ -3020,7 +3020,18 @@ function Permission(props: {
             {permissionCommand(props.permission.detail)}
           </pre>
         </Show>
-        <Show when={script()}>
+        <Show when={script()?.rewritten ? script() : undefined}>
+          {(item) => (
+            <p class="approval-script-note">
+              {splitAround(
+                t("This command writes {path} before running it, so its contents can't be shown."),
+                () => <bdi><code>{item().path}</code></bdi>,
+                "{path}",
+              )}
+            </p>
+          )}
+        </Show>
+        <Show when={script()?.rewritten ? undefined : script()}>
           {(item) => (
             <div class="approval-script" classList={{ open: isOpen(scriptKey()) }}>
               <button

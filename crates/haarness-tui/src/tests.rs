@@ -9187,6 +9187,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: "/work/app/run.sh".into(),
         content: "echo one\n".into(),
         truncated: false,
+        rewritten: false,
     });
     let text = frame_text(&app, (100, 40));
     assert!(text.contains("Script: run.sh · 1 line"), "{text}");
@@ -9205,10 +9206,27 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: format!("/elsewhere/{}/tools/run.sh", "deep/".repeat(30)),
         content: "echo one\n".into(),
         truncated: false,
+        rewritten: false,
     });
     let text = frame_text(&app, (100, 40));
     assert!(text.contains("Script: …"), "{text}");
     assert!(text.contains("/tools/run.sh · 1 line"), "{text}");
+    // A script the command writes before it runs it: one quiet line, no
+    // text and no size.
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: "/work/app/gen.sh".into(),
+        content: String::new(),
+        truncated: false,
+        rewritten: true,
+    });
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains(
+            "This command writes gen.sh before running it, so its contents can't be shown."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Script:") && !text.contains("│ "), "{text}");
     // A request without one keeps the card it had.
     app.pending_permissions[0].script = None;
     assert!(!frame_text(&app, (100, 40)).contains("Script:"));

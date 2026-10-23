@@ -189,6 +189,27 @@ struct Scripts {
     found: Vec<(usize, PathBuf)>,
     /// Each `cd` (or `pushd`, `popd`, `eval`), in order.
     moves: Vec<Move>,
+    /// Each file the line writes, with where the writing command starts.
+    writes: Vec<(usize, Target)>,
+}
+
+/// A file a command line writes: a redirect's target, or what `tee`, `cp`,
+/// `mv`, `install`, `curl`, `wget`, `sed -i` or `perl -i` writes.
+enum Target {
+    /// The file, as the line names it.
+    File(PathBuf),
+    /// A file whose folder the line does not spell out (`> "$dir/x.sh"`),
+    /// known by its name.
+    Named(String),
+}
+
+/// A script file a command line runs, from [`script_files`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFile {
+    pub path: PathBuf,
+    /// The line writes it before it runs it (`curl -o x.sh … && bash
+    /// x.sh`, `cat > x.sh <<EOF`): what is on disk now is not what runs.
+    pub rewritten: bool,
 }
 
 /// Where one `cd` in a line moves the shell, for the scripts after it.
@@ -317,7 +338,7 @@ impl Reader<'_> {
                 wrappers.insert(node.id(), parent);
             }
             if node.kind() == "file_redirect" {
-                redirects.push(node);
+                redirects.push((node, parent));
             }
             let start = stack.len();
             stack.extend(node.children(&mut cursor).map(|child| (child, Some(node))));
@@ -411,7 +432,7 @@ impl Reader<'_> {
             self.unwrap(&words, Some(stdin), command, depth);
         }
         self.text_depth = outer_depth;
-        for redirect in redirects {
+        for (redirect, statement) in redirects {
             let Some(dest) = redirect.child_by_field_name("destination") else {
                 continue;
             };
@@ -432,6 +453,19 @@ impl Reader<'_> {
             if value.starts_with("/dev/") {
                 continue;
             }
+            if depth.text == 0 && self.scripts.is_some() && writes_to(redirect, command) {
+                // It truncates the file before its command runs, so it
+                // counts from the start of that command (`bash x.sh >
+                // x.sh`). A redirect the tree hangs on a whole list counts
+                // where it stands.
+                let at = statement
+                    .filter(|statement| statement.kind() == "redirected_statement")
+                    .and_then(|statement| statement.child_by_field_name("body"))
+                    .filter(|body| body.kind() == "command")
+                    .unwrap_or(redirect)
+                    .start_byte();
+                self.note_write(at, dest, command);
+            }
             if let Some(dir) =
                 external_dir(self.workspace, &node_text(dest, command), &value, complete)
             {
@@ -439,6 +473,163 @@ impl Reader<'_> {
             }
         }
         true
+    }
+
+    /// A file the line as written writes, for [`script_files`]: `node` is
+    /// the word or redirect target naming it, `at` where its command starts.
+    fn note_write(&mut self, at: usize, node: tree_sitter::Node<'_>, source: &str) {
+        let Some(scripts) = &mut self.scripts else {
+            return;
+        };
+        let raw = node_text(node, source);
+        let (value, complete) = literal(node, source);
+        let target = if complete && !value.is_empty() {
+            Target::File(home_expansion(&raw, &value).unwrap_or_else(|| PathBuf::from(&value)))
+        } else {
+            // Its name, when the end of the word spells it out.
+            let name = raw
+                .trim_matches(['"', '\''])
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            if name.is_empty() || name.contains(['$', '`', '*', '?', '[', '{']) {
+                return;
+            }
+            Target::Named(name)
+        };
+        scripts.writes.push((at, target));
+    }
+
+    /// The files a command writes, for [`script_files`]: `tee`'s, the
+    /// destination of `cp`, `mv`, `install` and `ln`, what `curl -o`/`-O`
+    /// and `wget` save, and the files `sed -i` and `perl -i` edit. Generous
+    /// where options are not read: a word taken for a file that is not one
+    /// only keeps a script's text off the card.
+    fn note_writes<'t>(
+        &mut self,
+        name: &str,
+        program: &Word<'t>,
+        arguments: &[Word<'t>],
+        source: &str,
+        depth: Depth,
+    ) {
+        if self.scripts.is_none() || depth.text > 0 {
+            return;
+        }
+        let at = program.node.start_byte();
+        let plain: Vec<&Word<'_>> = arguments
+            .iter()
+            .filter(|word| !word.value.starts_with('-'))
+            .collect();
+        let mut written: Vec<tree_sitter::Node<'t>> = Vec::new();
+        let mut files: Vec<PathBuf> = Vec::new();
+        // Into a folder, each source keeps its name.
+        let into = |folder: &str, sources: &[&Word<'_>]| -> Vec<PathBuf> {
+            sources
+                .iter()
+                .filter_map(|source| Path::new(&source.value).file_name())
+                .map(|file| Path::new(folder).join(file))
+                .collect()
+        };
+        // What a URL saves to under its own name, in `folder` if given.
+        let downloads = |folder: Option<&String>| -> Vec<PathBuf> {
+            plain
+                .iter()
+                .filter(|word| word.value.contains("://"))
+                .filter_map(|url| remote_name(&url.value))
+                .map(|file| {
+                    folder.map_or_else(
+                        || PathBuf::from(&file),
+                        |folder| Path::new(folder).join(&file),
+                    )
+                })
+                .collect()
+        };
+        let mut take = |values: Vec<(Option<tree_sitter::Node<'t>>, String)>,
+                        files: &mut Vec<PathBuf>| {
+            for (node, value) in values {
+                match node {
+                    Some(node) => written.push(node),
+                    None => files.push(PathBuf::from(value)),
+                }
+            }
+        };
+        match name {
+            "tee" => {
+                take(
+                    plain
+                        .iter()
+                        .map(|word| (Some(word.node), String::new()))
+                        .collect(),
+                    &mut files,
+                );
+            }
+            "cp" | "mv" | "install" | "ln" => {
+                if let Some((_, folder)) =
+                    option_values(arguments, Some('t'), "target-directory").first()
+                {
+                    files.extend(into(folder, &plain));
+                } else if let Some((destination, sources)) = plain.split_last() {
+                    take(vec![(Some(destination.node), String::new())], &mut files);
+                    files.extend(into(&destination.value, sources));
+                }
+            }
+            "curl" => {
+                take(option_values(arguments, Some('o'), "output"), &mut files);
+                let remote = arguments.iter().any(|word| {
+                    matches!(word.value.as_str(), "--remote-name" | "--remote-name-all")
+                        || (word.value.starts_with('-')
+                            && !word.value.starts_with("--")
+                            && word.value.contains('O'))
+                });
+                if remote {
+                    let folder = option_values(arguments, None, "output-dir")
+                        .into_iter()
+                        .next()
+                        .map(|(_, folder)| folder);
+                    files.extend(downloads(folder.as_ref()));
+                }
+            }
+            "wget" => {
+                let outputs = option_values(arguments, Some('O'), "output-document");
+                if outputs.is_empty() {
+                    let folder = option_values(arguments, Some('P'), "directory-prefix")
+                        .into_iter()
+                        .next()
+                        .map(|(_, folder)| folder);
+                    files.extend(downloads(folder.as_ref()));
+                } else {
+                    take(outputs, &mut files);
+                }
+            }
+            "sed" | "gsed" | "perl" => {
+                let in_place = arguments.iter().any(|word| {
+                    word.value.starts_with("--in-place")
+                        || (word.value.starts_with('-')
+                            && !word.value.starts_with("--")
+                            && word.value.contains('i'))
+                });
+                if in_place {
+                    take(
+                        plain
+                            .iter()
+                            .map(|word| (Some(word.node), String::new()))
+                            .collect(),
+                        &mut files,
+                    );
+                }
+            }
+            _ => {}
+        }
+        for node in written {
+            self.note_write(at, node, source);
+        }
+        if let Some(scripts) = &mut self.scripts {
+            scripts
+                .writes
+                .extend(files.into_iter().map(|file| (at, Target::File(file))));
+        }
     }
 
     /// A command as written, which its readings come from.
@@ -670,6 +861,7 @@ impl Reader<'_> {
         }
         let input = || stdin.map_or(Input::Unknown, |stdin| stdin_script(stdin, source));
         let name = program_name(&program.value);
+        self.note_writes(&name, program, arguments, source, depth);
         match name.as_str() {
             "eval" => self.nested(&joined(arguments), depth),
             "source" | "." => {
@@ -1186,10 +1378,13 @@ fn shell_script(arguments: &[Word<'_>], input: impl FnOnce() -> Input, source: &
 /// `/tmp/x.sh`), also through the wrappers [`analyze`] reads through
 /// (`sudo`, `env`, `timeout`, `nohup` …). A file named relative to the
 /// folder a `cd` earlier in the line moved to is taken from there, and left
-/// out when the line does not say where that is. For the person answering a
-/// permission request only (see `permissions::script`): it decides nothing.
+/// out when the line does not say where that is. One the line writes before
+/// it runs it (a redirect, `tee`, `cp`, `mv`, `install`, `ln`, `curl`,
+/// `wget`, `sed -i`, `perl -i`) is marked [`ScriptFile::rewritten`]. For the
+/// person answering a permission request only (see `permissions::script`):
+/// it decides nothing.
 #[must_use]
-pub fn script_files(command: &str, cwd: &Path) -> Vec<PathBuf> {
+pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     if command.len() > MAX_COMMAND_BYTES {
         return Vec::new();
     }
@@ -1201,29 +1396,129 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<PathBuf> {
     let Some(Scripts {
         mut found,
         mut moves,
+        writes,
     }) = reader.scripts
     else {
         return Vec::new();
     };
     found.sort_by_key(|(at, _)| *at);
     moves.sort_by_key(|step| step.at);
+    // Where a file named at `at` is, after the `cd`s before it: `None`
+    // when the line does not say.
+    let place = |at: usize, file: &Path| -> Option<PathBuf> {
+        let mut folder = cwd.to_path_buf();
+        // Rooted is where it says on every system (`/tmp/x.sh` has no
+        // drive on Windows).
+        if !file.has_root() {
+            for step in moves
+                .iter()
+                .filter(|step| step.at < at && step.until.is_none_or(|until| at < until))
+            {
+                folder.push(step.to.as_ref()?);
+            }
+        }
+        Some(folder.join(file))
+    };
+    let writes: Vec<(usize, Option<PathBuf>, Option<String>)> = writes
+        .into_iter()
+        .map(|(at, target)| match target {
+            Target::File(file) => {
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                let path = place(at, &file).map(|path| super::normalize_absolute(&path));
+                (at, path, name)
+            }
+            Target::Named(name) => (at, None, Some(name)),
+        })
+        .collect();
     found
         .into_iter()
         .filter_map(|(at, file)| {
-            let mut folder = cwd.to_path_buf();
-            // Rooted is where it says on every system (`/tmp/x.sh` has no
-            // drive on Windows).
-            if !file.has_root() {
-                for step in moves
-                    .iter()
-                    .filter(|step| step.at < at && step.until.is_none_or(|until| at < until))
-                {
-                    folder.push(step.to.as_ref()?);
-                }
-            }
-            Some(folder.join(file))
+            let path = place(at, &file)?;
+            let lexical = super::normalize_absolute(&path);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            // Written earlier in the line: where the line says, or, where it
+            // does not, by its name.
+            let rewritten = writes.iter().any(|(written_at, written, written_name)| {
+                *written_at < at
+                    && match written {
+                        Some(written) => *written == lexical,
+                        None => written_name.is_some() && *written_name == name,
+                    }
+            });
+            Some(ScriptFile { path, rewritten })
         })
         .collect()
+}
+
+/// The values a command's option is given, written `-o file`, `-ofile`,
+/// `-sSLo file`, `--output file` or `--output=file`: each with the word that
+/// holds it whole, when one does.
+fn option_values<'t>(
+    arguments: &[Word<'t>],
+    short: Option<char>,
+    long: &str,
+) -> Vec<(Option<tree_sitter::Node<'t>>, String)> {
+    let mut values = Vec::new();
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        let value = word.value.as_str();
+        if let Some(given) = value
+            .strip_prefix("--")
+            .and_then(|rest| rest.strip_prefix(long))
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            values.push((None, given.to_owned()));
+        } else if value.strip_prefix("--") == Some(long) {
+            if let Some(next) = words.next() {
+                values.push((Some(next.node), next.value.clone()));
+            }
+        } else if let (Some(short), Some(cluster)) = (
+            short,
+            value
+                .strip_prefix('-')
+                .filter(|cluster| !cluster.starts_with('-')),
+        ) && let Some(at) = cluster.find(short)
+        {
+            let attached = &cluster[at + short.len_utf8()..];
+            if attached.is_empty() {
+                if let Some(next) = words.next() {
+                    values.push((Some(next.node), next.value.clone()));
+                }
+            } else {
+                values.push((None, attached.to_owned()));
+            }
+        }
+    }
+    values
+}
+
+/// The file a download saves to under the URL's own name (`curl -O`,
+/// `wget`): the last part of its path, without a query.
+fn remote_name(url: &str) -> Option<String> {
+    url.split(['?', '#'])
+        .next()
+        .and_then(|path| path.split_once("://").map(|(_, rest)| rest))
+        .and_then(|rest| rest.split_once('/').map(|(_, path)| path))
+        .and_then(|path| path.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+/// Whether a redirect writes its target: `>`, `>>`, `&>`, `&>>`, `>|`, `>&`
+/// to a file, or `<>`.
+fn writes_to(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    (0..redirect.child_count())
+        .filter_map(|index| redirect.child(index))
+        .any(|child| {
+            matches!(
+                node_text(child, source).as_str(),
+                ">" | ">>" | "&>" | "&>>" | ">|" | ">&" | "<>"
+            )
+        })
 }
 
 /// Interpreters that run a script file named after their options, with a
@@ -2950,6 +3245,17 @@ mod scripts {
     /// The script files `command` runs from `/project`.
     fn found(command: &str) -> Vec<PathBuf> {
         script_files(command, &cwd())
+            .into_iter()
+            .map(|file| file.path)
+            .collect()
+    }
+
+    /// Whether the first script `command` runs is one the line writes first.
+    fn rewritten(command: &str) -> Option<bool> {
+        script_files(command, &cwd())
+            .into_iter()
+            .next()
+            .map(|file| file.rewritten)
     }
 
     fn first(command: &str) -> Option<PathBuf> {
@@ -3132,6 +3438,57 @@ mod scripts {
         assert_eq!(first(". env.sh"), None);
         assert_eq!(first("source ./env.sh"), Some(at("env.sh")));
         assert_eq!(first(". scripts/env.sh"), Some(at("scripts/env.sh")));
+    }
+
+    #[test]
+    fn a_script_the_line_writes_before_it_runs_it_is_marked_rewritten() {
+        for command in [
+            "cat > gen.sh <<'EOF'\necho NEW\nEOF\nbash gen.sh",
+            "echo 'echo hi' > run.sh && ./run.sh",
+            "echo 'echo hi' >> run.sh; sh run.sh",
+            "printf x &> run.sh; sh run.sh",
+            "printf x >| run.sh; sh run.sh",
+            "sh run.sh > run.sh",
+            "echo x | tee run.sh && sh run.sh",
+            "echo x | sudo tee -a ./run.sh > /dev/null && sh run.sh",
+            "cp new.sh run.sh && ./run.sh",
+            "mv -f new.sh run.sh && ./run.sh",
+            "install -m 755 new.sh run.sh && ./run.sh",
+            "cp new.sh bin/ && bin/new.sh",
+            "cp -t bin new.sh && sh bin/new.sh",
+            "ln -sf other.sh run.sh && ./run.sh",
+            "sed -i 's/a/b/' run.sh && ./run.sh",
+            "sed -i.bak -e 's/a/b/' run.sh && ./run.sh",
+            "perl -pi -e 's/a/b/' run.sh && ./run.sh",
+            "curl -fsSL -o run.sh https://example.test/run.sh && bash run.sh",
+            "curl --output=run.sh https://example.test/x && bash run.sh",
+            "curl -O https://example.test/dl/run.sh?v=1 && sh run.sh",
+            "curl -O --output-dir bin https://example.test/run.sh && sh bin/run.sh",
+            "wget -O run.sh https://example.test/x && sh run.sh",
+            "wget https://example.test/run.sh && sh run.sh",
+            "wget -P bin https://example.test/run.sh && sh bin/run.sh",
+            "cd sub && cat > x.sh <<EOF\necho\nEOF\ncd .. && sh sub/x.sh",
+            "cat > \"$DIR/gen.sh\" <<EOF\necho\nEOF\nbash ./gen.sh",
+        ] {
+            assert_eq!(rewritten(command), Some(true), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_script_the_line_only_reads_or_writes_after_it_runs_is_not() {
+        for command in [
+            "bash run.sh",
+            "cp run.sh backup.sh && ./run.sh",
+            "cat run.sh > out.txt && ./run.sh",
+            "./run.sh > /dev/null 2>&1",
+            "./run.sh; echo x > run.sh",
+            "sed 's/a/b/' run.sh > out.txt && ./run.sh",
+            "cd sub && echo x > run.sh; cd .. && ./run.sh",
+            "curl -o other.sh https://example.test/run.sh && sh run.sh",
+            "bash -c 'echo x > run.sh' && ./run.sh",
+        ] {
+            assert_eq!(rewritten(command), Some(false), "{command}");
+        }
     }
 
     #[test]
