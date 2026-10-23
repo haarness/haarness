@@ -92,6 +92,11 @@
   min-height: 0;
 }
 .sidebar {
+  /* A project heading's height, which the rows brought into view stop
+     below, and the scrollbar's width (base.css), which the list's gutter
+     takes from the sidebar's padding. */
+  --project-row: 30px;
+  --scrollbar: 11px;
   width: var(--sidebar-width);
   flex: none;
   display: flex;
@@ -205,7 +210,7 @@
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   padding-bottom: var(--s2);
-  margin-inline: calc(var(--s1) * -1) -11px;
+  margin-inline: calc(var(--s1) * -1) calc(var(--scrollbar) * -1);
   padding-inline: var(--s1) 0;
 }
 /* With no padding at the list's end, its rows draw their keyboard ring inside
@@ -284,7 +289,7 @@
   border: 0;
   width: 100%;
   justify-content: flex-start;
-  min-height: 30px;
+  min-height: var(--project-row);
   padding: 0 var(--s2);
   color: var(--muted);
   font-size: var(--ui);
@@ -343,7 +348,7 @@
 }
 /* Rows brought into view (a chat chosen, a row walked to) stop below it. */
 .project-group .session-row {
-  scroll-margin-block: 34px var(--s1);
+  scroll-margin-block: calc(var(--project-row) + var(--s0)) var(--s1);
 }
 .project-row > .project-heading {
   flex: 1;
@@ -353,7 +358,7 @@
 .project-disclosure {
   flex: none;
   width: 28px;
-  min-height: 30px;
+  min-height: var(--project-row);
   padding: 0;
   border: 0;
   border-radius: var(--r-md);
@@ -582,10 +587,15 @@ html[data-order-dragging] * {
   flex: none;
 }
 /* On hover or focus the row's archive button takes the place of its age or
-   waiting label, which keeps its room so the title does not move. */
+   waiting label, which keeps its room so the title does not move. Leaving,
+   the label comes back once the button has faded, so the two never overlap. */
+.session-row :is(.session-waiting, .session-age) {
+  transition: visibility 0s linear var(--fast);
+}
 .session-row:hover :is(.session-waiting, .session-age),
 .session-row:focus-within :is(.session-waiting, .session-age) {
   visibility: hidden;
+  transition-delay: 0s;
 }
 /* Select chats: a tick box in place of the status dot (rows keep their own
    backgrounds, so the open chat still stands out), and the bar of actions

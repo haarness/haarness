@@ -880,7 +880,9 @@ export function SessionList(props: {
               <button
                 class="sessions-archived"
                 aria-haspopup="dialog"
-                onClick={() => searchArchived(props.project?.id)}
+                onClick={() =>
+                  searchArchived({ project: props.project?.id, location: props.location?.id })
+                }
               >
                 {t("{count} archived", { count: archived() })}
               </button>

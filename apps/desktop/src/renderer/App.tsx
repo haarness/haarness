@@ -38,7 +38,7 @@ import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
 import { createOrdering, createOrderDropTarget } from "./Sortable";
 import { MenuButton, type MenuAction } from "./MenuButton";
-import { UniversalSearch, archivedSearchRequested } from "./UniversalSearch";
+import { UniversalSearch, archivedSearchRequested, type ArchivedScope } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
@@ -182,13 +182,13 @@ export function App() {
     !state.ready || !!state.openingProject || !!state.openingChat || !!state.loadingChat;
   const [palette, setPalette] = createSignal(false);
   /** Search's scope when the sidebar opened it on archived chats. */
-  const [paletteArchived, setPaletteArchived] = createSignal<{ project?: string }>();
+  const [paletteArchived, setPaletteArchived] = createSignal<ArchivedScope>();
   createEffect(
     on(
       archivedSearchRequested,
       (request) => {
         if (!request) return;
-        setPaletteArchived({ project: request.project });
+        setPaletteArchived({ project: request.project, location: request.location });
         setPalette(true);
       },
       { defer: true },
@@ -1589,7 +1589,10 @@ export function App() {
                   <button
                     class="dock-return"
                     aria-label={t("Return to chat")}
-                    onClick={() => setDock(null)}
+                    onClick={() => {
+                      setDock(null);
+                      focusComposer();
+                    }}
                   >
                     <Icon name="chat" size="sm" />
                     {t("Chat")}
