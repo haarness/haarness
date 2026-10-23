@@ -175,7 +175,8 @@ An agent in the user's Chrome acts in the user's signed-in accounts, so a site t
 | `once` | This call |
 | `always` | A session rule for this chat, origin and category, until the server stops |
 | `always_workspace`, `always_repository` | Downgraded to `always`; never persisted |
-| `reject` | The call fails |
+| `reject` | The call fails, and so does every other request waiting in the conversation (a person's no) |
+| `refuse` | For unattended runners only: the call fails, the conversation's other requests keep waiting, and the agent reads `feedback` as Haarness's reason rather than a person's answer. `haarness run` without a terminal stops on a Chrome request instead of refusing it |
 
 Desktop's dock and the TUI card read `explicit` and show **Allow in Chrome** with humanised lines ("Use https://example.com in Chrome", "Send downloads from … in Chrome to the agent", "Upload files to … in Chrome", "Run scripts on … in Chrome"). Desktop offers **Deny**, **Allow once** and **Allow in this chat** (primary, `always`); the TUI uses `a` (Allow in this chat, a single press), `y` (once) and `n`, with no `w`, `r` or `u`. Both show the call's own arguments under those lines (the address, script, text or files), without `__browser`, so Allow once approves a call the person has seen. The popup of the Haarness for Chrome extension can answer the same request through the bridge, which forwards only explicit approvals waiting on a Chrome site, with only their Chrome patterns. One that also waits on another gate (for example a file outside the project for an upload) shows in the popup with "Answer it in Haarness", and the bridge refuses to answer it.
 

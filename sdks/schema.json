@@ -3826,9 +3826,11 @@
       "PermissionReply": {
         "properties": {
           "decision": {
-            "$ref": "#/components/schemas/PermissionReplyDecision"
+            "$ref": "#/components/schemas/PermissionReplyDecision",
+            "description": "The answer. `once` allows this call; `always` allows it and what its\nrule covers until the server stops (in this chat only for a Chrome\nsite, whose rule names the chat); `always_workspace`\nalso persists the rule for this workspace, and `always_repository`\nfor every worktree of its Git repository (both act as `always` for a\nrequest only a person answers); `reject` is a person's no, which also\nrejects the other requests waiting in the same conversation, with\n`feedback` as their words. `refuse` is for unattended runners only\n(a run nobody can answer): it ends this one request, leaves the\nothers waiting, and the agent's error is worded as Haarness's, with\n`feedback` as the reason."
           },
           "feedback": {
+            "description": "For `reject`, what the person said; for `refuse`, why nobody could\nanswer. Ignored for the allowing answers.",
             "type": [
               "string",
               "null"

@@ -144,7 +144,12 @@ cancel server-owned work**. Use `interruptTurn`/`interrupt_turn` or
 
 Use `listPermissions`/`list_permissions` and `replyPermission`/`reply_permission`
 for approvals, and `listQuestions`/`list_questions` and
-`replyQuestion`/`reply_question` for user answers. No request is automatically
+`replyQuestion`/`reply_question` for user answers. A permission reply's
+`decision` is `once`, `always`, `always_workspace`, `always_repository`,
+`reject` (a person's no, which also rejects the other requests waiting in the
+conversation) or `refuse`, which is for unattended runners only: it ends that
+one request, leaves the others waiting, and the agent reads `feedback` as
+Haarness's reason rather than a person's answer. No request is automatically
 retried, including a retryable error. For a deliberate turn retry, reuse the
 same `requestId`; generating a new one requests a new turn.
 
