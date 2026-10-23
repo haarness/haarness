@@ -347,6 +347,30 @@ test("any image of the conversation opens full size; Esc, a click outside or Clo
   expect(errors).toEqual([]);
 });
 
+test("the model's thinking and a side chat's answer show the project's images the same way", async () => {
+  await page.evaluate(() => window.haarness.preferences({ thinking: "show" }));
+  try {
+    await reply("::reason ![Tall](out/tall.png)");
+    const thought = page.locator(".message.reasoning").last().locator("img.project-image-loaded");
+    await expect(thought).toBeVisible();
+    expect((await size(thought)).shown).toEqual([32, 320]);
+  } finally {
+    await page.evaluate(() => window.haarness.preferences({ thinking: "compact" }));
+  }
+
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("/btw ![Tall](out/tall.png)");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const answer = page.locator(".side-chat-answer img.project-image-loaded");
+  await expect(answer).toBeVisible();
+  expect((await size(answer)).shown).toEqual([32, 320]);
+  // It opens full size there too.
+  await answer.click();
+  await expect(page.locator("dialog.image-viewer img")).toHaveAttribute("src", (await answer.getAttribute("src"))!);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Hide side chat", exact: true }).click();
+  expect(errors).toEqual([]);
+});
+
 test("placeholders speak the interface language", async () => {
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   try {
