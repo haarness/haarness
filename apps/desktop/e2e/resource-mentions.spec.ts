@@ -211,6 +211,30 @@ test("resources wait below the files a slow search is still finding, so a quick 
   expect(kinds.indexOf("file")).toBeGreaterThanOrEqual(0);
   expect(kinds.indexOf("resource")).toBeGreaterThan(kinds.lastIndexOf("file"));
   await expect(list().locator('[role="option"][aria-selected="true"]')).toHaveAttribute("data-kind", kinds[0]!);
+  // Typing on keeps the files found so far that still match, in their places, while the next search runs: the list
+  // never empties, and the resources wait below until the new files are in.
+  const file = list().locator('[role="option"][data-kind="file"]').filter({ hasText: "settings.md" });
+  const place = () => file.evaluate((option) => [...option.parentElement!.children].indexOf(option));
+  const before = await place();
+  const status = page.locator(".mention-popover [role=status]");
+  await input().press("Backspace");
+  // Read at once, not waited for: the search has begun (the resources went), and the file never left.
+  await expect(rows()).toHaveCount(0);
+  expect([await file.count(), await status.count()]).toEqual([1, 0]);
+  expect(await place()).toBe(before);
+  await pictures(page.locator(".mention-popover"), "resource-rows-while-files-refresh");
+  await expect(rows()).toHaveCount(2);
+  expect(await place()).toBe(before);
+  // Nothing found so far matches: the list says it is searching.
+  await input().press("x");
+  await expect(file).toHaveCount(0);
+  await expect(status).toHaveText("Searching files…");
+  await input().press("Backspace");
+  await expect(status).toHaveCount(0);
+  expect(await file.count()).toBe(1);
+  expect(await rows().count()).toBe(0);
+  expect(await place()).toBe(before);
+  await expect(rows()).toHaveCount(2);
   await app.evaluate(() => ((globalThis as any).filesDelay = 0));
   await page.keyboard.press("Escape");
   await input().fill("");

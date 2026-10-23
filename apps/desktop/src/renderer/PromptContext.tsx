@@ -83,6 +83,16 @@ export function unreadReason(reason: string) {
 }
 /** A mentioned resource: what it is and where the server reads it from;
  * one brought back from a sent message, what was read then. */
+/** Whether every character of `query` comes in `text`, in order. */
+function inOrder(text: string, query: string) {
+  let at = 0;
+  for (const character of query) {
+    at = text.indexOf(character, at) + 1;
+    if (!at) return false;
+  }
+  return true;
+}
+
 function ResourcePreview(props: { item: ResourceContext }) {
   const read = () => {
     const part = props.item.block === undefined ? undefined : sentParts(props.item.block)[0];
@@ -170,7 +180,8 @@ export function PromptContextControls(props: {
   const app = useApp();
   const [caret, setCaret] = createSignal(0),
     [cursor, setCursor] = createSignal(0);
-  const [files, setFiles] = createSignal<string[]>([]),
+  /** The files the last search found, on its connection. */
+  const [found, setFound] = createSignal<{ connection?: string; names: string[] }>({ names: [] }),
     [error, setError] = createSignal("");
   const [loading, setLoading] = createSignal(false),
     [busy, setBusy] = createSignal(false);
@@ -234,6 +245,15 @@ export function PromptContextControls(props: {
       ...(loading() ? [] : resourceRows(mention()!.query)),
     ];
   };
+  /** The files the list shows: while a search runs, the last one's that
+   * still match what is typed, so typing never empties the list. */
+  const files = () => {
+    const last = found();
+    if (last.connection !== app.state.connection?.id) return [];
+    if (!loading()) return last.names;
+    const query = (mention()?.query ?? "").toLowerCase();
+    return last.names.filter((name) => inOrder(name.toLowerCase(), query));
+  };
   let generation = 0;
   createEffect(() => {
     const active = open(),
@@ -241,19 +261,31 @@ export function PromptContextControls(props: {
       connection = app.state.connection?.id;
     const version = ++generation;
     setCursor(0);
-    setFiles([]);
     setError("");
     setLoading(false);
-    if (!active || !connection) return;
+    if (!active || !connection) {
+      setFound({ names: [] });
+      return;
+    }
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
         .api<string[]>(connection, "searchFiles", [{ q: query, limit: 20 }])
-        .then((values) => {
-          if (version === generation) setFiles(values);
+        .then((names) => {
+          if (version !== generation) return;
+          // The highlighted row stays highlighted where the new files put it.
+          const held = options()[cursor()];
+          setFound({ connection, names });
+          setLoading(false);
+          const at = held
+            ? options().findIndex((option) => option.kind === held.kind && option.name === held.name)
+            : -1;
+          setCursor(Math.max(at, 0));
         })
         .catch((reason) => {
-          if (version === generation) setError(String(reason));
+          if (version !== generation) return;
+          setFound({ connection, names: [] });
+          setError(String(reason));
         })
         .finally(() => {
           if (version === generation) setLoading(false);
@@ -585,7 +617,7 @@ export function PromptContextControls(props: {
               <p class="muted">{t("No matching files or agents.")}</p>
             </Show>
           </div>
-          <Show when={loading()}>
+          <Show when={loading() && !files().length}>
             <p class="muted" role="status">
               {t("Searching files…")}
             </p>
