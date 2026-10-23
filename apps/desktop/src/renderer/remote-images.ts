@@ -114,24 +114,30 @@ export function forgetImages() {
 }
 
 /**
- * Placeholders and their buttons made here. A reply's own markup is never
- * one, whatever classes or attributes it copies, so only these load images.
+ * Placeholders and their buttons made here, and the project's images and
+ * their placeholders (project-images.ts). A reply's own markup is never one,
+ * whatever classes or attributes it copies, so only these load images.
  */
 const made = new WeakSet<Node>();
 export function madeHere(node: Node | null | undefined): boolean {
   return !!node && made.has(node);
 }
+/** Marks a node the app made in a reply, which the reply's own markup can never be. */
+export function markMade(node: Node) {
+  made.add(node);
+}
 
 /**
  * What the sanitizer keeps of an attribute a reply wrote: never the
- * `data-remote-*` attributes or `remote-image*` classes placeholders use, so
- * markup cannot dress as one. Undefined drops the attribute.
+ * `data-remote-*` and `data-project-*` attributes or the `remote-image*` and
+ * `project-image*` classes placeholders use, so markup cannot dress as one.
+ * Undefined drops the attribute.
  */
 export function replyAttribute(name: string, value: string): string | undefined {
-  if (/^data-remote-/i.test(name)) return undefined;
+  if (/^data-(?:remote|project)-/i.test(name)) return undefined;
   if (name.toLowerCase() !== "class") return value;
   const tokens = value.split(/\s+/).filter(Boolean);
-  const kept = tokens.filter((token) => !/^remote-image/i.test(token));
+  const kept = tokens.filter((token) => !/^(?:remote|project)-image/i.test(token));
   if (kept.length === tokens.length) return value;
   return kept.length ? kept.join(" ") : undefined;
 }

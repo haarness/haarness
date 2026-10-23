@@ -2767,5 +2767,7 @@
   "Ask about this chat without adding to it": "詢問此對話，但不加入任何內容",
   "Hide side chat": "隱藏側邊對話",
   "Resize side chat": "調整側邊對話大小",
-  "This server answers each question on its own": "此伺服器會個別回答每個問題"
+  "This server answers each question on its own": "此伺服器會個別回答每個問題",
+  "Outside this project": "不在此專案中",
+  "Too large to show": "太大，無法顯示"
 }
