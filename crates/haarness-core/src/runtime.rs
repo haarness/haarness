@@ -4191,7 +4191,7 @@ impl AgentRuntime {
             }
             let always_rules = plan.always_rules();
             let card = plan.card_detail(&arguments, asked);
-            let script = plan.script(&arguments, &self.workspace);
+            let script = plan.script(&arguments, &self.workspace, &engine);
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
@@ -9414,7 +9414,11 @@ impl RunnerTask {
         let detail = &plan.card_detail(detail, &plan.patterns);
         // Read before the gate is taken: a file read never holds up a mode
         // change or another chat's answer.
-        let script = plan.script(detail, &self.workspace);
+        let script = plan.script(
+            detail,
+            &self.workspace,
+            &self.permission_engine_with_session_rules(agent, &self.session_rules.lock()),
+        );
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         // A chat in Auto approves eligible requests once, without a prompt.
@@ -11885,16 +11889,17 @@ impl AskPlan {
             ),
         }
     }
-    /// The tool's arguments as a prompt about `patterns` shows them: with
-    /// the rule a command met because a limit stopped reading it
-    /// (`__readLimit`, without its `bash:`), so the card can say why it asks.
     /// For a bash request, the script its command runs, read now for the
-    /// person answering (`permissions::script`). Display only: it decides
-    /// nothing, and hooks, Auto and rules never see it.
+    /// person answering (`permissions::script`). It shows only what this
+    /// chat may read without asking: `engine`'s `read` rules (the built-in
+    /// secret rules and every configured deny or ask) must allow both the
+    /// file named and where it leads. Display only: it decides nothing, and
+    /// hooks, Auto and rules never see it.
     fn script(
         &self,
         detail: &serde_json::Value,
         workspace: &Path,
+        engine: &PermissionEngine,
     ) -> Option<haarness_protocol::PermissionScript> {
         if self.permission != "bash" {
             return None;
@@ -11904,8 +11909,13 @@ impl AskPlan {
             Some(workdir) => crate::permissions::resolve_permission_path(workspace, workdir),
             None => workspace.to_path_buf(),
         };
-        crate::permissions::script::bash_script(command, &cwd)
+        crate::permissions::script::bash_script(command, &cwd, |path| {
+            engine.evaluate(&format!("read:{}", path.display())) == PermissionDecision::Allow
+        })
     }
+    /// The tool's arguments as a prompt about `patterns` shows them: with
+    /// the rule a command met because a limit stopped reading it
+    /// (`__readLimit`, without its `bash:`), so the card can say why it asks.
     fn card_detail(&self, detail: &serde_json::Value, patterns: &[String]) -> serde_json::Value {
         let mut detail = detail.clone();
         if let Some(rule) = patterns.iter().find_map(|pattern| self.read_limit(pattern))
