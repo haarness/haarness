@@ -14433,6 +14433,69 @@ fn unicode_composer_wrap_and_cursor_use_display_cells() {
     assert!(wrapped.iter().all(|line| line.width() <= 50));
 }
 
+/// The prompt wraps between words like the prose it is, breaks a word only
+/// when it is longer than a row, and marks rows of a long draft that are out
+/// of its window.
+#[test]
+fn the_prompt_wraps_between_words_and_marks_hidden_rows() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let words = "please refactor the configuration loader so that every option is validated";
+    app.composer.set_text(words.into());
+    let rows: Vec<String> = composer_rows(&app, (40, 20));
+    assert!(rows.len() > 1, "{rows:#?}");
+    let joined: String = rows
+        .iter()
+        .map(|row| row.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(joined, words, "no word was split: {rows:#?}");
+    // A word longer than a row still breaks at the edge.
+    let path = "src/very/long/path/that/does/not/fit/on/one/row/of/the/prompt.rs";
+    app.composer.set_text(path.into());
+    let rows = composer_rows(&app, (40, 20));
+    assert!(rows.len() > 1, "{rows:#?}");
+    assert_eq!(rows.iter().map(|row| row.trim()).collect::<String>(), path);
+
+    // Ten lines in a six-row window: the rows above the cursor are marked.
+    app.composer.set_text(
+        (1..=10)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let rows = composer_rows(&app, (40, 20));
+    assert_eq!(rows.len(), 6, "{rows:#?}");
+    assert!(rows[0].starts_with("↑ line 5"), "{rows:#?}");
+    assert!(rows[5].starts_with("  line 10"), "{rows:#?}");
+    // With the cursor at the top, the rows below are marked instead.
+    for _ in 0..9 {
+        app.composer.move_up();
+    }
+    let rows = composer_rows(&app, (40, 20));
+    assert!(rows[0].starts_with("  line 1"), "{rows:#?}");
+    assert!(rows[5].starts_with("↓ line 6"), "{rows:#?}");
+}
+
+/// The prompt's rows as text: the lines between the transcript and the rule
+/// under the prompt.
+fn composer_rows(app: &App, size: (u32, u32)) -> Vec<String> {
+    let lines: Vec<String> = app.lines(size).iter().map(line_text).collect();
+    let rule = lines
+        .iter()
+        .rposition(|row| row.starts_with('─') || row.starts_with('━'))
+        .expect("rule under the prompt");
+    let mut rows = Vec::new();
+    for row in lines[..rule].iter().rev() {
+        if row.trim().is_empty() {
+            break;
+        }
+        rows.push(row.trim_end().to_owned());
+    }
+    rows.reverse();
+    rows
+}
+
 #[test]
 fn composer_cursor_is_visible_when_empty_and_at_multiline_end() {
     let thread = fixture_thread();
