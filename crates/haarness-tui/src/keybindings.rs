@@ -119,44 +119,71 @@ fn configured() -> BTreeMap<String, Option<String>> {
         .unwrap_or_default()
 }
 
-/// The shortcuts in force, and the settings that are not: an unknown action
-/// (one a newer Haarness wrote, say), a key that cannot be bound, a key
-/// another of the person's own shortcuts already has, or a default whose key
-/// the person gave to another action. Each is left out on its own and the
-/// rest apply; a shortcut the person chose wins over a default.
+/// The shortcuts in force, and the labels of the settings worth saying did
+/// not apply (see [`Settled::unapplied`]). Each is left out on its own and
+/// the rest apply; a shortcut the person chose wins over a default.
 pub(crate) fn load() -> (BTreeMap<String, String>, Vec<String>) {
-    let mut chosen = configured();
-    chosen.extend(
-        crate::config::load_state()
-            .keybindings
-            .into_iter()
-            .map(|(name, value)| (name, Some(value))),
-    );
-    settle(chosen)
+    let settled = settle(configured(), crate::config::load_state().keybindings);
+    let labels = settled
+        .unapplied
+        .iter()
+        .map(|name| {
+            ACTIONS
+                .iter()
+                .find(|(id, _, _)| id == name)
+                .map_or_else(|| name.clone(), |(_, label, _)| (*label).to_owned())
+        })
+        .collect();
+    (settled.bindings, labels)
 }
 
-fn settle(mut chosen: BTreeMap<String, Option<String>>) -> (BTreeMap<String, String>, Vec<String>) {
+struct Settled {
+    bindings: BTreeMap<String, String>,
+    /// Settings that did not apply and are worth saying, by action: an
+    /// unknown action or a key that cannot be bound in config.toml, or a key
+    /// two of the person's own shortcuts share. Never a default the person's
+    /// own key displaced (they chose that key), nor what tui-state.toml holds
+    /// that this version cannot apply (a newer Haarness wrote it; a save
+    /// keeps it).
+    unapplied: Vec<String>,
+}
+
+/// The shortcuts from the defaults, config.toml's `[tui.keybinds]` and
+/// tui-state.toml (which /keybinds writes and which wins per action).
+fn settle(config: BTreeMap<String, Option<String>>, state: BTreeMap<String, String>) -> Settled {
+    let mut chosen = config
+        .into_iter()
+        .map(|(name, value)| (name, (value, false)))
+        .collect::<BTreeMap<_, _>>();
+    chosen.extend(
+        state
+            .into_iter()
+            .map(|(name, value)| (name, (Some(value), true))),
+    );
     if chosen
         .get("models")
-        .and_then(Option::as_deref)
+        .and_then(|(value, _)| value.as_deref())
         .is_some_and(|key| key.eq_ignore_ascii_case("ctrl+m"))
     {
+        // Previous versions saved ctrl+m, which is Enter in terminals.
         let mut merged = defaults();
         merged.extend(
             chosen
                 .iter()
-                .filter_map(|(name, value)| Some((name.clone(), value.clone()?))),
+                .filter_map(|(name, (value, _))| Some((name.clone(), value.clone()?))),
         );
         migrate_model_shortcut(&mut merged);
-        chosen.insert("models".into(), merged.remove("models"));
+        if let Some((value, _)) = chosen.get_mut("models") {
+            *value = merged.remove("models");
+        }
     }
     let mut bindings = defaults();
-    let mut skipped = Vec::new();
+    let mut unapplied = Vec::new();
     // The person's own shortcuts first, in name order: each takes its key
     // unless another of theirs already has it.
     let mut taken = Vec::new();
     let mut own = Vec::new();
-    for (name, value) in chosen {
+    for (name, (value, from_state)) in chosen {
         let key = value
             .as_deref()
             .filter(|_| bindings.contains_key(&name))
@@ -167,42 +194,60 @@ fn settle(mut chosen: BTreeMap<String, Option<String>>) -> (BTreeMap<String, Str
                 bindings.insert(name.clone(), value);
                 own.push(name);
             }
-            _ => skipped.push(name),
+            (Some(_), Some(_)) => unapplied.push(name),
+            _ if !from_state => unapplied.push(name),
+            _ => {}
         }
     }
     // Then the defaults left, each unless its key went to one of the
-    // person's shortcuts: that default is unbound rather than the person's
-    // choice refused.
+    // person's shortcuts: that default is unbound, quietly, rather than the
+    // person's choice refused.
     for (name, _, default) in ACTIONS {
-        if own.iter().any(|own| own == name) {
-            continue;
-        }
-        if parse(default)
-            .ok()
-            .flatten()
-            .is_some_and(|key| taken.contains(&key))
+        if !own.iter().any(|own| own == name)
+            && parse(default)
+                .ok()
+                .flatten()
+                .is_some_and(|key| taken.contains(&key))
         {
             bindings.insert((*name).into(), "none".into());
-            if !skipped.iter().any(|skipped| skipped == name) {
-                skipped.push((*name).into());
-            }
         }
     }
-    (bindings, skipped)
+    Settled {
+        bindings,
+        unapplied,
+    }
 }
-/// What a save keeps: only the shortcuts that differ from `baseline`, what
-/// config.toml and the defaults give. An older Haarness reading the file then
-/// meets no action it does not know unless that one was changed, and a later
-/// default is not pinned to today's.
-fn changed(
+
+/// What a /keybinds save keeps in tui-state.toml, from the form's `bindings`
+/// and what was `loaded` before it:
+/// - the shortcuts that differ from what config.toml and the defaults give,
+///   so an older Haarness meets an action it does not know only when that one
+///   was changed, and a later default is not pinned to today's;
+/// - every action whose config.toml line did not apply, so the value set here
+///   settles it and the launch notice goes;
+/// - what this version cannot apply from the file (a newer Haarness's action
+///   or key), unless that action was edited here.
+fn saved_state(
     bindings: &BTreeMap<String, String>,
-    baseline: &BTreeMap<String, String>,
+    loaded: &BTreeMap<String, String>,
+    config: BTreeMap<String, Option<String>>,
+    state: BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    bindings
+    let baseline = settle(config, BTreeMap::new());
+    let mut saved = bindings
         .iter()
-        .filter(|(name, value)| baseline.get(*name) != Some(*value))
+        .filter(|(name, value)| {
+            baseline.bindings.get(*name) != Some(*value) || baseline.unapplied.contains(name)
+        })
         .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    for (name, value) in state {
+        let applies = ACTIONS.iter().any(|(id, _, _)| *id == name) && parse(&value).is_ok();
+        if !applies && bindings.get(&name) == loaded.get(&name) {
+            saved.insert(name, value);
+        }
+    }
+    saved
 }
 fn migrate_model_shortcut(bindings: &mut BTreeMap<String, String>) {
     if bindings
@@ -237,6 +282,7 @@ pub(crate) fn overrides_default(bindings: &BTreeMap<String, String>, key: KeyEve
 pub(crate) fn view(input: &Value) -> Result<ManagementView> {
     let (mut bindings, _) = load();
     if input["action"] == "save" {
+        let loaded = bindings.clone();
         for (name, _, _) in ACTIONS {
             bindings.insert(
                 (*name).into(),
@@ -244,7 +290,12 @@ pub(crate) fn view(input: &Value) -> Result<ManagementView> {
             );
         }
         validate(&bindings)?;
-        let saved = changed(&bindings, &settle(configured()).0);
+        let saved = saved_state(
+            &bindings,
+            &loaded,
+            configured(),
+            crate::config::load_state().keybindings,
+        );
         crate::config::save_state(|s| s.keybindings = saved);
     }
     Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:vec!["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".into()],fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
@@ -322,10 +373,17 @@ mod tests {
         assert!(parse("alt+upward").is_err());
     }
 
-    fn chosen(entries: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+    fn config(entries: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
         entries
             .iter()
             .map(|(name, value)| ((*name).into(), value.map(str::to_owned)))
+            .collect()
+    }
+
+    fn state(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
             .collect()
     }
 
@@ -335,68 +393,120 @@ mod tests {
         // included, with the models key it used to default to.
         let old = ACTIONS[..11]
             .iter()
-            .map(|(name, _, key)| (*name, Some(*key)))
-            .chain([("models", Some("ctrl+m"))])
+            .map(|(name, _, key)| (*name, *key))
+            .chain([("models", "ctrl+m")])
             .collect::<Vec<_>>();
-        let (bindings, skipped) = settle(chosen(&old));
-        assert_eq!(skipped, Vec::<String>::new());
+        let settled = settle(BTreeMap::new(), state(&old));
+        assert!(settled.unapplied.is_empty());
         assert_eq!(
-            bindings["models"], "F2",
+            settled.bindings["models"], "F2",
             "the unusable ctrl+m moves to a free function key"
         );
-        assert_eq!(bindings["messages_previous"], "alt+up");
-        validate(&bindings).unwrap();
+        assert_eq!(settled.bindings["messages_previous"], "alt+up");
+        validate(&settled.bindings).unwrap();
     }
 
     #[test]
     fn each_setting_that_cannot_apply_is_left_out_alone_and_named() {
-        let (bindings, skipped) = settle(chosen(&[
-            ("frobnicate", Some("alt+q")),
-            ("usage", Some("F6")),
-            ("agents", Some("ctrl+c")),
-            ("reasoning", None),
-            ("stash", Some("F6")),
-        ]));
-        assert_eq!(skipped, ["agents", "frobnicate", "reasoning", "usage"]);
+        let settled = settle(
+            config(&[
+                ("frobnicate", Some("alt+q")),
+                ("usage", Some("F6")),
+                ("agents", Some("ctrl+c")),
+                ("reasoning", None),
+            ]),
+            state(&[("stash", "F6")]),
+        );
+        assert_eq!(
+            settled.unapplied,
+            ["agents", "frobnicate", "reasoning", "usage"]
+        );
         // Two of the person's own on one key: the first by name keeps it, the
         // other keeps its default.
+        let bindings = &settled.bindings;
         assert_eq!(bindings["stash"], "F6");
         assert_eq!(bindings["usage"], "alt+u");
         assert_eq!(bindings["agents"], "alt+a");
         assert_eq!(bindings["reasoning"], "alt+r");
         assert!(!bindings.contains_key("frobnicate"));
-        validate(&bindings).unwrap();
+        validate(bindings).unwrap();
     }
 
     #[test]
-    fn a_shortcut_the_person_chose_wins_over_a_new_default() {
-        let (bindings, skipped) = settle(chosen(&[("sessions", Some("alt+up"))]));
-        assert_eq!(bindings["sessions"], "alt+up");
-        assert_eq!(bindings["messages_previous"], "none");
-        assert_eq!(skipped, ["messages_previous"]);
+    fn a_shortcut_the_person_chose_wins_over_a_new_default_without_a_word() {
+        let settled = settle(config(&[("sessions", Some("alt+up"))]), BTreeMap::new());
+        assert_eq!(settled.bindings["sessions"], "alt+up");
+        assert_eq!(settled.bindings["messages_previous"], "none");
+        assert!(settled.unapplied.is_empty(), "{:?}", settled.unapplied);
         assert_eq!(
-            resolve(&bindings, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+            resolve(
+                &settled.bindings,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)
+            ),
             Some("sessions")
         );
-        validate(&bindings).unwrap();
+        validate(&settled.bindings).unwrap();
+        // Setting Previous message to none in /keybinds changes nothing to
+        // save, and nothing is said either way.
+        let mut form = settled.bindings.clone();
+        form.insert("messages_previous".into(), "none".into());
+        let saved = saved_state(
+            &form,
+            &settled.bindings,
+            config(&[("sessions", Some("alt+up"))]),
+            BTreeMap::new(),
+        );
+        assert!(saved.is_empty(), "{saved:?}");
     }
 
     #[test]
-    fn a_save_keeps_only_what_differs_from_config_and_the_defaults() {
-        let (baseline, _) = settle(chosen(&[("usage", Some("F6"))]));
-        let mut bindings = baseline.clone();
-        bindings.insert("sessions".into(), "alt+up".into());
-        bindings.insert("messages_previous".into(), "none".into());
+    fn a_save_settles_a_config_line_that_did_not_apply() {
+        let lines = config(&[("usage", Some("ctrl+c"))]);
+        let settled = settle(lines.clone(), BTreeMap::new());
+        assert_eq!(settled.unapplied, ["usage"]);
+        // The form shows the default, and saving it as it is settles the line.
+        let saved = saved_state(
+            &settled.bindings,
+            &settled.bindings,
+            lines.clone(),
+            BTreeMap::new(),
+        );
+        assert_eq!(saved, state(&[("usage", "alt+u")]));
+        assert!(settle(lines, saved).unapplied.is_empty());
+    }
+
+    #[test]
+    fn a_save_keeps_only_what_differs_and_what_a_newer_haarness_wrote() {
+        let lines = config(&[("usage", Some("F6"))]);
+        let file = state(&[
+            ("future_action", "alt+z"),
+            ("messages_next", "alt+hyper+down"),
+        ]);
+        let loaded = settle(lines.clone(), file.clone());
+        // Not said: this version cannot apply them, a newer one wrote them.
+        assert!(loaded.unapplied.is_empty(), "{:?}", loaded.unapplied);
+        assert_eq!(loaded.bindings["messages_next"], "alt+down");
+        let mut form = loaded.bindings.clone();
+        form.insert("sessions".into(), "alt+up".into());
+        form.insert("messages_previous".into(), "none".into());
         // Put back to its default over config.toml's F6: that is a change too.
-        bindings.insert("usage".into(), "alt+u".into());
+        form.insert("usage".into(), "alt+u".into());
         assert_eq!(
-            changed(&bindings, &baseline),
-            BTreeMap::from([
-                ("messages_previous".into(), "none".into()),
-                ("sessions".into(), "alt+up".into()),
-                ("usage".into(), "alt+u".into()),
+            saved_state(&form, &loaded.bindings, lines.clone(), file.clone()),
+            state(&[
+                ("future_action", "alt+z"),
+                ("messages_next", "alt+hyper+down"),
+                ("messages_previous", "none"),
+                ("sessions", "alt+up"),
+                ("usage", "alt+u"),
             ])
         );
-        assert!(changed(&baseline, &baseline).is_empty());
+        // An edited action takes the edit; the newer action is still kept.
+        form.insert("messages_next".into(), "ctrl+n".into());
+        let saved = saved_state(&form, &loaded.bindings, lines.clone(), file);
+        assert_eq!(saved["messages_next"], "ctrl+n");
+        assert_eq!(saved["future_action"], "alt+z");
+        // Nothing changed, nothing new written.
+        assert!(saved_state(&loaded.bindings, &loaded.bindings, lines, BTreeMap::new()).is_empty());
     }
 }

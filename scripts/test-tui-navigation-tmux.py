@@ -301,11 +301,24 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         keys("Escape")
         checks.append("Answered elsewhere, a chat loses its mark and its place at the top")
 
-        # A person's own shortcut on a new default's key wins, and a setting
-        # that cannot apply is left out alone, said once on the status line.
-        config.write_text(base + '\n[tui.keybinds]\nsessions = "alt+up"\nfrobnicate = "alt+q"\nusage = "F6"\n')
+        # A person's own shortcut on a new default's key wins without a word;
+        # what really did not apply is named once at launch, by its label;
+        # what a newer Haarness left in tui-state.toml is neither named nor lost.
+        state = root / "data" / "config" / "tui-state.toml"
+
+        def notice():
+            return next((line.split("Shortcuts not applied:", 1)[1].split("·")[0].strip() for line in pane().splitlines() if "Shortcuts not applied:" in line), None)
+
+        config.write_text(base + '\n[tui.keybinds]\nsessions = "alt+up"\nfrobnicate = "alt+q"\nusage = "F6"\nagents = "ctrl+c"\n')
+        written = state.read_text() if state.exists() else ""
+        if "[keybindings]" in written:
+            written = written.replace("[keybindings]", '[keybindings]\nfuture_action = "alt+z"', 1)
+        else:
+            written += '\n[keybindings]\nfuture_action = "alt+z"\n'
+        state.write_text(written)
         tmux("respawn-pane", "-k", "-t", session, tui)
-        until(lambda: "Shortcuts not applied: frobnicate, messages_previous" in pane(), "the skipped shortcuts were not named")
+        until(lambda: notice() is not None, "the shortcuts that did not apply were not named")
+        assert notice() == "Agents, frobnicate", notice()
         screen("shortcuts-skipped")
         keys("M-Up")
         until(lambda: "Sessions" in pane() and len(rows()) >= 5, "Alt+Up did not open the session list it was given to")
@@ -313,7 +326,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         keys("F6")
         until(lambda: "usage" in pane().lower() and "context" in pane().lower(), "F6 from config.toml did not open usage")
         keys("Escape")
-        # /keybinds saves only what differs from config.toml and the defaults.
+        # /keybinds saves the change, settles the Agents line, keeps the newer entry.
         text("/keybinds")
         keys("Enter")
         until(lambda: "Keyboard shortcuts" in pane(), "/keybinds did not open")
@@ -326,13 +339,17 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         until(lambda: "F7" in pane(), "the stash shortcut was not edited")
         text("Apply these values")  # the Save row; "Save" also finds "Save draft to stash"
         keys("Enter")
-        state = root / "data" / "config" / "tui-state.toml"
         until(lambda: state.exists() and "F7" in state.read_text(), "the save did not reach tui-state.toml")
         saved = state.read_text().split("[keybindings]", 1)[-1].split("\n[", 1)[0]
-        assert "stash" in saved and not any(name in saved for name in ("messages_", "sessions", "usage", "agents")), saved
+        assert all(f"{name} =" in saved for name in ("stash", "agents", "future_action")), saved
+        assert not any(name in saved for name in ("messages_", "sessions", "usage")), saved
         keys("Escape")
+        tmux("respawn-pane", "-k", "-t", session, tui)
+        until(lambda: notice() is not None, "the config.toml typo was no longer named")
+        assert notice() == "frobnicate", notice()
+        screen("shortcuts-settled")
         config.write_text(base)
-        checks.append("A shortcut from config.toml wins over a new default, a bad one is named and skipped, and /keybinds saves only the change")
+        checks.append("A shortcut from config.toml wins over a new default quietly; what did not apply is named by label, /keybinds settles it, keeps a newer Haarness's entry and saves only the change")
 
         (EVIDENCE / "results.json").write_text(json.dumps({"checks": checks, "status": "passed"}, indent=2))
         print("PASS: " + "\nPASS: ".join(checks))

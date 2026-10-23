@@ -66,13 +66,16 @@ configurable shortcuts `messages_previous`, `messages_next`,
 may name `up`, `down`, `left`, `right`, `home`, `end`, `pageup` or `pagedown`
 with ctrl, alt or shift.
 
-A shortcut you chose wins over a default on the same key: `sessions = "alt+up"`
-keeps Alt+Up for the session list and leaves `messages_previous` without one.
-A setting that cannot apply (an unknown action, a key that cannot be bound, a
-key another of your shortcuts already has) is left out on its own while the rest
-apply, and the status line names what was left out once at launch. `/keybinds`
-saves only the shortcuts that differ from config.toml and the defaults, so a
-TUI from before these keys still reads the file.
+A shortcut you chose wins over a default on the same key, quietly:
+`sessions = "alt+up"` keeps Alt+Up for the session list and leaves
+`messages_previous` without one. A setting that cannot apply (an unknown action
+or a key that cannot be bound in config.toml, or a key two of your own
+shortcuts share) is left out on its own while the rest apply, and the status
+line names it once at launch, by its label; setting that shortcut in
+`/keybinds` settles it. `/keybinds` saves only the shortcuts that differ from
+config.toml and the defaults, plus any it was told to settle, and keeps what a
+newer Haarness wrote there, so a TUI from before these keys still reads the
+file unless you changed one of the message keys.
 
 Alt with an arrow reaches the TUI wherever Option or Alt reaches the terminal
 at all. iTerm2 and other xterm-style terminals send Alt+Up as `ESC [1;3A`;
