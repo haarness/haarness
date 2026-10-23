@@ -118,6 +118,14 @@ pub enum ReviewReason {
     /// passes, a path after a directory change), which Haarness cannot place
     /// and the person's messages do not name.
     UnplacedDeletion { path: String },
+    /// The command overwrites or empties the file at `path`, outside the
+    /// project, which the person's messages do not name.
+    UnnamedOverwrite { path: String },
+    /// The command overwrites the file at `path` (as written), which
+    /// Haarness cannot place and the person's messages do not name.
+    UnplacedOverwrite { path: String },
+    /// A shell (`program`) runs a here-document Haarness could not read.
+    UnreadScript { program: String },
     /// The command runs `program`'s inline code (`python3 -c`, `perl -e`),
     /// which plainly deletes or names a path outside the project, and the
     /// person's messages do not ask for it.

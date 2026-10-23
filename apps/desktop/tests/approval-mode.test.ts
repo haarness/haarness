@@ -233,6 +233,14 @@ test("the reviewer's note reads as one quiet line, and only for a reviewed reque
     "«Auto review» · «Destructive action»: «This deletes \u2068\"$TARGET\"\u2069, a path Haarness can't place, and your messages do not name it.»",
   );
   assert.equal(
+    reviewNote({ status: "asked", reason: { code: "unnamed_overwrite", path: "/etc/hosts" } }, words),
+    "«Auto review»: «This overwrites \u2068/etc/hosts\u2069, outside the project, and your messages do not name it.»",
+  );
+  assert.equal(
+    reviewNote({ status: "asked", reason: { code: "unread_script", program: "bash" } }, words),
+    "«Auto review»: «This runs a here-document Haarness could not read with \u2068bash\u2069, and your messages do not ask for it.»",
+  );
+  assert.equal(
     reviewNote({ status: "asked", rule: "Destructive action", reason: { code: "inline_code", program: "python3 -c" } }, words),
     "«Auto review» · «Destructive action»: «This runs \u2068python3 -c\u2069 code that deletes files or reaches outside the project, and your messages do not ask for it.»",
   );

@@ -99,6 +99,9 @@ pub enum Effect {
     /// Inline interpreter code that plainly deletes or names a path outside
     /// the project (`raw` names the interpreter and its flag).
     Inline,
+    /// A shell runs a here-document Haarness could not read (`raw` names
+    /// the shell).
+    Script,
 }
 
 /// One command as written in the line.
@@ -385,13 +388,17 @@ impl Reader<'_> {
         // walks down from the root, which a long or deeply nested line
         // cannot afford for every command.
         let mut stack = vec![(tree.root_node(), None)];
-        let mut command_nodes = Vec::new();
+        let mut command_nodes: Vec<(tree_sitter::Node<'_>, Option<tree_sitter::Node<'_>>)> =
+            Vec::new();
         let mut redirects = Vec::new();
         let mut previous = HashMap::new();
         let mut wrappers = HashMap::new();
         // The statement whose here-document or here-string a command reads,
         // where the parser hung it on something around the command.
         let mut documents = HashMap::new();
+        // Parse errors: what the parser could not place is read best-effort.
+        let mut errors = Vec::new();
+        let mut loose_starts = Vec::new();
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
             if node.kind() == "command" {
@@ -411,6 +418,16 @@ impl Reader<'_> {
             }
             if node.kind() == "file_redirect" {
                 redirects.push(node);
+            }
+            if node.kind() == "ERROR" {
+                errors.push(node);
+            }
+            if node.kind() == "heredoc_start"
+                && parent.is_some_and(|parent: tree_sitter::Node<'_>| {
+                    parent.kind() != "heredoc_redirect"
+                })
+            {
+                loose_starts.push(node.start_byte());
             }
             let start = stack.len();
             stack.extend(node.children(&mut cursor).map(|child| (child, Some(node))));
@@ -434,9 +451,51 @@ impl Reader<'_> {
                 *parent = Some(statement);
             }
         }
+        // `python3 - <<'EOF' 2>&1 | tail`: the parser stops at the pipe
+        // after a redirect behind a here-document. What follows the
+        // operator, to the end of its line, is read as a command line of its
+        // own, as the shell runs it.
+        let mut hidden: HashMap<usize, Vec<String>> = HashMap::new();
+        for error in &errors {
+            let text = node_text(*error, command);
+            if !["|", "&&", "||", ";", "&"]
+                .iter()
+                .any(|operator| text.trim_start().starts_with(operator))
+            {
+                continue;
+            }
+            let rest = command.get(error.end_byte()..).unwrap_or_default();
+            let line = rest.split('\n').next().unwrap_or_default().trim();
+            let mut holder = error.parent();
+            while let Some(node) = holder.filter(|node| node.kind() != "redirected_statement") {
+                holder = node.parent();
+            }
+            if let Some(statement) = holder
+                && !line.is_empty()
+            {
+                hidden
+                    .entry(statement.id())
+                    .or_default()
+                    .push(line.to_owned());
+            }
+        }
         // A here-document the parser could not attach (`true && bash <<'A'
-        // && cat <<'B'` parses with an error): what it feeds is unread.
-        let lost_document = tree.root_node().has_error() && command.contains("<<");
+        // && cat <<'B'`): only a shell before it would run it as a script,
+        // and that script is unread.
+        let mut lost_readers = HashSet::new();
+        for start in loose_starts {
+            if let Some((reader, _)) = command_nodes
+                .iter()
+                .filter(|(node, _)| node.end_byte() <= start)
+                .max_by_key(|(node, _)| node.end_byte())
+                && let Some(program) = reader.child_by_field_name("name")
+            {
+                let name = program_name(&node_text(program, command));
+                if SHELLS.contains(&name.as_str()) || matches!(name.as_str(), "source" | ".") {
+                    lost_readers.insert(reader.id());
+                }
+            }
+        }
         // The traversal above visits parents before children but pops LIFO;
         // sort by position so patterns keep source order.
         command_nodes.sort_by_key(|(node, _)| node.start_byte());
@@ -514,18 +573,20 @@ impl Reader<'_> {
                 .named_children(&mut cursor)
                 .any(|child| child.kind() == "variable_assignment");
             self.spell(&words, assigned || carried);
-            if lost_document {
+            if lost_readers.contains(&node.id()) {
                 self.stopped();
-                if depth.text == 0 {
-                    self.analysis.deletions.push(Deletion {
-                        raw: "a here-document Haarness could not read".into(),
-                        value: String::new(),
-                        complete: false,
-                        effect: Effect::Deletes,
-                        at: None,
-                        moved: false,
-                    });
-                }
+                let name = words
+                    .first()
+                    .map(|program| program_name(&program.value))
+                    .unwrap_or_default();
+                self.analysis.deletions.push(Deletion {
+                    raw: name.clone(),
+                    value: name,
+                    complete: false,
+                    effect: Effect::Script,
+                    at: None,
+                    moved: false,
+                });
             }
             if self.overflow {
                 continue;
@@ -538,6 +599,11 @@ impl Reader<'_> {
                 documents: &documents,
             };
             self.unwrap(&words, Some(stdin), command, depth);
+            if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
+                for line in lines {
+                    self.nested(line, depth);
+                }
+            }
         }
         self.text_depth = outer_depth;
         for redirect in redirects {
@@ -1282,9 +1348,22 @@ impl Reader<'_> {
                         || word.value.starts_with("--file=")
                 });
                 if in_place {
+                    // BSD `sed -i '' …` and `sed -i .bak …`: the word after a
+                    // bare `-i` is its backup suffix.
+                    let suffix = arguments.iter().enumerate().find_map(|(index, word)| {
+                        (word.value == "-i")
+                            .then(|| arguments.get(index + 1))
+                            .flatten()
+                            .filter(|next| next.value.is_empty() || next.value.starts_with('.'))
+                            .map(|next| next.node.id())
+                    });
                     let files =
                         operands(&["-e", "--expression", "-f", "--file", "-l", "--line-length"]);
-                    for word in files.into_iter().skip(usize::from(!scripted)) {
+                    for word in files
+                        .into_iter()
+                        .filter(|word| Some(word.node.id()) != suffix)
+                        .skip(usize::from(!scripted))
+                    {
                         for path in expanded(word, source) {
                             record(word, &path, true);
                         }
@@ -2768,11 +2847,18 @@ pub fn outside_deletions(
     for deletion in &analysis.deletions {
         let home = home_expansion(&deletion.raw, &deletion.value);
         let relative = home.is_none() && !Path::new(&deletion.value).is_absolute();
-        // After a link the line made, any path may lead through it.
-        let linked = analysis.links.iter().any(|link| match (link, deletion.at) {
-            (Some(link), Some(at)) => *link <= at,
-            _ => true,
-        });
+        // After a link the line made, any path may lead through it; but `rm`
+        // of a bare name in the folder (`tar -xzf x.tgz && rm x.tgz`)
+        // removes at most a link, never what it points to.
+        let bare_name = relative
+            && deletion.effect == Effect::Deletes
+            && !deletion.value.contains('/')
+            && !matches!(deletion.value.as_str(), "." | "..");
+        let linked = !bare_name
+            && analysis.links.iter().any(|link| match (link, deletion.at) {
+                (Some(link), Some(at)) => *link <= at,
+                _ => true,
+            });
         let from = if linked || (relative && deletion.moved) {
             None
         } else if relative {
@@ -2782,12 +2868,15 @@ pub fn outside_deletions(
         };
         let target = match from.filter(|_| deletion.complete) {
             // A `>` into a place nobody can tell may make a new file: not
-            // counted. Anything else is.
+            // counted. Neither is a copy or rewrite onto a path nobody can
+            // place (`cp in.json "$OUT"`, `sed -i … "$f"`), unless what is
+            // written of it leads away: absolute, from home, or up.
             None if deletion.effect == Effect::Empties => continue,
+            None if deletion.effect == Effect::Replaces && !leads_away(&deletion.raw) => continue,
             None => OutsideDeletion {
                 path: deletion.raw.clone(),
                 placed: false,
-                inline: deletion.effect == Effect::Inline,
+                effect: deletion.effect,
             },
             Some(from) => {
                 let resolved = match home {
@@ -2801,7 +2890,7 @@ pub fn outside_deletions(
                 OutsideDeletion {
                     path: resolved.display().to_string(),
                     placed: true,
-                    inline: false,
+                    effect: deletion.effect,
                 }
             }
         };
@@ -2820,9 +2909,24 @@ pub struct OutsideDeletion {
     /// False for a variable, a substitution, `xargs`'s input, a git alias, or
     /// a relative path after a directory change nobody can follow.
     pub placed: bool,
-    /// Inline interpreter code that plainly deletes or names a path outside
-    /// the project: `path` names the interpreter and its flag.
-    pub inline: bool,
+    /// What the command does to it. For inline code and an unread script,
+    /// `path` names the program.
+    pub effect: Effect,
+}
+
+/// Whether the literal start of a word nobody can place leads away from
+/// the project: an absolute path, one from home, or one going up.
+fn leads_away(raw: &str) -> bool {
+    let literal: String = raw
+        .trim_start_matches(['"', '\''])
+        .chars()
+        .take_while(|c| !matches!(c, '$' | '`' | '"' | '\''))
+        .collect();
+    literal.starts_with('/')
+        || literal.starts_with('~')
+        || literal == ".."
+        || literal.starts_with("../")
+        || literal.contains("/../")
 }
 
 /// `path` from `base` the way `cd` takes it by default: `..` drops the last
@@ -4029,21 +4133,39 @@ mod readings {
         let placed = |path: &str| OutsideDeletion {
             path: path.to_owned(),
             placed: true,
-            inline: false,
+            effect: Effect::Deletes,
         };
         let unplaced = |path: &str| OutsideDeletion {
             path: path.to_owned(),
             placed: false,
-            inline: false,
+            effect: Effect::Deletes,
         };
         let inline = |path: &str| OutsideDeletion {
             path: path.to_owned(),
             placed: false,
-            inline: true,
+            effect: Effect::Inline,
         };
         let home = haarness_protocol::home_dir().unwrap();
         let at_home = |rest: &str| placed(&resolve(&home, Path::new(rest)).display().to_string());
-        let found = |command: &str| outside_deletions(command, &workspace, None);
+        // What a command does to each path is checked on its own below:
+        // here an overwrite reads as a deletion.
+        let effects = |command: &str| {
+            outside_deletions(command, &workspace, None)
+                .into_iter()
+                .map(|found| found.effect)
+                .collect::<Vec<_>>()
+        };
+        let found = |command: &str| {
+            outside_deletions(command, &workspace, None)
+                .into_iter()
+                .map(|mut found| {
+                    if matches!(found.effect, Effect::Replaces | Effect::Empties) {
+                        found.effect = Effect::Deletes;
+                    }
+                    found
+                })
+                .collect::<Vec<_>>()
+        };
         // Inside the project, as written or through `..` that stays there.
         assert!(found("rm -rf build").is_empty());
         assert!(found("rm -rf ./build/../build").is_empty());
@@ -4194,8 +4316,9 @@ mod readings {
             ("CDPATH=/tmp cd sub && rm -rf node_modules", "node_modules"),
             ("ln -s ~ home-link && rm -rf home-link/x", "home-link/x"),
             ("rm${IFS}-rf${IFS}build", "rm${IFS}-rf${IFS}build"),
-            ("cp new.bin \"$TARGET\"", "\"$TARGET\""),
-            ("sed -i 's/a/b/' \"$FILE\"", "\"$FILE\""),
+            ("cp new.bin \"/etc/$TARGET\"", "\"/etc/$TARGET\""),
+            ("sed -i 's/a/b/' ~/\"$FILE\"", "~/\"$FILE\""),
+            ("cp new.bin ../\"$TARGET\"", "../\"$TARGET\""),
         ] {
             assert_eq!(found(command), vec![unplaced(written)], "{command}");
         }
@@ -4247,6 +4370,20 @@ mod readings {
             "\"$(git rev-parse --show-toplevel)/scripts/test.sh\"",
             "$RM -rf build",
             "printf x > \"$LOG\"",
+            // A copy or rewrite onto a path nobody can place, written
+            // without leading away.
+            "for f in src/*.rs; do sed -i 's/a/b/' \"$f\"; done",
+            "cp in.json \"$OUT\"",
+            "echo x | tee \"$LOG\"",
+            "sed -i 's/a/b/' \"${FILES[@]}\"",
+            // `rm` of a bare name after unpacking or moving removes at most
+            // a link.
+            "tar -xzf x.tgz && rm -f x.tgz",
+            "unzip -o a.zip && rm a.zip",
+            "mv a b && rm -f c",
+            // BSD `sed -i ''` and `sed -i .bak`: the suffix is no path.
+            "sed -i '' 's/a/b/' notes.txt",
+            "sed -i .bak 's/a/b/' notes.txt",
         ] {
             assert!(found(command).is_empty(), "{command}: {:?}", found(command));
         }
@@ -4316,6 +4453,19 @@ mod readings {
                 .any(|dir| dir.ends_with(".ssh/*")),
             "{:?}",
             analysis.external_dirs
+        );
+        // An overwrite says so.
+        assert_eq!(
+            effects(&format!("cp new.bin {}", file.display())),
+            [Effect::Replaces]
+        );
+        assert_eq!(
+            effects(&format!("printf x > {}", file.display())),
+            [Effect::Empties]
+        );
+        assert_eq!(
+            effects(&format!("rm -f {}", file.display())),
+            [Effect::Deletes]
         );
         // What makes links, and a link made in a loop, leave later (or any)
         // deletions unplaceable.
@@ -4492,8 +4642,8 @@ mod readings {
                 .patterns
                 .contains(&"ok".to_owned())
         );
-        // A document the parser could not attach is unread: the command is
-        // incomplete, and the deletion check cannot place what it runs.
+        // A document the parser could not attach is unread when a shell
+        // runs it: that command is incomplete, and the check asks.
         let lost = analyze(
             "true && bash <<'A' && cat <<'B'\nrm -rf /tmp/heredoc-y\nA\nhello\nB",
             &workspace,
@@ -4502,6 +4652,55 @@ mod readings {
             lost.written.iter().any(|written| written.incomplete),
             "{lost:?}"
         );
-        assert!(lost.deletions.iter().any(|deletion| !deletion.complete));
+        assert!(
+            lost.deletions
+                .iter()
+                .any(|deletion| deletion.effect == Effect::Script && deletion.value == "bash")
+        );
+        // Lines the parser trips on but the shell runs as written: they meet
+        // the rules as they did before, the part after the pipe included.
+        let ask = PermissionEngine::new(vec![
+            rule("bash:*", PermissionDecision::Allow),
+            rule("bash:git push *", PermissionDecision::Ask),
+        ]);
+        for command in [
+            "python3 - <<'EOF' 2>&1 | tail -20\nprint(1)\nEOF",
+            "psql <<SQL 2>&1 | tail -5\nselect 1;\nSQL",
+            "git commit -F - <<'EOF' 2>&1 | tail -2\nmessage\nEOF",
+            "cat > a.txt <<'A' && cat > b.txt <<'B'\na\nA\nb\nB",
+            "cat <<A <<B\na\nA\nb\nB",
+        ] {
+            assert_eq!(decide(command), PermissionDecision::Allow, "{command}");
+            let analysis = analyze(command, &workspace);
+            assert!(
+                !analysis.written.iter().any(|written| written.incomplete),
+                "{command}: {analysis:?}"
+            );
+            assert!(
+                analysis.patterns.iter().all(|pattern| {
+                    ask.evaluate(&format!("bash:{pattern}")) == PermissionDecision::Allow
+                }),
+                "{command}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                outside_deletions(command, &workspace, None).is_empty(),
+                "{command}: {:?}",
+                analysis.deletions
+            );
+        }
+        // What runs after the pipe meets its rules.
+        assert!(
+            analyze(
+                "python3 - <<'EOF' 2>&1 | tail -20\nprint(1)\nEOF",
+                &workspace
+            )
+            .patterns
+            .contains(&"tail -20".to_owned())
+        );
+        assert_eq!(
+            decide("python3 - <<'EOF' 2>&1 | rm -rf x\nprint(1)\nEOF"),
+            PermissionDecision::Deny
+        );
     }
 }
