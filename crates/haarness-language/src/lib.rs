@@ -25,6 +25,11 @@ const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 10_000;
 const MAX_MESSAGE_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_DIAGNOSTICS: usize = 100;
 
+/// The chat id an agent's shell command gets (`haarness_core::SESSION_ID_ENV`).
+/// A server started by such a command inherits it; it names none of that
+/// server's chats, so its language servers and formatters do not get it.
+const SESSION_ID_ENV: &str = "HAARNESS_SESSION_ID";
+
 fn true_value() -> bool {
     true
 }
@@ -699,6 +704,7 @@ impl LanguageService {
         }
         command
             .current_dir(dunce::simplified(&self.workspace))
+            .env_remove(SESSION_ID_ENV)
             .envs(&formatter.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -858,6 +864,7 @@ impl Client {
         command
             .args(config.command.iter().skip(1))
             .current_dir(dunce::simplified(&workspace))
+            .env_remove(SESSION_ID_ENV)
             .envs(&config.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
