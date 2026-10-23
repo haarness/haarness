@@ -440,6 +440,13 @@ impl App {
                     self.live_threads.entry(thread_id).or_default().phase = Some(phase.clone());
                 }
                 if on_current {
+                    // The call the turn ran last: a batch waiting on a
+                    // person names its step only here.
+                    if matches!(phase.state.as_str(), "tool" | "reviewing")
+                        && phase.call_id.is_some()
+                    {
+                        self.last_tool_call.clone_from(&phase.call_id);
+                    }
                     self.phase = Some(phase);
                 }
             }

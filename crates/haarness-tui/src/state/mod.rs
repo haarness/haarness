@@ -859,6 +859,8 @@ pub struct App {
     /// The request the card's typed letters, staged answer and chip
     /// selection belong to: a different one at the head starts afresh.
     pub permission_head: Option<String>,
+    /// The call the open conversation's latest tool status named.
+    pub last_tool_call: Option<String>,
     /// Highlighted chip on the docked approval panel: an index into
     /// `permission_choices`, or into confirm/cancel while `confirm_always`
     /// is staged.
@@ -1186,6 +1188,7 @@ impl App {
             permission_typed: None,
             permission_settling: None,
             permission_head: None,
+            last_tool_call: None,
             permission_selection: 0,
             permission_scroll: None,
             permission_fit: std::cell::Cell::new(SubjectFit::default()),
