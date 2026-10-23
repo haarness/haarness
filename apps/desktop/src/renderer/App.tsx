@@ -228,25 +228,34 @@ export function App() {
   /** The side panel lies over the conversation when the workbench has no
    * room for both (shell.css, `.dock-over`). */
   const dockCovers = () => workbenchWidth() < besideRoom;
-  /** Shown again by the person while the sidebar made room for the side
-   * panel; it then stays until the panel closes. */
+  /** Shown again by the person while the sidebar made room beside the chat;
+   * it then stays until the side panel and the side chat are closed. */
   const [keepSidebar, setKeepSidebar] = createSignal(false);
-  /** The sidebar steps aside, before the side panel covers the chat, when
-   * that alone gives the two room side by side. */
-  const sidebarYields = () =>
-    sidebarVisible() &&
-    !keepSidebar() &&
-    dockVisible() &&
-    !dockExpanded() &&
-    windowWidth() - sidebarWidth() - 1 < besideRoom &&
-    windowWidth() >= besideRoom;
+  /** The room the conversation needs with what stands beside it: the side
+   * panel (the side chat then shares its place), or else the side chat. */
+  const roomNeeded = () =>
+    dockVisible()
+      ? dockExpanded() ? 0 : besideRoom
+      : sideWanted() ? CHAT_MIN + 1 + SIDE_MIN : 0;
+  /** The sidebar steps aside, before the side panel or the side chat covers
+   * the chat, when that alone gives them room side by side. */
+  const sidebarYields = () => {
+    const need = roomNeeded();
+    return (
+      sidebarVisible() &&
+      !keepSidebar() &&
+      need > 0 &&
+      windowWidth() - sidebarWidth() - 1 < need &&
+      windowWidth() >= need
+    );
+  };
   const sidebarShown = () => sidebarVisible() && !sidebarYields();
   createEffect(() => {
-    if (!dockVisible()) setKeepSidebar(false);
+    if (!roomNeeded()) setKeepSidebar(false);
   });
   function showSidebar() {
     setSidebarVisible(true);
-    if (dockVisible()) setKeepSidebar(true);
+    if (roomNeeded()) setKeepSidebar(true);
   }
   function toggleSidebar() {
     if (sidebarShown()) setSidebarVisible(false);
