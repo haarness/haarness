@@ -6,13 +6,18 @@ import {
   homePath,
   OPEN_GROUP_LIMIT,
   splitPath,
-  toolGroupKey,
+  toolGroupKeys,
   toolGroups,
   toolSummary,
   toolTitle,
 } from "../src/renderer/settings-lists";
 
-const tool = (id: string, source = "native", description = ""): ToolCatalogEntry => ({
+const tool = (
+  id: string,
+  source = "native",
+  description = "",
+  [group, groupTitle] = ["core", "Core"],
+): ToolCatalogEntry => ({
   id,
   source,
   description,
@@ -20,8 +25,8 @@ const tool = (id: string, source = "native", description = ""): ToolCatalogEntry
   enabled: true,
   essential: false,
   estimatedTokens: 10,
-  group: "core",
-  groupTitle: "Core",
+  group,
+  groupTitle,
   loaded: false,
 });
 
@@ -43,7 +48,8 @@ test("a path shows this computer's own home folder as ~ and keeps its last folde
   assert.deepEqual(splitPath("C:\\Users\\Ana\\code\\app", "C:\\Users\\Ana"), { head: "~\\code", tail: "\\app" });
 });
 
-test("tools group by source: built-in first, then each MCP server, then each extension", () => {
+test("tools group by source, and built-in tools by the catalog's groups with families split out", () => {
+  const browser = ["back", "click", "cpu_analyze", "fill", "tabs_open"].map((name) => tool("browser_" + name));
   const groups = toolGroups([
     tool("mcp__weather__show_weather", "mcp:weather"),
     tool("write"),
@@ -51,28 +57,58 @@ test("tools group by source: built-in first, then each MCP server, then each ext
     tool("apply_patch"),
     tool("mcp__docs__search", "mcp:docs"),
     tool("mcp__docs__read_page", "mcp:docs"),
+    tool("memory_save", "native", "", ["memory", "Memory"]),
+    tool("memory_list", "native", "", ["memory", "Memory"]),
+    tool("agent_manage", "native", "", ["agents", "Agents"]),
+    ...browser,
   ]);
   assert.deepEqual(
-    groups.map((group) => [group.key, group.kind, group.name, group.tools.map((item) => item.id)]),
+    groups.map((group) => [group.key, group.kind, group.name, group.tools.length]),
     [
-      ["builtin", "builtin", "", ["apply_patch", "write"]],
-      ["mcp:docs", "mcp", "docs", ["mcp__docs__read_page", "mcp__docs__search"]],
-      ["mcp:weather", "mcp", "weather", ["mcp__weather__show_weather"]],
-      ["extension:lint", "extension", "lint", ["ext__lint__run_lint"]],
+      ["builtin", "builtin", "", 10],
+      ["mcp:docs", "mcp", "docs", 2],
+      ["mcp:weather", "mcp", "weather", 1],
+      ["extension:lint", "extension", "lint", 1],
     ],
   );
-  assert.equal(toolGroupKey(tool("mcp__docs__search", "mcp:docs")), "mcp:docs");
-  assert.equal(toolGroupKey(tool("bash")), "builtin");
+  // Core first, its browser_* family after it, then the other groups by title.
+  assert.deepEqual(
+    groups[0].groups!.map((part) => [part.key, part.name, part.prefix, part.tools.map((item) => item.id)]),
+    [
+      ["builtin/core", "Core", undefined, ["apply_patch", "write"]],
+      ["builtin/browser", "Browser", "browser", ["browser_back", "browser_click", "browser_cpu_analyze", "browser_fill", "browser_tabs_open"]],
+      ["builtin/agents", "Agents", undefined, ["agent_manage"]],
+      ["builtin/memory", "Memory", undefined, ["memory_list", "memory_save"]],
+    ],
+  );
+  assert.equal(groups[1].groups, undefined);
+  assert.deepEqual(toolGroupKeys(groups, "browser_click"), ["builtin", "builtin/browser"]);
+  assert.deepEqual(toolGroupKeys(groups, "mcp__docs__search"), ["mcp:docs"]);
+  assert.deepEqual(toolGroupKeys(groups, "missing"), []);
+  // A family as large as its group, or named like it, is that group already.
+  const small = toolGroups(browser.slice(0, 4).concat(tool("bash")));
+  assert.deepEqual(small[0].groups!.map((part) => part.key), ["builtin/core"]);
   assert.ok(OPEN_GROUP_LIMIT >= 1);
 });
 
-test("a tool reads by a human title and the first sentence of its description", () => {
+test("a tool reads by a careful title and the first sentence of its description", () => {
   assert.equal(toolTitle(tool("apply_patch")), "Apply patch");
   assert.equal(toolTitle(tool("bash")), "Bash");
+  assert.equal(toolTitle(tool("lsp")), "LSP");
+  assert.equal(toolTitle(tool("mcp_manage")), "MCP manage");
+  assert.equal(toolTitle(tool("webfetch")), "Web fetch");
+  assert.equal(toolTitle(tool("todowrite")), "Todo write");
+  assert.equal(toolTitle(tool("multiedit")), "Multi edit");
+  assert.equal(toolTitle(tool("browser_cpu_analyze")), "Browser CPU analyze");
+  assert.equal(toolTitle(tool("browser_cpu_analyze"), "browser"), "CPU analyze");
+  assert.equal(toolTitle(tool("browser_network_get"), "browser"), "Network get");
   assert.equal(toolTitle(tool("mcp__weather__show_weather")), "Show weather");
   assert.equal(toolTitle(tool("mcp__my_server__list-items")), "List items");
+  assert.equal(toolTitle(tool("mcp__web__fetchUrl")), "Fetch URL");
   assert.equal(toolTitle(tool("ext__lint__run_lint")), "Run lint");
-  assert.equal(toolTitle(tool("mcp_resource_read")), "Mcp resource read");
+  // A server's one-word name is not guessed at.
+  assert.equal(toolTitle(tool("mcp__weather__getweather")), "getweather");
+  assert.equal(toolTitle(tool("mcp__weather__api")), "API");
   assert.equal(
     toolSummary("Run a terminal command through the workspace shell. Use bash for builds, tests, git."),
     "Run a terminal command through the workspace shell.",

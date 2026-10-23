@@ -33,15 +33,26 @@ export function splitPath(path: string, home?: string) {
 export type ToolGroupKind = "builtin" | "mcp" | "extension";
 
 export interface ToolGroup {
+  /** "builtin", "mcp:<server>", "extension:<name>"; a built-in part is "builtin/<group>". */
   key: string;
   kind: ToolGroupKind;
-  /** The server or extension name; built-in tools take their title from the caller. */
+  /**
+   * The server or extension name; for a part of the built-in tools, the
+   * catalog's group title ("Core", "Memory") or the family's ("Browser").
+   * The whole built-in group takes its title from the caller.
+   */
   name: string;
   tools: ToolCatalogEntry[];
+  /** Built-in tools only: the catalog's groups, families split out. */
+  groups?: ToolGroup[];
+  /** A family split out by name: the prefix its titles leave out. */
+  prefix?: string;
 }
 
 /** Groups this size and smaller start open; larger ones start folded. */
 export const OPEN_GROUP_LIMIT = 6;
+/** Tools of one catalog group sharing a name prefix this often are their own part. */
+const FAMILY_SIZE = 5;
 
 function sourceOf(tool: ToolCatalogEntry): { kind: ToolGroupKind; name: string } {
   const [kind, ...rest] = tool.source.split(":");
@@ -51,7 +62,52 @@ function sourceOf(tool: ToolCatalogEntry): { kind: ToolGroupKind; name: string }
   return { kind: "builtin", name: "" };
 }
 
-/** Built-in tools first, then each MCP server, then each extension, by name. */
+const byTitle = (prefix?: string) => (a: ToolCatalogEntry, b: ToolCatalogEntry) =>
+  toolTitle(a, prefix).localeCompare(toolTitle(b, prefix)) || a.id.localeCompare(b.id);
+
+/**
+ * The built-in tools by the catalog's own groups (the TUI's), Core first. A
+ * family a group holds, such as the browser_* tools in Core, is a part of its
+ * own after its group, named by its prefix.
+ */
+function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
+  const buckets = new Map<string, { title: string; tools: ToolCatalogEntry[] }>();
+  for (const tool of tools) {
+    const key = tool.group || "core";
+    const bucket = buckets.get(key) ?? { title: tool.groupTitle || key, tools: [] };
+    bucket.tools.push(tool);
+    buckets.set(key, bucket);
+  }
+  const parts: ToolGroup[] = [];
+  const order = [...buckets.keys()].sort((a, b) =>
+    a === "core" ? -1 : b === "core" ? 1 : buckets.get(a)!.title.localeCompare(buckets.get(b)!.title),
+  );
+  for (const key of order) {
+    const bucket = buckets.get(key)!;
+    const families = new Map<string, ToolCatalogEntry[]>();
+    for (const tool of bucket.tools) {
+      const prefix = tool.id.includes("_") ? tool.id.slice(0, tool.id.indexOf("_")) : "";
+      // A group named after the prefix ("memory", "sessions") is that family already.
+      if (!prefix || key.startsWith(prefix) || prefix.startsWith(key)) continue;
+      families.set(prefix, [...(families.get(prefix) ?? []), tool]);
+    }
+    const split = [...families].filter(([, members]) => members.length >= FAMILY_SIZE && members.length < bucket.tools.length);
+    const rest = bucket.tools.filter((tool) => !split.some(([, members]) => members.includes(tool)));
+    if (rest.length)
+      parts.push({ key: "builtin/" + key, kind: "builtin", name: bucket.title, tools: rest.sort(byTitle()) });
+    for (const [prefix, members] of split.sort(([a], [b]) => a.localeCompare(b)))
+      parts.push({
+        key: "builtin/" + prefix,
+        kind: "builtin",
+        name: humanize([prefix]),
+        prefix,
+        tools: members.sort(byTitle(prefix)),
+      });
+  }
+  return parts;
+}
+
+/** Built-in tools first, in their parts, then each MCP server, then each extension, by name. */
 export function toolGroups(tools: ToolCatalogEntry[]): ToolGroup[] {
   const groups = new Map<string, ToolGroup>();
   for (const tool of tools) {
@@ -62,24 +118,67 @@ export function toolGroups(tools: ToolCatalogEntry[]): ToolGroup[] {
     groups.set(key, group);
   }
   const rank: Record<ToolGroupKind, number> = { builtin: 0, mcp: 1, extension: 2 };
-  for (const group of groups.values())
-    group.tools.sort((a, b) => toolTitle(a).localeCompare(toolTitle(b)) || a.id.localeCompare(b.id));
+  for (const group of groups.values()) {
+    group.tools.sort(byTitle());
+    if (group.kind === "builtin") group.groups = builtinParts(group.tools);
+  }
   return [...groups.values()].sort(
     (a, b) => rank[a.kind] - rank[b.kind] || a.name.localeCompare(b.name),
   );
 }
 
-/** The group a tool is listed under, for opening it on a search jump. */
-export function toolGroupKey(tool: ToolCatalogEntry) {
-  const { kind, name } = sourceOf(tool);
-  return kind === "builtin" ? "builtin" : `${kind}:${name}`;
+/** The keys of the group, and part, that list a tool, for opening them on a search jump. */
+export function toolGroupKeys(groups: ToolGroup[], id: string): string[] {
+  for (const group of groups) {
+    const part = group.groups?.find((candidate) => candidate.tools.some((tool) => tool.id === id));
+    if (part) return [group.key, part.key];
+    if (group.tools.some((tool) => tool.id === id)) return [group.key];
+  }
+  return [];
 }
 
-/** "apply_patch" → "Apply patch"; an MCP or extension tool drops its server prefix. */
-export function toolTitle(tool: Pick<ToolCatalogEntry, "id">) {
-  const bare = tool.id.replace(/^(?:mcp|ext)__.*?__/, "");
-  const words = bare.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || tool.id;
-  return words.charAt(0).toUpperCase() + words.slice(1);
+/** Words written in capitals wherever they appear in a tool's name. */
+const ACRONYMS = new Set([
+  "ai", "api", "cli", "cpu", "css", "csv", "dns", "gpu", "html", "http", "https", "id", "io", "ip", "js",
+  "json", "jsonl", "llm", "lsp", "mcp", "os", "pdf", "ram", "sdk", "sql", "ssh", "svg", "tcp", "tls",
+  "ts", "tui", "ui", "uri", "url", "urls", "xml", "yaml",
+]);
+/** Haarness's own tools whose name runs two words together. */
+const COMPOUNDS: Record<string, string[]> = {
+  multiedit: ["multi", "edit"],
+  todoread: ["todo", "read"],
+  todowrite: ["todo", "write"],
+  webfetch: ["web", "fetch"],
+};
+
+function humanize(words: string[]) {
+  const text = words
+    .map((word) => (ACRONYMS.has(word.toLowerCase()) ? word.toUpperCase() : word.toLowerCase()))
+    .join(" ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * A tool's title, from its name: "apply_patch" → "Apply patch", "lsp" → "LSP",
+ * "browser_cpu_analyze" in the Browser part → "CPU analyze". An MCP or
+ * extension tool drops its server prefix; one whose name is a single word of
+ * its own ("getweather") keeps it as written rather than guess at it.
+ */
+export function toolTitle(tool: Pick<ToolCatalogEntry, "id">, prefix?: string) {
+  let bare = tool.id.replace(/^(?:mcp|ext)__.*?__/, "");
+  const native = bare === tool.id;
+  if (prefix && bare.startsWith(prefix + "_") && bare.length > prefix.length + 1) bare = bare.slice(prefix.length + 1);
+  const words = bare
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[\s_-]+/)
+    .filter(Boolean);
+  if (!words.length) return tool.id;
+  if (words.length === 1) {
+    const word = words[0].toLowerCase();
+    if (COMPOUNDS[word]) return humanize(COMPOUNDS[word]);
+    if (!native && !ACRONYMS.has(word)) return bare;
+  }
+  return humanize(words);
 }
 
 const SUMMARY_LIMIT = 140;

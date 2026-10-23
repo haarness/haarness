@@ -18,7 +18,7 @@ import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
 import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
-import { definitionSource, OPEN_GROUP_LIMIT, toolGroupKey, toolGroups, toolSummary, toolTitle, type DefinitionRow } from "./settings-lists";
+import { definitionSource, OPEN_GROUP_LIMIT, toolGroupKeys, toolGroups, toolSummary, toolTitle, type DefinitionRow, type ToolGroup } from "./settings-lists";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
 import { RouterConnectionDialog } from "./RouterConnectionDialog";
@@ -30,10 +30,12 @@ import {
   Match,
   Show,
   Switch,
+  createMemo,
   createSignal,
   createEffect,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import { computers, lastSeen, loadComputers, platformName, watchComputers } from "./computers";
 import type * as T from "@haarness/sdk";
@@ -1522,44 +1524,126 @@ function Tools() {
     app.state.catalogVersion;
     void app.run(refresh);
   });
-  // A tool Search opened is shown in its group, which opens for it.
-  createEffect(() => {
-    const target = app.state.settingsTarget;
-    const tool = target?.startsWith("tool:")
-      ? catalog()?.tools.find((item) => "tool:" + item.id === target)
-      : undefined;
-    if (tool) setOpened((state) => ({ ...state, [toolGroupKey(tool)]: true }));
-  });
   const needle = () => filter().trim().toLowerCase();
-  const groups = () =>
+  const groups = createMemo(() =>
     toolGroups(
       (catalog()?.tools ?? []).filter(
         (tool) =>
           !needle() ||
           `${tool.id} ${toolTitle(tool)} ${tool.description}`.toLowerCase().includes(needle()),
       ),
-    );
-  const expanded = (group: ReturnType<typeof groups>[number]) =>
+    ),
+  );
+  // Groups and tools render by key, so a switch keeps its row (and the
+  // keyboard) when the catalog it changed comes back.
+  const index = createMemo(() => {
+    const groupsByKey = new Map<string, ToolGroup>();
+    const visit = (list: ToolGroup[]) =>
+      list.forEach((group) => {
+        groupsByKey.set(group.key, group);
+        visit(group.groups ?? []);
+      });
+    visit(groups());
+    return { groups: groupsByKey, tools: new Map((catalog()?.tools ?? []).map((tool) => [tool.id, tool])) };
+  });
+  // A tool Search opened is shown in its group and part, which open for it.
+  createEffect(() => {
+    const target = app.state.settingsTarget;
+    if (!target?.startsWith("tool:")) return;
+    const keys = toolGroupKeys(untrack(groups), target.slice("tool:".length));
+    if (catalog() && keys.length)
+      setOpened((state) => ({ ...state, ...Object.fromEntries(keys.map((key) => [key, true])) }));
+  });
+  const expanded = (group: ToolGroup) =>
     needle()
       ? !closedInSearch()[group.key]
       : (opened()[group.key] ?? group.tools.length <= OPEN_GROUP_LIMIT);
-  const toggle = (group: ReturnType<typeof groups>[number]) => {
+  const toggle = (group: ToolGroup) => {
     const open = !expanded(group);
     if (needle()) setClosedInSearch((state) => ({ ...state, [group.key]: !open }));
     else setOpened((state) => ({ ...state, [group.key]: open }));
   };
-  const groupTitle = (group: ReturnType<typeof groups>[number]) =>
-    group.kind === "builtin" ? t("Built-in") : group.name;
-  const groupMeta = (group: ReturnType<typeof groups>[number]) => {
+  const groupTitle = (group: ToolGroup) =>
+    group.key === "builtin" ? t("Built-in") : group.kind === "builtin" ? t(group.name) : group.name;
+  const groupMeta = (group: ToolGroup) => {
     const off = group.tools.filter((tool) => !tool.enabled).length;
     return [
       group.kind === "mcp" ? t("MCP server") : group.kind === "extension" ? t("Extension") : "",
       group.tools.length === 1 ? t("1 tool") : t("{count} tools", { count: group.tools.length }),
-      off ? t("{count} turned off", { count: off }) : "",
+      off === 1 ? t("1 turned off") : off ? t("{count} turned off", { count: off }) : "",
     ]
       .filter(Boolean)
       .join(" · ");
   };
+  function ToolRow(props: { id: string; prefix?: string }) {
+    const tool = () => index().tools.get(props.id)!;
+    return (
+      <Show when={index().tools.get(props.id)}>
+        <Row
+          literal
+          title={toolTitle(tool(), props.prefix)}
+          description={toolSummary(tool().description)}
+          tag={<code class="setting-id">{tool().id}</code>}
+          target={"tool:" + tool().id}
+        >
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label={t("Enable {name}", { name: tool().id })}
+            checked={tool().enabled}
+            onChange={(event) =>
+              app.run(async () =>
+                setCatalog(
+                  await app.api("updateTool", tool().id, {
+                    enabled: event.currentTarget.checked,
+                  }),
+                ),
+              )
+            }
+          />
+        </Row>
+      </Show>
+    );
+  }
+  function GroupView(props: { group: string; part?: boolean }) {
+    const group = () => index().groups.get(props.group)!;
+    const body = "tool-group-" + props.group.replace(/[^\w-]/g, "_");
+    return (
+      <Show when={index().groups.get(props.group)}>
+        <div class="tool-group" classList={{ "tool-group-part": props.part }}>
+          <button
+            type="button"
+            class="tool-group-toggle disclosure-toggle"
+            aria-expanded={expanded(group())}
+            aria-controls={body}
+            onClick={() => toggle(group())}
+          >
+            <Icon name="chevron" size="xs" />
+            <strong>{groupTitle(group())}</strong>
+            <span>{groupMeta(group())}</span>
+          </button>
+          <Show when={expanded(group())}>
+            <div id={body}>
+              <Show
+                when={group().groups}
+                fallback={
+                  <For each={group().tools.map((tool) => tool.id)}>
+                    {(id) => <ToolRow id={id} prefix={group().prefix} />}
+                  </For>
+                }
+              >
+                {(parts) => (
+                  <For each={parts().map((part) => part.key)}>
+                    {(key) => <GroupView group={key} part />}
+                  </For>
+                )}
+              </Show>
+            </div>
+          </Show>
+        </div>
+      </Show>
+    );
+  }
   return (
     <>
       <Row
@@ -1604,56 +1688,8 @@ function Tools() {
       <Show when={catalog() && needle() && !groups().length}>
         <p class="muted">{t("No tool matches that search.")}</p>
       </Show>
-      <For each={groups()}>
-        {(group) => {
-          const body = "tool-group-" + group.key.replace(/[^\w-]/g, "_");
-          return (
-            <div class="tool-group">
-              <button
-                type="button"
-                class="tool-group-toggle disclosure-toggle"
-                aria-expanded={expanded(group)}
-                aria-controls={body}
-                onClick={() => toggle(group)}
-              >
-                <Icon name="chevron" size="xs" />
-                <strong>{groupTitle(group)}</strong>
-                <span>{groupMeta(group)}</span>
-              </button>
-              <Show when={expanded(group)}>
-                <div id={body}>
-                  <For each={group.tools}>
-                    {(tool) => (
-                      <Row
-                        literal
-                        title={toolTitle(tool)}
-                        description={toolSummary(tool.description)}
-                        tag={<code class="setting-id">{tool.id}</code>}
-                        target={"tool:" + tool.id}
-                      >
-                        <input
-                          type="checkbox"
-                          role="switch"
-                          aria-label={t("Enable {name}", { name: tool.id })}
-                          checked={tool.enabled}
-                          onChange={(event) =>
-                            app.run(async () =>
-                              setCatalog(
-                                await app.api("updateTool", tool.id, {
-                                  enabled: event.currentTarget.checked,
-                                }),
-                              ),
-                            )
-                          }
-                        />
-                      </Row>
-                    )}
-                  </For>
-                </div>
-              </Show>
-            </div>
-          );
-        }}
+      <For each={groups().map((group) => group.key)}>
+        {(key) => <GroupView group={key} />}
       </For>
     </>
   );

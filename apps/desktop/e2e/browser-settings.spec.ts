@@ -636,10 +636,29 @@ test("a search jump marks its row without moving it, and Providers, Models and T
   await expect(settings().locator(".tools-tokens")).toContainText("advertised tokens");
   await builtIn.click();
   await expect(builtIn).toHaveAttribute("aria-expanded", "true");
+  // Inside, the catalog's own groups, the browser tools a part of their own.
+  const parts = settings().locator(".tool-group-part > .tool-group-toggle");
+  const core = parts.filter({ hasText: /^Core/ });
+  const browser = parts.filter({ hasText: /^Browser/ });
+  await expect(core).toHaveAttribute("aria-expanded", "false");
+  await expect(browser).toHaveAttribute("aria-expanded", "false");
+  await core.click();
   const bash = settings().locator('[data-setting="tool:bash"]');
   await expect(bash.locator("strong")).toHaveText("Bash");
   // One sentence: the description's first.
   await expect(bash.locator("p")).toHaveText(/^[^.]+\.$/);
+  await expect(settings().locator('[data-setting="tool:lsp"] strong')).toHaveText("LSP");
+  await expect(settings().locator('[data-setting="tool:browser_cpu_analyze"]')).toHaveCount(0);
+  await browser.click();
+  await expect(settings().locator('[data-setting="tool:browser_cpu_analyze"] strong')).toHaveText("CPU analyze");
+  // A switch keeps its row, and the keyboard, when the catalog comes back.
+  const toggle = bash.getByRole("switch", { name: "Enable bash", exact: true });
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(toggle).toBeChecked();
   await builtIn.click();
   await expect(bash).toHaveCount(0);
   await closeSettings();
