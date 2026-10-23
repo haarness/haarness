@@ -1774,9 +1774,10 @@ pub struct ScriptFile {
 /// `exec`. One a wrapper runs in another folder (`env -C`, `sudo -D`,
 /// `sudo -i`) is not named, nor a relative one once the folder is unknown
 /// (after a `cd` the line does not spell out, or one that may have failed),
-/// nor any in a line the tree cannot read whole. On Windows, whose `cmd`
-/// reads a line otherwise (quotes, `^`, `%CD%`, `\`, drives), none is named
-/// at all.
+/// nor any in a line the tree cannot read whole, nor one under `/proc` or
+/// `/dev`, which lead elsewhere in the server's process than in the shell's
+/// (`/proc/self/cwd`, `/dev/fd/3`). On Windows, whose `cmd` reads a line
+/// otherwise (quotes, `^`, `%CD%`, `\`, drives), none is named at all.
 ///
 /// Its text may be shown only in the shape people run: the line's first
 /// statement, its steps before the script joined by `&&` and each a `cd` to
@@ -2074,6 +2075,9 @@ impl Line<'_> {
             return;
         };
         let lexical = super::normalize_absolute(&path);
+        if in_system_folder(&lexical) {
+            return;
+        }
         let outputs: Vec<PathBuf> = redirect_targets(redirects, self.source)
             .into_iter()
             .filter_map(|target| self.place(&target))
@@ -2089,7 +2093,12 @@ impl Line<'_> {
                 .any(|written| lexical.starts_with(written))
         {
             Some(haarness_protocol::ScriptWithheld::Written)
-        } else if !self.trusted || !script.trusted {
+        } else if !self.trusted
+            || !script.trusted
+            || outputs
+                .iter()
+                .any(|output| in_system_folder(&super::normalize_absolute(output)))
+        {
             Some(haarness_protocol::ScriptWithheld::Changeable)
         } else {
             None
@@ -2231,7 +2240,6 @@ impl Line<'_> {
                             && !value.is_empty()
                             && value != "-"
                             && !value.contains(['*', '?', '['])
-                            && !STDIN_PATHS.contains(&value)
                     })?;
                     if elsewhere {
                         return Some(Run::Elsewhere);
@@ -2485,6 +2493,13 @@ fn plain_path(word: &Word<'_>) -> bool {
         && Path::new(value)
             .components()
             .all(|part| part != Component::ParentDir)
+}
+
+/// Whether a path (lexical, absolute) is under `/proc` or `/dev`, where the
+/// server's process and the shell's see different files (`/proc/self/cwd`,
+/// `/dev/fd/3`, `/dev/stdin`).
+pub(super) fn in_system_folder(path: &Path) -> bool {
+    path.starts_with("/proc") || path.starts_with("/dev")
 }
 
 /// A `chmod` mode: octal digits, or symbolic clauses (`+x`, `u=rwx,go-w`).
@@ -3910,6 +3925,36 @@ mod scripts {
             first("make; cd /tmp && ./run.sh"),
             Some(PathBuf::from("/tmp/run.sh"))
         );
+    }
+
+    /// Under `/proc` and `/dev` the server's process answers, not the
+    /// shell's: `/proc/self/cwd` is the server's folder, `/dev/fd/3` a file
+    /// the server has open. No script there is named, and output sent there
+    /// withholds the script.
+    #[test]
+    fn nothing_under_proc_or_dev_is_named() {
+        for command in [
+            "bash /proc/self/cwd/run.sh",
+            "cd sub && bash /proc/self/cwd/run.sh",
+            "sh /proc/self/fd/3",
+            "bash /dev/fd/3",
+            "bash /dev/stdin",
+            "sh /dev/stdout",
+            "source /dev/fd/0",
+            "cd /proc/self && sh cwd/run.sh",
+            "cd /dev && sh fd/3",
+            "sh ../../proc/self/cwd/run.sh",
+        ] {
+            assert_eq!(found(command), Vec::<PathBuf>::new(), "{command}");
+        }
+        for command in [
+            "./run.sh > /proc/self/cwd/run.sh",
+            "./run.sh 2> /proc/self/fd/9",
+            "cd /proc/self/cwd && /tmp/run.sh > run.sh",
+        ] {
+            assert_eq!(withheld_last(command), Some(Changeable), "{command}");
+        }
+        assert_eq!(withheld("./run.sh > /dev/null 2>&1"), None);
     }
 
     #[test]
