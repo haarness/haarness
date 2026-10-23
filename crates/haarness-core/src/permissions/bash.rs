@@ -673,7 +673,7 @@ impl Reader<'_> {
         match name.as_str() {
             "eval" => self.nested(&joined(arguments), depth),
             "source" | "." => {
-                self.note_script(arguments.first(), depth);
+                self.note_sourced(arguments.first(), depth);
                 let text = match arguments.first() {
                     Some(first) if first.node.kind() == "process_substitution" => {
                         substituted(first.node, source).map_or(Input::Unknown, Input::Text)
@@ -693,6 +693,13 @@ impl Reader<'_> {
                     &["unset", "chdir", "split-string", "argv0"],
                 );
                 let rest = after_assignments(options.rest);
+                if options
+                    .value("C")
+                    .or_else(|| options.value("chdir"))
+                    .is_some()
+                {
+                    self.note_elsewhere(program, rest, depth);
+                }
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
                     // `env -S` splits its text into words, options and
                     // assignments included, and goes on with the words
@@ -727,6 +734,17 @@ impl Reader<'_> {
                     return;
                 }
                 let rest = after_assignments(options.rest);
+                // `-D` runs the command in another folder, `-i` in the
+                // target user's home.
+                if name == "sudo"
+                    && (options.flags.contains('i')
+                        || options
+                            .value("D")
+                            .or_else(|| options.value("chdir"))
+                            .is_some())
+                {
+                    self.note_elsewhere(program, rest, depth);
+                }
                 if rest.is_empty() {
                     // A shell that reads its commands from standard input.
                     if options.flags.contains(['s', 'i']) {
@@ -868,6 +886,39 @@ impl Reader<'_> {
         }
         let file = home_expansion(&word.raw, value).unwrap_or_else(|| PathBuf::from(value));
         scripts.found.push((word.node.start_byte(), file));
+    }
+
+    /// The file `source` or `.` reads, for [`script_files`]. A name without
+    /// a slash is looked up on `PATH` first (by `sh`, and by `bash` unless
+    /// told otherwise), so one that is found there is not claimed: the file
+    /// shown could be the other one.
+    fn note_sourced(&mut self, word: Option<&Word<'_>>, depth: Depth) {
+        if self.scripts.is_none() {
+            return;
+        }
+        let on_path = |name: &str| {
+            std::env::var_os("PATH").is_some_and(|paths| {
+                std::env::split_paths(&paths).any(|folder| folder.join(name).is_file())
+            })
+        };
+        let word = word.filter(|word| word.value.contains('/') || !on_path(&word.value));
+        self.note_script(word, depth);
+    }
+
+    /// A wrapper that runs its command in another folder (`env -C`,
+    /// `sudo -D`, `sudo -i`): a relative script in that command is not
+    /// claimed, since the line does not say where it is.
+    fn note_elsewhere(&mut self, wrapper: &Word<'_>, rest: &[Word<'_>], depth: Depth) {
+        let (Some(scripts), Some(last)) = (&mut self.scripts, rest.last()) else {
+            return;
+        };
+        if depth.text == 0 {
+            scripts.moves.push(Move {
+                at: wrapper.node.start_byte(),
+                to: None,
+                until: Some(last.node.end_byte()),
+            });
+        }
     }
 
     /// A script a program reads, read as a command of its own.
@@ -1156,10 +1207,15 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<PathBuf> {
     if !reader.read(command, Depth::default()) {
         return Vec::new();
     }
-    let Some(Scripts { mut found, moves }) = reader.scripts else {
+    let Some(Scripts {
+        mut found,
+        mut moves,
+    }) = reader.scripts
+    else {
         return Vec::new();
     };
     found.sort_by_key(|(at, _)| *at);
+    moves.sort_by_key(|step| step.at);
     found
         .into_iter()
         .filter_map(|(at, file)| {
@@ -3086,6 +3142,42 @@ mod scripts {
         assert_eq!(
             first("(if true; then cd sub; fi); ./x.sh").as_deref(),
             Some("/project/./x.sh")
+        );
+    }
+
+    #[test]
+    fn a_wrapper_that_runs_its_command_elsewhere_hides_a_relative_script() {
+        for command in [
+            "env -C sub ./x.sh",
+            "env --chdir=sub bash x.sh",
+            "env --chdir sub bash x.sh",
+            "sudo -D sub ./x.sh",
+            "sudo --chdir=sub ./x.sh",
+            "sudo -i bash x.sh",
+            "sudo -u bob -i ./x.sh",
+        ] {
+            assert_eq!(first(command), None, "{command}");
+        }
+        // An absolute one is where it says, and the rest of the line is
+        // where it was.
+        assert_eq!(first("env -C sub /tmp/x.sh").as_deref(), Some("/tmp/x.sh"));
+        assert_eq!(found("sudo -i ./a.sh; ./b.sh"), ["/project/./b.sh"]);
+        assert_eq!(
+            first("env FOO=1 ./x.sh").as_deref(),
+            Some("/project/./x.sh")
+        );
+    }
+
+    #[test]
+    fn a_sourced_name_without_a_slash_that_path_finds_is_not_claimed() {
+        // `sh` is on every PATH; a file named so in the project would not be
+        // the one `source sh` reads.
+        assert_eq!(first("source sh"), None);
+        assert_eq!(first(". sh"), None);
+        assert_eq!(first("source ./sh").as_deref(), Some("/project/./sh"));
+        assert_eq!(
+            first("source haarness-not-on-path.sh").as_deref(),
+            Some("/project/haarness-not-on-path.sh")
         );
     }
 
