@@ -213,12 +213,12 @@ async fn auto_approves_what_the_reviewer_allows_and_blocks_what_it_denies() {
     };
     for part in [
         "<transcript>",
-        "user: !tool bash {\"command\":\"printf yes > allowed.txt\"} [review:allow]",
-        "agent called: bash {\"command\":\"printf yes > allowed.txt\"}",
+        "user: \"!tool bash {\\\"command\\\":\\\"printf yes \\u003e allowed.txt\\\"} [review:allow]\"",
+        "agent called: \"bash\" {\"command\":\"printf yes \\u003e allowed.txt\"}",
         "<action>",
-        "\"command\": \"printf no > blocked.txt\"",
+        "\"command\": \"printf no \\u003e blocked.txt\"",
         "\"permission\": \"bash\"",
-        &format!("Working directory: {}", workspace.0.display()),
+        &format!("Working directory: \"{}\"", workspace.0.display()),
         "No sandbox",
     ] {
         assert!(content.contains(part), "{part} missing from {content}");
