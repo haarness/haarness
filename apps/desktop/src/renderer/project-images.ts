@@ -133,16 +133,18 @@ const CARRIED = /^data:(image\/(?:png|jpeg|gif|webp))((?:;[^,;]*)*);base64,/i;
 /**
  * The image a finished `read` returned, to preview in its row: the image the
  * result carries (a data URL the server made smaller), or the project file it
- * read, which is read again like a reply's image. An image outside the
- * project that the result does not carry is not shown.
+ * read, which is read again like a reply's image and shown only while it has
+ * the size the result recorded (`size`), so a file changed since is not
+ * passed off as what the agent read. An image outside the project that the
+ * result does not carry is not shown.
  */
 export function readToolImage(
   name: string,
   result: { is_error: boolean; metadata?: unknown } | undefined,
   root: string,
-): { data: string } | { path: string } | undefined {
+): { data: string } | { path: string; size?: number } | undefined {
   if (name !== "read" || !result || result.is_error) return undefined;
-  const metadata = result.metadata as { attachments?: unknown; mime?: unknown } | undefined;
+  const metadata = result.metadata as { attachments?: unknown; mime?: unknown; size?: unknown } | undefined;
   const source = Array.isArray(metadata?.attachments) ? metadata.attachments[0] : undefined;
   if (typeof source !== "string" || typeof metadata?.mime !== "string" || !metadata.mime.startsWith("image/"))
     return undefined;
@@ -154,14 +156,21 @@ export function readToolImage(
   }
   if (/^data:/i.test(source)) return undefined;
   const found = projectImagePath(source, root);
-  return found && "path" in found ? found : undefined;
+  if (!found || !("path" in found)) return undefined;
+  return typeof metadata.size === "number" ? { path: found.path, size: metadata.size } : found;
 }
 
 /** Reads one project file through the server's file API. */
-export type ImageReader = (path: string) => Promise<{ content?: string; encoding?: string } | undefined>;
+export type ImageReader = (
+  path: string,
+) => Promise<{ content?: string; encoding?: string; size?: number } | undefined>;
 
-/** What a reply shows for a path: the image, or why there is none. */
-export type ShownImage = { data: string; note?: undefined } | { data?: undefined; note: ImageNote };
+/** The bytes base64 text decodes to, from its length alone. */
+const decodedSize = (base64: string) =>
+  Math.floor((base64.length * 3) / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+
+/** What a reply shows for a path: the image and its file's size in bytes, or why there is none. */
+export type ShownImage = { data: string; size?: number; note?: undefined } | { data?: undefined; note: ImageNote };
 
 /** A remembered answer: the project's change it was read after, when, and the file API's writes of it then. */
 type Entry = ShownImage & { epoch: number; at: number; touch: number };
@@ -199,7 +208,7 @@ function remember(entry: string, value: Entry) {
 export function shownProjectImage(scope: string, path: string): ShownImage | undefined {
   const entry = remembered.get(key(scope, path));
   if (!entry) return undefined;
-  return entry.data !== undefined ? { data: entry.data } : { note: entry.note! };
+  return entry.data !== undefined ? { data: entry.data, size: entry.size } : { note: entry.note! };
 }
 
 /**
@@ -373,8 +382,9 @@ export function requestProjectImage(
           async (file): Promise<ShownImage> => {
             const data = fileImage(file);
             if (!data) return { note: "failed" };
-            if (data === remembered.get(entry)?.data) return { data };
-            return (await decode(data)) ? { data } : { note: "failed" };
+            const size = file?.size ?? decodedSize(file!.content!);
+            if (data === remembered.get(entry)?.data) return { data, size };
+            return (await decode(data)) ? { data, size } : { note: "failed" };
           },
           (error: unknown): ShownImage => ({ note: tooLarge(error) ? "large" : "failed" }),
         )
@@ -383,10 +393,10 @@ export function requestProjectImage(
         .then((result) => {
           const shown: ShownImage = result === "late" ? { note: "failed" } : result;
           const before = remembered.get(entry);
-          // A file that cannot be read again keeps the picture it showed.
-          const kept = shown.note && before?.data !== undefined ? { data: before.data } : shown;
-          remember(entry, { ...kept, ...asked });
-          if (kept.data !== before?.data || kept.note !== before?.note) settle(scope, path, kept);
+          // A file gone or no longer an image says so from now on; a reply
+          // already showing its picture keeps it (Markdown.tsx).
+          remember(entry, { ...shown, ...asked });
+          if (shown.data !== before?.data || shown.note !== before?.note) settle(scope, path, shown);
         })
         .finally(() => {
           clearTimeout(timer);

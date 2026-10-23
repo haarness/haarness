@@ -12,7 +12,14 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { imageProject, onProjectImageSettled, readProjectImage, readToolImage, shownProjectImage } from "./project-images";
+import {
+  imageProject,
+  onProjectImageSettled,
+  readProjectImage,
+  readToolImage,
+  shownProjectImage,
+  type ShownImage,
+} from "./project-images";
 import { openImage } from "./ImageViewer";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
@@ -139,7 +146,12 @@ export function ToolActivity(props: {
     undefined,
     {
       equals: (a, b) =>
-        a === b || (!!a && !!b && ("data" in a ? "data" in b && a.data === b.data : "path" in b && a.path === b.path)),
+        a === b ||
+        (!!a &&
+          !!b &&
+          ("data" in a
+            ? "data" in b && a.data === b.data
+            : "path" in b && a.path === b.path && a.size === b.size)),
     },
   );
   /** This row's own menu turned the apps off: it says so where the page was, with Undo. */
@@ -343,18 +355,25 @@ export function ToolActivity(props: {
  * carries, or the project file it read, read again like a reply's image.
  * Nothing shows until the image is there; a click opens it full size.
  */
-function ReadImage(props: { image: { data: string } | { path: string }; alt: string }) {
+function ReadImage(props: { image: { data: string } | { path: string; size?: number }; alt: string }) {
   const store = useApp();
   const image = props.image;
   const project = imageProject(store.state);
   const connection = project?.connection;
+  /** The file as the read saw it: one changed since (another size) is not shown. */
+  const same = (shown: ShownImage | undefined) =>
+    shown?.data !== undefined && ("data" in image || image.size === undefined || shown.size === image.size)
+      ? shown.data
+      : undefined;
   const [data, setData] = createSignal(
-    "data" in image ? image.data : connection ? shownProjectImage(connection, image.path)?.data : undefined,
+    "data" in image ? image.data : connection ? same(shownProjectImage(connection, image.path)) : undefined,
   );
   if ("path" in image && project) {
     const reading = new AbortController();
     const off = onProjectImageSettled((scope, path, shown) => {
-      if (scope === connection && path === image.path && shown.data !== undefined) setData(shown.data);
+      // A picture the row shows stays when its file changes or goes.
+      const next = scope === connection && path === image.path ? same(shown) : undefined;
+      if (next) setData(next);
     });
     readProjectImage(project, image.path, reading.signal);
     onCleanup(() => {
