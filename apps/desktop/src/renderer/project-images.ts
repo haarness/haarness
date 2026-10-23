@@ -117,6 +117,36 @@ export function fileImage(file: { content?: string; encoding?: string } | undefi
   return type ? `data:${type};base64,${file.content}` : undefined;
 }
 
+/** Image types a read tool's own result shows as it carries them. */
+const CARRIED = /^data:(image\/(?:png|jpeg|gif|webp))((?:;[^,;]*)*);base64,/i;
+
+/**
+ * The image a finished `read` returned, to preview in its row: the image the
+ * result carries (a data URL the server made smaller), or the project file it
+ * read, which is read again like a reply's image. An image outside the
+ * project that the result does not carry is not shown.
+ */
+export function readToolImage(
+  name: string,
+  result: { is_error: boolean; metadata?: unknown } | undefined,
+  root: string,
+): { data: string } | { path: string } | undefined {
+  if (name !== "read" || !result || result.is_error) return undefined;
+  const metadata = result.metadata as { attachments?: unknown; mime?: unknown } | undefined;
+  const source = Array.isArray(metadata?.attachments) ? metadata.attachments[0] : undefined;
+  if (typeof source !== "string" || typeof metadata?.mime !== "string" || !metadata.mime.startsWith("image/"))
+    return undefined;
+  const carried = CARRIED.exec(source);
+  if (carried) {
+    const payload = source.slice(carried[0].length);
+    const data = fileImage({ content: payload, encoding: "base64" });
+    return data ? { data } : undefined;
+  }
+  if (/^data:/i.test(source)) return undefined;
+  const found = projectImagePath(source, root);
+  return found && "path" in found ? found : undefined;
+}
+
 /** Reads one project file through the server's file API. */
 export type ImageReader = (path: string) => Promise<{ content?: string; encoding?: string } | undefined>;
 

@@ -10,6 +10,7 @@ import {
   onProjectImageSettled,
   projectChanged,
   projectImagePath,
+  readToolImage,
   relabelProjectImages,
   requestProjectImage,
   shownProjectImage,
@@ -139,6 +140,26 @@ test("only raster types are read, and only bytes that start as one are shown", (
     undefined,
   ])
     assert.equal(fileImage(file), undefined, JSON.stringify(file));
+});
+
+test("a read's preview is the image its result carries, or the project file it read", () => {
+  const done = (attachment: string, mime = "image/png") => ({
+    is_error: false,
+    metadata: { attachments: [attachment], mime, path: `${root}/shot.png` },
+  });
+  const carried = `data:image/png;name=shot.png;base64,${base64(png)}`;
+  assert.deepEqual(readToolImage("read", done(carried), root), { data: `data:image/png;base64,${base64(png)}` });
+  assert.deepEqual(readToolImage("read", done(`${root}/out/shot.png`), root), { path: "out/shot.png" });
+  // Outside the project, an image the result does not carry is not shown.
+  assert.equal(readToolImage("read", done("/tmp/shot.png"), root), undefined);
+  // An SVG, bytes that are no image, another type or a failed read keep the row as it is.
+  assert.equal(readToolImage("read", done(`data:image/svg+xml;base64,${base64(ascii("<svg/>"))}`, "image/svg+xml"), root), undefined);
+  assert.equal(readToolImage("read", done(`data:image/png;base64,${base64(ascii("not a png"))}`), root), undefined);
+  assert.equal(readToolImage("read", done(`${root}/a.pdf`, "application/pdf"), root), undefined);
+  assert.equal(readToolImage("read", { ...done(carried), is_error: true }, root), undefined);
+  assert.equal(readToolImage("read", { is_error: false, metadata: { mime: "image/png" } }, root), undefined);
+  assert.equal(readToolImage("read", undefined, root), undefined);
+  assert.equal(readToolImage("bash", done(carried), root), undefined);
 });
 
 test("a reply's own markup cannot dress as a project image or as one that opens larger", () => {
