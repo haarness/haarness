@@ -76,15 +76,29 @@ pub struct Deletion {
     pub value: String,
     /// The value is all literal.
     pub complete: bool,
-    /// It destroys only a file that already exists: a `>` redirect empties
-    /// one, and makes a new one harmlessly.
-    pub existing: bool,
+    /// What it does to the path.
+    pub effect: Effect,
     /// Where it starts in the line, when it is in the line itself rather
     /// than in text run again.
     pub at: Option<usize>,
     /// It runs in a directory a wrapper chose (`env -C`, `sudo -D`, `sudo
     /// -i`), so a relative path cannot be placed.
     pub moved: bool,
+}
+
+/// What a command does to a path it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    /// Deletes it, whatever it is.
+    Deletes,
+    /// Replaces it when it is a file that is there (`cp`, `sed -i`, `tee`).
+    Replaces,
+    /// Empties it when it is a file that is there (a `>` redirect); one
+    /// into a place nobody can tell may make a new file.
+    Empties,
+    /// Inline interpreter code that plainly deletes or names a path outside
+    /// the project (`raw` names the interpreter and its flag).
+    Inline,
 }
 
 /// One command as written in the line.
@@ -143,12 +157,10 @@ const READ_ONLY: &[&str] = &[
     "printf",
     "readlink",
     "realpath",
-    "rg",
     "sha1sum",
     "sha256sum",
     "sha512sum",
     "shasum",
-    "sort",
     "stat",
     "strings",
     "tail",
@@ -302,6 +314,10 @@ struct Stdin<'a, 't> {
     /// The parent of each statement with redirects, by node id: a shell
     /// with a redirect (`… | sh 2>&1`) is a pipeline stage through it.
     wrappers: &'a HashMap<usize, tree_sitter::Node<'t>>,
+    /// The statement whose here-document or here-string each command reads,
+    /// by node id, where the parser hung it on a list, a pipeline, a `!`, a
+    /// subshell or a group around the command.
+    documents: &'a HashMap<usize, tree_sitter::Node<'t>>,
 }
 
 /// What a command reads on standard input, as far as the command line says.
@@ -373,6 +389,9 @@ impl Reader<'_> {
         let mut redirects = Vec::new();
         let mut previous = HashMap::new();
         let mut wrappers = HashMap::new();
+        // The statement whose here-document or here-string a command reads,
+        // where the parser hung it on something around the command.
+        let mut documents = HashMap::new();
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
             if node.kind() == "command" {
@@ -382,6 +401,13 @@ impl Reader<'_> {
                 && let Some(parent) = parent
             {
                 wrappers.insert(node.id(), parent);
+            }
+            if node.kind() == "redirected_statement" && has_document(node) {
+                if let Some(body) = node.child_by_field_name("body") {
+                    for reader in document_readers(body) {
+                        documents.insert(reader.id(), node);
+                    }
+                }
             }
             if node.kind() == "file_redirect" {
                 redirects.push(node);
@@ -408,6 +434,9 @@ impl Reader<'_> {
                 *parent = Some(statement);
             }
         }
+        // A here-document the parser could not attach (`true && bash <<'A'
+        // && cat <<'B'` parses with an error): what it feeds is unread.
+        let lost_document = tree.root_node().has_error() && command.contains("<<");
         // The traversal above visits parents before children but pops LIFO;
         // sort by position so patterns keep source order.
         command_nodes.sort_by_key(|(node, _)| node.start_byte());
@@ -463,7 +492,9 @@ impl Reader<'_> {
                     tokens.push(node_text(child, command));
                 }
             }
-            let words = words(node, command);
+            // Words written after a redirect (`rm 2>&1 -rf ~/x`) or a
+            // here-document operator are the command's too.
+            let (words, carried) = command_words(node, parent, command);
             self.check_paths(&words, command);
             if depth.text == 0 {
                 self.source = None;
@@ -482,7 +513,20 @@ impl Reader<'_> {
             let assigned = node
                 .named_children(&mut cursor)
                 .any(|child| child.kind() == "variable_assignment");
-            self.spell(&words, assigned);
+            self.spell(&words, assigned || carried);
+            if lost_document {
+                self.stopped();
+                if depth.text == 0 {
+                    self.analysis.deletions.push(Deletion {
+                        raw: "a here-document Haarness could not read".into(),
+                        value: String::new(),
+                        complete: false,
+                        effect: Effect::Deletes,
+                        at: None,
+                        moved: false,
+                    });
+                }
+            }
             if self.overflow {
                 continue;
             }
@@ -491,6 +535,7 @@ impl Reader<'_> {
                 parent,
                 previous: &previous,
                 wrappers: &wrappers,
+                documents: &documents,
             };
             self.unwrap(&words, Some(stdin), command, depth);
         }
@@ -525,7 +570,7 @@ impl Reader<'_> {
                     raw: node_text(dest, command),
                     value: value.clone(),
                     complete,
-                    existing: true,
+                    effect: Effect::Empties,
                     at: (depth.text == 0).then(|| dest.start_byte()),
                     moved: false,
                 });
@@ -1012,25 +1057,47 @@ impl Reader<'_> {
     /// What `name` deletes or overwrites among `arguments`: see
     /// [`BashAnalysis::deletions`]. Only what is cheap to read for certain;
     /// a program's options with values are skipped by their usual spelling.
+    /// A brace list (`{dist,build}`) is expanded and each path placed.
+    #[allow(clippy::too_many_lines)]
     fn check_deletions(&mut self, name: &str, arguments: &[Word<'_>], source: &str) {
         let top = self.text_depth == 0;
         let moved = self.moved > 0;
+        let workspace = self.workspace;
         let deletions = std::cell::RefCell::new(&mut self.analysis.deletions);
-        // A word deleted (`existing`: emptied) as written. A brace list
-        // (`{a,b}`) is several paths nobody can place one by one.
-        let record =
-            |word: &Word<'_>, raw: String, value: String, complete: bool, existing: bool| {
-                deletions.borrow_mut().push(Deletion {
-                    complete: complete && !brace_list(&word.raw),
-                    raw,
-                    value,
-                    existing,
-                    at: top.then(|| word.node.start_byte()),
-                    moved,
-                });
-            };
-        let push = |word: &Word<'_>, value: String, complete: bool| {
-            record(word, word.raw.clone(), value, complete, false);
+        // A path deleted (`existing`: emptied or replaced) as written.
+        let record = |word: &Word<'_>, path: &Path_, existing: bool| {
+            deletions.borrow_mut().push(Deletion {
+                raw: path.raw.clone(),
+                value: path.value.clone(),
+                complete: path.complete,
+                effect: if existing {
+                    Effect::Replaces
+                } else {
+                    Effect::Deletes
+                },
+                at: top.then(|| word.node.start_byte()),
+                moved,
+            });
+        };
+        // What can't be placed at all (`xargs rm`, a git alias, inline code).
+        let unplaced = |word: &Word<'_>, raw: String, inline: bool| {
+            deletions.borrow_mut().push(Deletion {
+                value: raw.clone(),
+                raw,
+                complete: false,
+                effect: if inline {
+                    Effect::Inline
+                } else {
+                    Effect::Deletes
+                },
+                at: top.then(|| word.node.start_byte()),
+                moved,
+            });
+        };
+        let push = |word: &Word<'_>| {
+            for path in expanded(word, source) {
+                record(word, &path, false);
+            }
         };
         // The words that are not options, the value of an option that takes
         // one (`-s 0`) left out too.
@@ -1051,32 +1118,37 @@ impl Reader<'_> {
                 })
                 .collect::<Vec<_>>()
         };
+        let short = |letter: char| {
+            arguments.iter().any(|word| {
+                word.value.starts_with('-')
+                    && !word.value.starts_with("--")
+                    && word.value.contains(letter)
+            })
+        };
+        let long = |name: &str| {
+            arguments
+                .iter()
+                .any(|word| word.value == name || word.value.starts_with(&format!("{name}=")))
+        };
         match name {
-            "rm" | "rmdir" | "unlink" => {
+            UNKNOWN_PROGRAM | "rm" | "rmdir" | "unlink" => {
                 for word in operands(&[]) {
-                    let (value, complete) = path_literal(word.node, source);
-                    push(word, value, complete);
+                    push(word);
                 }
             }
             "shred" | "truncate" => {
                 for word in operands(&["-n", "-s", "-r", "--iterations", "--size", "--reference"]) {
-                    let (value, complete) = path_literal(word.node, source);
-                    push(word, value, complete);
+                    push(word);
                 }
             }
             // `tee` empties the files it writes, unless it appends.
             "tee" => {
-                let appends = arguments.iter().any(|word| {
-                    word.value == "--append"
-                        || (word.value.starts_with('-')
-                            && !word.value.starts_with("--")
-                            && word.value.contains('a'))
-                });
-                if !appends {
+                if !long("--append") && !short('a') {
                     for word in operands(&["--output-error"]) {
-                        let (value, complete) = path_literal(word.node, source);
-                        if value != "-" && !value.starts_with("/dev/") {
-                            record(word, word.raw.clone(), value, complete, true);
+                        for path in expanded(word, source) {
+                            if path.value != "-" && !path.value.starts_with("/dev/") {
+                                record(word, &path, true);
+                            }
                         }
                     }
                 }
@@ -1085,7 +1157,12 @@ impl Reader<'_> {
                 for word in arguments {
                     let (value, complete) = path_literal(word.node, source);
                     if let Some(target) = value.strip_prefix("of=") {
-                        push(word, target.to_owned(), complete);
+                        let path = Path_ {
+                            raw: word.raw.clone(),
+                            value: target.to_owned(),
+                            complete: complete && !brace_list(&word.raw),
+                        };
+                        record(word, &path, false);
                     }
                 }
             }
@@ -1117,29 +1194,24 @@ impl Reader<'_> {
                     .last()
                     .filter(|word| !remote(&word.value))
                 {
-                    let (value, complete) = path_literal(destination.node, source);
-                    push(destination, value, complete);
+                    push(destination);
                 }
             }
             // A copy, move, install or forced link onto a file that is there
-            // replaces it.
+            // replaces it, and so does one into a folder holding a file of
+            // the same name.
             "cp" | "mv" | "install" | "ln" => {
-                let short = |letter: char| {
-                    arguments.iter().any(|word| {
-                        word.value.starts_with('-')
-                            && !word.value.starts_with("--")
-                            && word.value.contains(letter)
-                    })
-                };
-                let long = |name: &str| {
-                    arguments.iter().any(|word| {
-                        word.value == name || word.value.starts_with(&format!("{name}="))
-                    })
-                };
-                let into_folder = long("--target-directory") || short('t');
                 let forced = name != "ln" || short('f') || long("--force");
                 let creates_folders = name == "install" && (short('d') || long("--directory"));
-                let operands = operands(&[
+                let folder_option =
+                    arguments.iter().enumerate().find_map(|(index, word)| {
+                        match word.value.as_str() {
+                            "-t" | "--target-directory" => arguments.get(index + 1),
+                            value if value.starts_with("--target-directory=") => Some(word),
+                            _ => None,
+                        }
+                    });
+                let paths: Vec<(&Word<'_>, Path_)> = operands(&[
                     "-S",
                     "--suffix",
                     "-t",
@@ -1150,22 +1222,60 @@ impl Reader<'_> {
                     "--owner",
                     "-g",
                     "--group",
-                ]);
-                if forced && !into_folder && !creates_folders && operands.len() >= 2 {
-                    let target = operands[operands.len() - 1];
-                    let (value, complete) = path_literal(target.node, source);
-                    record(target, target.raw.clone(), value, complete, true);
+                ])
+                .into_iter()
+                .flat_map(|word| {
+                    expanded(word, source)
+                        .into_iter()
+                        .map(move |path| (word, path))
+                })
+                .collect();
+                if forced && !creates_folders {
+                    let (folder, sources) = match folder_option {
+                        Some(word) => {
+                            let mut path = expanded(word, source).into_iter().next();
+                            if let Some(path) = path.as_mut() {
+                                path.value = path
+                                    .value
+                                    .strip_prefix("--target-directory=")
+                                    .map_or_else(|| path.value.clone(), str::to_owned);
+                            }
+                            (path.map(|path| (word, path)), &paths[..])
+                        }
+                        None if paths.len() >= 2 => {
+                            let (target, sources) = paths.split_last().unwrap();
+                            record(target.0, &target.1, true);
+                            (Some((target.0, target.1.clone())), sources)
+                        }
+                        None => (None, &paths[..0]),
+                    };
+                    // A folder nobody can place is already counted whole.
+                    if let Some((word, folder)) = folder.filter(|(_, folder)| folder.complete) {
+                        for (_, source) in sources {
+                            let Some(file) = Path::new(&source.value)
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                            else {
+                                continue;
+                            };
+                            let join =
+                                |text: &str| format!("{}/{file}", text.trim_end_matches('/'));
+                            record(
+                                word,
+                                &Path_ {
+                                    raw: join(&folder.raw),
+                                    value: join(&folder.value),
+                                    complete: folder.complete && source.complete,
+                                },
+                                true,
+                            );
+                        }
+                    }
                 }
             }
             // `sed -i` rewrites its files in place.
             "sed" | "gsed" => {
-                let in_place = arguments.iter().any(|word| {
-                    word.value == "--in-place"
-                        || word.value.starts_with("--in-place=")
-                        || (word.value.starts_with('-')
-                            && !word.value.starts_with("--")
-                            && word.value.contains('i'))
-                });
+                let in_place = long("--in-place") || short('i');
                 let scripted = arguments.iter().any(|word| {
                     matches!(word.value.as_str(), "-e" | "--expression" | "-f" | "--file")
                         || word.value.starts_with("--expression=")
@@ -1175,44 +1285,42 @@ impl Reader<'_> {
                     let files =
                         operands(&["-e", "--expression", "-f", "--file", "-l", "--line-length"]);
                     for word in files.into_iter().skip(usize::from(!scripted)) {
-                        let (value, complete) = path_literal(word.node, source);
-                        record(word, word.raw.clone(), value, complete, true);
+                        for path in expanded(word, source) {
+                            record(word, &path, true);
+                        }
                     }
                 }
             }
-            // Code given inline to an interpreter can delete anything,
-            // nowhere anyone can place it.
-            "perl" | "ruby" | "node" | "nodejs" | "php" | "bun" | "deno" => {
-                let flags: &[&str] = match name {
-                    "perl" => &["-e", "-E"],
-                    "ruby" => &["-e"],
-                    "php" => &["-r"],
-                    _ => &["-e", "--eval", "-p", "--print", "eval"],
-                };
-                let letters: &[char] = match name {
-                    "perl" => &['e', 'E'],
-                    "ruby" => &['e'],
-                    "php" => &['r'],
-                    _ => &[],
-                };
-                if let Some(word) = arguments.iter().find(|word| {
-                    flags.contains(&word.value.as_str())
-                        || (word.value.starts_with('-')
-                            && !word.value.starts_with("--")
-                            && word.value.contains(letters))
-                }) {
-                    let raw = format!("{name} {}", word.value);
-                    record(word, raw.clone(), raw, false, false);
+            // Code given inline to an interpreter: the reviewer reads it
+            // whole, so it counts only when it plainly deletes or names a
+            // path outside the project.
+            interpreter if inline_interpreter(interpreter) => {
+                let code = inline_code(interpreter, arguments);
+                if let Some((flag, code)) = &code
+                    && risky_code(&code.value, workspace)
+                {
+                    unplaced(code, format!("{interpreter} {flag}"), true);
                 }
-            }
-            python if python.starts_with("python") => {
-                if let Some(word) = arguments.iter().find(|word| {
-                    word.value.starts_with('-')
-                        && !word.value.starts_with("--")
-                        && word.value.contains('c')
-                }) {
-                    let raw = format!("{name} {}", word.value);
-                    record(word, raw.clone(), raw, false, false);
+                // `perl -pi -e CODE files`: the files are rewritten in place.
+                if interpreter == "perl"
+                    && arguments.iter().any(|word| {
+                        word.value.starts_with('-')
+                            && !word.value.starts_with("--")
+                            && word.value[1..].starts_with(|c: char| c != 'e' && c != 'E')
+                            && word.value[1..].contains('i')
+                    })
+                    && let Some((_, code)) = code
+                {
+                    let after = arguments
+                        .iter()
+                        .skip_while(|word| word.node.id() != code.node.id())
+                        .skip(1)
+                        .filter(|word| !word.value.starts_with('-'));
+                    for word in after {
+                        for path in expanded(word, source) {
+                            record(word, &path, true);
+                        }
+                    }
                 }
             }
             // `xargs rm`: the paths come from its input, where nobody can
@@ -1254,8 +1362,7 @@ impl Reader<'_> {
                 if let Some(program) =
                     program.filter(|word| DESTROYERS.contains(&program_name(&word.value).as_str()))
                 {
-                    let raw = format!("xargs {}", program.value);
-                    record(program, raw.clone(), raw, false, false);
+                    unplaced(program, format!("xargs {}", program.value), false);
                 }
             }
             "find" => {
@@ -1294,11 +1401,10 @@ impl Reader<'_> {
                 });
                 if deletes {
                     if let (true, Some(anchor)) = (roots.is_empty(), arguments.first()) {
-                        record(anchor, ".".into(), ".".into(), true, false);
+                        record(anchor, &Path_::here(), false);
                     }
                     for word in roots {
-                        let (value, complete) = path_literal(word.node, source);
-                        push(word, value, complete);
+                        push(word);
                     }
                 }
             }
@@ -1333,7 +1439,7 @@ impl Reader<'_> {
                     }
                 };
                 if let (false, Some(alias)) = (clean, alias) {
-                    record(alias, alias.raw.clone(), alias.value.clone(), false, false);
+                    unplaced(alias, alias.raw.clone(), false);
                 }
                 let rest: Vec<&Word<'_>> = rest.collect();
                 let forced = rest.iter().any(|word| {
@@ -1349,19 +1455,13 @@ impl Reader<'_> {
                         .collect();
                     if paths.is_empty() {
                         match (folder, arguments.first()) {
-                            (Some(word), _) => {
-                                let (value, complete) = path_literal(word.node, source);
-                                push(word, value, complete);
-                            }
-                            (None, Some(anchor)) => {
-                                record(anchor, ".".into(), ".".into(), true, false);
-                            }
+                            (Some(word), _) => push(word),
+                            (None, Some(anchor)) => record(anchor, &Path_::here(), false),
                             (None, None) => {}
                         }
                     }
                     for word in paths {
-                        let (value, complete) = path_literal(word.node, source);
-                        push(word, value, complete);
+                        push(word);
                     }
                 }
             }
@@ -1380,22 +1480,30 @@ impl Reader<'_> {
         let name = program_name(&name);
         let top = self.text_depth == 0;
         // A program nobody can name (`$RM`, `"$(command -v rm)"`,
-        // `rm${IFS}-rf`) may delete anything.
+        // `rm${IFS}-rf`) may delete what it is given: its operands are
+        // placed as deletions.
         if !complete {
-            self.analysis.deletions.push(Deletion {
-                raw: program.raw.clone(),
-                value: program.raw.clone(),
-                complete: false,
-                existing: false,
-                at: top.then(|| program.node.start_byte()),
-                moved: self.moved > 0,
-            });
+            // `rm${IFS}-rf${IFS}x`: the word splits into a command of its own.
+            if program.raw.contains("IFS") {
+                self.analysis.deletions.push(Deletion {
+                    raw: program.raw.clone(),
+                    value: program.raw.clone(),
+                    complete: false,
+                    effect: Effect::Deletes,
+                    at: top.then(|| program.node.start_byte()),
+                    moved: self.moved > 0,
+                });
+            }
+            self.check_deletions(UNKNOWN_PROGRAM, arguments, source);
         }
-        if complete && name == "ln" {
+        // What makes links: a path deleted after one may lead through it.
+        // In a loop or a function, after may also be before.
+        if complete && makes_links(&name, arguments) {
             let end = words
                 .last()
                 .map_or(program.node.end_byte(), |word| word.node.end_byte());
-            self.analysis.links.push(top.then_some(end));
+            let repeated = repeats(program.node);
+            self.analysis.links.push((top && !repeated).then_some(end));
         }
         if complete && matches!(name.as_str(), "cd" | "pushd" | "popd") {
             self.analysis.changes_directory = true;
@@ -1406,8 +1514,7 @@ impl Reader<'_> {
             // (`cd`, `cd -`, `cd "$x"`, `cd {a,b}`, `popd`, a name `CDPATH`
             // may send elsewhere) leads where nobody can tell.
             let searched = |value: &str| {
-                (source.contains("CDPATH")
-                    || std::env::var_os("CDPATH").is_some_and(|path| !path.is_empty()))
+                source.contains("CDPATH")
                     && !(value.starts_with('/')
                         || value.starts_with('~')
                         || matches!(value, "." | "..")
@@ -1437,15 +1544,394 @@ impl Reader<'_> {
             return;
         }
         for word in arguments {
-            let (argument, complete) = path_literal(word.node, source);
-            if argument.starts_with('-') || (name == "chmod" && argument.starts_with('+')) {
-                continue;
-            }
-            if let Some(dir) = external_dir(self.workspace, &word.raw, &argument, complete) {
-                push_unique(&mut self.analysis.external_dirs, glob(&dir));
+            // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
+            for path in expanded(word, source) {
+                if path.value.starts_with('-') || (name == "chmod" && path.value.starts_with('+')) {
+                    continue;
+                }
+                if let Some(dir) =
+                    external_dir(self.workspace, &path.raw, &path.value, path.complete)
+                {
+                    push_unique(&mut self.analysis.external_dirs, glob(&dir));
+                }
             }
         }
     }
+}
+
+/// The name [`Reader::check_deletions`] reads a program nobody can name by.
+const UNKNOWN_PROGRAM: &str = "\0unknown program";
+
+/// A path a command is given, as written and as the program receives it.
+#[derive(Debug, Clone)]
+struct Path_ {
+    raw: String,
+    value: String,
+    /// All literal: it can be placed.
+    complete: bool,
+}
+
+impl Path_ {
+    /// The folder a command runs in.
+    fn here() -> Self {
+        Self {
+            raw: ".".into(),
+            value: ".".into(),
+            complete: true,
+        }
+    }
+}
+
+/// The paths a word stands for: itself, or each word its brace list
+/// expands to (`{dist,build}`, `{,~/.zshrc}`, `x{1..3}`). A list too large
+/// or too odd to expand cannot be placed.
+fn expanded(word: &Word<'_>, source: &str) -> Vec<Path_> {
+    if !brace_list(&word.raw) {
+        let (value, complete) = path_literal(word.node, source);
+        return vec![Path_ {
+            raw: word.raw.clone(),
+            value,
+            complete,
+        }];
+    }
+    match expand_braces(&word.raw, BRACE_WORDS) {
+        Some(words) => words
+            .into_iter()
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| {
+                let complete = !raw.contains(['$', '`']);
+                let value: String = raw
+                    .chars()
+                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                    .collect();
+                Path_ {
+                    raw: value.clone(),
+                    value,
+                    complete,
+                }
+            })
+            .collect(),
+        None => vec![Path_ {
+            raw: word.raw.clone(),
+            value: word.raw.clone(),
+            complete: false,
+        }],
+    }
+}
+
+/// How many words a brace list may expand to before it is too many to read.
+const BRACE_WORDS: usize = 64;
+
+/// `raw` with its unquoted brace lists expanded, the way the shell does
+/// before anything else: `None` past `limit` words, or for a list it cannot
+/// read.
+fn expand_braces(raw: &str, limit: usize) -> Option<Vec<String>> {
+    let chars: Vec<char> = raw.chars().collect();
+    // The first unquoted `{` that opens a list, and its matching `}`.
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    let mut open = None;
+    let mut depth = 0_usize;
+    let mut items: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut previous = '\0';
+    for (index, &c) in chars.iter().enumerate() {
+        if let Some(start) = open {
+            if escaped {
+                escaped = false;
+                current.push(c);
+                continue;
+            }
+            match c {
+                '\\' if !single => {
+                    escaped = true;
+                    current.push(c);
+                }
+                '\'' if !double => {
+                    single = !single;
+                    current.push(c);
+                }
+                '"' if !single => {
+                    double = !double;
+                    current.push(c);
+                }
+                '{' if !single && !double => {
+                    depth += 1;
+                    current.push(c);
+                }
+                '}' if !single && !double && depth > 0 => {
+                    depth -= 1;
+                    current.push(c);
+                }
+                ',' if !single && !double && depth == 0 => items.push(std::mem::take(&mut current)),
+                '}' if !single && !double => {
+                    items.push(std::mem::take(&mut current));
+                    let prefix: String = chars[..start].iter().collect();
+                    let suffix: String = chars[index + 1..].iter().collect();
+                    let parts = if items.len() == 1 {
+                        sequence(&items[0])?
+                    } else {
+                        items
+                    };
+                    let mut words = Vec::new();
+                    for part in parts {
+                        for tail in expand_braces(&format!("{part}{suffix}"), limit)? {
+                            words.push(format!("{prefix}{tail}"));
+                            if words.len() > limit {
+                                return None;
+                            }
+                        }
+                    }
+                    return Some(words);
+                }
+                _ => current.push(c),
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            previous = c;
+            continue;
+        }
+        match c {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double && previous != '$' => open = Some(index),
+            _ => {}
+        }
+        previous = c;
+    }
+    // No list here (or one never closed): the word as it is.
+    Some(vec![raw.to_owned()])
+}
+
+/// A brace sequence (`1..3`, `a..c`, `1..10..2`) as its words; `None` for
+/// one the shell would leave as it is (`{a}`) or that is too long.
+fn sequence(text: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = text.split("..").collect();
+    let (from, to, step) = match parts.as_slice() {
+        [from, to] => (*from, *to, 1_i64),
+        [from, to, step] => (*from, *to, step.parse::<i64>().ok()?.abs().max(1)),
+        _ => return None,
+    };
+    if let (Ok(from), Ok(to)) = (from.parse::<i64>(), to.parse::<i64>()) {
+        let count = (to - from).abs() / step + 1;
+        if count > i64::try_from(BRACE_WORDS).unwrap_or(i64::MAX) {
+            return None;
+        }
+        let direction = if to >= from { 1 } else { -1 };
+        return Some(
+            (0..count)
+                .map(|index| (from + direction * index * step).to_string())
+                .collect(),
+        );
+    }
+    let (mut from, mut to) = (from.chars(), to.chars());
+    let (Some(first), None, Some(last), None) = (from.next(), from.next(), to.next(), to.next())
+    else {
+        return None;
+    };
+    let (low, high) = (first.min(last) as u32, first.max(last) as u32);
+    if !first.is_ascii_alphabetic()
+        || !last.is_ascii_alphabetic()
+        || high - low >= u32::try_from(BRACE_WORDS).unwrap_or(u32::MAX)
+    {
+        return None;
+    }
+    let mut letters: Vec<String> = (low..=high)
+        .filter_map(char::from_u32)
+        .map(String::from)
+        .collect();
+    if first > last {
+        letters.reverse();
+    }
+    Some(letters)
+}
+
+/// Whether `name` makes links: `ln`, a copy that keeps them (`cp -P`, `-d`,
+/// `-a`, `-s`, `-R`), `mv`, `rsync -l`/`-a`, and what unpacks archives.
+fn makes_links(name: &str, arguments: &[Word<'_>]) -> bool {
+    let short = |letters: &[char]| {
+        arguments.iter().any(|word| {
+            word.value.starts_with('-')
+                && !word.value.starts_with("--")
+                && word.value.contains(letters)
+        })
+    };
+    let long = |names: &[&str]| {
+        arguments
+            .iter()
+            .any(|word| names.contains(&word.value.as_str()))
+    };
+    match name {
+        "ln" | "mv" | "tar" | "unzip" | "bsdtar" | "7z" => true,
+        "cp" => {
+            short(&['P', 'd', 'a', 's', 'R'])
+                || long(&[
+                    "--archive",
+                    "--no-dereference",
+                    "--symbolic-link",
+                    "--recursive",
+                ])
+        }
+        "rsync" => short(&['l', 'a']) || long(&["--links", "--archive"]),
+        _ => false,
+    }
+}
+
+/// Whether a command runs again and again, or later than written: inside
+/// a loop or a function.
+fn repeats(node: tree_sitter::Node<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(node) = current {
+        if matches!(
+            node.kind(),
+            "for_statement" | "c_style_for_statement" | "while_statement" | "function_definition"
+        ) {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
+}
+
+/// Interpreters that take code inline.
+fn inline_interpreter(name: &str) -> bool {
+    matches!(
+        name,
+        "perl" | "ruby" | "node" | "nodejs" | "php" | "bun" | "deno"
+    ) || name.starts_with("python")
+}
+
+/// The flag and the word holding an interpreter's inline code (`python3 -c
+/// CODE`, `perl -ne CODE`, `node -e CODE`, `deno eval CODE`), read up to its
+/// first operand: a script, a module (`-m`), a subcommand.
+fn inline_code<'w, 't>(name: &str, arguments: &'w [Word<'t>]) -> Option<(String, &'w Word<'t>)> {
+    let (letters, words, valued): (&[char], &[&str], &[&str]) = match name {
+        "perl" => (&['e', 'E'], &[], &["-I", "-M", "-m", "-x"]),
+        "ruby" => (&['e'], &[], &["-I", "-r", "-C", "-E", "-F"]),
+        "php" => (&['r'], &[], &["-c", "-d", "-z"]),
+        "node" | "nodejs" | "bun" => (
+            &[],
+            &["-e", "--eval", "-p", "--print"],
+            &[
+                "-r",
+                "--require",
+                "--import",
+                "--loader",
+                "-C",
+                "--conditions",
+            ],
+        ),
+        "deno" => (&[], &["eval"], &[]),
+        _ => (&['c'], &[], &["-W", "-X", "-Q"]),
+    };
+    let mut index = 0;
+    while let Some(word) = arguments.get(index) {
+        let value = word.value.as_str();
+        if words.contains(&value) {
+            return arguments
+                .get(index + 1)
+                .map(|code| (value.to_owned(), code));
+        }
+        if let Some((flag, _)) = value
+            .split_once('=')
+            .filter(|(flag, _)| words.contains(flag))
+        {
+            return Some((flag.to_owned(), word));
+        }
+        if value == "--" || value == "-" || !value.starts_with('-') || value == "-m" {
+            return None;
+        }
+        if valued.contains(&value) {
+            index += 2;
+            continue;
+        }
+        if !value.starts_with("--") {
+            // A cluster: the code follows its letter, in the rest of the
+            // word or in the next one.
+            if let Some(at) = value[1..].find(letters) {
+                let rest = &value[1 + at + 1..];
+                return if rest.is_empty() {
+                    arguments
+                        .get(index + 1)
+                        .map(|code| (value.to_owned(), code))
+                } else {
+                    Some((value.to_owned(), word))
+                };
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Whether inline code plainly deletes (`rmtree`, `os.remove`, `rm -`,
+/// `fs.rm`, `unlink`) or names a path outside `workspace`.
+fn risky_code(code: &str, workspace: &Path) -> bool {
+    let lower = code.to_lowercase();
+    if [
+        "rmtree",
+        "unlink",
+        "os.remove",
+        "removedirs",
+        "rm -",
+        "fs.rm",
+        "rmsync",
+        "rmdir",
+        "file.delete",
+        "fileutils.rm",
+        "truncate",
+    ]
+    .iter()
+    .any(|call| lower.contains(call))
+    {
+        return true;
+    }
+    // Paths in the code's string literals (`open("/etc/hosts", "w")`); a
+    // bare `/x/` is as often a regular expression.
+    let project = resolve(workspace, Path::new(""));
+    let mut literals = Vec::new();
+    let mut chars = code.chars();
+    while let Some(c) = chars.next() {
+        if !matches!(c, '\'' | '"' | '`') {
+            continue;
+        }
+        let mut literal = String::new();
+        let mut escaped = false;
+        for next in chars.by_ref() {
+            if escaped {
+                escaped = false;
+                literal.push(next);
+            } else if next == '\\' {
+                escaped = true;
+            } else if next == c {
+                break;
+            } else {
+                literal.push(next);
+            }
+        }
+        literals.push(literal);
+    }
+    literals
+        .iter()
+        .map(|literal| literal.trim())
+        .filter(|token| {
+            token.starts_with('/') || token.starts_with("~/") || token.starts_with("../")
+        })
+        .filter(|token| {
+            !matches!(
+                *token,
+                "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+            )
+        })
+        .any(|token| {
+            let path = match home_expansion(token, token) {
+                Some(expanded) => resolve(workspace, &expanded),
+                None => resolve(workspace, Path::new(token)),
+            };
+            !path.starts_with(&project)
+        })
 }
 
 /// A command's words, its assignments and redirects left out.
@@ -1673,7 +2159,13 @@ fn su_command(arguments: &[Word<'_>]) -> Option<String> {
 /// `echo`, `printf` or `cat` of one writes into a pipe to it, through any
 /// `cat` stages between them.
 fn stdin_script(stdin: Stdin<'_, '_>, source: &str) -> Input {
-    if let Some(text) = here_input(stdin.node, stdin.parent, source) {
+    // A here-document beats a pipe: `echo ok | bash <<EOF` runs the document.
+    if let Some(text) = here_input(stdin.node, stdin.parent, source).or_else(|| {
+        stdin
+            .documents
+            .get(&stdin.node.id())
+            .and_then(|statement| document(*statement, source))
+    }) {
         return Input::Text(text);
     }
     match stdin.parent {
@@ -1743,14 +2235,124 @@ fn here_input(
     {
         return Some(text);
     }
-    let parent = parent.filter(|parent| parent.kind() == "redirected_statement")?;
-    children(parent)
+    document(
+        parent.filter(|parent| parent.kind() == "redirected_statement")?,
+        source,
+    )
+}
+
+/// The here-document or here-string of a redirected statement.
+fn document(statement: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    children(statement)
         .into_iter()
         .find_map(|child| match child.kind() {
             "heredoc_redirect" => heredoc_body(child, source),
             "herestring_redirect" => here_string(child, source),
             _ => None,
         })
+}
+
+/// Whether a redirected statement has a here-document or here-string.
+fn has_document(statement: tree_sitter::Node<'_>) -> bool {
+    children(statement)
+        .into_iter()
+        .any(|child| matches!(child.kind(), "heredoc_redirect" | "herestring_redirect"))
+}
+
+/// The commands a statement's here-document reaches: the last command of a
+/// list, the command under `!`, the last stage of a pipeline (the document
+/// beats the pipe), and every command of a subshell or group, which share
+/// it.
+fn document_readers(body: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
+    fn named(node: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
+        (0..node.named_child_count())
+            .filter_map(|index| node.named_child(index))
+            .filter(|child| child.kind() != "comment")
+            .collect()
+    }
+    match body.kind() {
+        "command" => vec![body],
+        "list" | "pipeline" => named(body)
+            .last()
+            .map(|last| document_readers(*last))
+            .unwrap_or_default(),
+        "negated_command" => named(body)
+            .first()
+            .map(|inner| document_readers(*inner))
+            .unwrap_or_default(),
+        "subshell" | "compound_statement" => {
+            named(body).into_iter().flat_map(document_readers).collect()
+        }
+        "redirected_statement" => body
+            .child_by_field_name("body")
+            .map(document_readers)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// The command that writes last in a statement: the last command of a list,
+/// the command under `!`, the body of a redirected statement.
+fn last_command(node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
+    let named: Vec<_> = (0..node.named_child_count())
+        .filter_map(|index| node.named_child(index))
+        .filter(|child| child.kind() != "comment")
+        .collect();
+    match node.kind() {
+        "list" => named.last().map_or(node, |last| last_command(*last)),
+        "negated_command" => named.first().map_or(node, |inner| last_command(*inner)),
+        "redirected_statement" => node.child_by_field_name("body").map_or(node, last_command),
+        _ => node,
+    }
+}
+
+/// A command's words, with those written after its redirects: the parser
+/// gives a redirect's later words to its destination (`rm 2>&1 -rf ~/x`)
+/// and a here-document operator's to the redirect (`rm <<EOF -rf ~/x`).
+/// True when there were such words.
+fn command_words<'t>(
+    node: tree_sitter::Node<'t>,
+    parent: Option<tree_sitter::Node<'t>>,
+    source: &str,
+) -> (Vec<Word<'t>>, bool) {
+    let mut list = words(node, source);
+    let Some(statement) = parent.filter(|parent| parent.kind() == "redirected_statement") else {
+        return (list, false);
+    };
+    let before = list.len();
+    for redirect in children(statement) {
+        let carried: Vec<tree_sitter::Node<'t>> = match redirect.kind() {
+            "file_redirect" => {
+                let mut cursor = redirect.walk();
+                redirect
+                    .children_by_field_name("destination", &mut cursor)
+                    .skip(1)
+                    .collect()
+            }
+            "heredoc_redirect" => {
+                let mut cursor = redirect.walk();
+                redirect
+                    .children_by_field_name("argument", &mut cursor)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        for child in carried
+            .into_iter()
+            .filter(|child| WORD_KINDS.contains(&child.kind()))
+        {
+            let (value, literal) = unquote(child, source);
+            list.push(Word {
+                node: child,
+                raw: node_text(child, source),
+                value,
+                literal,
+            });
+        }
+    }
+    list.sort_by_key(|word| word.node.start_byte());
+    let carried = list.len() > before;
+    (list, carried)
 }
 
 /// What the stages before the command in `pipeline` write into it, walked
@@ -1773,9 +2375,11 @@ fn piped_input<'t>(
             let Some(redirect) = holder.filter(|holder| holder.kind() == "heredoc_redirect") else {
                 return Input::Unknown;
             };
+            // `true && cat <<EOF | sh`: the list's last command writes.
             let writer = redirect
                 .parent()
-                .and_then(|statement| statement.child_by_field_name("body"));
+                .and_then(|statement| statement.child_by_field_name("body"))
+                .map(last_command);
             return match writer.map(|writer| writes(writer, source)) {
                 Some(Writes::Input) => {
                     heredoc_body(redirect, source).map_or(Input::Unknown, Input::Text)
@@ -2179,22 +2783,25 @@ pub fn outside_deletions(
         let target = match from.filter(|_| deletion.complete) {
             // A `>` into a place nobody can tell may make a new file: not
             // counted. Anything else is.
-            None if deletion.existing => continue,
+            None if deletion.effect == Effect::Empties => continue,
             None => OutsideDeletion {
                 path: deletion.raw.clone(),
                 placed: false,
+                inline: deletion.effect == Effect::Inline,
             },
             Some(from) => {
                 let resolved = match home {
                     Some(expanded) => resolve(&from, &expanded),
                     None => resolve(&from, Path::new(&deletion.value)),
                 };
-                if resolved.starts_with(&project) || (deletion.existing && !resolved.is_file()) {
+                let only_a_file = matches!(deletion.effect, Effect::Replaces | Effect::Empties);
+                if resolved.starts_with(&project) || (only_a_file && !resolved.is_file()) {
                     continue;
                 }
                 OutsideDeletion {
                     path: resolved.display().to_string(),
                     placed: true,
+                    inline: false,
                 }
             }
         };
@@ -2213,6 +2820,9 @@ pub struct OutsideDeletion {
     /// False for a variable, a substitution, `xargs`'s input, a git alias, or
     /// a relative path after a directory change nobody can follow.
     pub placed: bool,
+    /// Inline interpreter code that plainly deletes or names a path outside
+    /// the project: `path` names the interpreter and its flag.
+    pub inline: bool,
 }
 
 /// `path` from `base` the way `cd` takes it by default: `..` drops the last
@@ -3419,11 +4029,20 @@ mod readings {
         let placed = |path: &str| OutsideDeletion {
             path: path.to_owned(),
             placed: true,
+            inline: false,
         };
         let unplaced = |path: &str| OutsideDeletion {
             path: path.to_owned(),
             placed: false,
+            inline: false,
         };
+        let inline = |path: &str| OutsideDeletion {
+            path: path.to_owned(),
+            placed: false,
+            inline: true,
+        };
+        let home = haarness_protocol::home_dir().unwrap();
+        let at_home = |rest: &str| placed(&resolve(&home, Path::new(rest)).display().to_string());
         let found = |command: &str| outside_deletions(command, &workspace, None);
         // Inside the project, as written or through `..` that stays there.
         assert!(found("rm -rf build").is_empty());
@@ -3565,33 +4184,71 @@ mod readings {
             assert!(found(&command).is_empty(), "{command}");
         }
         // Where nobody can tell what a command deletes, it cannot be placed:
-        // a brace list, a folder a wrapper or CDPATH chooses, a path after
-        // a link, a program word that is not literal, inline code.
+        // a folder a wrapper or CDPATH chooses, a path after a link, a
+        // program word split by IFS, inline code that deletes.
         for (command, written) in [
-            (
-                "rm -rf {~/.npm/_cacache,~/.cache/yarn}",
-                "{~/.npm/_cacache,~/.cache/yarn}",
-            ),
-            ("rm -rf {../outside/cache,x}", "{../outside/cache,x}"),
-            ("rm -rf build-{1..3}", "build-{1..3}"),
             ("env -C /tmp rm -rf build", "build"),
             ("env --chdir=/tmp rm -rf build", "build"),
             ("sudo -D /tmp rm -rf build", "build"),
             ("sudo -i rm -rf build", "build"),
             ("CDPATH=/tmp cd sub && rm -rf node_modules", "node_modules"),
             ("ln -s ~ home-link && rm -rf home-link/x", "home-link/x"),
-            ("$RM -rf build", "$RM"),
-            ("\"$(command -v rm)\" -rf build", "\"$(command -v rm)\""),
             ("rm${IFS}-rf${IFS}build", "rm${IFS}-rf${IFS}build"),
+            ("cp new.bin \"$TARGET\"", "\"$TARGET\""),
+            ("sed -i 's/a/b/' \"$FILE\"", "\"$FILE\""),
+        ] {
+            assert_eq!(found(command), vec![unplaced(written)], "{command}");
+        }
+        for (command, written) in [
             (
                 "python3 -c 'import shutil; shutil.rmtree(\"x\")'",
                 "python3 -c",
             ),
+            ("python3 -c 'open(\"/etc/hosts\", \"w\")'", "python3 -c"),
             ("perl -e 'unlink q(x)'", "perl -e"),
             ("node -e 'require(\"fs\").rmSync(\"x\")'", "node -e"),
             ("ruby -e 'File.delete(\"x\")'", "ruby -e"),
         ] {
-            assert_eq!(found(command), vec![unplaced(written)], "{command}");
+            assert_eq!(found(command), vec![inline(written)], "{command}");
+        }
+        // Brace lists are expanded and each path placed.
+        assert_eq!(
+            found("rm -rf {~/.npm/_cacache,~/.cache/yarn}"),
+            vec![at_home(".npm/_cacache"), at_home(".cache/yarn")]
+        );
+        assert_eq!(
+            found("rm -rf {../outside/cache,build}"),
+            vec![placed(&cache)]
+        );
+        // A program nobody can name: its operands are placed.
+        assert_eq!(found("$RM -rf ~/x"), vec![at_home("x")]);
+        assert_eq!(
+            found(&format!(
+                "\"$(command -v rm)\" -rf {}/cache",
+                outside.display()
+            )),
+            vec![placed(&cache)]
+        );
+        // None of these ask: the reviewer reads them, and nothing here is
+        // destructive outside the project.
+        for command in [
+            "rm -rf {dist,build}",
+            "rm -f build/*.{o,d}",
+            "rm -rf build-{1..3}",
+            "python3 -m pytest -c pytest.ini",
+            "python3 scripts/x.py -c 3",
+            "python3 -c 'print(1)'",
+            "node build.js -p",
+            "node -p '1 + 1'",
+            "perl -ne 'print if /x/' notes.txt",
+            "perl -pi -e 's/a/b/' notes.txt",
+            "\"$HOME/.cargo/bin/cargo\" build",
+            "$PYTHON -m pytest tests",
+            "\"$(git rev-parse --show-toplevel)/scripts/test.sh\"",
+            "$RM -rf build",
+            "printf x > \"$LOG\"",
+        ] {
+            assert!(found(command).is_empty(), "{command}: {:?}", found(command));
         }
         // A quoted brace is a name; an absolute path stays placed behind a
         // folder-choosing wrapper; a deletion before a link is where it was.
@@ -3627,6 +4284,7 @@ mod readings {
             format!("ln -sf new.bin {}", file.display()),
             format!("sed -i 's/a/b/' {}", file.display()),
             format!("sed -i.bak -e 's/a/b/' {}", file.display()),
+            format!("perl -pi -e 's/a/b/' {}", file.display()),
         ] {
             assert_eq!(found(&command), vec![placed(&file_text)], "{command}");
         }
@@ -3634,10 +4292,52 @@ mod readings {
             format!("cp new.bin {out}/cache/"),
             format!("cp -t {out}/cache new.bin"),
             format!("cp new.bin {out}/cache/fresh.bin"),
-            format!("ln -s new.bin {out}/cache/link"),
             format!("sed 's/a/b/' {}", file.display()),
         ] {
             assert!(found(&command).is_empty(), "{command}");
+        }
+        // Into a folder holding a file of the same name, or through a brace
+        // list, a copy still replaces it.
+        for command in [
+            format!("cp data.bin {out}/cache/"),
+            format!("cp -t {out}/cache src/data.bin"),
+            format!("mv src/data.bin {out}/cache"),
+            format!("cp new.bin {{,{}}}", file.display()),
+            format!("sed -i 's/a/b/' {{,{}}}", file.display()),
+        ] {
+            assert_eq!(found(&command), vec![placed(&file_text)], "{command}");
+        }
+        // A brace list reaches the outside-the-project check too.
+        let analysis = analyze("cat {,~/.ssh/id_rsa}", &workspace);
+        assert!(
+            analysis
+                .external_dirs
+                .iter()
+                .any(|dir| dir.ends_with(".ssh/*")),
+            "{:?}",
+            analysis.external_dirs
+        );
+        // What makes links, and a link made in a loop, leave later (or any)
+        // deletions unplaceable.
+        for command in [
+            format!("cp -a src dst && rm -rf {out}/cache"),
+            format!("tar xf a.tar && rm -rf {out}/cache"),
+            format!("mv a b && rm -rf {out}/cache"),
+            format!("rsync -a src/ dst/ && rm -rf {out}/cache"),
+            format!("rm -rf {out}/cache; for f in a; do ln -s x y; done"),
+        ] {
+            assert_eq!(
+                found(&command),
+                vec![unplaced(&format!("{out}/cache"))],
+                "{command}"
+            );
+        }
+        // sort and rg can write or run programs: not read-only for find.
+        for command in [
+            format!("find {out}/cache -exec sort -o x {{}} +"),
+            format!("find {out}/cache -exec rg --pre x y {{}} +"),
+        ] {
+            assert_eq!(found(&command), vec![placed(&cache)], "{command}");
         }
         // Wrappers are read through.
         for command in [
@@ -3704,5 +4404,104 @@ mod readings {
             "{:?}",
             analysis.patterns
         );
+    }
+
+    #[test]
+    fn words_after_a_redirect_and_documents_around_a_command_meet_the_rules() {
+        use crate::permissions::{PermissionDecision, PermissionEngine, PermissionRule};
+        let workspace = std::env::temp_dir();
+        let rule = |pattern: &str, decision| PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        };
+        let engine = PermissionEngine::new(vec![
+            rule("bash:*", PermissionDecision::Allow),
+            rule("bash:rm -rf *", PermissionDecision::Deny),
+        ]);
+        // The strictest answer for every command the line runs.
+        let decide = |command: &str| {
+            let analysis = analyze(command, &workspace);
+            let decisions: Vec<_> = analysis
+                .patterns
+                .iter()
+                .map(|pattern| engine.evaluate(&format!("bash:{pattern}")))
+                .collect();
+            if decisions.contains(&PermissionDecision::Deny) {
+                PermissionDecision::Deny
+            } else if decisions.contains(&PermissionDecision::Ask) {
+                PermissionDecision::Ask
+            } else {
+                PermissionDecision::Allow
+            }
+        };
+        // Words after a redirect or a here-document operator are the
+        // command's: the rule for `rm -rf` holds, the path outside asks, and
+        // the deletion check sees it.
+        for command in [
+            "rm 2>&1 -rf ~/x",
+            "rm >/dev/null -rf ~/x",
+            "rm <<'EOF' -rf ~/x\nhi\nEOF",
+        ] {
+            assert_eq!(decide(command), PermissionDecision::Deny, "{command}");
+            let analysis = analyze(command, &workspace);
+            assert!(!analysis.external_dirs.is_empty(), "{command}");
+            assert!(
+                analysis
+                    .deletions
+                    .iter()
+                    .any(|deletion| deletion.value == "~/x"),
+                "{command}: {:?}",
+                analysis.deletions
+            );
+        }
+        let analysis = analyze("cat 2>/dev/null ~/.ssh/id_rsa", &workspace);
+        assert!(
+            analysis
+                .external_dirs
+                .iter()
+                .any(|dir| dir.ends_with(".ssh/*")),
+            "{:?}",
+            analysis.external_dirs
+        );
+        assert!(
+            analysis.patterns.contains(&"cat ~/.ssh/id_rsa".to_owned()),
+            "{:?}",
+            analysis.patterns
+        );
+        // A here-document reaches the command it feeds: through a list, a
+        // `!`, a subshell, a group, and before a pipe.
+        for command in [
+            "true && cat <<'EOF' | sh\nrm -rf /tmp/heredoc-y\nEOF",
+            "true && ! bash <<EOF\nrm -rf /tmp/heredoc-y\nEOF",
+            "(bash) <<EOF\nrm -rf /tmp/heredoc-y\nEOF",
+            "{ bash; } <<EOF\nrm -rf /tmp/heredoc-y\nEOF",
+            "echo ok | bash <<EOF\nrm -rf /tmp/heredoc-y\nEOF",
+        ] {
+            assert_eq!(decide(command), PermissionDecision::Deny, "{command}");
+            assert!(
+                analyze(command, &workspace)
+                    .deletions
+                    .iter()
+                    .any(|deletion| deletion.value == "/tmp/heredoc-y"),
+                "{command}"
+            );
+        }
+        // The document, not the pipe, is the script.
+        assert!(
+            !analyze("echo ok | bash <<EOF\nls\nEOF", &workspace)
+                .patterns
+                .contains(&"ok".to_owned())
+        );
+        // A document the parser could not attach is unread: the command is
+        // incomplete, and the deletion check cannot place what it runs.
+        let lost = analyze(
+            "true && bash <<'A' && cat <<'B'\nrm -rf /tmp/heredoc-y\nA\nhello\nB",
+            &workspace,
+        );
+        assert!(
+            lost.written.iter().any(|written| written.incomplete),
+            "{lost:?}"
+        );
+        assert!(lost.deletions.iter().any(|deletion| !deletion.complete));
     }
 }
