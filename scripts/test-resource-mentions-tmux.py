@@ -9,7 +9,8 @@ resource into the message and the model gets it (the echo provider repeats it), 
 chip it was picked as. Prompt history brings the chip back, and sending it again reads the resource again; a
 resource whose server is gone by then is named in the message as not read. A resource that never answers holds
 the message 10 s at most, while the prompt stays live and a second message waits. The same marker text piped to
-`haarness run` reads nothing: only a pick this TUI made is a mention.
+`haarness run` reads nothing: only a pick this TUI made is a mention. After a restart (`-c`), a chip recalled
+from history is still read.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-resource-mentions-tmux.py
 Pane captures, with their colours, go to RESOURCE_TMUX_EVIDENCE; HAARNESS_E2E_DIR holds the run's state.
@@ -123,9 +124,12 @@ try:
 
     until(lambda: {item["name"]: item["status"] for item in api("/mcp")} == {"docs": "connected", "wiki": "connected", "closed": "connected"},
           "the MCP servers did not connect", 60)
-    run("tmux", "new-session", "-d", "-x", "110", "-y", "50", "-s", session,
-        pane_command(env, [BINARY, "--workspace", project, "--trust-project"]))
-    until(lambda: "/ commands" in pane(), "the TUI did not open")
+    def launch(*extra):
+        run("tmux", "new-session", "-d", "-x", "110", "-y", "50", "-s", session,
+            pane_command(env, [BINARY, "--workspace", project, "--trust-project", *extra]))
+        until(lambda: "/ commands" in pane() or "▎" in pane(), "the TUI did not open")
+
+    launch()
     if THEME:
         text(f"/themes editorial {THEME}")
         keys("Enter")
@@ -227,6 +231,33 @@ try:
     assert piped["text"] == "Summarise " + marker, piped
     assert listings("resources/read") == reads, requests.read_text()
     checks.append("marker text piped to `haarness run` is sent as the text it is and reads nothing")
+
+    # A restart keeps the picks the history names: the recalled chip is still read.
+    keys("C-c")
+    keys("C-c")
+    until(lambda: subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode != 0,
+          "the TUI did not exit", 15)
+    launch("-c")
+    time.sleep(1)
+    def everywhere():
+        return [item for thread in api("/threads") for item in (
+            entry["data"] for entry in api(f"/threads/{thread['id']}/items")) if item["type"] == "user_message"]
+
+    before = listings("resources/read")
+    count = len(everywhere())
+    for _ in range(2):
+        keys("Up")
+        time.sleep(0.2)
+    until(lambda: "[@setup] compare" in pane(), "history after a restart did not bring the chip back")
+    keys("Enter")
+    until(lambda: len(everywhere()) == count + 1, "the recalled prompt was not sent")
+    idle()
+    recalled = [item for item in everywhere() if item["text"].startswith("@setup compare\n\n<details>")]
+    # Sent three times: read, not read (its server was gone), and read again after the restart.
+    read = "<summary>MCP resource: setup · wiki:docs://setup</summary>\n\n```\n# Setup"
+    assert len(recalled) == 3 and sum(read in item["text"] for item in recalled) == 2, recalled
+    assert listings("resources/read") == before + 1, requests.read_text()
+    checks.append("after a restart, a chip recalled from history is still read")
     for check in checks:
         print("ok -", check)
     print(f"evidence: {EVIDENCE}")
