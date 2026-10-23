@@ -1627,12 +1627,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 }
                 if app.thinking == crate::state::ThinkingMode::Compact {
                     // One row that a click opens: the transcript keeps its
-                    // shape whatever the model thought.
+                    // shape whatever the model thought. Its disclosure mark
+                    // is hollow, so it never reads as a reply's ▸.
                     let open = app.expanded.contains(&item.id);
                     block.push_tagged(
                         Line::new(vec![
                             Span::new(REASONING_INDENT, theme.muted),
-                            Span::new(if open { "▾ " } else { "▸ " }, theme.muted),
+                            Span::new(if open { "▿ " } else { "▹ " }, theme.muted),
                             Span::new(thought_label(app.language, *duration_ms), theme.muted),
                         ]),
                         HitTarget::ToolToggle(item.id),

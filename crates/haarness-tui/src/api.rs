@@ -54,6 +54,9 @@ pub struct LspStatus {
     pub id: String,
     pub status: String,
     pub error: Option<String>,
+    /// The files it serves (`.sh`, `.bash`).
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

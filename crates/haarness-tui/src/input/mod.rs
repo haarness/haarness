@@ -656,6 +656,14 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         app.shell_mode = false;
         app.autocomplete_hidden = false;
         app.selection = 0;
+        // Typing here goes nowhere, so say why rather than drop it silently.
+        let typing = matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
+        if typing {
+            app.notice =
+                "A child agent's conversation is read-only · ↑ returns to its parent".into();
+            return Ok(AppAction::Continue);
+        }
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('d')) => return Ok(AppAction::Quit),
             (KeyModifiers::CONTROL, KeyCode::Char('z' | 'Z')) => {

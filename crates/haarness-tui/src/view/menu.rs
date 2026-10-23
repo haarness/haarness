@@ -112,18 +112,10 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     .mention_suggestions
                     .iter()
                     .any(|path| crate::resource_mentions::find(app, path).is_some());
+                // One order whatever matches, the masthead's: the header
+                // says what `@` reaches, not which kind matched first.
                 let title = if query.starts_with('/') || query.starts_with('~') || dot_path {
                     "files · local paths"
-                } else if app
-                    .mention_suggestions
-                    .iter()
-                    .any(|path| path.starts_with("agent://"))
-                {
-                    if resources {
-                        "agents · files · resources"
-                    } else {
-                        "agents · files"
-                    }
                 } else if resources {
                     "files · agents · resources"
                 } else {
