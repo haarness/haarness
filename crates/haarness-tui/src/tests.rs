@@ -12868,7 +12868,7 @@ async fn ctrl_c_clears_a_draft_once_and_empty_ctrl_c_requires_confirmation_to_qu
         app.composer.is_empty(),
         "one Ctrl+C clears a non-empty draft"
     );
-    assert_eq!(app.notice, "Input cleared");
+    assert_eq!(app.notice, "Draft cleared · ↑ brings it back");
     assert!(
         app.notification_toast.is_none(),
         "clearing a draft is ambient feedback, not a card"
@@ -18830,11 +18830,92 @@ async fn clearing_input_reports_in_the_status_line_not_a_toast() {
     .await
     .unwrap();
     assert!(app.composer.is_empty());
-    assert_eq!(app.notice, "Input cleared");
+    assert_eq!(app.notice, "Draft cleared · ↑ brings it back");
     assert!(
         app.notification_toast.is_none(),
         "ambient feedback belongs to the status line"
     );
+    // Shell mode alone has no draft to bring back.
+    app.shell_mode = true;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "Input cleared");
+}
+
+/// A draft Ctrl+C cleared is not lost: ↑ brings it back from history, and
+/// undo (Ctrl+-) restores it in place.
+#[tokio::test]
+async fn a_draft_cleared_with_ctrl_c_comes_back() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let client = offline_client();
+    let press = |code, modifiers| KeyEvent::new(code, modifiers);
+    type_text(&mut app, "half a thought", &client).await;
+    for key in [
+        press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        press(KeyCode::Up, KeyModifiers::NONE),
+    ] {
+        crate::input::handle_key(&mut app, key, &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.composer.text(), "half a thought");
+    assert_eq!(app.notice, "", "back in the prompt, it is not cleared any more");
+    for key in [
+        press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        press(KeyCode::Char('-'), KeyModifiers::CONTROL),
+    ] {
+        crate::input::handle_key(&mut app, key, &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.composer.text(), "half a thought");
+}
+
+/// Undo answers to Ctrl+- however the terminal sends it: as itself (kitty's
+/// keyboard protocol), or as 0x1F, which tmux and macOS Terminal send for
+/// Ctrl+- and Ctrl+_ and crossterm reads as Ctrl+7.
+#[tokio::test]
+async fn composer_undo_answers_every_form_of_ctrl_minus() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let client = offline_client();
+    for (code, modifiers) in [
+        (KeyCode::Char('-'), KeyModifiers::CONTROL),
+        (KeyCode::Char('7'), KeyModifiers::CONTROL),
+        (KeyCode::Char('_'), KeyModifiers::CONTROL),
+        (
+            KeyCode::Char('_'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+    ] {
+        app.composer.clear();
+        type_text(&mut app, "keep", &client).await;
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.composer.text(), "");
+        crate::input::handle_key(&mut app, KeyEvent::new(code, modifiers), &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "keep ", "{code:?} {modifiers:?}");
+    }
 }
 
 /// `/diff` must not hold the event loop: the viewer appears immediately in a
