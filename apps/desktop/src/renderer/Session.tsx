@@ -305,9 +305,16 @@ export function Session() {
               .then((file) => (file.encoding === "utf8" ? fileContext(file.path, file.content) : undefined))
               .catch(() => undefined)
           : undefined;
-      if (mention && app.draftKey() === key && state.connection?.id === connection?.id)
-        await app.addPromptContext(mention, key);
-      else written.push(path);
+      // One too large to carry is named by its path instead.
+      const added =
+        !!mention &&
+        app.draftKey() === key &&
+        state.connection?.id === connection?.id &&
+        (await app.addPromptContext(mention, key).then(
+          () => true,
+          () => false,
+        ));
+      if (!added) written.push(path);
     }
     if (written.length && app.draftKey() === key && composer?.isConnected && !composer.disabled)
       insertText(
@@ -1621,6 +1628,9 @@ export function Session() {
   }
   /** The chats whose Enter waits for the model choices. */
   const waitingForModels = new Set<string>();
+  /** The send under way in each chat, which a second Enter there waits for. */
+  const inFlight = new Map<string, Promise<boolean>>();
+  const waitingForSend = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
       // A queued message keeps only its pastes and the resources it held
@@ -1703,6 +1713,23 @@ export function Session() {
         change("");
       return;
     }
+    // Enter again while a message is on its way sends this one once that
+    // one has gone, however often it is pressed: the box stays editable, so
+    // what is in it then is the next message. If that one did not go, its
+    // text is back in the box, and nothing more is sent.
+    if (submitting() && (draft().trim() || attachments().length || app.promptContext().length)) {
+      const pressed = owner();
+      if (waitingForSend.has(pressed)) return;
+      waitingForSend.add(pressed);
+      let went = false;
+      try {
+        went = (await inFlight.get(pressed)) ?? false;
+      } finally {
+        waitingForSend.delete(pressed);
+      }
+      if (!went || owner() !== pressed || submitting()) return;
+      return send(delivery);
+    }
     if (
       !project() ||
       !state.ready ||
@@ -1758,6 +1785,9 @@ export function Session() {
     const storedKey = storedDraftKey();
     const keyboard = document.activeElement === composer;
     setSubmissions((items) => [...items, origin]);
+    let landed!: (went: boolean) => void;
+    const flight = new Promise<boolean>((done) => (landed = done));
+    inFlight.set(origin, flight);
     // The message box empties as the message goes and keeps the keyboard,
     // so the next one can be typed at once. A second Enter waits for this
     // send; text that is not sent comes back.
@@ -1824,6 +1854,7 @@ export function Session() {
             );
           });
           setSubmissions((items) => [...items, createdOwner]);
+          inFlight.set(createdOwner, flight);
         },
         context,
         delivery,
@@ -1878,6 +1909,10 @@ export function Session() {
       setSubmissions((items) =>
         items.filter((item) => item !== origin && item !== createdOwner),
       );
+      // The view has moved to a new chat by now, or never will.
+      carriedTo = undefined;
+      for (const key of [origin, createdOwner]) if (inFlight.get(key) === flight) inFlight.delete(key);
+      landed(sent);
       if (!sent) putBack(text, [origin, createdOwner], contextKey, storedKey);
     }
   }
