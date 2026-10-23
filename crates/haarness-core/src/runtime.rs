@@ -465,6 +465,56 @@ pub struct DirectToolResult {
     pub is_error: bool,
 }
 
+/// What a person's own `@` mention of an MCP resource may reach in one chat
+/// (see [`AgentRuntime::resource_mention_policy`]). The chat's rules decide
+/// as they do for the model's `mcp_resource_read`, except that an ask is not
+/// asked: the person picked the resource, as they would attach a file.
+pub struct ResourceMentionPolicy {
+    engine: PermissionEngine,
+    configured: HashMap<String, bool>,
+    live: HashMap<String, bool>,
+    agent_tools: Option<HashMap<String, bool>>,
+    workspace: PathBuf,
+}
+
+impl ResourceMentionPolicy {
+    /// Whether a rule or setting takes every tool of `server` away for the
+    /// chat (`"mcp__docs__*": "deny"`, or `false` under `tools`), which keeps
+    /// its resources from the chat too.
+    #[must_use]
+    pub fn turned_off(&self, server: &str) -> bool {
+        let tools = mcp_server_tools(server);
+        !self
+            .live
+            .get(&tools)
+            .or_else(|| self.configured.get(&tools))
+            .copied()
+            .unwrap_or(true)
+            || self.agent_tools.as_ref().is_some_and(|agent_tools| {
+                crate::definitions::tool_override(agent_tools, &tools) == Some(false)
+            })
+            || self.engine.disables_tool(&tools)
+    }
+
+    /// Whether the chat's rules keep `uri` of `server` from it: its server is
+    /// turned off, or an `mcp_resource_read` rule denies `<server>:<uri>`.
+    #[must_use]
+    pub fn denies(&self, server: &str, uri: &str) -> bool {
+        self.turned_off(server)
+            || ask_plans(
+                "mcp_resource_read",
+                &json!({"server": server, "uri": uri}),
+                &self.workspace,
+            )
+            .iter()
+            .any(|plan| {
+                plan.patterns.iter().any(|pattern| {
+                    plan.evaluate(&self.engine, pattern).decision == PermissionDecision::Deny
+                })
+            })
+    }
+}
+
 fn plain_tool_output(text: String) -> ToolOutput {
     ToolOutput {
         text,
@@ -1537,6 +1587,123 @@ impl AgentRuntime {
         self.components().config.default_agent.clone()
     }
 
+    /// Whether chat `thread_id` already took request `request`: its turn
+    /// runs or ran, it was steered into a turn, or it waits in the queue. A
+    /// retry finds it there.
+    pub async fn request_admitted(
+        &self,
+        thread_id: ThreadId,
+        request: RequestId,
+    ) -> CoreResult<bool> {
+        if self
+            .active
+            .get(&thread_id)
+            .is_some_and(|active| active.request_id == request)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .repository
+            .has_input_admission(thread_id, request)
+            .await?
+            || self
+                .repository
+                .turn_for_request(thread_id, request)
+                .await?
+                .is_some())
+    }
+
+    /// The agent of the turn running in chat `thread_id`, if one runs.
+    #[must_use]
+    pub fn running_agent(&self, thread_id: ThreadId) -> Option<String> {
+        self.active
+            .get(&thread_id)
+            .map(|active| active.agent.id.clone())
+    }
+
+    /// The agent a turn a message to chat `thread_id` starts runs under,
+    /// when it is not the chat's own: the one it names, else the one its
+    /// command `command` names. `None` means the chat's agent.
+    #[must_use]
+    pub fn message_agent(&self, named: Option<&str>, command: Option<&str>) -> Option<String> {
+        if let Some(named) = named {
+            return Some(named.to_owned());
+        }
+        if let Some(name) = command
+            && let Some(agent) = self
+                .live_commands
+                .read()
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+                .filter(|command| !command.execution.fork)
+                .and_then(|command| command.agent.clone())
+        {
+            return Some(agent);
+        }
+        None
+    }
+
+    /// The rules a person's `@` mentions of MCP resources follow in chat
+    /// `thread_id` under `agent` (the agent the message runs under, which
+    /// wins over the chat's), or, before a chat exists, for `agent` alone
+    /// (the default agent when none is named). They are built as a direct
+    /// tool call's are: the configured and remembered rules, the agent's own
+    /// permissions and tool settings, and a parent chat's ceilings.
+    pub async fn resource_mention_policy(
+        &self,
+        thread_id: Option<ThreadId>,
+        agent: Option<&str>,
+    ) -> CoreResult<ResourceMentionPolicy> {
+        let components = self.components();
+        let thread = match thread_id {
+            Some(id) => Some(self.repository.get_thread(id).await?),
+            None => None,
+        };
+        let agent = agent
+            .map(str::to_owned)
+            .or_else(|| thread.as_ref().map(|thread| thread.agent.clone()))
+            .or_else(|| components.config.default_agent.clone())
+            .unwrap_or_else(|| "build".into());
+        if let Some(store) = &self.repository_approvals {
+            *self.repository_rules.lock() = store.load()?;
+        }
+        let mut engine = components
+            .config
+            .permission_defaults(&agent, "mcp_resource_read");
+        engine.set_workspace(&self.workspace);
+        for rule in self.repository_rules.lock().iter().cloned() {
+            engine.add_repository_grant(rule);
+        }
+        for rule in components.config.base_rules.iter().cloned() {
+            engine.add_rule(rule);
+        }
+        for rule in components
+            .config
+            .granted_rules
+            .iter()
+            .chain(self.session_rules.lock().iter())
+            .cloned()
+        {
+            engine.add_grant(rule);
+        }
+        let custom = self.custom_agent(&agent);
+        if let Some(custom) = &custom {
+            for rule in custom.permissions.iter().cloned() {
+                engine.add_rule(rule);
+            }
+        }
+        if let Some(parent_id) = thread.and_then(|thread| thread.parent_id) {
+            engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
+        }
+        Ok(ResourceMentionPolicy {
+            engine,
+            configured: components.config.tool_availability.clone(),
+            live: self.tool_availability.read().clone(),
+            agent_tools: custom.map(|custom| custom.tools),
+            workspace: self.workspace.clone(),
+        })
+    }
+
     #[must_use]
     pub fn model_defaults(&self) -> (Option<String>, Option<String>) {
         let components = self.components();
@@ -1867,6 +2034,19 @@ impl AgentRuntime {
                 turn: None,
             });
         }
+        // A steer that started a turn: its retry finds that turn instead of
+        // joining it as a second message.
+        if let Some(turn) = self
+            .repository
+            .turn_for_request(thread_id, request.request_id)
+            .await?
+        {
+            return Ok(QueueInputResponse {
+                queued: false,
+                item: None,
+                turn: Some(turn),
+            });
+        }
         if request.delivery == haarness_protocol::InputDelivery::Queue {
             return self.defer_input(thread_id, request).await;
         }
@@ -1997,6 +2177,7 @@ impl AgentRuntime {
                         request_id: input.id,
                         text: input.text.clone(),
                         attachments: input.attachments.clone(),
+                        resources: Vec::new(),
                         synthetic: false,
                         auto_approve: false,
                         agent: None,
@@ -2118,6 +2299,20 @@ impl AgentRuntime {
                 .get(&thread_id)
                 .map(|entry| Arc::clone(entry.value()));
             if let Some(active) = active_turn {
+                // This request started the running turn (a retry racing the
+                // steer that found the chat idle): it is that turn, not a
+                // message to steer into it.
+                if active.request_id == request.request_id {
+                    let turn = self.repository.get_turn(active.id).await?;
+                    if let Some(handoff) = handoff {
+                        handoff.release();
+                    }
+                    return Ok(QueueInputResponse {
+                        queued: false,
+                        item: None,
+                        turn: Some(turn),
+                    });
+                }
                 let changed = active.changed.notified();
                 let accepting = active.accepting.lock().await;
                 if *accepting {
@@ -2151,6 +2346,7 @@ impl AgentRuntime {
                         request_id: request.request_id,
                         text: request.text.clone(),
                         attachments: request.attachments.clone(),
+                        resources: Vec::new(),
                         synthetic: request.synthetic,
                         auto_approve,
                         agent: None,
@@ -2203,20 +2399,34 @@ impl AgentRuntime {
         request: &QueueInputRequest,
     ) -> CoreResult<QueueInputResponse> {
         let root = self.resolve_root(thread).await;
-        let item = self
-            .repository
-            .append_item(
-                thread.id,
-                Some(turn_id),
-                ItemData::UserMessage {
-                    text: request.text.clone(),
-                    attachments: request.attachments.clone(),
+        let data = ItemData::UserMessage {
+            text: request.text.clone(),
+            attachments: request.attachments.clone(),
+            queued: true,
+            synthetic: request.synthetic,
+            command_line: None,
+        };
+        // A person's steer is recorded by its request with the item, under
+        // the turn's gate, so a retry (even one racing it) is not delivered
+        // twice.
+        let item = if request.synthetic {
+            self.repository
+                .append_item(thread.id, Some(turn_id), data)
+                .await?
+        } else {
+            let Some(item) = self
+                .repository
+                .append_steered_input(thread.id, turn_id, request.request_id, data)
+                .await?
+            else {
+                return Ok(QueueInputResponse {
                     queued: true,
-                    synthetic: request.synthetic,
-                    command_line: None,
-                },
-            )
-            .await?;
+                    item: None,
+                    turn: None,
+                });
+            };
+            item
+        };
         self.events.publish_scoped(
             "item.created",
             Some(thread.id),
@@ -2900,6 +3110,7 @@ impl AgentRuntime {
                 request_id: handoff.request_id(),
                 text,
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: true,
             },
             false,
@@ -2949,6 +3160,7 @@ impl AgentRuntime {
                             request_id: RequestId::new(),
                             text,
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: true,
                         };
                         self.append_queued_input(&chat, active.id, &request).await?;
@@ -3839,6 +4051,8 @@ impl AgentRuntime {
 
     /// Run one shell command through the normal bash tool and permission path,
     /// persisting the call/result into the thread without a provider turn.
+    /// It is a person's own command (the TUI's `!`), so it is not marked as
+    /// an agent's (see [`crate::ExecutionSettings::person_shell`]).
     pub async fn run_shell(&self, thread_id: ThreadId, command: String) -> CoreResult<Item> {
         Ok(self
             .run_direct_tool(
@@ -3851,11 +4065,13 @@ impl AgentRuntime {
             .item)
     }
 
-    /// Execute a named native or projected MCP tool outside a provider turn.
-    /// This is intentionally not a raw registry escape hatch: every call is
-    /// persisted and passes through normal hooks, permission policy, workspace
-    /// snapshots, and cancellation. A workflow gets its own idle thread and
-    /// uses this method for `ctx.tool()` and `ctx.shell()` host requests.
+    /// Execute a named native or projected MCP tool outside a provider turn,
+    /// for a person (the TUI's `!` through [`run_shell`](Self::run_shell),
+    /// Desktop's browser tool calls); a workflow's own calls go through
+    /// [`run_workflow_tool`](Self::run_workflow_tool). This is intentionally
+    /// not a raw registry escape hatch: every call is persisted and passes
+    /// through normal hooks, permission policy, workspace snapshots, and
+    /// cancellation.
     pub async fn run_direct_tool(
         &self,
         thread_id: ThreadId,
@@ -4246,6 +4462,22 @@ impl AgentRuntime {
                         cancel: cancel.clone(),
                     })
                 });
+            // A shell command's card, whatever it asks about (under the
+            // default rules, a folder outside the project), shows the script
+            // the command runs, in Auto as in Review: read for the person the
+            // card is shown to. A request Auto may answer without a card is
+            // not read now; if the reviewer leaves it to a person, it is read
+            // then, before the card is shown.
+            let reads_script = shows_script(name, &arguments);
+            let mut shown = if reads_script
+                && (forced || explicit || !self.approval_modes.is_auto(thread_id).await)
+            {
+                let readable = script_readable(engine.clone(), None, &self.workspace);
+                script_for_person(&arguments, &self.workspace, readable).await
+            } else {
+                None
+            };
+            let mut script = shown.as_ref().map(|shown| shown.script.clone());
             let approval_gate = self.approval_modes.gate.lock().await;
             let auto = !forced && !explicit && self.approval_modes.is_auto(thread_id).await;
             if auto && (!review_on || !agent_work) {
@@ -4273,6 +4505,7 @@ impl AgentRuntime {
                     patterns: asked.clone(),
                     always_rules: always_rules.clone(),
                     detail: card.clone(),
+                    script: script.clone(),
                     thread_id,
                     root_thread_id: root,
                     turn_id: None,
@@ -4329,6 +4562,16 @@ impl AgentRuntime {
                     Reviewed::Show => {}
                 }
             }
+            // Shown to a person after all (the reviewer left it to them, or
+            // Auto went off meanwhile): the card carries the script.
+            if reads_script && shown.is_none() {
+                let readable = script_readable(engine.clone(), None, &self.workspace);
+                shown = script_for_person(&arguments, &self.workspace, readable).await;
+                script = shown.as_ref().map(|shown| shown.script.clone());
+                if let Some(mut entry) = self.permissions.get_mut(&id) {
+                    entry.script.clone_from(&script);
+                }
+            }
             let review = self
                 .permissions
                 .get(&id)
@@ -4371,6 +4614,7 @@ impl AgentRuntime {
                         "explicit": explicit,
                         "operation": operation,
                         "detail": card,
+                        "script": script,
                         "permission": plan.permission,
                         "patterns": asked,
                         "alwaysPatterns": always_rules,
@@ -4397,9 +4641,21 @@ impl AgentRuntime {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
                 result = receiver => result.map_err(|_| CoreError::Cancelled),
             }?;
+            // Allowed once, the script must still be what the card showed.
+            let changed = match &shown {
+                Some(crate::permissions::script::Shown {
+                    script,
+                    seal: Some(seal),
+                }) if resolution.once && !seal.holds().await => {
+                    Some(script_changed(&script.path, &self.workspace))
+                }
+                _ => None,
+            };
             allowed = if let Some(review) = resolution.review {
                 let message = crate::auto_review::blocked_message(&review);
                 blocked = Some(review);
+                Err(message)
+            } else if let Some(message) = changed {
                 Err(message)
             } else if resolution.allowed {
                 Ok(())
@@ -4460,6 +4716,7 @@ impl AgentRuntime {
             }
         }
         let mut execution = components.config.execution.clone();
+        execution.person_shell = !agent_work;
         if name == "bash"
             && allowed.is_ok()
             && let Some(hooks) = &components.hooks
@@ -4715,11 +4972,15 @@ impl AgentRuntime {
             }
         }
         self.publish_permission_resolved(id, &pending, allowed);
+        // A forced request offers nothing longer, so any allow of it is once.
+        let once = allowed
+            && (matches!(decision, PermissionReplyDecision::Once) || (pending.forced && !explicit));
         let _ = pending.sender.send(PermissionResolution {
             allowed,
             feedback: reply.feedback,
             review: None,
             refused,
+            once,
         });
         Ok(())
     }
@@ -5632,6 +5893,7 @@ impl AgentRuntime {
                 request_id: RequestId::new(),
                 text: STOP_CONTINUATION.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: true,
             };
             if let Err(error) = self
@@ -6268,6 +6530,8 @@ struct PendingPermission {
     /// Full rules an "always" answer persists, e.g. `bash:git status *`.
     always_rules: Vec<String>,
     detail: serde_json::Value,
+    /// The script a bash request's command runs, for the card.
+    script: Option<haarness_protocol::PermissionScript>,
     thread_id: ThreadId,
     root_thread_id: ThreadId,
     turn_id: Option<TurnId>,
@@ -6304,6 +6568,85 @@ enum ReviewStage {
     /// The reviewer left it to a person: turning Auto on again does not
     /// review it again.
     Reviewed,
+}
+
+/// Whether a card about this call shows the script its command runs: any
+/// card a shell command raises. Checked before anything else is built, so
+/// other prompts pay nothing.
+fn shows_script(tool: &str, detail: &serde_json::Value) -> bool {
+    tool == "bash"
+        && detail
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
+
+/// What a card may show of a script, by path (the file named and where it
+/// leads): what the chat's `read` rules allow (the built-in secret rules and
+/// every configured deny or ask) and an active skill's do not deny, and,
+/// outside the project, in a folder no `external_directory` rule denies (an
+/// ask is often the very question the card asks, so it does not hide it).
+fn script_readable(
+    engine: PermissionEngine,
+    skill: Option<PermissionEngine>,
+    workspace: &Path,
+) -> impl Fn(&Path) -> bool + Send + 'static {
+    let workspace = workspace.to_path_buf();
+    move |path| {
+        let read = format!("read:{}", path.display());
+        let inside = path.starts_with(&workspace)
+            || workspace
+                .canonicalize()
+                .is_ok_and(|root| path.starts_with(root));
+        engine.evaluate(&read) == PermissionDecision::Allow
+            && skill
+                .as_ref()
+                .is_none_or(|skill| skill.evaluate(&read) != PermissionDecision::Deny)
+            && (inside
+                || path.parent().is_none_or(|folder| {
+                    let folder = folder.display().to_string();
+                    engine.evaluate(&format!(
+                        "external_directory:{}/*",
+                        folder.trim_end_matches(['/', '\\'])
+                    )) != PermissionDecision::Deny
+                }))
+    }
+}
+
+/// The script a shell call's command runs, read for the person a card about
+/// it is announced to (`permissions::script`): off the async workers, within
+/// a short deadline, and only what `readable` lets the card show. Display
+/// only: it decides nothing, and hooks, Auto and rules never see it. Its
+/// seal is checked when the person allows the call once.
+async fn script_for_person(
+    detail: &serde_json::Value,
+    workspace: &Path,
+    readable: impl Fn(&Path) -> bool + Send + 'static,
+) -> Option<crate::permissions::script::Shown> {
+    let command = detail.get("command")?.as_str()?.to_owned();
+    let cwd = match detail.get("workdir").and_then(serde_json::Value::as_str) {
+        Some(workdir) => crate::permissions::resolve_permission_path(workspace, workdir),
+        None => workspace.to_path_buf(),
+    };
+    crate::permissions::script::for_prompt(command, cwd, readable).await
+}
+
+/// Why a command whose script is not what it was when its card was shown
+/// did not run, for the model. Neutral: who answered may not have read it
+/// (`haarness run` at a terminal, Allow once + Auto), and a slow re-read
+/// counts too.
+fn script_changed(path: &str, workspace: &Path) -> String {
+    let path = Path::new(path);
+    let canonical = workspace.canonicalize().ok();
+    let shown = path
+        .strip_prefix(workspace)
+        .ok()
+        .or_else(|| path.strip_prefix(canonical.as_ref()?).ok())
+        .unwrap_or(path);
+    format!(
+        "The command did not run: {} is not what it was when approval was asked (changed, moved or unreadable). Run it again to ask with the file as it is now.",
+        shown.display()
+    )
 }
 
 struct PendingPermissionCleanup {
@@ -6577,6 +6920,7 @@ async fn review_waiting(
                 feedback: None,
                 review: Some(review),
                 refused: false,
+                once: false,
             },
             // Left to the person, with the reviewer's note; or the chat left
             // Auto, and the card is plain again. Either way it is announced
@@ -6806,6 +7150,7 @@ impl PendingPermission {
             patterns: self.patterns.clone(),
             always_patterns: self.always_rules.clone(),
             detail: self.detail.clone(),
+            script: self.script.clone(),
             thread_id: self.thread_id,
             root_thread_id: Some(self.root_thread_id),
             turn_id: self.turn_id,
@@ -6872,6 +7217,11 @@ struct PermissionResolution {
     /// Nobody could answer it (`refuse`): `feedback` is Haarness's words,
     /// not a person's.
     refused: bool,
+    /// A person allowed exactly this request, once (Allow once, or any
+    /// allow of a request that offers nothing longer): nothing else lets it
+    /// through again without a card. Never set by Auto's reviewer, a
+    /// refusal or a release.
+    once: bool,
 }
 
 impl PermissionResolution {
@@ -6881,6 +7231,7 @@ impl PermissionResolution {
             feedback: None,
             review: None,
             refused: false,
+            once: false,
         }
     }
 
@@ -6890,6 +7241,7 @@ impl PermissionResolution {
             feedback,
             review: None,
             refused: false,
+            once: false,
         }
     }
 }
@@ -10016,6 +10368,29 @@ impl RunnerTask {
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
+        // A shell command's card, whatever it asks about (under the default
+        // rules, a folder outside the project), shows the script the command
+        // runs, in Auto as in Review: it is read for the person the card is
+        // shown to, before the gate is taken, so a slow disk never holds up a
+        // mode change or another chat's answer. In Auto, which may answer
+        // without a card (the check under the gate below is the one that
+        // counts), it is read only once the request goes to a person: after
+        // the reviewer leaves it to them, or for an ask they configured.
+        let script_card = shows_script(tool.0, detail);
+        let read_script = || async {
+            let engine =
+                self.permission_engine_with_session_rules(agent, &self.session_rules.lock());
+            let readable = script_readable(engine, Some(self.skill_engine()), &self.workspace);
+            script_for_person(detail, &self.workspace, readable).await
+        };
+        let mut shown = if !script_card
+            || (!forced && !explicit && self.approval_modes.is_auto(self.thread.id).await)
+        {
+            None
+        } else {
+            read_script().await
+        };
+        let mut script = shown.as_ref().map(|shown| shown.script.clone());
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, mut receiver) = oneshot::channel();
         // In a chat in Auto, eligible requests go to the reviewer (or, with
@@ -10072,6 +10447,7 @@ impl RunnerTask {
                     patterns: plan.patterns.clone(),
                     always_rules: always_rules.clone(),
                     detail: detail.clone(),
+                    script: script.clone(),
                     thread_id: self.thread.id,
                     root_thread_id: self.root_thread_id,
                     turn_id: Some(self.turn.id),
@@ -10129,6 +10505,14 @@ impl RunnerTask {
                 Reviewed::Show => {}
             }
         }
+        // Shown to a person after all: the card carries the script.
+        if script_card && shown.is_none() {
+            shown = read_script().await;
+            script = shown.as_ref().map(|shown| shown.script.clone());
+            if let Some(mut entry) = self.permissions.get_mut(&id) {
+                entry.script.clone_from(&script);
+            }
+        }
         let review = self
             .permissions
             .get(&id)
@@ -10150,6 +10534,7 @@ impl RunnerTask {
                 "explicit": explicit,
                 "operation": operation,
                 "detail": detail,
+                "script": script,
                 "permission": plan.permission,
                 "patterns": plan.patterns,
                 "alwaysPatterns": always_rules,
@@ -10215,6 +10600,22 @@ impl RunnerTask {
             self.set_status("tool", Some(tool));
         }
         self.publish_task_update("running");
+        // The person approved what the card showed: a script that changed
+        // since, or is gone, does not run in its place.
+        if let Some(shown) = &shown
+            && let Some(seal) = &shown.seal
+            && resolution.as_ref().is_ok_and(|resolution| resolution.once)
+            && !seal.holds().await
+        {
+            tracing::info!(
+                permission = id,
+                "refused: the script changed after it was shown"
+            );
+            return Err(CoreError::PermissionRejected(script_changed(
+                &shown.script.path,
+                &self.workspace,
+            )));
+        }
         resolution
     }
     /// A `PermissionRequest` hook answered Always: remember what Always in
@@ -10687,6 +11088,7 @@ impl RunnerTask {
                                 request_id: RequestId::new(),
                                 text: prompt,
                                 attachments: Vec::new(),
+                                resources: Vec::new(),
                                 synthetic: false,
                             },
                         )
@@ -10764,6 +11166,7 @@ impl RunnerTask {
             request_id: RequestId::new(),
             text: prompt,
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: self.request.auto_approve,
             agent: Some(agent.clone()),
@@ -11124,6 +11527,7 @@ impl RunnerTask {
                             request_id: handoff.request_id(),
                             text: envelope.clone(),
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: true,
                         },
                         task.delivery_auto_approve,
@@ -16611,6 +17015,49 @@ mod tests {
         // The three seconds between provider checkpoints represent tool,
         // child-agent, or human-question wait and are charged exactly once.
         assert_eq!(accounting.elapsed_delta_at(5), 3);
+    }
+
+    /// A script card shows what the chat may read: `read` rules (built-in
+    /// and configured) and an active skill's deny hide a file, and outside
+    /// the project an `external_directory` deny of its folder does, not an
+    /// ask.
+    #[test]
+    fn a_script_card_shows_only_what_the_chat_may_read() {
+        use crate::{PermissionDecision, PermissionEngine, PermissionRule};
+        let rule = |pattern: &str, decision| PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        };
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-readable-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(&workspace);
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.add_rule(rule("read:private/*", PermissionDecision::Ask));
+        engine.add_rule(rule(
+            "external_directory:/opt/denied/*",
+            PermissionDecision::Deny,
+        ));
+        let mut skill =
+            PermissionEngine::new(vec![rule("read:skill-hidden/*", PermissionDecision::Deny)]);
+        skill.set_workspace(&workspace);
+        let readable = super::script_readable(engine, Some(skill), &workspace);
+        assert!(readable(&workspace.join("run.sh")));
+        for hidden in [
+            ".env",
+            "secrets/run.sh",
+            "private/run.sh",
+            "skill-hidden/run.sh",
+        ] {
+            assert!(!readable(&workspace.join(hidden)), "{hidden}");
+        }
+        // Outside the project: the folder's ask (the default) shows it, a
+        // deny of it or of a folder above hides it.
+        assert!(readable(std::path::Path::new("/opt/tools/run.sh")));
+        assert!(!readable(std::path::Path::new("/opt/denied/run.sh")));
+        assert!(!readable(std::path::Path::new("/opt/denied/deeper/run.sh")));
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 }
 

@@ -1,5 +1,7 @@
 //! Two creates of one chosen chat id that both find no chat yet: the store
 //! keeps the first insert, and the runtime answers the second with that chat.
+//! And a steer's retry that checked for its turn before the steer that found
+//! the chat idle stored it: it gets that turn, not a second message.
 use super::*;
 use haarness_core::PermissionRule;
 use haarness_protocol::{
@@ -10,7 +12,8 @@ use tokio::sync::Barrier;
 
 /// A store whose first two lookups of one id wait for each other, so
 /// neither create has inserted when the other checks whether the chat
-/// exists.
+/// exists. It finds no turn by request and no admitted input, as a retry
+/// that checked before the first request was stored does.
 struct RacingCreates {
     inner: SqliteStore,
     id: ThreadId,
@@ -196,4 +199,63 @@ async fn concurrent_creates_that_both_find_no_chat_make_one_chat() {
         .filter_map(|event| event.thread_id)
         .collect::<Vec<_>>();
     assert_eq!(created, [id], "one created event");
+}
+
+#[tokio::test]
+async fn a_steers_retry_that_checked_before_its_turn_was_stored_gets_that_turn() {
+    let provider = SlowText::default();
+    let runtime = AgentRuntime::new(
+        Arc::new(RacingCreates {
+            inner: SqliteStore::in_memory().unwrap(),
+            id: ThreadId::new(),
+            checked: Barrier::new(2),
+            lookups: AtomicUsize::new(0),
+            inserts: AtomicUsize::new(0),
+        }),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let steer = haarness_protocol::QueueInputRequest {
+        preview: None,
+        reasoning_effort: None,
+        delivery: haarness_protocol::InputDelivery::Steer,
+        request_id: RequestId::new(),
+        text: "Go".into(),
+        attachments: Vec::new(),
+        resources: Vec::new(),
+        synthetic: false,
+    };
+    let started = runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), provider.first_started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let retried = runtime.queue_input(thread.id, steer).await.unwrap();
+    assert!(!retried.queued && retried.item.is_none(), "{retried:?}");
+    assert_eq!(
+        retried.turn.map(|turn| turn.id),
+        started.turn.map(|turn| turn.id)
+    );
+    provider.release_first.add_permits(1);
+    wait_idle(&runtime, thread.id).await;
+    let sent = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|item| matches!(item.data, ItemData::UserMessage { .. }))
+        .count();
+    assert_eq!(sent, 1);
 }

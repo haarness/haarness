@@ -14,6 +14,104 @@ import {
   onImageSettled,
   relabelImages,
 } from "./remote-images";
+import {
+  noteImage,
+  onProjectImageSettled,
+  projectImageElement,
+  imageProject,
+  projectRoots,
+  readProjectImages,
+  relabelProjectImages,
+  shownProjectImage,
+  type ShownImage,
+} from "./project-images";
+import { watchOpenImages } from "./ImageViewer";
+
+/**
+ * What is read in the transcript's view: the first text that starts inside
+ * it, under its middle. Starting inside the view, it holds nothing above it,
+ * so an image growing there moves it whole; an image or a placeholder, which
+ * may be the one about to come in, is passed over. When no text starts
+ * inside it (a tall picture or code block fills it), the end of the row under
+ * its centre, which any growth above the view moves as well.
+ */
+function readingAnchor(list: HTMLElement, view: DOMRect): { element: HTMLElement; edge: "top" | "bottom" } | undefined {
+  const x = view.left + view.width / 2;
+  for (let y = view.top + 1; y < view.bottom; y += 12) {
+    const point = document.elementFromPoint(x, y);
+    if (!(point instanceof HTMLElement) || point === list || !list.contains(point)) continue;
+    if (point instanceof HTMLImageElement || point.closest(".project-image, .remote-image")) continue;
+    if (point.getBoundingClientRect().top >= view.top) return { element: point, edge: "top" };
+  }
+  const row = document.elementFromPoint(x, view.top + view.height / 2)?.closest<HTMLElement>("[data-index]");
+  return row && list.contains(row) ? { element: row, edge: "bottom" } : undefined;
+}
+
+/**
+ * Whether an element is drawn: not skipped by the window, and not inside a
+ * closed disclosure (the compaction summary), whose content keeps a box but
+ * whose size is never observed; a closed disclosure's own summary is drawn.
+ */
+function drawn(element: HTMLElement) {
+  if (!element.checkVisibility()) return false;
+  const closed = element.closest("details:not([open])");
+  return !closed || !!closed.querySelector(":scope > summary")?.contains(element);
+}
+
+/** Each transcript's correction of the reading position that waits for its rows to be measured. */
+const correcting = new WeakMap<HTMLElement, object>();
+
+/**
+ * Makes `change` (an image coming into `host`) without moving what is being
+ * read when `element` is above the top of the transcript's view. The
+ * transcript turns the browser's scroll anchoring off; its virtualizer keeps
+ * a row in place only when the whole row is above the view, so a reply that
+ * reaches into the view, or the live reply outside the rows, would move by
+ * as much as the image grew. So what is read (`readingAnchor`, or else the
+ * end of this reply) is noted before, and once the rows are measured (the
+ * virtualizer's observer was made first, so it hears first, and any place it
+ * kept is counted) and before they are painted, the view moves by as much as
+ * that moved. One correction waits per transcript: images coming in while it
+ * waits, in this reply or another (your own message showing the same image),
+ * are counted in it; if no measure comes within two frames, it is given up.
+ * Text not shown (inside a closed disclosure) moves nothing, so it is just
+ * changed. The image is decoded before it comes in, so it takes its final
+ * size at once.
+ */
+function keepReading(element: HTMLElement, host: HTMLElement, change: () => void) {
+  const list = element.closest<HTMLElement>(".transcript");
+  const view = list?.getBoundingClientRect();
+  if (
+    !list ||
+    !view ||
+    !host.checkVisibility() ||
+    !drawn(element) ||
+    element.getBoundingClientRect().top >= view.top ||
+    correcting.has(list)
+  )
+    return change();
+  const anchor = readingAnchor(list, view);
+  const where = () => {
+    const box = (anchor?.element ?? host).getBoundingClientRect();
+    return (anchor?.edge === "top" ? box.top : box.bottom) - list.getBoundingClientRect().top;
+  };
+  const before = where();
+  const token = {};
+  correcting.set(list, token);
+  change();
+  const done = () => {
+    measured.disconnect();
+    if (correcting.get(list) === token) correcting.delete(list);
+  };
+  const measured = new ResizeObserver(() => {
+    done();
+    if (anchor && !anchor.element.isConnected) return;
+    const moved = where() - before;
+    if (moved) list.scrollTop += moved;
+  });
+  measured.observe(host);
+  requestAnimationFrame(() => requestAnimationFrame(done));
+}
 
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
@@ -29,6 +127,12 @@ export function Markdown(props: {
   onLink?: (href: string) => void;
 }) {
   const app = useApp();
+  /**
+   * In the conversation an image whose source is a path shows that file of
+   * the project, read through the server; a Markdown file's preview and
+   * release notes draw it as before.
+   */
+  const conversation = !props.document;
   /** Web links leave through the desktop's link check; file links open in the Files panel. */
   function follow(href: string) {
     const connection = app.state.connection;
@@ -114,13 +218,44 @@ export function Markdown(props: {
       const load = holder.querySelector<HTMLButtonElement>(".remote-image-load");
       if (load && madeHere(load)) load.disabled = false;
     }
+    opening?.refresh();
   }
   onCleanup(onImageSettled(settled));
   const imageLabels = () => ({
     load: (from: string) => t("Load image from {host}", { host: from }),
     unnamed: t("Image"),
   });
+  const projectLabels = () => ({
+    unnamed: t("Image"),
+    outside: t("Outside this project"),
+    large: t("Too large to show"),
+    failed: t("Not available"),
+  });
+  /** Reads end with the reply: one still waiting for a slot is never started. */
+  const reading = new AbortController();
+  const asked = new Set<string>();
+  /** A read for this project settled: this reply's placeholders for the path show the image, or why not. */
+  function projectSettled(connection: string, path: string, shown: ShownImage) {
+    if (disposed || !host || connection !== app.state.connection?.id) return;
+    const elements = Array.from(host.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded")).filter(
+      (element) => madeHere(element) && element.dataset.projectPath === path,
+    );
+    if (!elements.length) return;
+    // Decided by the first copy drawn: one in a closed disclosure moves nothing.
+    keepReading(elements.find(drawn) ?? elements[0], host, () => {
+      for (const element of elements) {
+        if (shown.data === undefined) {
+          if (!(element instanceof HTMLImageElement)) noteImage(element, shown.note, projectLabels(), path);
+        } else if (element instanceof HTMLImageElement) {
+          if (element.getAttribute("src") !== shown.data) element.src = shown.data;
+        } else element.replaceWith(projectImageElement(document, path, element.dataset.projectAlt ?? "", shown.data));
+      }
+    });
+    opening?.refresh();
+  }
+  if (conversation) onCleanup(onProjectImageSettled(projectSettled));
   let host!: HTMLDivElement;
+  let opening: ReturnType<typeof watchOpenImages> | undefined;
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -130,7 +265,26 @@ export function Markdown(props: {
       loaded: (src) => loadedImage(scope(), src),
       loading: (src) => imageLoading(scope(), src),
       labels: imageLabels,
+      project: conversation
+        ? {
+            root: () => (app.state.connection ? projectRoots(app.state.connection) : []),
+            shown: (path) => {
+              const connection = app.state.connection?.id;
+              const now = connection ? shownProjectImage(connection, path) : undefined;
+              if (!now?.note) return now;
+              // A picture this reply already shows stays when its file is
+              // gone; only a place still waiting says why.
+              const live = Array.from(host.querySelectorAll<HTMLImageElement>("img.project-image-loaded")).find(
+                (image) => madeHere(image) && image.dataset.projectPath === path,
+              );
+              return live ? { data: live.getAttribute("src")! } : now;
+            },
+            labels: projectLabels,
+          }
+        : undefined,
     }))(update);
+    if (conversation) readProjectImages(host, imageProject(app.state), reading.signal, asked, projectLabels());
+    opening?.refresh();
     for (const block of host.querySelectorAll("pre")) {
       const code = block.querySelector("code");
       const language = /language-([\w+#-]+)/.exec(code?.className ?? "")?.[1];
@@ -161,16 +315,31 @@ export function Markdown(props: {
   onMount(() => host.addEventListener("markdown-draw-now", drawNow));
   onCleanup(() => host?.removeEventListener("markdown-draw-now", drawNow));
   // Image placeholders already drawn follow a language change.
-  createEffect(on(language, () => relabelImages(host, imageLabels()), { defer: true }));
+  createEffect(
+    on(
+      language,
+      () => {
+        relabelImages(host, imageLabels());
+        relabelProjectImages(host, projectLabels());
+      },
+      { defer: true },
+    ),
+  );
   onCleanup(() => {
     disposed = true;
+    reading.abort();
     client.dispose();
     timers.forEach(clearTimeout);
   });
+  // An image of the conversation shown smaller than it is opens full size.
+  onMount(() => {
+    if (conversation) opening = watchOpenImages(host, () => t("Image"));
+  });
+  onCleanup(() => opening?.dispose());
   return (
     <div
       ref={host}
-      class="markdown"
+      class={props.document ? "markdown markdown-document" : "markdown"}
       onClick={(event) => {
         const target = event.target as HTMLElement;
         const load = target.closest<HTMLButtonElement>(".remote-image-load");

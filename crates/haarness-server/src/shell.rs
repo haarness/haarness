@@ -1,5 +1,6 @@
 //! Stream shell output to disk while retaining only a bounded tail in memory.
 use haarness_core::{CoreError, CoreResult, ToolOutput};
+use haarness_protocol::ThreadId;
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -27,7 +28,9 @@ impl Drop for ProcessGroup {
 
 /// `env` adds or overrides variables for this one invocation (`shell.env`
 /// hooks); the parent environment is otherwise inherited, minus the server's
-/// private variables (`haarness_core::private_env_names`).
+/// private variables (`haarness_core::private_env_names`). `agent` is the
+/// chat a command the agent runs is for (`None` for a person's own command):
+/// see [`mark_agent`].
 pub(crate) async fn run(
     command: &str,
     workdir: &Path,
@@ -35,6 +38,7 @@ pub(crate) async fn run(
     cancel: &CancellationToken,
     directory: &Path,
     env: &BTreeMap<String, String>,
+    agent: Option<ThreadId>,
 ) -> CoreResult<ToolOutput> {
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
@@ -46,14 +50,28 @@ pub(crate) async fn run(
     for name in haarness_core::private_env_names() {
         command.env_remove(name);
     }
+    // A person's own command is not marked, also when this server holds
+    // Haarness's own markers (a `haarness serve` an agent's command started).
+    if agent.is_none() {
+        for name in haarness_core::own_agent_markers(std::env::var_os("AI_AGENT").as_deref()) {
+            command.env_remove(name);
+        }
+    }
     // Without a locale (Desktop opened from Finder) a command would read 日本
     // as six characters, as a terminal would; a hook's own LANG still wins.
     if let Some(locale) = haarness_pty::missing_locale() {
         command.env("LANG", locale);
     }
-    command.envs(env.iter().filter(|(key, value)| {
-        !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0')
-    }));
+    let env: Vec<_> = env
+        .iter()
+        .filter(|(key, value)| {
+            !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0')
+        })
+        .collect();
+    command.envs(env.iter().copied());
+    if let Some(thread) = agent {
+        mark_agent(&mut command, thread, &env);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -167,6 +185,52 @@ pub(crate) async fn run(
     })
 }
 
+/// Marks a command the agent runs as an agent's (`AGENT`, `AI_AGENT`, and
+/// `HAARNESS`), for scripts and tools that adapt to one, and names the chat
+/// it runs for (`HAARNESS_SESSION_ID`). They win over the server's own
+/// environment, which a `haarness` started by another chat's command inherits
+/// with that chat's id, and over `env` (`shell.env` hooks and extensions). An
+/// `AI_AGENT` already set, there or in the server's environment, names an
+/// outer agent and is kept, unless it is Haarness's own. A person's own
+/// command is not marked.
+fn mark_agent(command: &mut std::process::Command, thread: ThreadId, env: &[(&String, &String)]) {
+    // What the command would get otherwise: `env`'s value, else the server's.
+    let given = |name: &str| {
+        env.iter()
+            .rev()
+            .find(|(key, _)| {
+                if cfg!(windows) {
+                    key.eq_ignore_ascii_case(name)
+                } else {
+                    key.as_str() == name
+                }
+            })
+            .map(|(_, value)| std::ffi::OsString::from(value.as_str()))
+            .or_else(|| std::env::var_os(name))
+            .filter(|value| !value.is_empty())
+    };
+    let id = thread.to_string();
+    // `AI_AGENT=haarness` (this server started in an agent's command, say)
+    // is Haarness's own marker, not an outer agent's.
+    let outer = given("AI_AGENT").is_some_and(|value| value != haarness_core::AI_AGENT_VALUE);
+    let stale = given(haarness_core::SESSION_ID_ENV).is_some_and(|value| value != id.as_str());
+    command
+        .env("AGENT", "1")
+        .env("HAARNESS", "1")
+        .env(haarness_core::SESSION_ID_ENV, &id);
+    if !outer {
+        command.env("AI_AGENT", haarness_core::AI_AGENT_VALUE);
+    }
+    // The values themselves are not logged: neither the outer marker kept nor
+    // the id replaced.
+    tracing::info!(
+        thread_id = %thread,
+        outer_marker_kept = outer,
+        stale_id_replaced = stale,
+        "agent shell environment set"
+    );
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -186,6 +250,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &BTreeMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -203,6 +268,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &env,
+            None,
         )
         .await
         .unwrap();
@@ -214,6 +280,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &BTreeMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -241,6 +308,7 @@ mod tests {
                 &CancellationToken::new(),
                 &root,
                 &BTreeMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -255,6 +323,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &env,
+            None,
         )
         .await
         .unwrap();
@@ -276,6 +345,7 @@ mod tests {
                     &token,
                     &work,
                     &BTreeMap::new(),
+                    None,
                 )
                 .await
             });
@@ -299,5 +369,267 @@ mod tests {
             assert!(!root.join("escaped").exists());
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    /// The cases of [`agent_marker_case`] run in a child test process whose
+    /// own environment (the server's, which a command inherits) holds
+    /// `inherited`, with the markers and the server's token unset otherwise.
+    fn in_server_environment(case: &str, inherited: &[(&str, &str)]) {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "shell::tests::agent_marker_case", "--nocapture"])
+            .env("HAARNESS_SHELL_MARKER_CASE", case);
+        for name in [
+            "AGENT",
+            "HAARNESS",
+            "AI_AGENT",
+            "HAARNESS_SESSION_ID",
+            "HAARNESS_SERVER_TOKEN",
+        ] {
+            command.env_remove(name);
+        }
+        let output = command.envs(inherited.iter().copied()).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(&format!("case {case} passed")),
+            "{case}: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The formatted INFO events of this thread while it lives.
+    #[derive(Clone, Default)]
+    struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Logs {
+        fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+            let logs = Self::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            (logs, tracing::subscriber::set_default(subscriber))
+        }
+        fn marked(&self) -> Vec<String> {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .lines()
+                .filter(|line| line.contains("agent shell environment set"))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    const SHOW: &str = r#"printf '%s|%s|%s|%s' "${AGENT-unset}" "${HAARNESS-unset}" "${AI_AGENT-unset}" "${HAARNESS_SESSION_ID-unset}""#;
+
+    async fn stdout(
+        root: &Path,
+        script: &str,
+        env: &BTreeMap<String, String>,
+        agent: Option<ThreadId>,
+    ) -> String {
+        let output = run(script, root, 0, &CancellationToken::new(), root, env, agent)
+            .await
+            .unwrap();
+        assert_eq!(output.metadata["exit"], 0, "{output:?}");
+        output.metadata["stdout"].as_str().unwrap().to_owned()
+    }
+
+    /// One case of the tests below, in the environment they give it.
+    #[tokio::test]
+    async fn agent_marker_case() {
+        let Ok(case) = std::env::var("HAARNESS_SHELL_MARKER_CASE") else {
+            return;
+        };
+        let root = fixture();
+        let (logs, _guard) = Logs::capture();
+        let thread = ThreadId::new();
+        let none = BTreeMap::new();
+        let line = |outer: bool, stale: bool| {
+            format!(
+                "agent shell environment set thread_id={thread} outer_marker_kept={outer} stale_id_replaced={stale}"
+            )
+        };
+        match case.as_str() {
+            "stale" => {
+                // The id another chat's command left in the server's environment
+                // is replaced, and the markers it set to 0 are set again; an
+                // empty AI_AGENT names no outer agent.
+                assert_eq!(
+                    stdout(&root, SHOW, &none, Some(thread)).await,
+                    format!("1|1|haarness|{thread}")
+                );
+                assert_eq!(logs.marked().len(), 1);
+                assert!(
+                    logs.marked()[0].ends_with(&line(false, true)),
+                    "{:?}",
+                    logs.marked()
+                );
+                // A person's own command is not marked, and no chat id reaches it:
+                // the server's AGENT and HAARNESS are left out too.
+                assert_eq!(stdout(&root, SHOW, &none, None).await, "unset|unset||unset");
+                assert_eq!(logs.marked().len(), 1);
+            }
+            "own" => {
+                // This server started in another chat's agent command (a
+                // `haarness serve`, say): its AI_AGENT=haarness is Haarness's
+                // own marker, not an outer agent's, and a person's command
+                // gets none of that command's markers.
+                assert_eq!(
+                    stdout(&root, SHOW, &none, Some(thread)).await,
+                    format!("1|1|haarness|{thread}")
+                );
+                assert!(
+                    logs.marked()[0].ends_with(&line(false, true)),
+                    "{:?}",
+                    logs.marked()
+                );
+                assert_eq!(
+                    stdout(&root, SHOW, &none, None).await,
+                    "unset|unset|unset|unset"
+                );
+            }
+            "outer" => {
+                // An agent that runs Haarness keeps its own marker.
+                assert_eq!(
+                    stdout(&root, SHOW, &none, Some(thread)).await,
+                    format!("1|1|outer-agent|{thread}")
+                );
+                assert!(
+                    logs.marked()[0].ends_with(&line(true, false)),
+                    "{:?}",
+                    logs.marked()
+                );
+                assert_eq!(
+                    stdout(&root, SHOW, &none, None).await,
+                    "unset|unset|outer-agent|unset"
+                );
+            }
+            "hook" => {
+                // A `shell.env` hook (or an extension) adds variables, and an
+                // AI_AGENT it sets is kept as an outer marker, but it cannot mark
+                // the command as not an agent's or name another chat.
+                let env = BTreeMap::from(
+                    [
+                        ("AGENT", "0"),
+                        ("HAARNESS", "0"),
+                        ("AI_AGENT", "hook-agent"),
+                        ("HAARNESS_SESSION_ID", "hook"),
+                        ("HOOK_ENV", "ok"),
+                    ]
+                    .map(|(name, value)| (name.to_owned(), value.to_owned())),
+                );
+                let script = format!(r#"{SHOW}; printf '|%s' "$HOOK_ENV""#);
+                assert_eq!(
+                    stdout(&root, &script, &env, Some(thread)).await,
+                    format!("1|1|hook-agent|{thread}|ok")
+                );
+                assert!(
+                    logs.marked()[0].ends_with(&line(true, true)),
+                    "{:?}",
+                    logs.marked()
+                );
+                // A person's command gets the hook's variables as they are.
+                assert_eq!(
+                    stdout(&root, &script, &env, None).await,
+                    "0|0|hook-agent|hook|ok"
+                );
+                // An empty AI_AGENT from a hook names no outer agent either.
+                let env = BTreeMap::from([("AI_AGENT".to_owned(), String::new())]);
+                assert_eq!(
+                    stdout(&root, SHOW, &env, Some(thread)).await,
+                    format!("1|1|haarness|{thread}")
+                );
+            }
+            "clean" => {
+                // The new variables hold the fixed markers and the chat id, nothing
+                // else, and the id is in no other variable.
+                let listing = stdout(&root, "env", &none, Some(thread)).await;
+                let lines: Vec<_> = listing.lines().collect();
+                let named = |test: &dyn Fn(&str) -> bool| {
+                    let mut found: Vec<_> =
+                        lines.iter().copied().filter(|line| test(line)).collect();
+                    found.sort_unstable();
+                    found
+                };
+                assert_eq!(
+                    named(&|line| line.contains(&thread.to_string())),
+                    [format!("HAARNESS_SESSION_ID={thread}")]
+                );
+                assert_eq!(
+                    named(&|line| ["AGENT=", "AI_AGENT=", "HAARNESS="]
+                        .iter()
+                        .any(|start| line.starts_with(start))),
+                    ["AGENT=1", "AI_AGENT=haarness", "HAARNESS=1"]
+                );
+                assert!(!listing.contains("server-secret"), "{listing}");
+                assert!(!listing.contains("OPENCODE"), "{listing}");
+                // One line per command, the values left out.
+                stdout(&root, "true", &none, Some(thread)).await;
+                assert_eq!(logs.marked().len(), 2, "{:?}", logs.marked());
+                for logged in logs.marked() {
+                    assert!(logged.ends_with(&line(false, false)), "{logged}");
+                    assert!(logged.starts_with(" INFO"), "{logged}");
+                }
+                assert_eq!(
+                    stdout(&root, SHOW, &none, None).await,
+                    "unset|unset|unset|unset"
+                );
+            }
+            other => panic!("unknown case {other}"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        println!("case {case} passed");
+    }
+
+    #[test]
+    fn an_agent_command_replaces_a_stale_chat_id_and_a_person_s_gets_none() {
+        in_server_environment(
+            "stale",
+            &[
+                ("AGENT", "0"),
+                ("HAARNESS", "0"),
+                ("AI_AGENT", ""),
+                ("HAARNESS_SESSION_ID", "stale"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_server_started_in_an_agent_s_command_marks_its_commands_as_its_own() {
+        in_server_environment(
+            "own",
+            &[
+                ("AGENT", "1"),
+                ("HAARNESS", "1"),
+                ("AI_AGENT", "haarness"),
+                ("HAARNESS_SESSION_ID", "another-chat"),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_agent_command_keeps_an_outer_ai_agent_marker() {
+        in_server_environment("outer", &[("AGENT", "1"), ("AI_AGENT", "outer-agent")]);
+    }
+
+    #[test]
+    fn a_shell_env_hook_cannot_unmark_an_agent_command_or_name_another_chat() {
+        in_server_environment("hook", &[]);
+    }
+
+    #[test]
+    fn the_markers_carry_only_fixed_values_and_the_chat_id_logged_once_per_command() {
+        in_server_environment("clean", &[("HAARNESS_SERVER_TOKEN", "server-secret")]);
     }
 }

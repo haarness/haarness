@@ -167,16 +167,24 @@ fn shell_with_binary(script: &str, binary: &Path) -> io::Result<Command> {
         command.raw_arg(format!("/d /s /c \"{script}\""));
         command
     };
+    // A `cd` goes where the script says (as a permission card reads it),
+    // never through a `CDPATH`: none is inherited, and one a login profile
+    // sets is unset on this first line, so an error quotes only the
+    // script's own lines; a read-only one is left, and breaks nothing.
     #[cfg(not(windows))]
     let mut command = {
         let mut command = Command::new("sh");
         command
             .args([
                 "-lc",
-                &format!("export PATH=\"$1${{PATH:+:$PATH}}\"; shift\n{script}"),
+                &format!(
+                    "export PATH=\"$1${{PATH:+:$PATH}}\"; shift; \
+                     command unset CDPATH 2>/dev/null || :\n{script}"
+                ),
                 "sh",
             ])
-            .arg(binary.parent().expect("binary directory"));
+            .arg(binary.parent().expect("binary directory"))
+            .env_remove("CDPATH");
         command
     };
     command.env(
@@ -233,6 +241,75 @@ mod tests {
         symlink(&outside, &binary).unwrap();
         assert!(extract(cache.path()).is_err());
         assert_eq!(fs::read_to_string(outside).unwrap(), "preserve");
+    }
+
+    /// A login shell for `script` from `folder`, with `home` as its home
+    /// folder (where its `.profile` is).
+    #[cfg(unix)]
+    fn run_in(
+        script: &str,
+        folder: &Path,
+        home: &Path,
+        cdpath: Option<&Path>,
+    ) -> std::process::Output {
+        let mut command = shell_with_binary(script, &folder.join("bin/rg")).unwrap();
+        command.current_dir(folder).env("HOME", home);
+        if let Some(cdpath) = cdpath {
+            command.env("CDPATH", cdpath);
+        }
+        command.output().unwrap()
+    }
+
+    /// A `cd` goes where the script says, as a permission card reads it,
+    /// whatever `CDPATH` the server's environment or a login profile sets.
+    #[cfg(unix)]
+    #[test]
+    fn cd_goes_where_the_script_says_whatever_cdpath_says() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        for folder in [root.path(), elsewhere.path()] {
+            fs::create_dir_all(folder.join("sub")).unwrap();
+        }
+        fs::write(root.path().join("sub/run.sh"), "printf here").unwrap();
+        fs::write(elsewhere.path().join("sub/run.sh"), "printf elsewhere").unwrap();
+        let script = "cd sub && sh run.sh";
+        let output = run_in(script, root.path(), home.path(), Some(elsewhere.path()));
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "here");
+        fs::write(
+            home.path().join(".profile"),
+            format!("export CDPATH='{}'\n", elsewhere.path().display()),
+        )
+        .unwrap();
+        let output = run_in(script, root.path(), home.path(), None);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "here");
+    }
+
+    /// The wrapper's own line stays out of what the person reads: an error
+    /// quotes only the script, and a profile's read-only `CDPATH` fails
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn the_wrapper_stays_out_of_errors_and_a_read_only_cdpath_breaks_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let output = run_in("echo )", root.path(), home.path(), None);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(')'), "{error}");
+        assert!(
+            !error.contains("CDPATH") && !error.contains("shift"),
+            "{error}"
+        );
+        fs::write(
+            home.path().join(".profile"),
+            "readonly CDPATH=/nonexistent\n",
+        )
+        .unwrap();
+        let output = run_in("printf ran", root.path(), home.path(), None);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "ran");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     }
 
     #[cfg(unix)]

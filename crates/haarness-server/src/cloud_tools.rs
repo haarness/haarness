@@ -481,6 +481,7 @@ mod tests {
             request_id: RequestId::new(),
             text: format!("!cloud {tool} {arguments}"),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: true,
             agent: None,

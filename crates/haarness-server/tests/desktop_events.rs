@@ -57,6 +57,7 @@ async fn terminal_failure_is_published_live_before_completion_and_replayed_once(
                 request_id: RequestId::new(),
                 text: "hi".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
                 auto_approve: false,
                 agent: None,

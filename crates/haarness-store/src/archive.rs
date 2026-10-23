@@ -501,6 +501,7 @@ mod tests {
             request_id: RequestId::new(),
             text: text.into(),
             attachments: vec!["/private/secret.png".into()],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,

@@ -1375,6 +1375,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: payload,
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: false,
                     },
                 )
@@ -1399,6 +1400,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: payload,
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: false,
                     },
                 )
@@ -1414,6 +1416,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: payload,
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: false,
                         auto_approve: false,
                         agent: Some(identity.0),
@@ -1580,6 +1583,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: format!("Agent handoff completed. {reason}"),
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: true,
                         auto_approve: false,
                         agent: Some(continuation_agent),

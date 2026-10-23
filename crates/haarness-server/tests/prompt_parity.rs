@@ -192,6 +192,7 @@ fn request() -> StartTurnRequest {
         request_id: RequestId::new(),
         text: "Use the held tool, then answer.".into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: false,
         agent: None,

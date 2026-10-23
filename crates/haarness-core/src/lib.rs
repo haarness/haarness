@@ -52,8 +52,8 @@ pub use permissions::{
 pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
-    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
-    refusal_reason, shorten_title,
+    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, ResourceMentionPolicy,
+    StaticProviderRegistry, refusal_reason, shorten_title,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,
@@ -70,12 +70,41 @@ pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 /// provider error bodies, approval prompts, paths and client addresses.
 pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 
+/// The variable that names the chat an agent's shell command runs for. The
+/// shell tool sets it for each command the agent runs (see
+/// [`ExecutionSettings::person_shell`]); the other processes the server
+/// starts leave it out (see [`private_env_names`]).
+pub const SESSION_ID_ENV: &str = "HAARNESS_SESSION_ID";
+
+/// The `AI_AGENT` the shell tool gives a command the agent runs, unless an
+/// outer agent already set its own.
+pub const AI_AGENT_VALUE: &str = "haarness";
+
+/// The variables of Haarness's own agent markers, as an agent's shell command
+/// gets them, in an environment whose `AI_AGENT` is `ai_agent`: `AGENT`,
+/// `HAARNESS`, [`SESSION_ID_ENV`], and `AI_AGENT` when it is
+/// [`AI_AGENT_VALUE`]. A server started from such a command leaves them out:
+/// it outlives that command and serves a person's own `!` commands and
+/// terminals too, and its own agent commands are marked again. An outer
+/// agent's `AI_AGENT` (any other value) is kept.
+#[must_use]
+pub fn own_agent_markers(ai_agent: Option<&std::ffi::OsStr>) -> Vec<&'static str> {
+    let mut names = vec!["AGENT", "HAARNESS", SESSION_ID_ENV];
+    if ai_agent.is_some_and(|value| value == AI_AGENT_VALUE) {
+        names.push("AI_AGENT");
+    }
+    names
+}
+
 /// Variables a process the server starts for the agent, a terminal, a hook, an
-/// MCP server or an extension must not inherit: the server's own credentials,
-/// and the OpenTelemetry settings (`OTEL_EXPORTER_OTLP_HEADERS` usually holds a
-/// collector key, and instrumented programs would export into the user's
-/// collector). Configured environments (`shell.env` hooks, MCP `env`) can still
-/// set them explicitly.
+/// MCP server, an extension, a language server, a formatter or Git must not
+/// inherit: the server's own credentials, the OpenTelemetry settings
+/// (`OTEL_EXPORTER_OTLP_HEADERS` usually holds a collector key, and
+/// instrumented programs would export into the user's collector), and
+/// [`SESSION_ID_ENV`], which a server started by an agent's command inherits
+/// from that command and which names none of its own chats. Configured
+/// environments (`shell.env` hooks, MCP `env`, a language server's
+/// `environment`) can still set them explicitly.
 #[must_use]
 pub fn private_env_names() -> Vec<std::ffi::OsString> {
     std::env::vars_os()
@@ -103,6 +132,7 @@ fn is_private_env_name(name: &str, any_case: bool) -> bool {
             "HAARNESS_SERVER_TOKEN",
             "HAARNESS_SERVER_PASSWORD",
             "HAARNESS_SERVER_USERNAME",
+            SESSION_ID_ENV,
         ]
         .iter()
         .any(|private| same(name, private))
@@ -110,7 +140,19 @@ fn is_private_env_name(name: &str, any_case: bool) -> bool {
 
 #[cfg(test)]
 mod private_env_tests {
-    use super::is_private_env_name;
+    use super::{is_private_env_name, own_agent_markers};
+
+    #[test]
+    fn a_server_leaves_out_haarness_s_own_markers_and_keeps_an_outer_agent_s() {
+        let own = ["AGENT", "HAARNESS", "HAARNESS_SESSION_ID"];
+        assert_eq!(own_agent_markers(None), own);
+        assert_eq!(own_agent_markers(Some("outer-agent".as_ref())), own);
+        assert_eq!(own_agent_markers(Some("".as_ref())), own);
+        assert_eq!(
+            own_agent_markers(Some("haarness".as_ref())),
+            ["AGENT", "HAARNESS", "HAARNESS_SESSION_ID", "AI_AGENT"]
+        );
+    }
 
     #[test]
     fn the_server_s_credentials_are_private_in_any_case_where_names_ignore_case() {
@@ -119,6 +161,7 @@ mod private_env_tests {
             "HAARNESS_SERVER_PASSWORD",
             "HAARNESS_SERVER_USERNAME",
             "OTEL_EXPORTER_OTLP_HEADERS",
+            "HAARNESS_SESSION_ID",
         ] {
             assert!(is_private_env_name(name, false), "{name}");
             assert!(is_private_env_name(name, true), "{name}");
@@ -127,6 +170,7 @@ mod private_env_tests {
             "haarness_server_token",
             "Haarness_Server_Password",
             "otel_exporter_otlp_headers",
+            "haarness_session_id",
         ] {
             assert!(is_private_env_name(name, true), "{name}");
             assert!(!is_private_env_name(name, false), "{name}");
@@ -136,6 +180,10 @@ mod private_env_tests {
             "OTEL",
             "HAARNESS_SERVER",
             "HAARNESS_SERVER_TOKENS",
+            "HAARNESS_SESSION",
+            "AI_AGENT",
+            "AGENT",
+            "HAARNESS",
             "é",
         ] {
             assert!(!is_private_env_name(name, true), "{name}");

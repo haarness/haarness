@@ -21,6 +21,11 @@ pub struct ExecutionSettings {
     /// `shell.env` hooks. Never read from or written to configuration.
     #[serde(skip)]
     pub shell_env: std::collections::BTreeMap<String, String>,
+    /// The shell command is a person's own (the TUI's `!`), so the shell
+    /// tool does not mark it as an agent's (`AI_AGENT`, `AGENT`, `HAARNESS`,
+    /// `HAARNESS_SESSION_ID`). Set per call by the runtime, never configured.
+    #[serde(skip)]
+    pub person_shell: bool,
 }
 
 impl Default for ExecutionSettings {
@@ -36,6 +41,7 @@ impl Default for ExecutionSettings {
             code_max_source_bytes: 256 * 1024,
             plan_read_tools: Vec::new(),
             shell_env: std::collections::BTreeMap::new(),
+            person_shell: false,
         }
     }
 }
@@ -91,9 +97,12 @@ mod tests {
     fn hook_supplied_shell_environment_never_reaches_persisted_settings() {
         let mut settings = ExecutionSettings::default();
         settings.shell_env.insert("HOOK_VAR".into(), "1".into());
+        settings.person_shell = true;
         let text = serde_json::to_string(&settings).unwrap();
         assert!(!text.contains("shell_env"), "{text}");
+        assert!(!text.contains("person_shell"), "{text}");
         assert!(serde_json::from_str::<ExecutionSettings>(r#"{"shell_env":{"A":"b"}}"#).is_err());
+        assert!(serde_json::from_str::<ExecutionSettings>(r#"{"person_shell":true}"#).is_err());
     }
     #[test]
     fn plan_observation_and_explicit_extension_allowance_preserve_mutation_ceiling() {
