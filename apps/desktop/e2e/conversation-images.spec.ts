@@ -355,6 +355,48 @@ test("two images coming in at once above the view still move nothing being read"
   expect(errors).toEqual([]);
 });
 
+test("scrolling up through replies that finish drawing above the view moves only by the scroll", async () => {
+  // A long chat drawn for the first time: each reply measures, then grows as its text is drawn.
+  const long = await client.createThread({ title: "Long scroll", provider: "echo", model: "echo-1" });
+  for (let index = 0; index < 24; index++) {
+    const text =
+      `## Part ${index}\n\n` +
+      Array.from({ length: 6 + (index % 5) }, (_, line) => `- Item ${index}.${line} with enough words to wrap across the reading column now and then`).join("\n") +
+      "\n\n```ts\n" + Array.from({ length: 4 + (index % 3) }, (_, line) => `const value${line} = ${index * line};`).join("\n") + "\n```";
+    const turn = await client.startTurn(long.id, { requestId: crypto.randomUUID(), text });
+    await client.waitTurn(turn.id);
+  }
+  await page.locator(".sessions").getByRole("button", { name: "Long scroll", exact: true }).click();
+  const list = page.locator(".transcript");
+  await expect(list.locator("[data-item-id]").last()).toBeVisible();
+  await list.hover();
+  await page.mouse.wheel(0, -40);
+  await page.waitForTimeout(200);
+  // Scroll up 6px a frame; the row at the top of the view must move by exactly that.
+  const jumps = await list.evaluate(async (element) => {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const top = () => {
+      const view = element.getBoundingClientRect();
+      const row = document.elementFromPoint(view.left + view.width / 2, view.top + 5)?.closest<HTMLElement>("[data-item-id]");
+      return row ? { id: row.dataset.itemId, top: row.getBoundingClientRect().top } : undefined;
+    };
+    const found: number[] = [];
+    for (let step = 0; step < 150 && element.scrollTop > 0; step++) {
+      const before = top();
+      element.scrollTop -= 6;
+      await frame();
+      await frame();
+      const after = top();
+      // A frame may lose its 6px to a correction made at the same time; it may not jump.
+      if (before && after && before.id === after.id && Math.abs(after.top - before.top - 6) > 12) found.push(after.top - before.top);
+    }
+    return found;
+  });
+  expect(jumps).toEqual([]);
+  await page.locator(".sessions").getByRole("button", { name: "Images", exact: true }).click();
+  expect(errors).toEqual([]);
+});
+
 test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
   await reply("The chart again: ![Weekly chart](out/chart.png)");
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
