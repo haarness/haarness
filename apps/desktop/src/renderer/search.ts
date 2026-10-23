@@ -115,8 +115,9 @@ const keyStems = ["shortcut", "shortcuts", "keyboard", "hotkey", "keybind", "key
  * action it belongs to, which shows its key anyway.
  */
 export function asksForKeys(query: string, names: readonly string[] = []) {
-  const words = normalizeSearch(query).split(" ").filter(Boolean);
-  const stems = [...keyStems, ...names.flatMap((name) => normalizeSearch(name).split(" "))];
+  const split = (text: string) => normalizeSearch(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const words = split(query);
+  const stems = [...keyStems, ...names.flatMap(split)];
   return words.some(
     (word) =>
       keyWords.includes(word) ||

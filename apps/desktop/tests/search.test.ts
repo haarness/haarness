@@ -105,7 +105,7 @@ test("an action outranks a setting or shortcut that matches as well", () => {
 });
 
 test("a search is about keys when it names them, a modifier, or the interface's word for shortcuts", () => {
-  for (const query of ["shortcut new", "short", "keyboard", "key", "Ctrl+N", "⌘ ⇧ L", "cmd", "alt", "hotk"])
+  for (const query of ["shortcut new", "Shortcut: New chat", "short", "keyboard", "key", "Ctrl+N", "⌘ ⇧ L", "cmd", "alt", "hotk"])
     assert.equal(asksForKeys(query), true, query);
   for (const query of ["", "new chat", "terminal", "model", "keep", "theme"])
     assert.equal(asksForKeys(query), false, query);
