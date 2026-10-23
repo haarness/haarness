@@ -252,15 +252,15 @@ fn shebang_line(bytes: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
 
 /// Whether `perl` runs another program instead of the script: one its
 /// first line names with `#!` without saying `perl` or `indir`, found as
-/// perl finds it (after a UTF-8 byte order mark, spaces, tabs and carriage
-/// returns, and one `:`), the line ending at a line feed, form feed,
+/// perl finds it (after a UTF-8 byte order mark, any ASCII white space but
+/// a line feed, and one `:`), the line ending at a line feed, form feed,
 /// vertical tab or carriage return. Real Perl scripts say `perl`, so the
 /// program is not judged.
 fn perl_runs_another_program(bytes: &[u8]) -> bool {
     let start = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let at = start
         .iter()
-        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r'))
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\x0c' | b'\x0b'))
         .unwrap_or(start.len());
     let mut start = &start[at..];
     if start.starts_with(b":") && !start.starts_with(b"::") {
@@ -980,6 +980,10 @@ mod tests {
             "#!/bin/sh evil.sh\x0cperl",
             "#!/bin/sh evil.sh\x0bperl",
             "#!/bin/sh evil.sh\rperl",
+            "\x0c#!/bin/sh evil.sh",
+            "\x0b#!/bin/sh evil.sh",
+            " \x0c#!/bin/sh evil.sh",
+            "\r\x0c\t#!/bin/sh evil.sh",
         ] {
             fixture.write("x.pl", format!("{first}\nprint \"body\\n\";\n"));
             assert!(
@@ -993,6 +997,7 @@ mod tests {
             ("#!/usr/bin/env perl", "perl x.pl"),
             ("#!/bin/sh evil.sh perl", "perl x.pl"),
             ("::#!/bin/sh evil.sh", "perl x.pl"),
+            (": #!/bin/sh evil.sh", "perl x.pl"),
             ("use strict;", "perl x.pl"),
             ("#!/bin/sh evil.sh", "sh x.pl"),
             ("#!/bin/sh evil.sh", "python3 x.pl"),
