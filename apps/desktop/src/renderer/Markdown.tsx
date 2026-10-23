@@ -176,7 +176,14 @@ export function Markdown(props: {
             root: () => app.state.connection?.workspace ?? "",
             shown: (path) => {
               const connection = app.state.connection?.id;
-              return connection ? shownProjectImage(connection, path) : undefined;
+              const now = connection ? shownProjectImage(connection, path) : undefined;
+              if (!now?.note) return now;
+              // A picture this reply already shows stays when its file is
+              // gone; only a place still waiting says why.
+              const live = Array.from(host.querySelectorAll<HTMLImageElement>("img.project-image-loaded")).find(
+                (image) => madeHere(image) && image.dataset.projectPath === path,
+              );
+              return live ? { data: live.getAttribute("src")! } : now;
             },
             labels: projectLabels,
           }

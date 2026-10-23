@@ -155,6 +155,11 @@ test("a read's preview is the image its result carries, or the project file it r
   const carried = `data:image/png;name=shot.png;base64,${base64(png)}`;
   assert.deepEqual(readToolImage("read", done(carried), root), { data: `data:image/png;base64,${base64(png)}` });
   assert.deepEqual(readToolImage("read", done(`${root}/out/shot.png`), root), { path: "out/shot.png" });
+  // The size the read saw, to tell the file as it was read from one changed since.
+  assert.deepEqual(
+    readToolImage("read", { is_error: false, metadata: { attachments: [`${root}/a.png`], mime: "image/png", size: 1234 } }, root),
+    { path: "a.png", size: 1234 },
+  );
   // Outside the project, an image the result does not carry is not shown.
   assert.equal(readToolImage("read", done("/tmp/shot.png"), root), undefined);
   // An SVG, bytes that are no image, another type or a failed read keep the row as it is.
@@ -280,7 +285,7 @@ test("an image is read once for its project, shown to every reply, and read agai
   requestProjectImage("project", "a.png", source.read, live.signal);
   await settle();
   assert.deepEqual(source.calls, ["a.png"]);
-  const shown = { data: `data:image/png;base64,${base64(png)}` };
+  const shown = { data: `data:image/png;base64,${base64(png)}`, size: png.length };
   assert.deepEqual(shownProjectImage("project", "a.png"), shown);
   assert.deepEqual(settled, [["project", "a.png", shown]]);
   // Another project reads its own file of that name.
@@ -298,17 +303,18 @@ test("an image is read once for its project, shown to every reply, and read agai
   await settle();
   assert.deepEqual([source.calls.length, settled.length], [2, 1]);
 
-  // A file that changed is shown anew; one that cannot be read again keeps its picture.
+  // A file that changed is shown anew, with its size; one that is gone says so from then on.
   files["a.png"] = jpeg;
   projectChanged("project");
   requestProjectImage("project", "a.png", source.read, live.signal);
   await settle();
-  assert.deepEqual(settled.at(-1), ["project", "a.png", { data: `data:image/jpeg;base64,${base64(jpeg)}` }]);
+  assert.deepEqual(settled.at(-1), ["project", "a.png", { data: `data:image/jpeg;base64,${base64(jpeg)}`, size: jpeg.length }]);
   files["a.png"] = new Error("This file no longer exists");
   projectChanged("project");
   requestProjectImage("project", "a.png", source.read, live.signal);
   await settle();
-  assert.deepEqual(shownProjectImage("project", "a.png"), { data: `data:image/jpeg;base64,${base64(jpeg)}` });
+  assert.deepEqual(shownProjectImage("project", "a.png"), { note: "failed" });
+  assert.deepEqual(settled.at(-1), ["project", "a.png", { note: "failed" }]);
   off();
 }));
 
