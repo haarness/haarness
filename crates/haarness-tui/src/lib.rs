@@ -741,6 +741,12 @@ async fn run_with_client(
                                 );
                             }
                         }
+                        // A one-key approval answer is sent when its window
+                        // ends unless another key comes first: the tick
+                        // wakes the loop then rather than on its own beat.
+                        if let Some(deadline) = crate::input::settle_deadline(&app) {
+                            tick.reset_at(tokio::time::Instant::from_std(deadline));
+                        }
                     }
                     TerminalEvent::Resize(width, height) => {
                         // Screen coordinates from an in-progress drag are no
@@ -1063,6 +1069,9 @@ async fn run_with_client(
                     (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
                 }
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
+                if let Err(error) = crate::input::settle_answer(&mut app, &client).await {
+                    app.notice = format!("Could not answer permission: {error}");
+                }
                 app.expire_notification();
                 app.expire_notice(std::time::Instant::now());
                 app.release_completions(std::time::Instant::now());
