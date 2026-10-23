@@ -230,6 +230,32 @@ test("notification controls independently govern completion, approvals and quest
   await f.receive(event({eventId:7,type:"permission.requested"}));
   assert.equal(f.shown.length, 3);
 });
+test("a request announced again asks for attention only when it newly needs the person", async () => {
+  const f = fixture();
+  const request = (eventId: number, review?: Record<string, unknown>, permissionId = "p1") =>
+    f.receive(event({ eventId, type: "permission.requested", payload: { permissionId, review } }));
+  // Shown in Review: one banner.
+  await request(1);
+  assert.equal(f.shown.length, 1);
+  // Auto turns on elsewhere with the card shown: the reviewer is deciding it.
+  await request(2, { status: "reviewing" });
+  assert.equal(f.shown.length, 1);
+  // The reviewer leaves it to the person: it needs them again.
+  await request(3, { status: "asked", rationale: "Test verdict: ask." });
+  assert.equal(f.shown.length, 2);
+  // The same need announced again (a reconnect, a replay) stays quiet.
+  await request(4, { status: "asked", rationale: "Test verdict: ask." });
+  assert.equal(f.shown.length, 2);
+  // A request first seen under review never asks; its ask does, once.
+  await request(5, { status: "reviewing" }, "p2");
+  assert.equal(f.shown.length, 2);
+  await request(6, { status: "failed", reason: { code: "timeout", seconds: 60 } }, "p2");
+  assert.equal(f.shown.length, 3);
+  // Permission IDs are scoped by project.
+  await f.receive(event({ eventId: 7, type: "permission.requested", payload: { permissionId: "p1" } }), "project-b");
+  assert.equal(f.shown.length, 4);
+  assert.ok(f.shown.every((item) => /Approval needed/.test(item.title)));
+});
 test("changing notification policy while resolving a conversation suppresses the stale alert", async () => {
   const policy = { completionNotifications: "always" as "always" | "never", permissionNotifications: true, questionNotifications: true };
   const f = fixture(policy);
