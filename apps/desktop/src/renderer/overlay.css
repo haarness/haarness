@@ -971,11 +971,11 @@ dialog .notifications {
   overflow-wrap: anywhere;
 }
 .settings-current-project-path {
+  display: flex;
+  width: fit-content;
   margin: 0 0 var(--s1);
   font-size: var(--ui);
   color: var(--muted);
-  overflow-wrap: anywhere;
-  user-select: text;
 }
 .settings-current-project > button {
   flex: none;
@@ -1006,6 +1006,41 @@ dialog .notifications {
 }
 .setting-row strong + .setting-tag {
   margin-inline-start: var(--s2);
+}
+/* "Current" beside the server or computer this window shows. */
+.badge.current-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--primary);
+}
+/* A path keeps its last folder whole and gives way in the middle. */
+.path-text {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: bottom;
+  white-space: nowrap;
+  user-select: text;
+}
+.path-text-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.path-text-tail {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.setting-row .path-text {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 2px;
+  font-size: var(--ui);
+  color: var(--muted);
 }
 .setting-row p {
   font-size: var(--ui);
@@ -1583,15 +1618,28 @@ dialog .notifications {
   text-align: center;
   padding: 0 3px;
 }
-/* The reveal marks a whole row, so the tint runs the full width of the page
-   rather than boxing the text in. Inline padding and an equal negative margin
-   cancel out, so the row's content box is untouched and nothing moves; every
-   wrapper a row can sit in (.setting-block, .browser-settings) has zero inline
-   padding, so the band lines up with the page gutter wherever it lands. */
+/* The reveal marks the row, block or card Search opened, never a control in
+   it, so a primary button keeps its own colours. The tint runs a little past
+   the box as a shadow, which takes no space: nothing in the row moves or
+   changes size while it shows or fades. */
+[data-setting]:not(button) {
+  transition:
+    background-color var(--slow) var(--ease),
+    border-color var(--slow) var(--ease),
+    box-shadow var(--slow) var(--ease);
+}
+/* The ring stands for the row's own edge while it shows: a hairline under
+   the row would run across inside it. */
 .setting-search-target {
-  background: var(--primary-soft);
-  padding-inline: var(--s6);
-  margin-inline: calc(var(--s6) * -1);
+  border-bottom-color: transparent;
+  /* Opaque over the page, so the band covers the ring under it but its
+     outer pixel. */
+  --search-tint: color-mix(in srgb, var(--primary) 7%, var(--page));
+  border-radius: var(--r-md);
+  background-color: var(--search-tint);
+  box-shadow:
+    0 0 0 var(--s2) var(--search-tint),
+    0 0 0 calc(var(--s2) + 1px) var(--primary-edge);
 }
 @media (max-width: 600px) {
   .palette-footer > span {
@@ -1678,11 +1726,31 @@ dialog .notifications {
   }
 }
 
+/* Steer or Queue, with where the value lives quietly under it. */
 .input-settings-controls {
   display: flex;
   flex-direction: column;
-  gap: var(--s2);
-  max-width: 260px;
+  align-items: flex-end;
+  gap: var(--s1);
+  /* The caption wraps rather than widen the column: the setting's own words
+     keep the room a row's label always has. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(45%, 300px);
+}
+.input-settings-scope {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 0 var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  text-align: end;
+}
+.input-settings-scope > button.settings-link {
+  white-space: normal;
+  text-align: end;
 }
 @media (max-width: 650px) {
   /* Stacked, the controls need the row's full gap back, not the tighter one
@@ -1692,6 +1760,202 @@ dialog .notifications {
     flex-direction: column;
     gap: var(--s3);
   }
+  .input-settings-controls {
+    align-items: flex-start;
+    max-width: none;
+  }
+  .input-settings-scope {
+    justify-content: flex-start;
+    text-align: start;
+  }
+  .input-settings-scope > button.settings-link {
+    text-align: start;
+  }
+}
+/* Two or three exclusive choices side by side, one of them chosen. */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--page);
+}
+.setting-row .segmented > button,
+.segmented > button {
+  min-height: calc(var(--control) - 6px);
+  min-width: 72px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-size: var(--ui);
+}
+.segmented > button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.segmented > button[aria-checked="true"],
+.segmented > button[aria-checked="true"]:hover:not(:disabled) {
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 500;
+}
+/* A quiet text action beside a setting's value: no frame, the muted tone,
+   the text colour and an underline on hover. */
+button.settings-link,
+.setting-row button.settings-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+button.settings-link:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+}
+/* A disclosure that opens a list in place: its words, then the shared chevron
+   pointing the way it opens (reversed right to left). */
+.disclosure-toggle {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  gap: var(--s1);
+  color: var(--muted);
+  font-size: inherit;
+}
+.disclosure-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+.disclosure-toggle > .icon {
+  flex: none;
+  transition: transform var(--fast) var(--ease);
+}
+.disclosure-toggle[aria-expanded="true"] > .icon {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .disclosure-toggle[aria-expanded="false"] > .icon {
+  transform: scaleX(-1);
+}
+
+/* Providers: what is connected, each with its own quiet actions. */
+.provider-row > header {
+  margin-bottom: 0;
+}
+.setting-block .provider-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
+  margin: 2px 0 0;
+  font-size: var(--ui);
+}
+.provider-models {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+}
+.provider-models li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s2);
+  color: var(--muted);
+}
+.provider-models strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.provider-models code {
+  font-size: var(--ui-xs);
+}
+
+/* Models and Tools: the search, then a quiet switch or summary at the end. */
+.settings-content > .models-toolbar,
+.settings-content > .tools-toolbar {
+  justify-content: space-between;
+  gap: var(--s3);
+}
+.models-toolbar > input,
+.tools-toolbar > input {
+  flex: 0 1 260px;
+}
+.quiet-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+.tools-tokens {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.models-elsewhere {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+
+/* Tools, by where they come from: a group's name once, its tools under it. */
+.tool-group {
+  border-bottom: 1px solid var(--hairline);
+}
+.tool-group-toggle {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  padding: var(--s3) 0;
+  color: var(--text);
+}
+.tool-group-toggle > .icon {
+  color: var(--muted);
+}
+.tool-group-toggle > strong {
+  font-size: var(--ui-lg);
+  font-weight: 600;
+}
+.tool-group-toggle > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  margin-inline-start: var(--s1);
+}
+.tool-group > div {
+  padding-inline-start: calc(12px + var(--s1));
+}
+/* A part of the built-in tools, inside Built-in: the same disclosure, a step
+   quieter, its last line the group's own. */
+.tool-group-part:last-child {
+  border-bottom: 0;
+}
+.tool-group-part > .tool-group-toggle {
+  padding-block: var(--s2);
+}
+.tool-group-part > .tool-group-toggle > strong {
+  font-size: var(--ui);
+}
+.tool-group .setting-row {
+  padding: var(--s3) 0;
+}
+.tool-group .setting-row:last-child {
+  border-bottom: 0;
+}
+/* A tool's own id beside its title. Code keeps left to right, so its margin
+   is set on both sides rather than at an inline start that would flip. */
+.setting-row code.setting-id {
+  margin: 0 var(--s2);
+  font-size: var(--ui-xs);
+  color: var(--faint);
 }
 
 /* Native modality supplies initial focus, background inertness and restoration. */
@@ -1793,8 +2057,14 @@ p.settings-computers-note {
   min-width: 0;
   margin-inline-end: var(--s2);
 }
+.computer-row-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
 .computer-row strong {
   display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -560,6 +560,126 @@ test("every settings control is discoverable and focused from Settings and globa
   await closeSettings();
 });
 
+test("a search jump marks its row without moving it, and Providers, Models and Tools lead with what is in use", async () => {
+  const look = (locator: ReturnType<typeof settings>) =>
+    locator.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return { width: box.width, height: box.height, background: style.backgroundColor, color: style.color };
+    });
+  // The place Search opens is the row or block, never the primary button in it,
+  // whose colours and size stay as they were.
+  await openSettings("Providers");
+  const hero = settings().locator(".providers-hero");
+  const connect = hero.getByRole("button", { name: "Connect a provider", exact: true });
+  const button = await look(connect);
+  const block = await look(hero);
+  await globalFind("Connect a provider", "Connect a provider");
+  await expect(hero).toHaveClass(/setting-search-target/);
+  await expect(connect).toBeFocused();
+  expect(await look(connect)).toEqual(button);
+  expect({ ...(await look(hero)), background: block.background }).toEqual(block);
+  await expect(hero).not.toHaveClass(/setting-search-target/, { timeout: 10000 });
+
+  // Providers lists the connected ones, with one primary action for the rest.
+  const connected = (await client.providers()).filter((provider) => provider.authenticated);
+  const rows = settings().locator(".provider-row");
+  await expect(rows).toHaveCount(connected.length);
+  await expect(settings().locator('[data-setting="provider:anthropic"]')).toHaveCount(0);
+  await expect(settings().locator(".settings-content details")).toHaveCount(0);
+  await expect(settings().locator(".settings-content button.primary")).toHaveCount(1);
+  const echo = settings().locator(`[data-setting="provider:${connected[0].id}"]`);
+  const models = echo.locator(".disclosure-toggle");
+  await expect(models).toHaveAttribute("aria-expanded", "false");
+  await models.click();
+  await expect(models).toHaveAttribute("aria-expanded", "true");
+  await expect(echo.locator(".provider-models li")).toHaveCount(connected[0].models.length);
+  // A provider Search opens that is not connected is shown to connect.
+  await globalFind("Anthropic", "Anthropic");
+  const anthropic = settings().locator('[data-setting="provider:anthropic"]');
+  await expect(anthropic).toHaveClass(/setting-search-target/);
+  await expect(anthropic).toContainText("Not connected");
+  await expect(anthropic.getByRole("button", { name: "Connect", exact: true })).not.toHaveClass(/primary/);
+  await expect(anthropic.getByRole("button", { name: "Connect", exact: true })).toBeFocused();
+
+  // Models shows the connected providers' models; Show all adds the catalog.
+  await openSettings("Models");
+  const anthropicModels = settings().locator('tbody [data-provider-icon="anthropic"]');
+  const all = settings().getByRole("switch", { name: "Show all", exact: true });
+  await expect(settings().locator("tbody tr")).toHaveCount(connected.reduce((sum, provider) => sum + provider.models.length, 0));
+  await expect(anthropicModels).toHaveCount(0);
+  await settings().getByRole("textbox", { name: "Search models", exact: true }).fill("claude");
+  await expect(settings().locator(".models-elsewhere")).toContainText("more from providers that aren't connected.");
+  await settings().locator(".models-elsewhere").getByRole("button", { name: "Show all", exact: true }).click();
+  await expect(all).toBeChecked();
+  await expect(anthropicModels.first()).toBeVisible();
+  await all.uncheck();
+  await settings().getByRole("textbox", { name: "Search models", exact: true }).fill("");
+  await expect(anthropicModels).toHaveCount(0);
+  // A model Search opens from a provider that is not connected shows the catalog.
+  await settings().getByRole("textbox", { name: "Filter settings" }).fill("claude");
+  await settings()
+    .getByRole("navigation", { name: "Settings search results" })
+    .getByRole("button")
+    .filter({ hasText: "Settings › Models" })
+    .first()
+    .click();
+  await expect(all).toBeChecked();
+  await expect(settings().locator("tbody tr.setting-search-target")).toHaveCount(1);
+
+  // Tools group by source, the large built-in group folded, the source said once.
+  await openSettings("Tools");
+  const builtIn = settings().getByRole("button", { name: /^Built-in\b/ });
+  await expect(builtIn).toHaveAttribute("aria-expanded", "false");
+  await expect(builtIn).toContainText("tools");
+  await expect(settings().locator(".settings-content .badge")).toHaveCount(0);
+  await expect(settings().locator(".tools-tokens")).toContainText("advertised tokens");
+  await builtIn.click();
+  await expect(builtIn).toHaveAttribute("aria-expanded", "true");
+  // Inside, the catalog's own groups, the browser tools a part of their own.
+  const parts = settings().locator(".tool-group-part > .tool-group-toggle");
+  const core = parts.filter({ hasText: /^Core/ });
+  const browser = parts.filter({ hasText: /^Browser/ });
+  await expect(core).toHaveAttribute("aria-expanded", "false");
+  await expect(browser).toHaveAttribute("aria-expanded", "false");
+  await core.click();
+  const bash = settings().locator('[data-setting="tool:bash"]');
+  await expect(bash.locator("strong")).toHaveText("Bash");
+  // One sentence: the description's first.
+  await expect(bash.locator("p")).toHaveText(/^[^.]+\.$/);
+  await expect(settings().locator('[data-setting="tool:lsp"] strong')).toHaveText("LSP");
+  await expect(settings().locator('[data-setting="tool:browser_cpu_analyze"]')).toHaveCount(0);
+  await browser.click();
+  await expect(settings().locator('[data-setting="tool:browser_cpu_analyze"] strong')).toHaveText("CPU analyze");
+  // A switch keeps its row, and the keyboard, when the catalog comes back.
+  const toggle = bash.getByRole("switch", { name: "Enable bash", exact: true });
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(toggle).toBeChecked();
+  await builtIn.click();
+  await expect(bash).toHaveCount(0);
+
+  // A jump to a row whose only control is off (the global shortcut's field)
+  // waits on the row, but never takes the keyboard back once it has moved on.
+  await globalFind("Global shortcut", "Global shortcut");
+  const target = settings().locator('[data-setting="Global shortcut"]');
+  await expect(target).toBeFocused();
+  const field = settings().getByRole("textbox", { name: "Shortcut new", exact: true });
+  const mod = process.platform === "darwin" ? "Meta" : "Control";
+  await field.click();
+  await field.press(`${mod}+Shift+Y`);
+  await expect.poll(async () => (await page.evaluate(() => window.haarness.boot())).preferences.shortcuts.new).toBe("Mod+Shift+Y");
+  await page.waitForTimeout(500);
+  await expect(field).toBeFocused();
+  await field.press(`${mod}+N`);
+  await expect.poll(async () => (await page.evaluate(() => window.haarness.boot())).preferences.shortcuts.new).toBe("Mod+N");
+  await expect(field).toBeFocused();
+  await closeSettings();
+});
+
 test("settings disable agent execution live, keep manual browsing, cancel waits, and persist", async () => {
   tabID = (
     await tool("tabs_open", {

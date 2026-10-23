@@ -22,7 +22,7 @@ Queued prompts remain outside the conversation transcript until delivery. They r
 
 ## Default delivery and project settings
 
-Normal Send uses **Steer** by default. In **Settings → General → Messages sent while working**, choose Steer or Queue. Edits default to **This project**; select **Global** to change the inherited default for other projects. **Use inherited setting** removes the selected scope's override.
+Normal Send uses **Steer** by default. In **Settings → General → Messages sent while working**, choose Steer or Queue: the choice shows what a message sent during work does in the current project, and the line under it says where that value lives and what resetting it leads to. Without a project override it is the global setting (**All projects**), and choosing changes it for every project; **Override for this project** saves the project's own value (the one shown, to start with), after which choices change only this project (**This project**), and **Use global setting (Queue)** removes the override, naming the value the project then falls back to, or **Use parent folder's setting (Queue)** when a parent folder sets it. A value set in a parent folder (**Parent folder**) is changed with an override in this project, since the global setting would not reach it. Without project configuration only the global setting applies.
 
 Both Desktop and TUI support these commands, including during active work:
 
