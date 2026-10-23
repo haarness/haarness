@@ -6,6 +6,7 @@ import {
   fileImage,
   forgetProjectImages,
   holdProjectImages,
+  imageHeader,
   imageType,
   inViewedTree,
   localProject,
@@ -145,6 +146,66 @@ test("only raster types are read, and only bytes that start as one are shown", (
     undefined,
   ])
     assert.equal(fileImage(file), undefined, JSON.stringify(file));
+});
+
+const be32 = (n: number) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+const le16 = (n: number) => [n & 255, (n >>> 8) & 255];
+const le24 = (n: number) => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255];
+const le32 = (n: number) => [...le16(n & 0xffff), ...le16((n >>> 16) & 0xffff)];
+const bytes = (...parts: (Uint8Array | number[] | string)[]) =>
+  join(...parts.map((part) => (typeof part === "string" ? ascii(part) : Uint8Array.from(part))));
+const pngSized = (width: number, height: number) => bytes(png, be32(width), be32(height), [8, 2, 0, 0, 0]);
+// A JPEG whose frame comes after two large application segments, past what one slice decodes.
+const jpegSized = (width: number, height: number) =>
+  bytes(
+    [0xff, 0xd8, 0xff, 0xe0, 0, 16],
+    "JFIF\0",
+    new Array(9).fill(0),
+    [0xff, 0xe1, ...be32(60_000).slice(2)],
+    new Array(60_000 - 2).fill(7),
+    [0xff, 0xe2, ...be32(60_000).slice(2)],
+    new Array(60_000 - 2).fill(0xff),
+    [0xff, 0xc2, 0, 17, 8, ...be32(height).slice(2), ...be32(width).slice(2), 3],
+    new Array(9).fill(0),
+  );
+
+test("an image's size in pixels comes from its header, without decoding it", () => {
+  const riff = (chunk: string, ...rest: (number[] | Uint8Array)[]) => bytes("RIFF", le32(100), "WEBP", chunk, le32(80), ...rest);
+  for (const [name, file, width, height] of [
+    ["png", pngSized(4000, 3000), 4000, 3000],
+    ["gif", bytes("GIF89a", le16(640), le16(480)), 640, 480],
+    ["bmp", bytes("BM", new Array(12).fill(0), le32(40), le32(800), le32(-600)), 800, 600],
+    ["bmp core", bytes("BM", new Array(12).fill(0), le32(12), le16(32), le16(16)), 32, 16],
+    ["webp lossy", riff("VP8 ", [0, 0, 0, 0x9d, 0x01, 0x2a], le16(1920), le16(1080)), 1920, 1080],
+    ["webp lossless", riff("VP8L", [0x2f, 0x7f, 0x80, 0x39, 0x01]), 128, 1255],
+    ["webp extended", riff("VP8X", [0, 0, 0, 0], le24(8191), le24(4095)), 8192, 4096],
+    ["jpeg", jpegSized(6000, 4000), 6000, 4000],
+    ["ico", bytes([0, 0, 1, 0, 1, 0, 0, 48]), 256, 48],
+    [
+      "avif",
+      bytes(be32(0x1c), "ftypavif", be32(0), "avifmif1", be32(20), "ispe", be32(0), be32(5000), be32(4000)),
+      5000,
+      4000,
+    ],
+  ] as const)
+    assert.deepEqual(imageHeader(base64(file)), { type: sniffImage(file), width, height }, name);
+  // An AVIF whose size is not near its start is only typed; its byte count still bounds it.
+  assert.deepEqual(imageHeader(base64(avif)), { type: "image/avif" });
+  assert.equal(imageHeader(base64(ascii("<svg/>"))), undefined);
+});
+
+test("an image of more than 50 megapixels is too large to show and is never decoded", async () => {
+  forgetProjectImages();
+  const decoded: string[] = [];
+  const decode = async (data: string) => (decoded.push(data), true);
+  const source = reader({ "huge.png": pngSized(10_000, 10_000), "huge.jpg": jpegSized(9000, 6000), "big.png": pngSized(7000, 7000) });
+  const live = new AbortController();
+  for (const path of ["huge.png", "huge.jpg", "big.png"]) requestProjectImage("project", path, source.read, live.signal, decode);
+  await settle();
+  assert.deepEqual(shownProjectImage("project", "huge.png"), { note: "large" });
+  assert.deepEqual(shownProjectImage("project", "huge.jpg"), { note: "large" });
+  assert.ok(shownProjectImage("project", "big.png")?.data);
+  assert.equal(decoded.length, 1);
 });
 
 test("a read's preview is the image its result carries, or the project file it read", () => {
@@ -394,7 +455,7 @@ test("a missing file, a refusal, text, bytes the window cannot draw or a file to
     "missing.png": new Error("Error invoking remote method 'files': Error: This file no longer exists"),
     "escape.png": new Error("Error invoking remote method 'files': Error: Path escapes the workspace"),
     "text.png": { content: "hello", encoding: "utf8" },
-    "fake.png": ascii("GIF89a not really"),
+    "fake.png": ascii("GIF89a\u0001\u0000\u0001\u0000 not really"),
     "huge.png": new Error("Error invoking remote method 'files': Error: File exceeds 10 MiB"),
   });
   const live = new AbortController();

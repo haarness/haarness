@@ -37,6 +37,8 @@ export const PROJECT_IMAGE_LIMITS = {
   paths: 20,
   bytes: 64 * 1024 * 1024,
   recheck: 20_000,
+  /** An image with more pixels is not decoded ("Too large to show"): 50 megapixels. */
+  pixels: 50_000_000,
 };
 
 // Raster types the window draws. An SVG is a document, so it is not read.
@@ -107,13 +109,112 @@ export function sniffImage(bytes: Uint8Array): string | undefined {
   return undefined;
 }
 
-/** The first 48 bytes of base64 text, enough to tell an image's type, without decoding the rest. */
-function head(base64: string) {
-  try {
-    return Uint8Array.from(atob(base64.slice(0, 64)), (char) => char.charCodeAt(0));
-  } catch {
-    return new Uint8Array();
+/**
+ * Bytes `offset` to `offset + length` of base64 text, decoding only the part
+ * that holds them (four characters are three bytes), so a header is read
+ * without decoding a whole image.
+ */
+function slice(base64: string) {
+  return (offset: number, length: number) => {
+    const from = Math.floor(offset / 3) * 4;
+    const to = Math.min(base64.length, Math.ceil((offset + length) / 3) * 4);
+    if (from >= to) return new Uint8Array();
+    try {
+      const skip = offset - (from / 4) * 3;
+      return Uint8Array.from(atob(base64.slice(from, to)).slice(skip, skip + length), (char) => char.charCodeAt(0));
+    } catch {
+      return new Uint8Array();
+    }
+  };
+}
+
+/** The bytes base64 text decodes to, from its length alone. */
+const decodedSize = (base64: string) =>
+  Math.floor((base64.length * 3) / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+
+const u16be = (bytes: Uint8Array, at: number) => (bytes[at] << 8) | bytes[at + 1];
+const u16le = (bytes: Uint8Array, at: number) => bytes[at] | (bytes[at + 1] << 8);
+const u32be = (bytes: Uint8Array, at: number) => (u16be(bytes, at) * 65536 + u16be(bytes, at + 2)) >>> 0;
+const u32le = (bytes: Uint8Array, at: number) => (u16le(bytes, at) + u16le(bytes, at + 2) * 65536) >>> 0;
+const text = (bytes: Uint8Array) => String.fromCharCode(...bytes);
+
+/** A JPEG's size, from its first start-of-frame segment. */
+function jpegSize(read: (offset: number, length: number) => Uint8Array, total: number) {
+  let offset = 2;
+  for (let segments = 0; segments < 1000 && offset + 4 <= total; segments++) {
+    const head = read(offset, 4);
+    if (head[0] !== 0xff) return undefined;
+    const marker = head[1];
+    // Fill bytes, and markers that stand alone.
+    if (marker === 0xff) {
+      offset += 1;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      offset += 2;
+      continue;
+    }
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      const frame = read(offset + 5, 4);
+      return frame.length === 4 ? { width: u16be(frame, 2), height: u16be(frame, 0) } : undefined;
+    }
+    offset += 2 + u16be(head, 2);
   }
+  return undefined;
+}
+
+/**
+ * An image's type, from the way its bytes start, and its size in pixels from
+ * its header when the type says where (PNG, GIF, BMP, WebP, JPEG, ICO, and an
+ * AVIF whose `ispe` property is near its start), without decoding it.
+ */
+export function imageHeader(base64: string): { type: string; width?: number; height?: number } | undefined {
+  const read = slice(base64);
+  const type = sniffImage(read(0, 48));
+  if (!type) return undefined;
+  const size = (() => {
+    if (type === "image/png") {
+      const bytes = read(16, 8);
+      return { width: u32be(bytes, 0), height: u32be(bytes, 4) };
+    }
+    if (type === "image/gif") {
+      const bytes = read(6, 4);
+      return { width: u16le(bytes, 0), height: u16le(bytes, 2) };
+    }
+    if (type === "image/bmp") {
+      const bytes = read(14, 12);
+      if (u32le(bytes, 0) === 12) return { width: u16le(bytes, 4), height: u16le(bytes, 6) };
+      return { width: Math.abs(u32le(bytes, 4) | 0), height: Math.abs(u32le(bytes, 8) | 0) };
+    }
+    if (type === "image/x-icon") {
+      const bytes = read(6, 2);
+      return { width: bytes[0] || 256, height: bytes[1] || 256 };
+    }
+    if (type === "image/webp") {
+      const chunk = text(read(12, 4));
+      if (chunk === "VP8 ") {
+        const bytes = read(26, 4);
+        return { width: u16le(bytes, 0) & 0x3fff, height: u16le(bytes, 2) & 0x3fff };
+      }
+      if (chunk === "VP8L") {
+        const [b0, b1, b2, b3] = read(21, 4);
+        return { width: 1 + (((b1 & 0x3f) << 8) | b0), height: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | (b1 >> 6)) };
+      }
+      if (chunk === "VP8X") {
+        const bytes = read(24, 6);
+        return { width: 1 + (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16)), height: 1 + (bytes[3] | (bytes[4] << 8) | (bytes[5] << 16)) };
+      }
+      return undefined;
+    }
+    if (type === "image/jpeg") return jpegSize(read, decodedSize(base64));
+    // AVIF: the image spatial extents property, when it is near the start.
+    const start = read(0, Math.min(decodedSize(base64), 64 * 1024));
+    for (let at = 0; at + 16 <= start.length; at++)
+      if (start[at] === 0x69 && text(start.subarray(at, at + 4)) === "ispe")
+        return { width: u32be(start, at + 8), height: u32be(start, at + 12) };
+    return undefined;
+  })();
+  return size && size.width > 0 && size.height > 0 ? { type, ...size } : { type };
 }
 
 /**
@@ -123,8 +224,14 @@ function head(base64: string) {
  */
 export function fileImage(file: { content?: string; encoding?: string } | undefined): string | undefined {
   if (!file?.content || file.encoding !== "base64") return undefined;
-  const type = sniffImage(head(file.content));
+  const type = imageHeader(file.content)?.type;
   return type ? `data:${type};base64,${file.content}` : undefined;
+}
+
+/** Whether an image's header says it has more pixels than the window decodes for a reply. */
+export function tooManyPixels(base64: string) {
+  const header = imageHeader(base64);
+  return !!header?.width && !!header.height && header.width * header.height > PROJECT_IMAGE_LIMITS.pixels;
 }
 
 /** Image types a read tool's own result shows as it carries them. */
@@ -152,7 +259,7 @@ export function readToolImage(
   if (carried) {
     const payload = source.slice(carried[0].length);
     const data = fileImage({ content: payload, encoding: "base64" });
-    return data ? { data } : undefined;
+    return data && !tooManyPixels(payload) ? { data } : undefined;
   }
   if (/^data:/i.test(source)) return undefined;
   const found = projectImagePath(source, root);
@@ -164,10 +271,6 @@ export function readToolImage(
 export type ImageReader = (
   path: string,
 ) => Promise<{ content?: string; encoding?: string; size?: number } | undefined>;
-
-/** The bytes base64 text decodes to, from its length alone. */
-const decodedSize = (base64: string) =>
-  Math.floor((base64.length * 3) / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
 
 /** What a reply shows for a path: the image and its file's size in bytes, or why there is none. */
 export type ShownImage = { data: string; size?: number; note?: undefined } | { data?: undefined; note: ImageNote };
@@ -382,6 +485,7 @@ export function requestProjectImage(
           async (file): Promise<ShownImage> => {
             const data = fileImage(file);
             if (!data) return { note: "failed" };
+            if (tooManyPixels(file!.content!)) return { note: "large" };
             const size = file?.size ?? decodedSize(file!.content!);
             if (data === remembered.get(entry)?.data) return { data, size };
             return (await decode(data)) ? { data, size } : { note: "failed" };
