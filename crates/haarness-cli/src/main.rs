@@ -5548,25 +5548,24 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
     }
 }
 
-/// The configuration that would let a run without a person do what this
-/// request asks, such as `{"permission":{"bash":{"git push *":"allow"}}}`,
-/// built from the rules an **Always** answer would add. `None` for requests
-/// no rule should settle: an agent switch names one chat, and allowing the
-/// loop guard would turn it off.
 /// What a shell request's script says, for the terminal prompt: its path
-/// and first lines, indented, or that the command writes it before it runs
-/// it. The server has already made its text safe for a terminal.
+/// and first lines, indented and each cut to [`PREVIEW_COLUMNS`], or why its
+/// text is not shown. The server has already made its text safe for a
+/// terminal.
 fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
+    use haarness_protocol::ScriptWithheld;
     const LINES: usize = 6;
+    /// How much of a line the prompt shows.
+    const PREVIEW_COLUMNS: usize = 200;
     let script = script?;
     match script.withheld {
-        Some(haarness_protocol::ScriptWithheld::Written) => {
+        Some(ScriptWithheld::Written) => {
             return Some(format!(
                 "It writes {} before running it, so its contents can't be shown.\n",
                 script.path
             ));
         }
-        Some(haarness_protocol::ScriptWithheld::Changeable) => {
+        Some(ScriptWithheld::Changeable) => {
             return Some(format!(
                 "An earlier step of it can change {}, so its contents aren't shown.\n",
                 script.path
@@ -5578,7 +5577,13 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
     let mut text = format!("It runs {}:\n", script.path);
     for line in lines.iter().take(LINES) {
         text.push_str("    ");
-        text.push_str(line);
+        match line.char_indices().nth(PREVIEW_COLUMNS) {
+            Some((cut, _)) => {
+                text.push_str(&line[..cut]);
+                text.push('…');
+            }
+            None => text.push_str(line),
+        }
         text.push('\n');
     }
     if lines.len() > LINES || script.truncated {
@@ -5587,6 +5592,11 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
     Some(text)
 }
 
+/// The configuration that would let a run without a person do what this
+/// request asks, such as `{"permission":{"bash":{"git push *":"allow"}}}`,
+/// built from the rules an **Always** answer would add. `None` for requests
+/// no rule should settle: an agent switch names one chat, and allowing the
+/// loop guard would turn it off.
 fn allow_rule_example(pending: &haarness_protocol::PendingPermissionInfo) -> Option<String> {
     let rules: Vec<String> = if pending.always_patterns.is_empty() {
         pending
@@ -11715,6 +11725,12 @@ mod tests {
             super::script_preview(Some(&script("", false, Some(ScriptWithheld::Changeable))))
                 .as_deref(),
             Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
+        );
+        // A long line is cut, not wrapped over the terminal.
+        let wide = super::script_preview(Some(&script(&"x".repeat(500), false, None))).unwrap();
+        assert!(
+            wide.contains(&format!("    {}…\n", "x".repeat(200))),
+            "{wide}"
         );
     }
 
