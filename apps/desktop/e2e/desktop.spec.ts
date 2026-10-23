@@ -9760,6 +9760,12 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     .toBeTruthy();
   const live = page.locator(".tool-batch").last();
   await expect(live.locator(":scope > summary")).toContainText("Read files");
+  // The question docks first and the view follows it down; then the batch
+  // is opened, so nothing moves between aiming and clicking.
+  await expect(page.locator(".prompt-dock.question")).toBeVisible();
+  await expect
+    .poll(() => page.locator(".transcript").evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
+    .toBeLessThan(5);
   await live.locator(":scope > summary").click();
   const reading = live.locator(".tool-child").first();
   await reading.locator("summary").click();
