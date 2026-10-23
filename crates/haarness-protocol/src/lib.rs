@@ -315,7 +315,11 @@ pub enum ItemData {
         #[serde(default)]
         always_patterns: Vec<String>,
         /// Why Auto's reviewer left it to a person, when it did.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_review"
+        )]
         review: Option<PermissionReview>,
     },
     Question {
@@ -1073,7 +1077,11 @@ pub struct PendingPermissionInfo {
     pub created_at: DateTime<Utc>,
     /// Set when Auto's reviewer left this request to a person: it asked,
     /// could not decide, or paused for the turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_review"
+    )]
     pub review: Option<PermissionReview>,
 }
 
