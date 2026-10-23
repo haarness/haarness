@@ -299,8 +299,14 @@ impl ModelProvider for EchoProvider {
             if resolved.is_some() {
                 events.push(Ok(ProviderEvent::TextDelta("All tools finished".into())));
             } else {
+                // The calls are the first JSON value; a `[review:…]` marker
+                // may follow them.
                 let calls: Vec<serde_json::Value> =
-                    serde_json::from_str(script.trim()).unwrap_or_default();
+                    serde_json::Deserializer::from_str(script.trim())
+                        .into_iter()
+                        .next()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
                 for (index, call) in calls.iter().enumerate() {
                     events.push(Ok(ProviderEvent::ToolCall {
                         call_id: format!("echo-call-{}", index + 1),

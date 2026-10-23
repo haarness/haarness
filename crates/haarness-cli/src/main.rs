@@ -124,9 +124,10 @@ struct Cli {
     #[arg(long, global = true, visible_alias = "dangerously-skip-permissions")]
     yolo: bool,
     /// Put the chat this command opens, starts or continues in Auto: its
-    /// server then approves eligible requests once, whichever app shows the
-    /// chat, until someone switches it back to Review. Permission denials
-    /// and requests that always ask still hold.
+    /// server's reviewer model then answers eligible requests (approving
+    /// routine ones once, leaving the rest to a person), whichever app shows
+    /// the chat, until someone switches it back to Review. Permission
+    /// denials and requests that always ask still hold.
     #[arg(long, global = true, conflicts_with = "yolo")]
     auto: bool,
     /// Open a specific chat by id. `--session` is an alias.
@@ -4659,7 +4660,7 @@ async fn run_command(
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
-            let mut watch = RunWatch::new(yolo);
+            let mut watch = RunWatch::new(yolo).auto(approvals.auto);
             if let Some(workflow) = args.workflow {
                 let mut values = serde_json::Map::new();
                 if !prompt.trim().is_empty() {
@@ -5129,7 +5130,8 @@ async fn set_goal_for_run_client(
     Ok(())
 }
 
-/// Why Auto's reviewer left a request to a person, as a run prints it.
+/// Why Auto's reviewer left a request to a person, as a run prints it: one
+/// sentence, ending with its stop.
 fn review_note(review: &haarness_protocol::PermissionReview) -> String {
     let reason = review
         .rationale
@@ -5137,6 +5139,9 @@ fn review_note(review: &haarness_protocol::PermissionReview) -> String {
         .map(str::trim)
         .filter(|reason| !reason.is_empty());
     let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Reviewing => {
+            return "Auto review is deciding it.".into();
+        }
         haarness_protocol::PermissionReviewStatus::Failed => "Auto review was unavailable",
         haarness_protocol::PermissionReviewStatus::Paused => "Auto review paused for this turn",
         _ => "Auto review left it to a person",
@@ -5148,7 +5153,8 @@ fn review_note(review: &haarness_protocol::PermissionReview) -> String {
         .map(|rule| format!(" ({rule})"))
         .unwrap_or_default();
     match reason {
-        Some(reason) => format!("{lead}{rule}: {reason}"),
+        Some(reason) if reason.ends_with(['.', '!', '?']) => format!("{lead}{rule}: {reason}"),
+        Some(reason) => format!("{lead}{rule}: {reason}."),
         None => format!("{lead}{rule}."),
     }
 }
@@ -5171,6 +5177,9 @@ struct RunWatch {
     /// `--yolo`: the run approves its own requests once, as they come, and
     /// asks the approver only for those that must ask every time.
     yolo: bool,
+    /// `--auto`: with nobody to ask, a request that still needs a person is
+    /// refused with its reason and the run goes on.
+    auto: bool,
     activity: Option<RunActivity>,
 }
 
@@ -5188,8 +5197,15 @@ impl RunWatch {
                 Approver::Nobody
             },
             yolo,
+            auto: false,
             activity: terminal.then(RunActivity::start),
         }
+    }
+
+    /// The run put its chat in Auto (`--auto`).
+    fn auto(mut self, auto: bool) -> Self {
+        self.auto = auto;
+        self
     }
 
     /// A scheduled run: nobody watches. Its turn approves its own requests
@@ -5199,6 +5215,7 @@ impl RunWatch {
         Self {
             approver: Approver::OtherClients,
             yolo: false,
+            auto: false,
             activity: None,
         }
     }
@@ -5271,6 +5288,37 @@ impl RunWatch {
                     "Stopped: the agent asked to {request}, which always needs an answer, and nobody can give one in this run. Run it at a terminal, or from the terminal UI or Desktop."
                 );
             }
+            let rule = allow_rule_example(&pending).map_or_else(
+                || "with a permission rule".to_owned(),
+                |rule| {
+                    format!(
+                        "by adding {rule} to haarness.json in the project or ~/.config/haarness/haarness.json"
+                    )
+                },
+            );
+            if self.approver == Approver::Nobody && self.auto {
+                // `--auto`: what still needs a person (the reviewer left it
+                // to one, or a rule asks for one) is refused with its reason,
+                // one line each, and the run goes on another way.
+                let why = pending.review.as_ref().map_or_else(
+                    || "A permission rule asks a person for it.".to_owned(),
+                    review_note,
+                );
+                let reason = why.trim_end_matches('.');
+                let _ = client
+                    .reply_permission(
+                        &pending.permission_id,
+                        PermissionReply {
+                            decision: PermissionReplyDecision::Reject,
+                            feedback: Some(format!("{reason}, and nobody can answer in this run")),
+                        },
+                    )
+                    .await;
+                self.notice(&format!(
+                    "Refused: the agent asked to {request}. {why} Nobody can approve that in this run; allow it {rule}."
+                ));
+                continue;
+            }
             if self.approver == Approver::Nobody {
                 // Stop first: refused, the agent would carry on another way,
                 // and a script is better served by a clear stop.
@@ -5281,20 +5329,6 @@ impl RunWatch {
                         reply(PermissionReplyDecision::Reject),
                     )
                     .await;
-                let rule = allow_rule_example(&pending).map_or_else(
-                    || "with a permission rule".to_owned(),
-                    |rule| {
-                        format!(
-                            "by adding {rule} to haarness.json in the project or ~/.config/haarness/haarness.json"
-                        )
-                    },
-                );
-                // In Auto, what the reviewer left to a person says why.
-                if let Some(note) = pending.review.as_ref().map(review_note) {
-                    anyhow::bail!(
-                        "Stopped: the agent asked to {request}. {note} Nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
-                    );
-                }
                 anyhow::bail!(
                     "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
                 );
@@ -14794,6 +14828,7 @@ request_timeout = 0
         let watch = RunWatch {
             approver: Approver::Nobody,
             yolo: false,
+            auto: false,
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -14897,6 +14932,7 @@ request_timeout = 0
         let yolo = RunWatch {
             approver: Approver::Nobody,
             yolo: true,
+            auto: false,
             activity: None,
         };
         tokio::time::timeout(
@@ -14919,6 +14955,7 @@ request_timeout = 0
         let nobody = RunWatch {
             approver: Approver::Nobody,
             yolo: false,
+            auto: false,
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -14930,6 +14967,29 @@ request_timeout = 0
         .unwrap_err()
         .to_string();
         assert!(error.starts_with("Stopped: the agent asked to"), "{error}");
+        assert!(!outside.exists());
+
+        // An --auto run refuses what still needs a person, with its reason,
+        // and goes on: the turn ends, nothing was written.
+        let auto = new_chat().await;
+        let turn = start(auto).await;
+        let headless = RunWatch {
+            approver: Approver::Nobody,
+            yolo: false,
+            auto: true,
+            activity: None,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &headless),
+        )
+        .await
+        .expect("an --auto run goes on")
+        .unwrap();
+        assert_eq!(
+            client.turn(turn.id).await.unwrap().status,
+            TurnStatus::Completed
+        );
         assert!(!outside.exists());
         server.shutdown().await.unwrap();
         drop(runtime);
@@ -14967,6 +15027,15 @@ request_timeout = 0
         assert_eq!(
             note(PermissionReviewStatus::Paused, None, None),
             "Auto review paused for this turn."
+        );
+        // A reason without its stop still ends the sentence.
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                None,
+                Some("It pushes to main")
+            ),
+            "Auto review left it to a person: It pushes to main."
         );
         let mut layers = super::jsonconfig::JsonLayers::default();
         assert_eq!(
@@ -15083,6 +15152,7 @@ request_timeout = 0
         RunWatch {
             approver: Approver::OtherClients,
             yolo: true,
+            auto: false,
             activity: None,
         }
         .answer(&client, root)
@@ -15092,6 +15162,7 @@ request_timeout = 0
         let error = RunWatch {
             approver: Approver::Nobody,
             yolo: true,
+            auto: false,
             activity: None,
         }
         .answer(&client, root)
@@ -15265,6 +15336,7 @@ request_timeout = 0
         let watch = RunWatch {
             approver: Approver::Nobody,
             yolo: true,
+            auto: false,
             activity: None,
         };
 

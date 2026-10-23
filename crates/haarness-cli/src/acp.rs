@@ -467,6 +467,13 @@ impl Service {
             .as_str()
             .unwrap_or("Approve tool use")
             .to_owned();
+        // Why Auto's reviewer left it to the person, after the request.
+        let operation = match serde_json::from_value::<haarness_protocol::PermissionReview>(
+            payload["review"].clone(),
+        ) {
+            Ok(review) => format!("{operation} — {}", crate::review_note(&review)),
+            Err(_) => operation,
+        };
         let detail = payload.get("detail").cloned().unwrap_or(Value::Null);
         let call = asked_call(calls, child.map(|child| child.id), &detail)
             .unwrap_or_else(|| asked.id.clone());
@@ -671,27 +678,40 @@ impl Service {
                 call_id,
                 output,
                 is_error,
+                metadata,
                 ..
-            } => notify(
-                connection,
-                session,
-                SessionUpdate::ToolCallUpdate(
-                    ToolCallUpdate::new(
-                        child.call(&call_id),
-                        ToolCallUpdateFields::new()
-                            .status(if is_error {
-                                ToolCallStatus::Failed
-                            } else {
-                                ToolCallStatus::Completed
-                            })
-                            .content(vec![
-                                ContentBlock::Text(TextContent::new(output.clone())).into(),
-                            ])
-                            .raw_output(parse_output(&output)),
-                    )
-                    .meta(child.meta()),
-                ),
-            ),
+            } => {
+                // A call Auto's reviewer refused shows its reason, not the
+                // text written for the model.
+                let shown = metadata
+                    .get("review")
+                    .filter(|review| review["status"] == "blocked")
+                    .map_or_else(
+                        || output.clone(),
+                        |review| match review["rationale"].as_str() {
+                            Some(reason) => format!("Blocked by Auto review: {reason}"),
+                            None => "Blocked by Auto review".to_owned(),
+                        },
+                    );
+                notify(
+                    connection,
+                    session,
+                    SessionUpdate::ToolCallUpdate(
+                        ToolCallUpdate::new(
+                            child.call(&call_id),
+                            ToolCallUpdateFields::new()
+                                .status(if is_error {
+                                    ToolCallStatus::Failed
+                                } else {
+                                    ToolCallStatus::Completed
+                                })
+                                .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
+                                .raw_output(parse_output(&output)),
+                        )
+                        .meta(child.meta()),
+                    ),
+                )
+            }
             _ => Ok(()),
         }
     }
