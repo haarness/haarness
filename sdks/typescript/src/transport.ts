@@ -42,11 +42,22 @@ export interface RequestOptions {
   headers?: Record<string, string>;
 }
 const REQUEST_OPTIONS = new Set(["signal", "timeoutMs", "headers"]);
-/** Whether `value`, passed where a method now takes a query, holds request
- * options instead: a call written before the method took a query. */
-export function isRequestOptions(value: object): value is RequestOptions {
-  const keys = Object.keys(value);
-  return keys.length > 0 && keys.every((key) => REQUEST_OPTIONS.has(key));
+/** One of `A` or `B`, never a mix of their keys. */
+export type Exclusive<A, B> = (A & { [K in keyof B]?: never }) | (B & { [K in keyof A]?: never });
+/**
+ * The first argument of a method that took request options there before it
+ * took a query, as its query and options: request option keys are options
+ * (a call written before the query), the rest is the query. The generator
+ * makes sure no query key is also an option key.
+ */
+export function splitQuery<Q extends object>(
+  first: Q | RequestOptions,
+  options: RequestOptions,
+): [Q, RequestOptions] {
+  const query: Record<string, unknown> = {};
+  const moved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(first)) (REQUEST_OPTIONS.has(key) ? moved : query)[key] = value;
+  return [query as Q, { ...moved, ...options }];
 }
 type WireOptions = RequestOptions & {
   body?: unknown;
