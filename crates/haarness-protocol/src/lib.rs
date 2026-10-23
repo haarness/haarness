@@ -994,6 +994,12 @@ pub struct McpServerInfo {
     /// it is connected with its apps on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_tools: Option<u32>,
+    /// `true` when the chat (or agent) the list was asked for takes every
+    /// tool of this server away by a rule or tool setting, and with them its
+    /// resources: an `@` list leaves it out. Absent otherwise, and from
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turned_off: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

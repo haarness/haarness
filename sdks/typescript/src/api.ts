@@ -187,8 +187,8 @@ export class Api extends Transport {
     return this.request("POST", `/v1/plugins`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/mcp */
-  mcpServers(options: RequestOptions = {}): Promise<Array<T.McpServerInfo>> {
-    return this.request("GET", `/v1/mcp`, { binaryBody: false, binaryResponse: false, ...options });
+  mcpServers(query: T.McpServersQuery = {}, options: RequestOptions = {}): Promise<Array<T.McpServerInfo>> {
+    return this.request("GET", `/v1/mcp`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/mcp/{name} */
   configureMcp(name: string, body: T.McpConfigureRequest, options: RequestOptions = {}): Promise<T.McpServerInfo> {

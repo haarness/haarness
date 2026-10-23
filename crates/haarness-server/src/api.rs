@@ -1298,8 +1298,37 @@ async fn load_skill(
         json!({"name":name,"instructions":state.skills.load(&name).await?}),
     ))
 }
-async fn mcp_servers(State(state): State<ServerState>) -> ApiResult<Json<Vec<McpServerInfo>>> {
-    Ok(Json(state.mcp.list().await?))
+/// Whom a server list is for: with a chat (or, before one exists, an agent)
+/// named, each server that chat cannot reach says so (`turnedOff`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServersQuery {
+    #[serde(default)]
+    thread_id: Option<ThreadId>,
+    #[serde(default)]
+    agent: Option<String>,
+}
+async fn mcp_servers(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<McpServersQuery>,
+) -> ApiResult<Json<Vec<McpServerInfo>>> {
+    let mut servers = state.mcp.list().await?;
+    // A published chat's viewers are offered no resources to mention.
+    if (query.thread_id.is_some() || query.agent.is_some())
+        && crate::remote_scope::root(&headers).is_none()
+    {
+        let policy = state
+            .runtime
+            .resource_mention_policy(query.thread_id, query.agent.as_deref())
+            .await?;
+        for server in &mut servers {
+            if policy.turned_off(&server.name) {
+                server.turned_off = Some(true);
+            }
+        }
+    }
+    Ok(Json(servers))
 }
 async fn configure_mcp(
     State(state): State<ServerState>,
@@ -1586,26 +1615,31 @@ async fn start_turn(
         ))
         .into());
     }
-    read_mentions(
-        &state,
-        &headers,
-        std::mem::take(&mut request.resources),
-        &mut request.text,
-        &mut request.attachments,
-    )
+    let resources = std::mem::take(&mut request.resources);
+    let turn = admit(resources.is_empty(), async move {
+        read_mentions(
+            &state,
+            &headers,
+            id,
+            resources,
+            &mut request.text,
+            &mut request.attachments,
+        )
+        .await?;
+        state
+            .runtime
+            .start_turn(id, request)
+            .await
+            .map_err(|error| match error {
+                // A chat busy elsewhere is said as a sentence, without the
+                // category the error type adds ("conflict: …").
+                CoreError::Conflict(message) => {
+                    ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+                }
+                other => other.into(),
+            })
+    })
     .await?;
-    let turn = state
-        .runtime
-        .start_turn(id, request)
-        .await
-        .map_err(|error| match error {
-            // A chat busy elsewhere is said as a sentence, without the
-            // category the error type adds ("conflict: …").
-            CoreError::Conflict(message) => {
-                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
-            }
-            other => other.into(),
-        })?;
     Ok((StatusCode::ACCEPTED, Json(turn)))
 }
 async fn execute_command(
@@ -1615,9 +1649,10 @@ async fn execute_command(
     Json(mut request): Json<ExecuteCommandRequest>,
 ) -> ApiResult<(StatusCode, Json<CommandExecutionResponse>)> {
     let resources = std::mem::take(&mut request.resources);
+    let mut text = None;
     if !resources.is_empty() {
         // Mentions join the command's argument text, as attached files do.
-        let mut text = match request.arguments.take() {
+        text = Some(match request.arguments.take() {
             None => String::new(),
             Some(Value::String(text)) => text,
             Some(_) => {
@@ -1626,18 +1661,28 @@ async fn execute_command(
                 )
                 .into());
             }
-        };
-        read_mentions(
-            &state,
-            &headers,
-            resources,
-            &mut text,
-            &mut request.attachments,
-        )
-        .await?;
-        request.arguments = Some(Value::String(text));
+        });
     }
-    let response = crate::command::execute(&state, id, request).await?;
+    // Boxed: a command's future is large.
+    let response = admit(
+        resources.is_empty(),
+        Box::pin(async move {
+            if let Some(mut text) = text {
+                read_mentions(
+                    &state,
+                    &headers,
+                    id,
+                    resources,
+                    &mut text,
+                    &mut request.attachments,
+                )
+                .await?;
+                request.arguments = Some(Value::String(text));
+            }
+            Ok(crate::command::execute(&state, id, request).await?)
+        }),
+    )
+    .await?;
     let status = match &response {
         CommandExecutionResponse::Turn { .. } => StatusCode::ACCEPTED,
         CommandExecutionResponse::WorkflowRun { run }
@@ -2353,26 +2398,31 @@ async fn queue_input(
     headers: HeaderMap,
     Json(mut request): Json<QueueInputRequest>,
 ) -> ApiResult<(StatusCode, Json<QueueInputResponse>)> {
-    read_mentions(
-        &state,
-        &headers,
-        std::mem::take(&mut request.resources),
-        &mut request.text,
-        &mut request.attachments,
-    )
+    let resources = std::mem::take(&mut request.resources);
+    let response = admit(resources.is_empty(), async move {
+        read_mentions(
+            &state,
+            &headers,
+            id,
+            resources,
+            &mut request.text,
+            &mut request.attachments,
+        )
+        .await?;
+        Ok(state.runtime.queue_input(id, request).await?)
+    })
     .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(state.runtime.queue_input(id, request).await?),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
-/// The MCP resources a message mentions, read into it when it arrives, so a
-/// queued message holds what was read. A published chat's viewers cannot
+/// The MCP resources a message to chat `id` mentions, read into it when it
+/// arrives, so a queued message holds what was read; the chat's rules keep
+/// from it what they keep from the model. A published chat's viewers cannot
 /// read the owner's MCP servers, so a mention from one is refused.
 async fn read_mentions(
     state: &ServerState,
     headers: &HeaderMap,
+    id: ThreadId,
     resources: Vec<haarness_protocol::ResourceMention>,
     text: &mut String,
     attachments: &mut Vec<String>,
@@ -2386,15 +2436,39 @@ async fn read_mentions(
         )
         .into());
     }
+    let policy = state
+        .runtime
+        .resource_mention_policy(Some(id), None)
+        .await?;
     crate::mcp_resources::read_mentions(
         state.mcp.as_ref(),
         &state.workspace,
         resources,
+        &|server, uri| policy.denies(server, uri),
+        crate::mcp_resources::MENTION_BUDGET,
         text,
         attachments,
     )
     .await?;
     Ok(())
+}
+
+/// Admits a message. One that mentions resources is read and admitted on a
+/// task of its own (`plain` is false), so a client that goes away while the
+/// reads run cannot lose the message; its retry with the same request id
+/// finds it.
+async fn admit<T: Send + 'static>(
+    plain: bool,
+    work: impl std::future::Future<Output = ApiResult<T>> + Send + 'static,
+) -> ApiResult<T> {
+    if plain {
+        return work.await;
+    }
+    tokio::spawn(work).await.map_err(|error| {
+        ApiFailure::from(CoreError::Tool(format!(
+            "the message could not be admitted: {error}"
+        )))
+    })?
 }
 
 async fn input_queue(

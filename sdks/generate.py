@@ -236,6 +236,7 @@ def specification():
             }
         ),
         "FileSearchQuery": obj({"q": S, "limit": N}, ("q",)),
+        "McpServersQuery": obj({"threadId": S, "agent": S}),
         "HostOptions": obj({"version": {"type": "integer", "enum": [1, 2]}}),
         "ExtensionHostOptions": obj(
             {"version": {"type": "integer", "enum": [1]}}, ("version",)
