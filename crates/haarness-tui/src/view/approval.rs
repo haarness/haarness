@@ -397,10 +397,13 @@ fn script_rows(
     } else {
         text.split('\n').collect()
     };
-    let size = if lines.len() == 1 {
-        language.text("1 line").to_owned()
-    } else {
-        language.format("{count} lines", &[("count", &lines.len().to_string())])
+    // A cut file's count is of what was read, so it says so.
+    let count = lines.len().to_string();
+    let size = match (script.truncated, lines.len()) {
+        (true, 1) => language.text("start of the file").to_owned(),
+        (true, _) => language.format("first {count} lines", &[("count", &count)]),
+        (false, 1) => language.text("1 line").to_owned(),
+        (false, _) => language.format("{count} lines", &[("count", &count)]),
     };
     let mut rows = vec![(
         Row::ScriptName,

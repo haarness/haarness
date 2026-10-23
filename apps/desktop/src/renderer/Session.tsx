@@ -3032,13 +3032,7 @@ function Permission(props: {
               >
                 <Icon name="chevron" size="xs" class="approval-script-chevron" />
                 <span>
-                  {isOpen(scriptKey())
-                    ? t("Hide script")
-                    : item().lines.length === 1
-                      ? t("View script · 1 line")
-                      : t("View script · {count} lines", {
-                          count: formatNumber(item().lines.length),
-                        })}
+                  {isOpen(scriptKey()) ? t("Hide script") : scriptLabel(item())}
                 </span>
               </button>
               <Show when={isOpen(scriptKey())}>
@@ -3184,6 +3178,18 @@ function Permission(props: {
       </Show>
     </section>
   );
+}
+/** The closed script toggle: its size, which for a cut file counts only
+ * what was read. */
+function scriptLabel(script: { lines: string[]; truncated: boolean }) {
+  const count = script.lines.length;
+  if (script.truncated)
+    return count === 1
+      ? t("View script · start of the file")
+      : t("View script · first {count} lines", { count: formatNumber(count) });
+  return count === 1
+    ? t("View script · 1 line")
+    : t("View script · {count} lines", { count: formatNumber(count) });
 }
 /** What an explicit Chrome request lets the agent do, with `{origin}` left
  * for the caller to isolate (an origin is a Latin run in any language). */

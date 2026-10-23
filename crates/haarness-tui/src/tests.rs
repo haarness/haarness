@@ -9144,7 +9144,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
     // Collapsed: the name, the size and the first lines, then how to read
     // the rest.
     assert!(
-        text.contains("Script: /work/app/scripts/deploy.sh · 11 lines"),
+        text.contains("Script: /work/app/scripts/deploy.sh · first 11 lines"),
         "{text}"
     );
     assert!(text.contains("│ echo step-01"), "{text}");
@@ -9187,6 +9187,15 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
     let text = frame_text(&app, (100, 40));
     assert!(text.contains("Script: run.sh · 1 line"), "{text}");
     assert!(!text.contains("Only the start"), "{text}");
+    // One long line cut short is the start of the file, not "1 line".
+    if let Some(script) = app.pending_permissions[0].script.as_mut() {
+        script.truncated = true;
+    }
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("Script: run.sh · start of the file"),
+        "{text}"
+    );
     // A request without one keeps the card it had.
     app.pending_permissions[0].script = None;
     assert!(!frame_text(&app, (100, 40)).contains("Script:"));
