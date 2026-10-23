@@ -205,6 +205,10 @@ test("keys translated through a variable are in the catalog", () => {
     "Cloud sessions in your Haarness account", "Local projects on this computer",
     // The palette's count picks its singular or plural key.
     "{count} result",
+    // Settings → Tools names the catalog's tool groups (`classify` in
+    // haarness-core) and the browser tools' family.
+    "Core", "Browser", "Agents", "Planning", "Memory", "Goals", "Cloud agents",
+    "Sessions", "Automation", "Web", "Media", "Extensions",
     // Refusals of a screenshot pick, translated in the main process.
     "The screenshots changed. Open Screenshots again.",
     "Choose up to 20 screenshots from the list.",

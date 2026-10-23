@@ -1914,6 +1914,17 @@ button.settings-link:hover:not(:disabled) {
 .tool-group > div {
   padding-inline-start: calc(12px + var(--s1));
 }
+/* A part of the built-in tools, inside Built-in: the same disclosure, a step
+   quieter, its last line the group's own. */
+.tool-group-part:last-child {
+  border-bottom: 0;
+}
+.tool-group-part > .tool-group-toggle {
+  padding-block: var(--s2);
+}
+.tool-group-part > .tool-group-toggle > strong {
+  font-size: var(--ui);
+}
 .tool-group .setting-row {
   padding: var(--s3) 0;
 }
