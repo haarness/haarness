@@ -7,6 +7,7 @@ use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use super::bash::ScriptFile;
 use haarness_protocol::{PermissionScript, ScriptWithheld};
 use sha2::{Digest as _, Sha256};
 
@@ -105,7 +106,7 @@ pub async fn for_prompt(
 /// [`super::bash::script_files`] for what counts) and that `readable` lets
 /// this chat read. Nothing for a secret-named file (the built-in `read`
 /// rules), a credential file ([`is_credential`]), a binary, a folder, a
-/// device or a missing file.
+/// device, a missing file, or one a link leads into `/proc` or `/dev`.
 #[must_use]
 pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Option<Shown> {
     super::bash::script_files(command, cwd)
@@ -113,7 +114,7 @@ pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Opti
         .take(MAX_TRIED)
         .find_map(|file| match file.withheld {
             Some(reason) => Some(withheld(&file.path, reason)),
-            None => read(&file.path, &file.outputs, &readable),
+            None => read(file, &readable),
         })
 }
 
@@ -155,10 +156,15 @@ pub fn is_credential(path: &Path) -> bool {
                 .is_some_and(|folder| folder.eq_ignore_ascii_case(".aws")))
 }
 
-/// `file` (absolute, as the command names it) read where it really is,
-/// links followed. Its own command's `outputs` may lead to it through a
-/// link: it is written before it runs then.
-fn read(file: &Path, outputs: &[PathBuf], readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
+/// A script (its path absolute, as the command names it) read where it
+/// really is, links followed. Its own command's outputs may lead to it
+/// through a link: it is written before it runs then.
+fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
+    let file = script.path.as_path();
+    // There the server's process answers, not the shell's.
+    if through_system_folder(file) {
+        return None;
+    }
     let shown = named(file);
     let real = file.canonicalize().ok()?;
     if [&shown, &real]
@@ -167,7 +173,14 @@ fn read(file: &Path, outputs: &[PathBuf], readable: &impl Fn(&Path) -> bool) -> 
     {
         return None;
     }
-    if outputs.iter().any(|output| same_file(output, &real)) {
+    if script
+        .outputs
+        .iter()
+        .any(|output| through_system_folder(output))
+    {
+        return Some(withheld(file, ScriptWithheld::Changeable));
+    }
+    if script.outputs.iter().any(|output| same_file(output, &real)) {
         return Some(withheld(file, ScriptWithheld::Written));
     }
     let mut bytes = read_bytes(&real)?;
@@ -214,6 +227,51 @@ fn named(file: &Path) -> PathBuf {
         .and_then(|folder| folder.canonicalize().ok())
         .zip(file.file_name())
         .map_or(lexical, |(folder, name)| folder.join(name))
+}
+
+/// Whether `path` (absolute) leads, as written or through links, into
+/// `/proc` or `/dev`, where the server's process answers instead of the
+/// shell's (`/proc/self/cwd`, `/dev/fd/3`).
+fn through_system_folder(path: &Path) -> bool {
+    let mut resolved = PathBuf::from("/");
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let push = |rest: &mut Vec<std::ffi::OsString>, path: &Path| {
+        for part in path.components().rev() {
+            match part {
+                Component::Normal(name) => rest.push(name.to_owned()),
+                Component::ParentDir => rest.push("..".into()),
+                _ => {}
+            }
+        }
+    };
+    push(&mut rest, path);
+    let mut links = 0;
+    while let Some(part) = rest.pop() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&part);
+        if super::bash::in_system_folder(&next) {
+            return true;
+        }
+        let is_link =
+            std::fs::symlink_metadata(&next).is_ok_and(|meta| meta.file_type().is_symlink());
+        // Past the system's own limit the file cannot be opened anyway.
+        if !is_link || links >= 40 {
+            resolved = next;
+            continue;
+        }
+        links += 1;
+        let Ok(target) = std::fs::read_link(&next) else {
+            return false;
+        };
+        if target.has_root() {
+            resolved = PathBuf::from("/");
+        }
+        push(&mut rest, &target);
+    }
+    false
 }
 
 /// Whether `path` leads to the file at `real`, through links of either
@@ -554,6 +612,31 @@ mod tests {
         fixture.write("other.log", "");
         let shown = bash_script("sh run.sh > other.log 2>&1", &fixture.0, |_| true).unwrap();
         assert_eq!(shown.content, "echo old\n");
+    }
+
+    /// A link into `/dev` (or `/proc`) leads where the server's process
+    /// answers, not the shell's: the script is not shown, and output sent
+    /// through one withholds it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_dev_or_proc_shows_nothing() {
+        let fixture = Fixture::new();
+        fixture.write("run.sh", "echo body\n");
+        std::os::unix::fs::symlink("/dev", fixture.0.join("devices")).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("devices"), fixture.0.join("again")).unwrap();
+        std::os::unix::fs::symlink("/dev/null", fixture.0.join("out.log")).unwrap();
+        assert!(through_system_folder(&fixture.0.join("again/fd/3")));
+        assert!(through_system_folder(Path::new("/proc/self/cwd/run.sh")));
+        assert!(!through_system_folder(&fixture.0.join("run.sh")));
+        for command in ["sh devices/fd/3", "sh again/fd/3"] {
+            assert!(
+                bash_script(command, &fixture.0, |_| true).is_none(),
+                "{command}"
+            );
+        }
+        let shown = bash_script("sh run.sh > out.log", &fixture.0, |_| true).unwrap();
+        assert_eq!(shown.withheld, Some(ScriptWithheld::Changeable));
+        assert_eq!(shown.content, "");
     }
 
     #[test]
