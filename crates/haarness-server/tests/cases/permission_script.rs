@@ -794,3 +794,44 @@ async fn a_script_after_a_step_that_may_change_it_is_named_not_shown() {
     }
     assert!(!fixture.0.join("old.txt").exists());
 }
+
+/// `cd sub &` moves a subshell of its own: the card names the script the
+/// shell runs, `./run.sh` where the line started, its text withheld.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_backgrounded_cd_names_the_script_where_the_shell_stays() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join("sub")).unwrap();
+    std::fs::write(fixture.0.join("run.sh"), "printf top > top.txt\n").unwrap();
+    std::fs::write(fixture.0.join("sub/run.sh"), "printf sub > sub.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    for command in ["cd sub & sh run.sh; wait", "cd sub &\nsh run.sh\nwait"] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&bash(json!({ "command": command }))),
+            )
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        let script = pending.script.clone().unwrap();
+        assert_eq!(
+            Path::new(&script.path),
+            fixture.0.join("run.sh"),
+            "{command}"
+        );
+        assert_eq!(
+            script.withheld,
+            Some(haarness_protocol::ScriptWithheld::Changeable),
+            "{command}"
+        );
+        assert_eq!(script.content, "", "{command}");
+        answer(&runtime, &pending.permission_id, Reply::Once).await;
+        wait_done(&runtime, &turn).await;
+        assert!(fixture.0.join("top.txt").exists(), "{command}");
+        assert!(!fixture.0.join("sub/sub.txt").exists(), "{command}");
+        std::fs::remove_file(fixture.0.join("top.txt")).unwrap();
+    }
+}

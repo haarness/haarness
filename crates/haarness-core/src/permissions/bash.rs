@@ -1768,7 +1768,12 @@ pub struct ScriptFile {
 /// path (`./x.sh`), named by a step at the line's top level (or a stage of a
 /// pipeline there), through `sudo`, `env`, `timeout`, `nohup`, `command` or
 /// `exec`. One a wrapper runs in another folder (`env -C`, `sudo -D`,
-/// `sudo -i`) is not named.
+/// `sudo -i`) is not named, nor a relative one once the folder is unknown:
+/// after a `cd` to a folder the line does not say, or in a line the tree
+/// cannot read whole. A statement that ends
+/// in `&` runs in a subshell of its own: its `cd`s stay in it, and anything
+/// it or a later step names is withheld, except a script that is all it runs
+/// (`nohup ./run.sh &`).
 ///
 /// Its text may be shown only when the line has a trusted shape: steps
 /// joined by `&&` or `;`, each one before the script a `cd` or `pushd` to a
@@ -1805,21 +1810,59 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
         writes: Vec::new(),
         found: Vec::new(),
     };
-    for (step, redirects) in steps(tree.root_node()) {
+    // A line the tree cannot read whole may hold an `&` or a `cd` where the
+    // tree puts none (`a && cd sub <<EOF &`): no folder can be told.
+    if tree.root_node().has_error() {
+        return Vec::new();
+    }
+    for statement in statements(tree.root_node()) {
         if line.found.len() >= MAX_SCRIPT_FILES {
             break;
         }
-        line.step(step, &redirects);
+        line.statement(&statement);
     }
     line.found
 }
 
-/// The steps of a line at its top level, in order, each with the redirects
-/// that belong to it: its statements, with `&&` lists opened. A redirect
-/// the tree hangs on a whole list (`a && b > f <<EOF`) belongs to its last
-/// command. Anything else (an `||` list, a pipeline, a group, a loop …) is
-/// one step.
-fn steps(root: tree_sitter::Node<'_>) -> Vec<(tree_sitter::Node<'_>, Vec<tree_sitter::Node<'_>>)> {
+/// A statement at a line's top level, with what ends it.
+struct Statement<'t> {
+    /// Its steps, from [`steps`].
+    steps: Vec<(tree_sitter::Node<'t>, Vec<tree_sitter::Node<'t>>)>,
+    /// It ends in `&`: it runs in a subshell of its own, alongside the
+    /// statements after it.
+    background: bool,
+}
+
+/// The statements of a line at its top level, in order, each paired with
+/// the `;`, `&` or line break that ends it.
+fn statements(root: tree_sitter::Node<'_>) -> Vec<Statement<'_>> {
+    let mut statements: Vec<Statement<'_>> = Vec::new();
+    for child in root.children(&mut root.walk()) {
+        match child.kind() {
+            // `cmd`, the shell on Windows, runs `a & b` one after the other.
+            "&" if cfg!(not(windows)) => {
+                if let Some(statement) = statements.last_mut() {
+                    statement.background = true;
+                }
+            }
+            "comment" => {}
+            _ if child.is_named() => statements.push(Statement {
+                steps: steps(child),
+                background: false,
+            }),
+            _ => {}
+        }
+    }
+    statements
+}
+
+/// The steps of a statement, in order, each with the redirects that belong
+/// to it: its `&&` lists opened. A redirect the tree hangs on a whole list
+/// (`a && b > f <<EOF`) belongs to its last command. Anything else (an `||`
+/// list, a pipeline, a group, a loop …) is one step.
+fn steps(
+    statement: tree_sitter::Node<'_>,
+) -> Vec<(tree_sitter::Node<'_>, Vec<tree_sitter::Node<'_>>)> {
     let and_list = |node: tree_sitter::Node<'_>| {
         node.kind() == "list"
             && node
@@ -1827,14 +1870,9 @@ fn steps(root: tree_sitter::Node<'_>) -> Vec<(tree_sitter::Node<'_>, Vec<tree_si
                 .all(|child| child.kind() != "||")
     };
     let mut steps = Vec::new();
-    let mut stack: Vec<_> = root
-        .named_children(&mut root.walk())
-        .map(|node| (node, Vec::new()))
-        .collect();
-    stack.reverse();
+    let mut stack = vec![(statement, Vec::new())];
     while let Some((node, redirects)) = stack.pop() {
         match node.kind() {
-            "comment" => {}
             _ if and_list(node) => {
                 let mut children: Vec<_> = node.named_children(&mut node.walk()).collect();
                 let last = children.pop();
@@ -1846,7 +1884,10 @@ fn steps(root: tree_sitter::Node<'_>) -> Vec<(tree_sitter::Node<'_>, Vec<tree_si
                 opened.reverse();
                 stack.extend(opened);
             }
-            "redirected_statement" if node.child_by_field_name("body").is_some_and(and_list) => {
+            "redirected_statement"
+                if !heredoc_holds_more(node)
+                    && node.child_by_field_name("body").is_some_and(and_list) =>
+            {
                 let mut own: Vec<_> = node
                     .children_by_field_name("redirect", &mut node.walk())
                     .collect();
@@ -1896,8 +1937,35 @@ struct Script {
 }
 
 impl Line<'_> {
+    /// A statement at the line's top level. One that ends in `&` runs in a
+    /// subshell alongside the rest of the line: its `cd`s stay in it, and
+    /// nothing it or a later step names is trusted, except a script that is
+    /// all it runs (`nohup ./run.sh &`).
+    fn statement(&mut self, statement: &Statement<'_>) {
+        let folder = statement.background.then(|| self.folder.clone());
+        if statement.background && statement.steps.len() > 1 {
+            self.trusted = false;
+        }
+        for (step, redirects) in &statement.steps {
+            if self.found.len() >= MAX_SCRIPT_FILES {
+                break;
+            }
+            self.step(*step, redirects);
+        }
+        if let Some(folder) = folder {
+            self.folder = folder;
+            self.trusted = false;
+        }
+    }
+
     fn step(&mut self, node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>]) {
         match node.kind() {
+            // What follows `<<EOF` on its line runs too, hidden in the
+            // here-document's redirect (`./a.sh <<EOF && cd sub`).
+            "command" | "redirected_statement" if heredoc_holds_more(node) => {
+                self.note_redirects(outer);
+                self.untrusted(node);
+            }
             "command" | "redirected_statement" => match statement(node, outer) {
                 (Some(command), redirects) => self.command(command, &redirects),
                 (None, redirects) => {
@@ -2403,6 +2471,22 @@ fn has_substitution(node: tree_sitter::Node<'_>) -> bool {
         stack.extend(node.children(&mut node.walk()));
     }
     false
+}
+
+/// Whether a here-document's redirect in `node` holds more of the line than
+/// the here-document: the tree hangs what follows `<<EOF` on its line
+/// (`&& b`, `| sh`) inside it.
+fn heredoc_holds_more(node: tree_sitter::Node<'_>) -> bool {
+    node.children_by_field_name("redirect", &mut node.walk())
+        .filter(|redirect| redirect.kind() == "heredoc_redirect")
+        .any(|redirect| {
+            redirect.named_children(&mut redirect.walk()).any(|child| {
+                !matches!(
+                    child.kind(),
+                    "heredoc_start" | "heredoc_body" | "heredoc_end" | "file_redirect"
+                )
+            })
+        })
 }
 
 /// Whether a command under `node` may move the shell: `cd`, `pushd`,
@@ -3694,6 +3778,64 @@ mod scripts {
         assert_eq!(withheld("cd \"$DIR\" && /tmp/run.sh"), Some(Changeable));
         // A subshell's `cd` stays in it.
         assert_eq!(first("(cd sub); ./run.sh"), Some(at("run.sh")));
+    }
+
+    /// A statement that ends in `&` runs in a subshell of its own,
+    /// alongside the rest of the line: its `cd` moves nothing after it, and
+    /// nothing after it is trusted.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backgrounded_statement_moves_nothing_and_trusts_nothing_after_it() {
+        for command in [
+            "cd sub & ./run.sh",
+            "cd sub &\n./run.sh",
+            "cd sub & # in the background\n./run.sh",
+            "pushd sub & ./run.sh",
+            "cd a && cd b & ./run.sh",
+            "{ cd sub; } & ./run.sh",
+            "export X=1 & ./run.sh",
+        ] {
+            assert_eq!(found(command), [at("run.sh")], "{command}");
+            assert_eq!(withheld(command), Some(Changeable), "{command}");
+        }
+        // A script that is all the statement runs still shows.
+        for command in [
+            "nohup ./run.sh &",
+            "./run.sh > log 2>&1 &",
+            "cd d; nohup ./run.sh &",
+        ] {
+            assert!(first(command).is_some(), "{command}");
+            assert_eq!(withheld(command), None, "{command}");
+        }
+        let files = script_files("./a.sh & ./b.sh", &cwd());
+        assert_eq!(files[0].withheld, None);
+        assert_eq!(files[1].withheld, Some(Changeable));
+        // In a list that ends in `&`, the list's own `cd` places its script,
+        // whose text is withheld.
+        let files = script_files("cd sub && ./a.sh & ./b.sh", &cwd());
+        assert_eq!(files[0].path, at("sub/a.sh"));
+        assert_eq!(files[0].withheld, Some(Changeable));
+        assert_eq!(files[1].path, at("b.sh"));
+        assert_eq!(files[1].withheld, Some(Changeable));
+    }
+
+    /// An `&` the tree cannot place (after a here-document's `<<EOF`), or a
+    /// step it hangs inside the here-document, leaves the folder unknown.
+    #[test]
+    fn what_a_here_document_hides_leaves_the_folder_unknown() {
+        for command in [
+            "cd sub && cat <<EOF &\nx\nEOF\n./run.sh",
+            "cat <<EOF & cd sub\nx\nEOF\n./run.sh",
+            "cat <<'EOF' > f &\nx\nEOF\n./run.sh",
+            "./a.sh <<EOF && cd sub\nx\nEOF\n./run.sh",
+            "cd sub && cat <<EOF && ./a.sh\nx\nEOF\n./run.sh",
+        ] {
+            assert_eq!(found(command), Vec::<PathBuf>::new(), "{command}");
+        }
+        // One that moves nothing keeps it, but trusts nothing after it.
+        let command = "cat <<EOF | sh\nx\nEOF\n./run.sh";
+        assert_eq!(found(command), [at("run.sh")]);
+        assert_eq!(withheld(command), Some(Changeable));
     }
 
     #[test]
