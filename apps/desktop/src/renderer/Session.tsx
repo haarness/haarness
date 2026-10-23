@@ -607,6 +607,7 @@ export function Session() {
    * person's own scrolling makes a step's opening no longer the reason. */
   function pauseFollowing(focus = false) {
     settleAtEnd = false;
+    quietUntil = undefined;
     if (!focus) pausedByToggle = undefined;
     revealTarget = undefined;
     cancelAnimationFrame(revealFrame);
@@ -618,10 +619,11 @@ export function Session() {
   /* A step or thought the reader opens or closes stays where it was clicked:
      following pins streamed output to the bottom, not the row's own growth.
      When opening it pushes the latest output out of view, following pauses,
-     as scrolling up would, and Jump to latest offers the way back (not for
-     a step of the work under way, whose output following shows as it
-     comes); when closing it brings the end of the chat into view, or closes
-     the step whose opening paused it, following resumes. */
+     as scrolling up would, and Jump to latest offers the way back. The
+     last step, still running, keeps following, but only for what it (or
+     the turn) writes after it was opened. When closing a step brings the
+     end of the chat into view, or closes the step whose opening paused it,
+     following resumes. */
   let toggled:
     | {
         control: Element;
@@ -636,11 +638,15 @@ export function Session() {
       }
     | undefined;
   /** The step whose opening paused following, until something else moves the view. */
-  let pausedByToggle: HTMLElement | undefined;
+  // By item, not element: the list may draw the row anew in between.
+  let pausedByToggle: string | undefined;
+  /** The list's height when a running step was opened: following waits for more. */
+  let quietUntil: number | undefined;
   function holdToggled(event: MouseEvent) {
     const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
     const row = control?.closest<HTMLElement>("[data-index]");
     if (!control || !row || !scrolling.contains(row)) return;
+    quietUntil = undefined;
     const hold = {
       control,
       row,
@@ -670,7 +676,7 @@ export function Session() {
       !grown ||
       !!held.row.querySelector('.markdown[data-markdown-ready="false"]') ||
       (grown > 0 && scrolling.scrollHeight < held.scrollHeight + grown - 1) ||
-      (grown < 0 && pausedByToggle !== held.row && scrolling.scrollHeight > held.scrollHeight + grown + 1);
+      (grown < 0 && pausedByToggle !== held.row.dataset.itemId && scrolling.scrollHeight > held.scrollHeight + grown + 1);
     if (held.row.isConnected && drawing && performance.now() < held.until) {
       requestAnimationFrame(() => keepToggled(held));
       return;
@@ -699,22 +705,30 @@ export function Session() {
       grown > 0
         ? held.below + grown - (scrolling.scrollTop - held.scrollTop)
         : scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
-    // A step of the turn under way is the latest work: opened, the view
-    // goes on following what it and the rest of the turn write, from where
-    // it stands now.
-    const item = rows()[Number(held.row.dataset.index)];
-    const latest =
-      !!item &&
-      (Number(held.row.dataset.index) === rows().length - 1 || (!!active() && item.turnId === active()!.id));
-    if (grown > 0 && below > 4 && !latest) {
-      if (follow()) pausedByToggle = held.row;
+    // The last step, still running, is the work under way: opened while
+    // following, it stays where it was clicked, and following goes on only
+    // once it (or the turn) writes more; its own opening never moves it.
+    const index = Number(held.row.dataset.index);
+    const item = rows()[index];
+    if (
+      grown > 0 &&
+      follow() &&
+      index === rows().length - 1 &&
+      item?.data.type === "tool_call" &&
+      !toolResult(state.items, item)
+    ) {
+      quietUntil = scrolling.scrollHeight;
+      return;
+    }
+    if (grown > 0 && below > 4) {
+      if (follow()) pausedByToggle = held.row.dataset.itemId;
       setFollow(false);
-    } else if (below <= 4 || (grown < 0 && pausedByToggle === held.row)) {
+    } else if (below <= 4 || (grown < 0 && !!pausedByToggle && pausedByToggle === held.row.dataset.itemId)) {
       // Closing the step whose opening paused following takes it back up.
       pausedByToggle = undefined;
       setFollow(true);
     }
-    if (!(latest && grown > 0)) followLatest();
+    followLatest();
   }
   function followLatest() {
     if (!follow() || scrollFrame || toggled) return;
@@ -722,6 +736,11 @@ export function Session() {
       scrollFrame = 0;
       // User input can arrive after a stream delta scheduled this frame.
       if (!follow() || !scrolling) return;
+      // A running step just opened holds the view until more is written.
+      if (quietUntil !== undefined) {
+        if (scrolling.scrollHeight <= quietUntil + 1) return;
+        quietUntil = undefined;
+      }
       scrolling.scrollTop = scrolling.scrollHeight;
       lastTop = scrolling.scrollTop;
     });
@@ -1311,6 +1330,7 @@ export function Session() {
     if (target === undefined) return false;
     if (target === "latest") {
       toggled = undefined;
+      quietUntil = undefined;
       setFollow(true);
       followLatest();
     } else jumpToPrompt(target);
@@ -1587,6 +1607,7 @@ export function Session() {
               }
             });
         lastTop = 0;
+        quietUntil = undefined;
         setFollow(true);
       },
     ),
@@ -1895,6 +1916,7 @@ export function Session() {
       const historyEntry = { text, attachments: originalAttachments, context, thread: selected ?? undefined };
       void app.run(() => history.record(historyKey(connection!), historyEntry));
       persistDraft();
+      quietUntil = undefined;
       setFollow(true);
       if (!state.connection && !state.openingProject) {
         if (!(await app.connect({ recent: project()!.id }, true))) return;
@@ -2230,6 +2252,7 @@ export function Session() {
                 "input, textarea, select, [contenteditable]",
               )
             ) {
+              quietUntil = undefined;
               setFollow(true);
               settleAtEnd = true;
             }
@@ -2454,6 +2477,7 @@ export function Session() {
               title={t("Jump to latest")}
               onClick={() => {
                 toggled = undefined;
+                quietUntil = undefined;
                 setFollow(true);
                 followLatest();
               }}

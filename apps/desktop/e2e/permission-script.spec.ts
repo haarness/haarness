@@ -304,6 +304,73 @@ test("a card that takes the keyboard because nothing had it sends what is typed 
   await box.fill("");
 });
 
+test("a step opened while its turn waits on a card stays where it was clicked", async () => {
+  const box = page.locator("[data-composer-input]");
+  const transcript = page.locator(".transcript");
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await box.fill("::long 40");
+  await box.press("Enter");
+  await expect(transcript).toContainText("line 40 marker-40");
+  await idle();
+  await box.fill(" !multi " + JSON.stringify([
+    { name: "bash", arguments: { command: "echo first-step-output; seq 1 30" } },
+    { name: "bash", arguments: { command: "printf second > second-step.txt" } },
+  ]));
+  await box.press("Enter");
+  await expect(card()).toBeVisible();
+  await card().getByRole("button", { name: "Allow once", exact: true }).click();
+  await expect(card().locator(".approval-command")).toHaveText("printf second > second-step.txt");
+  const settle = () => page.evaluate(() => new Promise((done) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(done)), 300)));
+  await settle();
+  /** Where a summary sits for a second after its click: it may come up
+   * once, by at most 80px, for its first lines to show at the bottom of
+   * the view, and then it holds. */
+  const holds = async (summary: Locator, before: number) => {
+    const places: number[] = [];
+    for (let sample = 0; sample < 8; sample++) {
+      await page.waitForTimeout(120);
+      places.push((await summary.boundingBox())!.y);
+    }
+    for (const place of places) {
+      expect(before - place).toBeLessThanOrEqual(81);
+      expect(place - before).toBeLessThan(2);
+      expect(Math.abs(place - places[0])).toBeLessThan(2);
+    }
+  };
+  // A finished step of the waiting turn: opening it moves nothing, and as its
+  // output pushes the end of the chat out of view, following pauses.
+  const finished = page.locator(".tool-call").filter({ hasText: "first-step-output" }).last();
+  const first = finished.locator(":scope > summary");
+  if ((await finished.getAttribute("open")) !== null) {
+    await first.click();
+    await settle();
+  }
+  const at = (await first.boundingBox())!.y;
+  await first.click();
+  await expect(finished.locator(".tool-output")).toContainText("first-step-output");
+  await holds(first, at);
+  await expect(jump).toBeVisible();
+  // Closing it again takes following back up.
+  await first.click();
+  await expect(jump).toHaveCount(0);
+  await settle();
+  // The running step at the end: opening it moves nothing either; what it
+  // writes once it runs is followed.
+  const running = page.locator(".tool-call").filter({ hasText: "second-step.txt" }).last();
+  const second = running.locator(":scope > summary");
+  const rest = (await second.boundingBox())!.y;
+  await second.click();
+  await expect(running.locator(".tool-empty")).toHaveText("Waiting for output…");
+  await holds(second, rest);
+  await card().getByRole("button", { name: "Allow once", exact: true }).click();
+  await idle();
+  await expect(transcript).toContainText("All tools finished");
+  await expect(jump).toHaveCount(0);
+  await expect
+    .poll(() => transcript.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
+    .toBeLessThan(5);
+});
+
 test("under the default rules the outside folder's card offers the script that runs there", async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });

@@ -9780,6 +9780,11 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     (element) => getComputedStyle(element).borderLeftColor,
   );
   expect(failedBatchRail).toBe(neutralRail);
+  // Steps opened above paused following, as scrolling up would; the next
+  // turn is read from the latest again.
+  const jumpToLatest = page.getByRole("button", { name: "Jump to latest", exact: true });
+  if (await jumpToLatest.isVisible()) await jumpToLatest.click();
+  await expect(jumpToLatest).toHaveCount(0);
   const missing = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
     text: '!tool glob {"pattern":"**/*.{yml,yaml,json,toml,lock}","path":".missing-tools-folder"}',
