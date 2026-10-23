@@ -601,9 +601,12 @@ function createApp(saved?: Preferences) {
     const current = ++selection;
     const connection = state.connection!.id;
     const next = openTab(state.tabs, state.preview, id, options.tab);
-    // Double-clicked while it opened: the preview it takes is kept.
-    if (keepNext === id && next.preview === id) next.preview = "";
-    keepNext = "";
+    // Double-clicked while it opened: the preview it takes is kept. Only this
+    // chat consumes the mark; a project opening first chooses its own.
+    if (keepNext === id) {
+      if (next.preview === id) next.preview = "";
+      keepNext = "";
+    }
     // The preview this chat replaces leaves the tab strip; its slot in a
     // saved tab order goes to this chat.
     const replaced = next.preview === id && state.preview !== id && !next.tabs.includes(state.preview)
@@ -653,7 +656,8 @@ function createApp(saved?: Preferences) {
   function rememberTabs(connection: string) {
     void window.haarness.storage(tabsKey(connection), keptTabs(state.tabs, state.preview));
   }
-  /** A double-click on a chat can land before the chat it opens is chosen. */
+  /** A double-click on a chat can land before the chat it opens is chosen
+   * (another project's opens first); the next navigation elsewhere drops it. */
   let keepNext = "";
   /** Turns the preview `id` into a tab that stays, or the chat being opened
    * now when it becomes the preview. */
@@ -706,7 +710,7 @@ function createApp(saved?: Preferences) {
     });
   });
   async function closeTab(id: string) {
-    set("openingChat", 0);
+    stopOpening();
     batch(() => {
       set("tabs", (tabs) => tabs.filter((tab) => tab !== id));
       if (state.preview === id) set("preview", "");
@@ -1057,7 +1061,7 @@ function createApp(saved?: Preferences) {
   }
   async function switchServer(id: string) {
     if (!servers().some((item) => item.id === id)) return false;
-    set("openingChat", 0);
+    stopOpening();
     const attempt = connectAttempt;
     const remembered = await window.haarness.storage("server-project:" + id);
     if (attempt !== connectAttempt) return false;
@@ -1074,7 +1078,7 @@ function createApp(saved?: Preferences) {
     return true;
   }
   async function openProject(newChat = false) {
-    set("openingChat", 0);
+    stopOpening();
     const server = currentServer();
     if (server.url || server.host) {
       set("remoteProjectRequest", { server, newChat });
@@ -1493,7 +1497,7 @@ function createApp(saved?: Preferences) {
       );
   }
   async function selectProject(id: string, newChat = false) {
-    set("openingChat", 0);
+    stopOpening();
     const group = projects().find((item) => item.id === id);
     if (!group) return false;
     const location = primaryLocation(group);
@@ -1528,7 +1532,7 @@ function createApp(saved?: Preferences) {
   }
   async function startChat(location?: string) {
     batch(() => {
-      set("openingChat", 0);
+      stopOpening();
       set("loadingChat", 0);
     });
     if (location) {
@@ -1735,31 +1739,39 @@ function createApp(saved?: Preferences) {
       if (attempt === connectAttempt) set("openingProject", "");
     }
   }
+  /** The location `id` is open and settled, so nothing needs connecting. */
+  const projectOpen = (id: string) =>
+    state.connection?.id === id &&
+    state.ready &&
+    state.connectionStatus === "Connected" &&
+    !activation;
   async function activateProject(id: string) {
     if (state.recent.find((item) => item.id === id)?.checkout?.exists === false)
       throw new Error(
         "This checkout is missing. Restore its folder or choose another location in this project.",
       );
-    if (
-      state.connection?.id === id &&
-      state.ready &&
-      state.connectionStatus === "Connected" &&
-      !activation
-    )
-      return true;
+    if (projectOpen(id)) return true;
     return connect({ recent: id });
   }
   async function chooseProjectSession(project: string, thread: string, tab?: TabOpen) {
     const request = ++navigation;
-    set("openingChat", request);
+    if (keepNext !== thread) keepNext = "";
+    // Another project shows the loading mark while it opens; a chat of the
+    // project already open loads in place, its tabs staying on screen.
+    if (!projectOpen(project)) set("openingChat", request);
     try {
-      if (!(await activateProject(project)) || state.openingChat !== request)
-        return;
+      if (!(await activateProject(project)) || navigation !== request) return;
       await expandLocation(project, true);
-      if (state.openingChat === request) await choose(thread, "chat", { tab });
+      if (navigation === request) await choose(thread, "chat", { tab });
     } finally {
       if (state.openingChat === request) set("openingChat", 0);
     }
+  }
+  /** Ends a chat opening still under way (a project, server or New chat
+   * chosen meanwhile, or its tab closed). */
+  function stopOpening() {
+    navigation++;
+    set("openingChat", 0);
   }
   let notificationNavigation = 0;
   async function openNotification(target: NotificationTarget) {
