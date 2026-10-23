@@ -499,7 +499,10 @@ test("workspace opening is direct, enables project configuration, and preserves 
   await settings.getByRole("button", { name: "Projects", exact: true }).click();
   await expect(currentFolder).toContainText("Project configuration disabled");
   await settings.getByRole("button", { name: "General", exact: true }).click();
-  await expect(settings.getByRole("combobox", { name: "Input mode scope" })).toContainText("Global");
+  // Without project configuration only the global value applies: no project override is offered.
+  const delivery = settings.locator('[data-setting="Messages sent while working"]');
+  await expect(delivery.getByRole("radiogroup", { name: "Messages sent while working" })).toBeVisible();
+  await expect(delivery.getByRole("button", { name: "Override for this project" })).toHaveCount(0);
   await settings.getByRole("button", { name: "Browser", exact: true }).click();
   await expect(settings.getByRole("combobox", { name: "Browser settings scope" })).toContainText("Global default");
   // Settings changes may overlap a background sidebar refresh or another
@@ -12778,23 +12781,42 @@ test("shared input settings apply project and global modes to real Desktop chat"
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await expect(settings).toBeVisible();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer"); // /settings only opens the pane.
-    const mode = settings.getByRole("combobox", { name: "Messages sent while working", exact: true });
-    const scope = settings.getByRole("combobox", { name: "Input mode scope", exact: true });
-    await expect(mode).toContainText("Steer");
-    await expect(scope).toContainText("This project");
-    await selectValue(mode, "queue");
+    const row = settings.locator('[data-setting="Messages sent while working"]');
+    const steer = row.getByRole("radio", { name: "Steer", exact: true });
+    const queue = row.getByRole("radio", { name: "Queue", exact: true });
+    // /input-mode saved this project's own value; the row says so.
+    await expect(steer).toHaveAttribute("aria-checked", "true");
+    await expect(row).toContainText("This project");
+    await queue.click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
-    await selectValue(scope, "global");
-    await selectValue(mode, "steer");
+    expect(await readFile(globalFile, "utf8")).toBe(originalGlobal);
+    // Use global setting removes the project's value; the global one shows.
+    await row.getByRole("button", { name: "Use global setting", exact: true }).click();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(row).not.toContainText("This project");
+    // Without a project value, the choice is the global setting's.
+    await steer.click();
     await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
-    expect((await settingsApi({ action: "get" })).delivery).toBe("queue");
-    await selectValue(scope, "project");
-    await selectValue(mode, "inherit");
+    expect((await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(steer).toHaveAttribute("aria-checked", "true");
+    // Override for this project starts the project's own value from the one shown.
+    await row.getByRole("button", { name: "Override for this project", exact: true }).click();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("steer");
+    await expect(row).toContainText("This project");
+    // Arrow keys move the choice, which saves at once.
+    await steer.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(queue).toBeFocused();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
+    expect((await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
+    await row.getByRole("button", { name: "Use global setting", exact: true }).click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer");
     // An external client changes the same project while General stays open.
     await settingsApi({ action: "set", delivery: "queue" });
-    await expect(mode).toContainText("Queue");
+    await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(row).toContainText("This project");
     await page.screenshot({ path: "test-results/input-settings-general.png" });
     await settings.getByRole("button", { name: "Close settings", exact: true }).click();
     await send("/input-mode reset");

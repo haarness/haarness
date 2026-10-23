@@ -1722,11 +1722,20 @@ dialog .notifications {
   }
 }
 
+/* Steer or Queue, with where the value lives quietly under it. */
 .input-settings-controls {
   display: flex;
   flex-direction: column;
-  gap: var(--s2);
-  max-width: 260px;
+  align-items: flex-end;
+  gap: var(--s1);
+  flex: none;
+}
+.input-settings-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--muted);
 }
 @media (max-width: 650px) {
   /* Stacked, the controls need the row's full gap back, not the tighter one
@@ -1736,6 +1745,38 @@ dialog .notifications {
     flex-direction: column;
     gap: var(--s3);
   }
+  .input-settings-controls {
+    align-items: flex-start;
+  }
+}
+/* Two or three exclusive choices side by side, one of them chosen. */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--page);
+}
+.setting-row .segmented > button,
+.segmented > button {
+  min-height: calc(var(--control) - 6px);
+  min-width: 72px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-size: var(--ui);
+}
+.segmented > button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.segmented > button[aria-checked="true"],
+.segmented > button[aria-checked="true"]:hover:not(:disabled) {
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 500;
 }
 /* A quiet text action beside a setting's value: no frame, the muted tone,
    the text colour and an underline on hover. */
