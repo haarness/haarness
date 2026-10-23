@@ -661,6 +661,22 @@ test("a search jump marks its row without moving it, and Providers, Models and T
   await expect(toggle).toBeChecked();
   await builtIn.click();
   await expect(bash).toHaveCount(0);
+
+  // A jump to a row whose only control is off (the global shortcut's field)
+  // waits on the row, but never takes the keyboard back once it has moved on.
+  await globalFind("Global shortcut", "Global shortcut");
+  const target = settings().locator('[data-setting="Global shortcut"]');
+  await expect(target).toBeFocused();
+  const field = settings().getByRole("textbox", { name: "Shortcut new", exact: true });
+  const mod = process.platform === "darwin" ? "Meta" : "Control";
+  await field.click();
+  await field.press(`${mod}+Shift+Y`);
+  await expect.poll(async () => (await page.evaluate(() => window.haarness.boot())).preferences.shortcuts.new).toBe("Mod+Shift+Y");
+  await page.waitForTimeout(500);
+  await expect(field).toBeFocused();
+  await field.press(`${mod}+N`);
+  await expect.poll(async () => (await page.evaluate(() => window.haarness.boot())).preferences.shortcuts.new).toBe("Mod+N");
+  await expect(field).toBeFocused();
   await closeSettings();
 });
 
