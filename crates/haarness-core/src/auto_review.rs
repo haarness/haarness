@@ -1288,8 +1288,8 @@ async fn call(
 /// and the server's API tests), or `None` when `request` is not a review.
 /// The verdict is the last `[review:<verdict>]` in the request, else
 /// `HAARNESS_TEST_AUTO_REVIEW`, else `allow`: `allow`, `ask`, `deny`, `fail`
-/// (the call errors), `slow` (three seconds, then allow) or `stall` (no
-/// answer until cancelled). Production reviews never read either.
+/// (the call errors), `slow` (three seconds, then allow), `slow-ask` (three
+/// seconds, then ask) or `stall` (no answer until cancelled). Production reviews never read either.
 #[must_use]
 pub fn test_review(
     request: &ProviderRequest,
@@ -1326,15 +1326,16 @@ pub fn test_review(
         }
         _ => json!({"risk": "low", "authorization": "high", "outcome": "allow"}),
     };
-    let delay = match chosen.as_str() {
-        "slow" => Some(Duration::from_secs(3)),
-        "stall" => Some(Duration::from_secs(600)),
-        _ => None,
+    let (delay, outcome) = match chosen.as_str() {
+        "slow" => (Some(Duration::from_secs(3)), "allow"),
+        "slow-ask" => (Some(Duration::from_secs(3)), "ask"),
+        "stall" => (Some(Duration::from_secs(600)), "allow"),
+        other => (None, other),
     };
-    let event = if chosen == "fail" {
+    let event = if outcome == "fail" {
         Err(CoreError::Provider("test reviewer failed".into()))
     } else {
-        Ok(ProviderEvent::StructuredOutput(verdict(&chosen)))
+        Ok(ProviderEvent::StructuredOutput(verdict(outcome)))
     };
     let cancel = cancel.clone();
     Some(Box::pin(

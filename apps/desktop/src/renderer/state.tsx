@@ -2132,7 +2132,9 @@ function createApp(saved?: Preferences) {
 
     if (item.type === "permission.resolved")
       retainPermissionErrors(state.connection!.id, state.permissions);
-    if (item.type === "assets.updated")
+    // A reloaded configuration can change models, agents, commands and the
+    // server's capabilities (Auto's reviewer turned on or off).
+    if (item.type === "assets.updated" || item.type === "configuration.reloaded")
       void catalogs().catch((error) => set("error", String(error)));
     if (
       ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(

@@ -4175,6 +4175,117 @@ test("Auto's reviewer notes what it leaves to you, blocks with a reason and says
   expect(errors).toEqual([]);
 });
 
+test("Auto's review cues: never for quick reviews, at once on a switch, and on a card Auto finds waiting", async () => {
+  test.setTimeout(150000);
+  const thread = await client.createThread({
+    title: "Auto review cues",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title);
+  await page.getByRole("option").filter({ hasText: thread.title }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title);
+  await client.setApprovalMode(thread.id, { mode: "auto" });
+  const auto = page.getByRole("button", { name: "Approvals: Auto", exact: true });
+  const review = page.getByRole("button", { name: "Approvals: Review", exact: true });
+  await expect(auto).toBeVisible();
+  const start = (command: string, verdict: string) =>
+    client.startTurn(thread.id, {
+      requestId: crypto.randomUUID(),
+      text: `!tool bash ${JSON.stringify({ command })} [review:${verdict}]`,
+    });
+  const card = page.getByRole("alert", { name: "Permission request" });
+  const activity = page.locator(".assistant-activity");
+  const missing = (name: string) =>
+    readFile(join(workspace, name), "utf8").catch(() => null);
+
+  // Quick reviews never say so: an observer watches every change.
+  await page.evaluate(() => {
+    const seen = window as unknown as { sawReviewing?: boolean; reviewWatch?: MutationObserver };
+    seen.sawReviewing = false;
+    seen.reviewWatch = new MutationObserver(() => {
+      if (document.querySelector(".assistant-activity")?.textContent?.includes("Reviewing…"))
+        seen.sawReviewing = true;
+    });
+    seen.reviewWatch.observe(document.body, { subtree: true, childList: true, characterData: true });
+  });
+  await start("printf quick > review-quick.txt", "allow");
+  await settled();
+  await start("printf quick > review-quick-deny.txt", "deny");
+  await settled();
+  const saw = await page.evaluate(() => {
+    const seen = window as unknown as { sawReviewing?: boolean; reviewWatch?: MutationObserver };
+    seen.reviewWatch?.disconnect();
+    return seen.sawReviewing;
+  });
+  expect(saw).toBe(false);
+  expect(await readFile(join(workspace, "review-quick.txt"), "utf8")).toBe("quick");
+  expect(await missing("review-quick-deny.txt")).toBeNull();
+
+  // A slow review that then asks: Reviewing…, then the card with its note.
+  await start("printf slow > review-slow-ask.txt", "slow-ask");
+  await expect(activity).toContainText("Reviewing…", { timeout: 5000 });
+  await expect(card.locator(".approval-review")).toHaveText(
+    "Auto review · Test rule: Test verdict: ask.",
+    { timeout: 10000 },
+  );
+  await card.getByRole("button", { name: "Deny", exact: true }).click();
+  await settled();
+
+  // A switch to Review mid-review shows the plain card at once.
+  await start("printf switched > review-switched.txt", "stall");
+  await expect(activity).toContainText("Reviewing…", { timeout: 5000 });
+  await auto.click();
+  await expect(review).toBeVisible();
+  await expect(card).toBeVisible({ timeout: 3000 });
+  await expect(card.locator(".approval-review")).toHaveCount(0);
+  await card.getByRole("button", { name: "Deny", exact: true }).click();
+  await settled();
+  expect(await missing("review-switched.txt")).toBeNull();
+
+  // A card shown in Review when Auto turns on says the reviewer is deciding
+  // it, in place; back in Review it is plain again.
+  await start("printf waiting > review-waiting.txt", "stall");
+  await expect(card).toBeVisible();
+  await expect(card.locator(".approval-review")).toHaveCount(0);
+  // Where the card rests once it has come in: its answers stay put as the
+  // note appears above them.
+  // Measured from the composer, whose own controls change with the mode.
+  const bottom = async () => {
+    const box = await card.getByRole("button", { name: "Deny", exact: true }).boundingBox();
+    const composer = await page.locator(".composer").boundingBox();
+    return Math.round((composer?.y ?? 0) - (box?.y ?? 0));
+  };
+  let rest = await bottom();
+  await expect
+    .poll(async () => {
+      const now = await bottom();
+      const still = now === rest;
+      rest = now;
+      return still;
+    })
+    .toBe(true);
+  await review.click();
+  await expect(auto).toBeVisible();
+  await expect(card.locator(".approval-review")).toHaveText("Auto review is deciding…");
+  expect(Math.abs((await bottom()) - rest)).toBeLessThan(2);
+  await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await card.screenshot({ path: test.info().outputPath("auto-review-deciding-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  await auto.click();
+  await expect(review).toBeVisible();
+  await expect(card.locator(".approval-review")).toHaveCount(0);
+  await card.getByRole("button", { name: "Deny", exact: true }).click();
+  await settled();
+  expect(await missing("review-waiting.txt")).toBeNull();
+
+  await client.setApprovalMode(thread.id, { mode: "review" });
+  expect(errors).toEqual([]);
+});
+
 test("Auto from a child view leaves its parent and siblings in Review", async () => {
   const parent = await client.createThread({
     title: "Selective Auto parent",

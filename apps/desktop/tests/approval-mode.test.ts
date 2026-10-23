@@ -215,3 +215,15 @@ test("a reply the server no longer knows was settled already", async () => {
   assert.equal(alreadySettled(new Error("not found: permission 0199")), true);
   assert.equal(alreadySettled(new Error("conflict: busy")), false);
 });
+
+test("the shield says Auto asks a reviewer only where the server's does", async () => {
+  const { autoApprovalHint } = await import("../src/renderer/approval-mode");
+  const t = (key: string) => key;
+  assert.match(autoApprovalHint(true, true, t), /a reviewer model approves routine permission requests in this chat/);
+  assert.match(autoApprovalHint(false, true, t), /in new chats here once, and asks you about the rest/);
+  // auto_review.enabled false, or an older server: no approval-review.v1.
+  assert.equal(
+    autoApprovalHint(true, false, t),
+    "Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.",
+  );
+});

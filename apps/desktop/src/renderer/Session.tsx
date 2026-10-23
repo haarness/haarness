@@ -46,6 +46,7 @@ import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
 import {
   alreadySettled,
+  autoApprovalHint,
   canAutoApprove,
   describeAlwaysRule,
   reviewNote,
@@ -190,18 +191,14 @@ export function Session() {
   // What the approval pill's mode does, worded after the server's default
   // rules (permissions/mod.rs): Review does not ask before every edit or
   // command, and browser sites ask only when Settings → Browser says so.
-  // A server that asks a reviewer in Auto says so in its capabilities.
-  const reviewer = () =>
-    !!state.connection?.info.capabilities.includes("approval-review.v1");
   const approvalModeHint = () =>
     app.isAutoApproval()
-      ? reviewer()
-        ? state.selected
-          ? t("Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.")
-          : t("Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.")
-        : state.selected
-          ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
-          : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
+      ? autoApprovalHint(
+          !!state.selected,
+          // A server that asks a reviewer in Auto says so in its capabilities.
+          !!state.connection?.info.capabilities.includes("approval-review.v1"),
+          t,
+        )
       : state.selected
         ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
         : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
@@ -1273,6 +1270,9 @@ export function Session() {
     undefined,
     { equals: (a, b) => a?.permissionId === b?.permissionId },
   );
+  // A request announced again (Auto's reviewer took it up, or left it to the
+  // person) keeps its card; only the note follows.
+  const currentReview = () => visiblePermissions()[0]?.review;
   const currentQuestion = createMemo(
     () => (visiblePermissions().length ? undefined : visibleQuestions()[0]),
     undefined,
@@ -2047,6 +2047,7 @@ export function Session() {
                 {(permission) => (
                   <Permission
                     permission={permission}
+                    review={currentReview()}
                     queued={visiblePermissions().length}
                   />
                 )}
@@ -2870,6 +2871,8 @@ const permissionTitles: Record<string, string> = {
  */
 function Permission(props: {
   permission: T.PendingPermissionInfo;
+  /** Its review note as announced last (it can change while it is shown). */
+  review?: T.PermissionReview | null;
   /** How many requests wait for this conversation, this one included. */
   queued: number;
 }) {
@@ -3073,7 +3076,7 @@ function Permission(props: {
       </Show>
       {/* Why Auto's reviewer left this to the person: one quiet line, there
           from the card's first paint. */}
-      <Show when={reviewNote(props.permission.review, t)}>
+      <Show when={reviewNote(props.review, t)}>
         {(note) => <p class="approval-review">{note()}</p>}
       </Show>
       <Show when={changes().length}>
