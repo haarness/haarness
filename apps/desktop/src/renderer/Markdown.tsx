@@ -28,6 +28,61 @@ import {
 import { watchOpenImages } from "./ImageViewer";
 
 /**
+ * What is read in the transcript's view: the first text that starts inside
+ * it, under its middle. Starting inside the view, it holds nothing above it,
+ * so an image growing there moves it whole; an image or a placeholder, which
+ * may be the one about to come in, is passed over.
+ */
+function readingAnchor(list: HTMLElement, view: DOMRect) {
+  for (let y = view.top + 1; y < view.bottom; y += 12) {
+    const point = document.elementFromPoint(view.left + view.width / 2, y);
+    if (!(point instanceof HTMLElement) || point === list || !list.contains(point)) continue;
+    if (point instanceof HTMLImageElement || point.closest(".project-image, .remote-image")) continue;
+    if (point.getBoundingClientRect().top >= view.top) return point;
+  }
+  return undefined;
+}
+
+/** Transcripts with a correction of the reading position waiting for its rows to be measured. */
+const correcting = new WeakSet<HTMLElement>();
+
+/**
+ * Makes `change` (an image coming into `host`) without moving what is being
+ * read when `element` is above the top of the transcript's view. The
+ * transcript turns the browser's scroll anchoring off; its virtualizer keeps
+ * a row in place only when the whole row is above the view, so a reply that
+ * reaches into the view, or the live reply outside the rows, would move by
+ * as much as the image grew. So what is read (`readingAnchor`, or else the
+ * end of this reply) is noted before, and once the rows are measured (the
+ * virtualizer's observer was made first, so it hears first, and any place it
+ * kept is counted) and before they are painted, the view moves by as much as
+ * that moved. One correction waits per transcript: images coming in while it
+ * waits, in this reply or another (your own message showing the same image),
+ * are counted in it. The image is decoded before it comes in, so it takes its
+ * final size at once.
+ */
+function keepReading(element: HTMLElement, host: HTMLElement, change: () => void) {
+  const list = element.closest<HTMLElement>(".transcript");
+  const view = list?.getBoundingClientRect();
+  if (!list || !view || element.getBoundingClientRect().top >= view.top || correcting.has(list)) return change();
+  const anchor = readingAnchor(list, view);
+  const where = () =>
+    (anchor ? anchor.getBoundingClientRect().top : host.getBoundingClientRect().bottom) -
+    list.getBoundingClientRect().top;
+  const before = where();
+  correcting.add(list);
+  change();
+  const measured = new ResizeObserver(() => {
+    measured.disconnect();
+    correcting.delete(list);
+    if (anchor && !anchor.isConnected) return;
+    const moved = where() - before;
+    if (moved) list.scrollTop += moved;
+  });
+  measured.observe(host);
+}
+
+/**
  * `document` renders a Markdown file, where a lone newline is not a line
  * break. `base` is the folder its relative links start from (the file's own
  * folder); a reply's links start from the project.
@@ -155,7 +210,7 @@ export function Markdown(props: {
       (element) => madeHere(element) && element.dataset.projectPath === path,
     );
     if (!elements.length) return;
-    keepReading(elements[0], () => {
+    keepReading(elements[0], host, () => {
       for (const element of elements) {
         if (shown.data === undefined) {
           if (!(element instanceof HTMLImageElement)) noteImage(element, shown.note, projectLabels(), path);
@@ -165,32 +220,6 @@ export function Markdown(props: {
       }
     });
     opening?.refresh();
-  }
-  /**
-   * Makes `change` to this text without moving what is being read below it
-   * when `element` is above the view and this text reaches into it. The
-   * transcript turns the browser's scroll anchoring off, and its virtualizer
-   * keeps a row in place only when the whole row is above the view; a row
-   * that reaches into it, or the live reply outside the rows, would move by
-   * as much as the image grew. So once the row is measured (the virtualizer's
-   * observer was made first, so it hears first) and before it is painted, the
-   * view moves by what this text's end moved. The image is decoded before it
-   * comes in, so it takes its final size at once and this happens once.
-   */
-  function keepReading(element: HTMLElement, change: () => void) {
-    const list = element.closest<HTMLElement>(".transcript");
-    const view = list?.getBoundingClientRect().top ?? 0;
-    if (!list || element.getBoundingClientRect().top >= view || host.getBoundingClientRect().bottom <= view)
-      return change();
-    const end = () => host.getBoundingClientRect().bottom - list.getBoundingClientRect().top;
-    const before = end();
-    change();
-    const measured = new ResizeObserver(() => {
-      measured.disconnect();
-      const moved = end() - before;
-      if (moved) list.scrollTop += moved;
-    });
-    measured.observe(host);
   }
   if (conversation) onCleanup(onProjectImageSettled(projectSettled));
   let host!: HTMLDivElement;
