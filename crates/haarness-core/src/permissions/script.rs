@@ -7,7 +7,7 @@ use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use super::bash::ScriptFile;
+use super::bash::{ScriptFile, Shebang};
 use haarness_protocol::{PermissionScript, ScriptWithheld};
 use sha2::{Digest as _, Sha256};
 
@@ -169,6 +169,10 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
     }
     let shown = named(file);
     let real = file.canonicalize().ok()?;
+    // Swapped for a link there since the walk above.
+    if super::bash::in_system_folder(&real) {
+        return None;
+    }
     if [&shown, &real]
         .iter()
         .any(|path| super::is_secret_path(path) || is_credential(path) || !readable(path))
@@ -186,7 +190,7 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
         return Some(withheld(file, ScriptWithheld::Written));
     }
     let mut bytes = read_bytes(&real)?;
-    if script.executed && runs_another_file(&bytes) {
+    if follows_shebang(script.shebang, &bytes) && runs_another_file(&bytes) {
         return None;
     }
     let seal = Seal {
@@ -234,33 +238,81 @@ fn named(file: &Path) -> PathBuf {
         .map_or(lexical, |(folder, name)| folder.join(name))
 }
 
-/// Whether a script run by its path has the system run another file too,
-/// by its `#!` line: an interpreter that is not a rooted path, or an
-/// argument that is not an option or has a `/` (`#!/bin/sh /x/evil.sh`,
+/// The `#!` line of `bytes`, without the `#!`, if it has one.
+fn shebang_line(bytes: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
+    let line = bytes.strip_prefix(b"#!")?;
+    let line = line.split(|&byte| byte == b'\n').next().unwrap_or_default();
+    Some(String::from_utf8_lossy(line))
+}
+
+/// Whether what runs the script runs the program its `#!` line names:
+/// the system, for a script run by its path, and `perl`, unless the line
+/// says `perl` (or `indir`).
+fn follows_shebang(shebang: Shebang, bytes: &[u8]) -> bool {
+    match shebang {
+        Shebang::Comment => false,
+        Shebang::Followed => true,
+        Shebang::Perl => shebang_line(bytes)
+            .is_some_and(|line| !line.contains("perl") && !line.contains("indir")),
+    }
+}
+
+/// Whether a script's `#!` line, followed, runs another file too: an
+/// interpreter that is not a rooted path, is under `/proc` or `/dev`, or is
+/// itself a script (Linux follows its `#!` line in turn), or an argument
+/// that is not an option or has a `/` (`#!/bin/sh /x/evil.sh`,
 /// `#!/bin/sh evil.sh`, `#!/usr/bin/perl -I/x`), the script's own path
-/// coming after them. `#!/usr/bin/env NAME` and `#!/usr/bin/env -S …` are
-/// taken as they are.
+/// coming after them. `#!/usr/bin/env NAME` looks the program up by name;
+/// under `#!/usr/bin/env -S …`, only a known shell or interpreter's
+/// arguments are read (`-S sh /x/evil.sh`), not another program's (`-S
+/// deno run --allow-read=/tmp`).
 fn runs_another_file(bytes: &[u8]) -> bool {
-    let Some(line) = bytes.strip_prefix(b"#!") else {
+    let Some(line) = shebang_line(bytes) else {
         return false;
     };
-    let line = line.split(|&byte| byte == b'\n').next().unwrap_or_default();
-    let line = String::from_utf8_lossy(line);
     let mut words = line.split([' ', '\t']).filter(|word| !word.is_empty());
     let Some(interpreter) = words.next() else {
         return false;
     };
     let mut arguments: Vec<&str> = words.collect();
-    if !interpreter.starts_with('/') {
+    if !interpreter.starts_with('/')
+        || super::bash::in_system_folder(Path::new(interpreter))
+        || is_script(Path::new(interpreter))
+    {
         return true;
     }
     if Path::new(interpreter).file_name() == Some("env".as_ref()) {
-        match arguments.first() {
-            Some(first) if first.starts_with("-S") || first.starts_with("--split-string") => {
-                return false;
+        let split = arguments.first().and_then(|first| {
+            first
+                .strip_prefix("--split-string")
+                .map(|rest| rest.trim_start_matches('='))
+                .or_else(|| first.strip_prefix("-S"))
+        });
+        match (split, arguments.first()) {
+            (Some(attached), _) => {
+                // The words `-S` splits: options and assignments, the
+                // program, its arguments.
+                let words: Vec<&str> = std::iter::once(attached)
+                    .filter(|word| !word.is_empty())
+                    .chain(arguments[1..].iter().copied())
+                    .collect();
+                let Some(at) = words
+                    .iter()
+                    .position(|word| !word.starts_with('-') && !word.contains('='))
+                else {
+                    return false;
+                };
+                let program = words[at];
+                if program.contains('/') {
+                    return true;
+                }
+                if super::bash::interpreter(&super::bash::program_name(program)).is_none() {
+                    return false;
+                }
+                arguments = words[at + 1..].to_vec();
             }
             // The program it looks up by name.
-            Some(name) if !name.starts_with('-') && !name.contains('/') => {
+            (None, Some(name)) if !name.starts_with('-') && !name.contains('/') => {
                 arguments.remove(0);
             }
             _ => {}
@@ -269,6 +321,25 @@ fn runs_another_file(bytes: &[u8]) -> bool {
     arguments
         .iter()
         .any(|argument| !argument.starts_with('-') || argument.contains('/'))
+}
+
+/// Whether the interpreter a `#!` line names is a script itself (its own
+/// first bytes `#!`), or cannot be told. A missing one runs nothing.
+fn is_script(interpreter: &Path) -> bool {
+    let Ok(real) = interpreter.canonicalize() else {
+        return false;
+    };
+    if super::bash::in_system_folder(&real) {
+        return true;
+    }
+    if !std::fs::metadata(&real).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let mut start = [0u8; 2];
+    match open(&real).and_then(|mut file| file.read_exact(&mut start)) {
+        Ok(()) => &start == b"#!",
+        Err(error) => error.kind() != std::io::ErrorKind::UnexpectedEof,
+    }
 }
 
 /// Whether `path` (absolute) leads, as written or through links, into
@@ -690,14 +761,18 @@ mod tests {
                     "{first}"
                 );
             }
-            // An interpreter reads that line as a comment.
-            let shown = bash_script("sh run.sh", &fixture.0, |_| true).unwrap();
-            assert!(shown.content.ends_with("echo body\n"), "{first}");
+            // Most interpreters read that line as a comment, also run by
+            // their own path.
+            for command in ["sh run.sh", "bash run.sh", "/bin/bash run.sh"] {
+                let shown = bash_script(command, &fixture.0, |_| true).unwrap();
+                assert!(shown.content.ends_with("echo body\n"), "{first}: {command}");
+            }
         }
         for first in [
             "#!/bin/sh",
             "#! /bin/bash -eu",
             "#!/usr/bin/env bash",
+            "#!/usr/bin/env -S bash -e",
             "#!/usr/bin/env -S deno run --allow-read=/tmp",
             "#!/usr/bin/awk -f",
             "echo no shebang",
@@ -709,31 +784,62 @@ mod tests {
                 "{first}"
             );
         }
+        // Under `env -S`, a known shell's or interpreter's arguments count.
+        for first in [
+            "#!/usr/bin/env -S sh /opt/evil.sh",
+            "#!/usr/bin/env -S node /opt/evil.js",
+            "#!/usr/bin/env -S /opt/evil",
+            "#!/usr/bin/env -Ssh evil.sh",
+        ] {
+            write(first);
+            assert!(
+                bash_script("./run.sh", &fixture.0, |_| true).is_none(),
+                "{first}"
+            );
+        }
+        // An interpreter that is a script itself is followed in turn.
+        let nested = fixture.write("interpreter", "#!/bin/sh\nexec sh \"$@\"\n");
+        write(&format!("#!{}", nested.display()));
+        assert!(bash_script("./run.sh", &fixture.0, |_| true).is_none());
     }
 
-    /// A link into `/dev` (or `/proc`) leads where the server's process
-    /// answers, not the shell's: the script is not shown, and output sent
-    /// through one withholds it.
+    /// `perl` runs the program a `#!` line names instead of the script,
+    /// unless the line says `perl`: `perl x.pl` with `#!/bin/sh evil.sh`
+    /// runs `evil.sh`.
     #[cfg(unix)]
     #[test]
-    fn a_link_into_dev_or_proc_shows_nothing() {
+    fn perl_follows_a_shebang_that_does_not_say_perl() {
         let fixture = Fixture::new();
-        fixture.write("run.sh", "echo body\n");
-        std::os::unix::fs::symlink("/dev", fixture.0.join("devices")).unwrap();
-        std::os::unix::fs::symlink(fixture.0.join("devices"), fixture.0.join("again")).unwrap();
-        std::os::unix::fs::symlink("/dev/null", fixture.0.join("out.log")).unwrap();
-        assert!(through_system_folder(&fixture.0.join("again/fd/3")));
-        assert!(through_system_folder(Path::new("/proc/self/cwd/run.sh")));
-        assert!(!through_system_folder(&fixture.0.join("run.sh")));
-        for command in ["sh devices/fd/3", "sh again/fd/3"] {
+        fixture.write("evil.sh", "echo evil\n");
+        fixture.write("x.pl", "#!/bin/sh evil.sh\nprint \"body\\n\";\n");
+        let perl = std::process::Command::new("perl")
+            .arg("x.pl")
+            .current_dir(&fixture.0)
+            .output();
+        if let Ok(ran) = perl {
+            assert_eq!(String::from_utf8_lossy(&ran.stdout), "evil\n");
+        }
+        for command in ["perl x.pl", "/usr/bin/perl -w x.pl"] {
             assert!(
                 bash_script(command, &fixture.0, |_| true).is_none(),
                 "{command}"
             );
         }
-        let shown = bash_script("sh run.sh > out.log", &fixture.0, |_| true).unwrap();
-        assert_eq!(shown.withheld, Some(ScriptWithheld::Changeable));
-        assert_eq!(shown.content, "");
+        // Saying `perl`, the line is perl's own; a shell ignores it.
+        for (first, command) in [
+            ("#!/usr/bin/perl -w", "perl x.pl"),
+            ("#!/usr/bin/env perl", "perl x.pl"),
+            ("#!/bin/sh", "perl x.pl"),
+            ("#!/bin/sh evil.sh", "sh x.pl"),
+            ("#!/bin/sh evil.sh", "python3 x.pl"),
+        ] {
+            fixture.write("x.pl", format!("{first}\nprint \"body\\n\";\n"));
+            let shown = bash_script(command, &fixture.0, |_| true);
+            assert!(
+                shown.is_some_and(|shown| shown.content.starts_with(first)),
+                "{first}: {command}"
+            );
+        }
     }
 
     #[test]

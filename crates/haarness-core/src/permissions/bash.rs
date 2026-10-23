@@ -895,7 +895,7 @@ fn after_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
 
 /// A program's name as wrappers and shells are recognized: its last path
 /// segment in lower case, without `.exe`.
-fn program_name(value: &str) -> String {
+pub(super) fn program_name(value: &str) -> String {
     let name = value
         .rsplit(['/', '\\'])
         .next()
@@ -1761,8 +1761,21 @@ pub struct ScriptFile {
     /// puts them: one that is the script itself (through a link) is written
     /// before it runs.
     pub outputs: Vec<PathBuf>,
-    /// Run by its path, so the system reads its `#!` line.
-    pub executed: bool,
+    /// What its `#!` line does as it runs.
+    pub shebang: Shebang,
+}
+
+/// What a script's `#!` line does as it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shebang {
+    /// Nothing: its interpreter (or `source`) reads the line as a comment.
+    Comment,
+    /// Run by its path, the system runs the program the line names, with
+    /// the script's path after the line's own words.
+    Followed,
+    /// Run by `perl`, which runs the program the line names instead, unless
+    /// the line says `perl`.
+    Perl,
 }
 
 /// The scripts `command` runs from `cwd`, in order, for the person answering
@@ -1967,8 +1980,8 @@ struct Script {
     trusted: bool,
     /// `source` or `.` of it: it runs in the line's own shell.
     sourced: bool,
-    /// Run by its path.
-    executed: bool,
+    /// What its `#!` line does as it runs.
+    shebang: Shebang,
 }
 
 impl Line<'_> {
@@ -2111,7 +2124,7 @@ impl Line<'_> {
             path,
             withheld,
             outputs,
-            executed: script.executed,
+            shebang: script.shebang,
         });
     }
 
@@ -2227,18 +2240,23 @@ impl Line<'_> {
                     rest = options.rest;
                 }
                 _ => {
-                    let executed = program.value.contains('/');
-                    let (word, sourced) = if matches!(name.as_str(), "source" | ".") {
+                    let (word, sourced, shebang) = if matches!(name.as_str(), "source" | ".") {
                         (
                             arguments.first().filter(|word| word.value.contains('/')),
                             true,
+                            Shebang::Comment,
                         )
                     } else if let Some(plain) = interpreter(&name) {
-                        (interpreter_script(plain, arguments), false)
-                    } else if executed {
-                        (Some(program), false)
+                        let shebang = if name == "perl" {
+                            Shebang::Perl
+                        } else {
+                            Shebang::Comment
+                        };
+                        (interpreter_script(plain, arguments), false, shebang)
+                    } else if program.value.contains('/') {
+                        (Some(program), false, Shebang::Followed)
                     } else {
-                        (None, false)
+                        (None, false, Shebang::Comment)
                     };
                     let word = word.filter(|word| {
                         let value = word.value.as_str();
@@ -2257,7 +2275,7 @@ impl Line<'_> {
                         file,
                         trusted,
                         sourced,
-                        executed: executed && !sourced,
+                        shebang,
                     }));
                 }
             }
@@ -2559,7 +2577,7 @@ fn redirect_targets(redirects: &[tree_sitter::Node<'_>], source: &str) -> Vec<Pa
 /// any other option (`-c`, `-e`, `-m`, `-W`, `--require`, `-o name` …) the
 /// next word may be the option's value or the code itself, so no script is
 /// claimed. fish's options differ, and are not read.
-fn interpreter(name: &str) -> Option<fn(&str) -> bool> {
+pub(super) fn interpreter(name: &str) -> Option<fn(&str) -> bool> {
     fn cluster(option: &str, letters: &str) -> bool {
         option
             .strip_prefix('-')
@@ -3964,21 +3982,26 @@ mod scripts {
         assert_eq!(withheld("./run.sh > /dev/null 2>&1"), None);
     }
 
-    /// Run by its path, the system reads its `#!` line; the reader checks
-    /// that line then.
+    /// Run by its path, the system follows its `#!` line, and `perl` does
+    /// unless the line says `perl`; other interpreters read it as a comment.
     #[test]
-    fn says_whether_a_script_is_run_by_its_path() {
-        let executed = |command: &str| script_files(command, &cwd())[0].executed;
-        for command in ["./run.sh", "sudo ./run.sh", "nohup /tmp/run.sh &"] {
-            assert!(executed(command), "{command}");
-        }
-        for command in [
-            "bash run.sh",
-            "sh ./run.sh",
-            "source ./run.sh",
-            ". ./run.sh",
+    fn says_what_a_scripts_shebang_does() {
+        let shebang = |command: &str| script_files(command, &cwd())[0].shebang;
+        for (command, expected) in [
+            ("./run.sh", Shebang::Followed),
+            ("sudo ./run.sh", Shebang::Followed),
+            ("nohup /tmp/run.sh &", Shebang::Followed),
+            ("perl x.pl", Shebang::Perl),
+            ("/usr/bin/perl -w x.pl", Shebang::Perl),
+            ("bash x.sh", Shebang::Comment),
+            ("/bin/bash x.sh", Shebang::Comment),
+            ("sh ./run.sh", Shebang::Comment),
+            ("python3 x.py", Shebang::Comment),
+            ("ruby x.rb", Shebang::Comment),
+            ("source ./run.sh", Shebang::Comment),
+            (". ./run.sh", Shebang::Comment),
         ] {
-            assert!(!executed(command), "{command}");
+            assert_eq!(shebang(command), expected, "{command}");
         }
     }
 
