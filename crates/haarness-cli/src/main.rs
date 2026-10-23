@@ -1718,7 +1718,7 @@ async fn cli_main() -> Result<()> {
             )
             .await
         }
-        Some(Command::Doctor) => doctor(&paths),
+        Some(Command::Doctor) => doctor(&paths, &workspace, project_config),
         Some(Command::Logs { .. }) => unreachable!("logs handled before project setup"),
         Some(Command::Upgrade(args)) => upgrade::run(args),
         }
@@ -5129,6 +5129,30 @@ async fn set_goal_for_run_client(
     Ok(())
 }
 
+/// Why Auto's reviewer left a request to a person, as a run prints it.
+fn review_note(review: &haarness_protocol::PermissionReview) -> String {
+    let reason = review
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty());
+    let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Failed => "Auto review was unavailable",
+        haarness_protocol::PermissionReviewStatus::Paused => "Auto review paused for this turn",
+        _ => "Auto review left it to a person",
+    };
+    let rule = review
+        .rule
+        .as_deref()
+        .filter(|rule| !rule.trim().is_empty())
+        .map(|rule| format!(" ({rule})"))
+        .unwrap_or_default();
+    match reason {
+        Some(reason) => format!("{lead}{rule}: {reason}"),
+        None => format!("{lead}{rule}."),
+    }
+}
+
 /// Who answers a permission prompt raised while a run waits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Approver {
@@ -5265,6 +5289,12 @@ impl RunWatch {
                         )
                     },
                 );
+                // In Auto, what the reviewer left to a person says why.
+                if let Some(note) = pending.review.as_ref().map(review_note) {
+                    anyhow::bail!(
+                        "Stopped: the agent asked to {request}. {note} Nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
+                    );
+                }
                 anyhow::bail!(
                     "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
                 );
@@ -5272,7 +5302,13 @@ impl RunWatch {
             let decision = if pending.explicit {
                 self.ask_explicit(&request, &permission_arguments(&pending))
                     .await?
-            } else if self.ask(&request).await? {
+            } else if self
+                .ask(
+                    &request,
+                    pending.review.as_ref().map(review_note).as_deref(),
+                )
+                .await?
+            {
                 PermissionReplyDecision::Once
             } else {
                 PermissionReplyDecision::Reject
@@ -5291,9 +5327,14 @@ impl RunWatch {
         Ok(())
     }
 
-    async fn ask(&self, request: &str) -> Result<bool> {
+    /// `note`: why Auto's reviewer left the request to a person.
+    async fn ask(&self, request: &str, note: Option<&str>) -> Result<bool> {
         let _paused = self.activity.as_ref().map(RunActivity::pause);
-        eprint!("The agent asks to {request}.\nAllow it once? [y/N] ");
+        eprintln!("The agent asks to {request}.");
+        if let Some(note) = note {
+            eprintln!("{note}");
+        }
+        eprint!("Allow it once? [y/N] ");
         let _ = io::stderr().flush();
         let answer = tokio::task::spawn_blocking(|| {
             let mut line = String::new();
@@ -8966,7 +9007,7 @@ fn require_system_certificates() -> Result<()> {
     Ok(())
 }
 
-fn doctor(paths: &Paths) -> Result<()> {
+fn doctor(paths: &Paths, workspace: &Path, project_config: bool) -> Result<()> {
     let report = haarness_opentui::doctor()?;
     println!("Haarness {}", env!("CARGO_PKG_VERSION"));
     println!("OpenTUI {} ({})", report.version, report.target);
@@ -9003,7 +9044,36 @@ fn doctor(paths: &Paths) -> Result<()> {
     }
     println!("{}", browser::doctor_line(&paths.data));
     println!("permissions: application-level policy (not an operating-system sandbox)");
+    let layers = jsonconfig::load_layers(
+        paths.config_dir(),
+        haarness_protocol::home_dir().as_deref(),
+        workspace,
+        project_config,
+        &[],
+    );
+    println!("{}", auto_review_line(&layers));
     Ok(())
+}
+
+/// Which model Auto's reviewer asks, as `haarness doctor` names it.
+fn auto_review_line(layers: &jsonconfig::JsonLayers) -> String {
+    let review = &layers.auto_review;
+    if !review.enabled {
+        return "auto review: off (Auto approves eligible requests once)".into();
+    }
+    let model = review.model.clone().map_or_else(
+        || {
+            layers.small_model.as_ref().map_or_else(
+                || "each chat's own model".to_owned(),
+                |small| format!("{small} (small_model), then each chat's own model"),
+            )
+        },
+        |model| format!("{model} (auto_review.model)"),
+    );
+    format!(
+        "auto review: {model}, timeout {}s",
+        review.timeout.as_secs()
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -12163,9 +12233,9 @@ mod tests {
         wait_for_goal_client, write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
-        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
+        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example, auto_review_line,
         default_run_model_client, describe_permission, discard_refused_chat, requested_run_model,
-        run_attachments, wait_for_turn_client,
+        review_note, run_attachments, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -14860,6 +14930,59 @@ request_timeout = 0
         server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_run_says_why_auto_review_left_a_request_to_a_person() {
+        use haarness_protocol::{PermissionReview, PermissionReviewStatus};
+        let note = |status, rule: Option<&str>, rationale: Option<&str>| {
+            review_note(&PermissionReview {
+                status,
+                risk: None,
+                rule: rule.map(str::to_owned),
+                rationale: rationale.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                Some("Destructive action"),
+                Some("This deletes /tmp/cache, outside the project.")
+            ),
+            "Auto review left it to a person (Destructive action): This deletes /tmp/cache, outside the project."
+        );
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Failed,
+                None,
+                Some("It took longer than 60 seconds.")
+            ),
+            "Auto review was unavailable: It took longer than 60 seconds."
+        );
+        assert_eq!(
+            note(PermissionReviewStatus::Paused, None, None),
+            "Auto review paused for this turn."
+        );
+        let mut layers = super::jsonconfig::JsonLayers::default();
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: each chat's own model, timeout 60s"
+        );
+        layers.small_model = Some("anthropic/claude-haiku".into());
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: anthropic/claude-haiku (small_model), then each chat's own model, timeout 60s"
+        );
+        layers.auto_review.model = Some("openai/gpt-mini".into());
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: openai/gpt-mini (auto_review.model), timeout 60s"
+        );
+        layers.auto_review.enabled = false;
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: off (Auto approves eligible requests once)"
+        );
     }
 
     #[test]
