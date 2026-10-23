@@ -66,8 +66,12 @@ test.beforeAll(async () => {
     const original = handlers.get("haarness:api")!;
     (globalThis as any).apiCalls = [];
     ipcMain.removeHandler("haarness:api");
-    ipcMain.handle("haarness:api", (event, raw) => {
+    // `filesDelay` holds file searches back, as a large project's would be.
+    (globalThis as any).filesDelay = 0;
+    ipcMain.handle("haarness:api", async (event, raw) => {
       (globalThis as any).apiCalls.push(raw.method);
+      const delay = raw.method === "searchFiles" ? (globalThis as any).filesDelay : 0;
+      if (delay) await new Promise((done) => setTimeout(done, delay));
       return original(event, raw);
     });
   });
@@ -186,6 +190,30 @@ test("the @ list asks for resources the first time it opens, then lists them aft
   await input().fill("");
   await client.updateThread(other.id, { archived: true });
   await page.locator(".sessions").getByRole("button", { name: "Resource mentions", exact: true }).click();
+});
+
+test("resources wait below the files a slow search is still finding, so a quick Enter never picks one", async () => {
+  await app.evaluate(() => ((globalThis as any).filesDelay = 2500));
+  await input().fill("@setting");
+  await expect(page.locator(".mention-popover [role=status]")).toHaveText("Searching files…");
+  // No resource fills the files' place meanwhile, and Enter picks nothing.
+  await expect(rows()).toHaveCount(0);
+  await pictures(page.locator(".mention-popover"), "resource-rows-while-files-load");
+  await input().fill("@set");
+  await expect(page.locator(".mention-popover [role=status]")).toHaveText("Searching files…");
+  await expect(rows()).toHaveCount(0);
+  await input().press("Enter");
+  await expect(chips()).toHaveCount(0);
+  await expect(input()).toHaveValue("@set");
+  // The files come first, the resources below them, the first file highlighted.
+  await expect(rows()).toHaveCount(2);
+  const kinds = await list().locator('[role="option"]').evaluateAll((options) => options.map((option) => option.getAttribute("data-kind")));
+  expect(kinds.indexOf("file")).toBeGreaterThanOrEqual(0);
+  expect(kinds.indexOf("resource")).toBeGreaterThan(kinds.lastIndexOf("file"));
+  await expect(list().locator('[role="option"][aria-selected="true"]')).toHaveAttribute("data-kind", kinds[0]!);
+  await app.evaluate(() => ((globalThis as any).filesDelay = 0));
+  await page.keyboard.press("Escape");
+  await input().fill("");
 });
 
 test("a picked resource is a chip that the server reads when the message is sent", async () => {

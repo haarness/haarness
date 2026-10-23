@@ -228,8 +228,10 @@ export function PromptContextControls(props: {
         })),
       ...files().map((name) => ({ kind: "file" as const, name })),
       // After agents and files, as in the TUI, so a server with many
-      // resources never pushes files down.
-      ...resourceRows(mention()!.query),
+      // resources never pushes files down; and only once this query's files
+      // have come, so a resource never sits where a file is about to go and
+      // a quick Enter never picks one in its place.
+      ...(loading() ? [] : resourceRows(mention()!.query)),
     ];
   };
   let generation = 0;
