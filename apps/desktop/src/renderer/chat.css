@@ -1966,6 +1966,14 @@ html[dir="rtl"] .tool-target {
 .prompt-actions .prompt-auto {
   margin-inline-end: auto;
 }
+/* A card answered elsewhere: one quiet line where its buttons were, at
+   their height, so nothing moves. */
+.approval-settled {
+  margin: 0;
+  min-height: var(--control-sm);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
 .prompt-actions input {
   flex: 1;
   min-width: 140px;

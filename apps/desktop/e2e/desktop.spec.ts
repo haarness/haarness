@@ -12078,6 +12078,51 @@ test("permission reply failures remain attached through unrelated actions and cl
   expect(await readFile(join(workspace,"retry-proof.txt"),"utf8")).toBe("retry-proof");
 });
 
+test("a card answered elsewhere says so in one quiet line where its buttons were", async () => {
+  const thread = await client.createThread({title:"Settled card fixture",provider:"echo",model:"echo-1"});
+  await page.getByRole("button", {name:"Search",exact:true}).click();
+  await page.getByRole("combobox", {name:"Search Haarness"}).fill(thread.title);
+  await page.getByRole("option").filter({hasText:thread.title}).first().click();
+  const turn = await client.startTurn(thread.id,{text:'!tool bash {"command":"printf settled > settled-card.txt"}',requestId:crypto.randomUUID()});
+  const card = page.getByRole("alert", { name: "Permission request" });
+  const once = card.getByRole("button",{name:"Allow once",exact:true});
+  await expect(once).toBeVisible();
+  const [pending] = await client.listPermissions();
+  // The server answers the reply "not found", as it does for a request
+  // settled meanwhile; the request itself stays for this check.
+  await app.evaluate(({ ipcMain }, id) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => unknown> })._invokeHandlers;
+    const original = handlers.get("haarness:api")!;
+    ipcMain.removeHandler("haarness:api");
+    ipcMain.handle("haarness:api", (event, raw) => {
+      if (raw.method === "replyPermission") {
+        ipcMain.removeHandler("haarness:api");
+        ipcMain.handle("haarness:api", original);
+        return {ok:false,error:`not found: permission ${id}`};
+      }
+      return original(event, raw);
+    });
+  }, pending.permissionId);
+  const footer = card.locator(".prompt-actions");
+  const before = (await footer.boundingBox())!;
+  const height = (await card.boundingBox())!.height;
+  await once.click();
+  const settled = card.locator(".approval-settled");
+  await expect(settled).toHaveText("Already answered");
+  await expect(card.getByRole("button")).toHaveCount(0);
+  const after = (await settled.boundingBox())!;
+  expect(Math.abs(after.y - before.y)).toBeLessThan(2);
+  expect(Math.abs((await card.boundingBox())!.height - height)).toBeLessThan(2);
+  // One quiet line, not a toast, and no error.
+  await expect(page.locator(".toast")).toHaveCount(0);
+  await expect(page.getByTestId("permission-reply-error")).toHaveCount(0);
+  await card.screenshot({path:test.info().outputPath("auto-review-settled.png")});
+  await client.replyPermission(pending.permissionId, {decision:"reject"});
+  await client.waitTurn(turn.id);
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".toast")).toHaveCount(0);
+});
+
 test("self-hosted router connects address-first and requests a key only when needed", async () => {
   const calls: { path: string; authorization: string }[] = [];
   const router = createServer((request, response) => {
