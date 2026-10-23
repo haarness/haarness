@@ -1318,12 +1318,29 @@ async fn mcp_servers(
     if (query.thread_id.is_some() || query.agent.is_some())
         && crate::remote_scope::root(&headers).is_none()
     {
-        let policy = state
-            .runtime
-            .resource_mention_policy(query.thread_id, query.agent.as_deref())
-            .await?;
+        let mut agents = vec![query.agent];
+        // A message sent while a turn runs follows both the running turn's
+        // agent and the chat's (see `queue_input`), so its list does too.
+        if let Some(running) = query
+            .thread_id
+            .and_then(|thread| state.runtime.running_agent(thread))
+        {
+            agents.extend([None, Some(running)]);
+        }
+        let mut policies = Vec::new();
+        for agent in &agents {
+            policies.push(
+                state
+                    .runtime
+                    .resource_mention_policy(query.thread_id, agent.as_deref())
+                    .await?,
+            );
+        }
         for server in &mut servers {
-            if policy.turned_off(&server.name) {
+            if policies
+                .iter()
+                .any(|policy| policy.turned_off(&server.name))
+            {
                 server.turned_off = Some(true);
             }
         }
