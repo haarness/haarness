@@ -51,17 +51,25 @@ impl Source for EventStream {
 /// the moment it came in.
 pub(crate) struct TerminalInput<S = EventStream> {
     source: S,
-    /// Events already read and decoded, not handed out yet, each with the
-    /// time of the read that brought it.
-    ready: VecDeque<(io::Result<Event>, Instant)>,
+    /// Events already read and decoded, not handed out yet: each with when
+    /// it was taken from the terminal and the number of the read that
+    /// brought it.
+    ready: VecDeque<Queued>,
     /// When the event `next` handed out last was read.
     read_at: Instant,
     /// The read whose decoded events are still coming from the source, if
     /// it was not taken to its end: what the source hands over next came
     /// with it. Once the source has nothing more, the next event is a read
     /// of its own.
-    batch: Option<Instant>,
+    batch: Option<u64>,
+    /// How many reads there have been, which numbers them.
+    reads: u64,
 }
+
+/// An event taken from the terminal, when, and the number of its read. The
+/// time is the event's own (a read numbered earlier can still be handing
+/// over events); the number only tells which events came together.
+type Queued = (io::Result<Event>, Instant, u64);
 
 impl TerminalInput {
     pub(crate) fn new() -> Self {
@@ -76,17 +84,28 @@ impl<S: Source> TerminalInput<S> {
             ready: VecDeque::new(),
             read_at: Instant::now(),
             batch: None,
+            reads: 0,
         }
     }
 
-    /// An event the source already has, stamped with the read it came with.
-    fn take_ready(&mut self) -> Option<(io::Result<Event>, Instant)> {
+    /// The number of the read the source is handing over, a new one when
+    /// the last was taken to its end.
+    fn read_number(&mut self) -> u64 {
+        if let Some(read) = self.batch {
+            return read;
+        }
+        self.reads += 1;
+        self.batch = Some(self.reads);
+        self.reads
+    }
+
+    /// An event the source already has, stamped now and with its read.
+    fn take_ready(&mut self) -> Option<Queued> {
         let Some(event) = self.source.ready() else {
             self.batch = None;
             return None;
         };
-        let read = *self.batch.get_or_insert_with(Instant::now);
-        Some((event, read))
+        Some((event, Instant::now(), self.read_number()))
     }
 
     /// When the event [`Self::next`] handed out last was read.
@@ -103,7 +122,7 @@ impl<S: Source> TerminalInput<S> {
         {
             self.ready.push_back(entry);
         }
-        self.ready.iter().any(|(event, _)| match event {
+        self.ready.iter().any(|(event, _, _)| match event {
             Ok(Event::Key(key)) => key.kind != KeyEventKind::Release,
             Ok(Event::Paste(_)) => true,
             Ok(Event::Mouse(mouse)) => matches!(mouse.kind, MouseEventKind::Down(_)),
@@ -113,12 +132,11 @@ impl<S: Source> TerminalInput<S> {
 
     /// The next event. Cancel safe: it only waits before taking anything.
     pub(crate) async fn next(&mut self) -> Option<io::Result<Event>> {
-        let (event, read_at) = match self.ready.pop_front() {
+        let (event, read_at, read) = match self.ready.pop_front() {
             Some(entry) => entry,
             None => {
                 let event = self.source.next().await?;
-                let read = *self.batch.get_or_insert_with(Instant::now);
-                (event, read)
+                (event, Instant::now(), self.read_number())
             }
         };
         self.read_at = read_at;
@@ -129,16 +147,16 @@ impl<S: Source> TerminalInput<S> {
         // SSH packets, a slow frame), so this runs for every Escape, queued
         // or new: what else that read brought tops the queue up.
         while self.ready.len() < LONGEST {
-            let Some((next, read)) = self.take_ready() else {
+            let Some(entry) = self.take_ready() else {
                 break;
             };
-            let key = matches!(next, Ok(Event::Key(_)));
-            self.ready.push_back((next, read));
+            let key = matches!(entry.0, Ok(Event::Key(_)));
+            self.ready.push_back(entry);
             if !key {
                 break;
             }
         }
-        Some(join(event, read_at, &mut self.ready))
+        Some(join(event, read, &mut self.ready))
     }
 }
 
@@ -146,22 +164,18 @@ fn escape(event: &io::Result<Event>) -> bool {
     matches!(event, Ok(Event::Key(key)) if bare_escape(key))
 }
 
-/// `event` as it is, or, when it is an Escape read at `read` and the keys at
+/// `event` as it is, or, when it is an Escape of read `read` and the keys at
 /// the front of `ready` that came with it (in the same read) spell a cursor
 /// key, that key with Alt, which takes them out of `ready`. An Escape read
 /// ahead, before the keys after it were sent, stays an Escape.
-fn join(
-    event: io::Result<Event>,
-    read: Instant,
-    ready: &mut VecDeque<(io::Result<Event>, Instant)>,
-) -> io::Result<Event> {
+fn join(event: io::Result<Event>, read: u64, ready: &mut VecDeque<Queued>) -> io::Result<Event> {
     if !escape(&event) {
         return event;
     }
     let keys = ready
         .iter()
-        .map_while(|(event, at)| match event {
-            Ok(Event::Key(key)) if *at == read => Some(*key),
+        .map_while(|(event, _, from)| match event {
+            Ok(Event::Key(key)) if *from == read => Some(*key),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -311,14 +325,13 @@ mod tests {
 
     /// What `TerminalInput` hands out when one read brought `events`.
     fn read(events: Vec<KeyEvent>) -> Vec<KeyEvent> {
-        let read = Instant::now();
         let mut ready = events
             .into_iter()
-            .map(|key| (Ok(Event::Key(key)), read))
+            .map(|key| (Ok(Event::Key(key)), Instant::now(), 1))
             .collect::<VecDeque<_>>();
         let mut out = Vec::new();
-        while let Some((event, at)) = ready.pop_front() {
-            let Ok(Event::Key(key)) = join(event, at, &mut ready) else {
+        while let Some((event, _, read)) = ready.pop_front() {
+            let Ok(Event::Key(key)) = join(event, read, &mut ready) else {
                 panic!("not a key");
             };
             out.push(key);
@@ -400,7 +413,6 @@ mod tests {
     async fn an_escape_read_ahead_never_joins_keys_from_a_later_read() {
         let mut input = TerminalInput::reading(Live(VecDeque::from([escape()])));
         assert!(input.input_waiting());
-        std::thread::sleep(std::time::Duration::from_millis(2));
         input.source.0.extend(typed("[A"));
         let mut out = Vec::new();
         while let Some(Ok(Event::Key(key))) = input.next().await {
@@ -414,6 +426,24 @@ mod tests {
             panic!("no key");
         };
         assert_eq!(key, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    }
+
+    /// A key is stamped when it is taken from the terminal, not when the read
+    /// before it began: the settling window of an approval counts from it.
+    #[tokio::test]
+    async fn each_key_is_stamped_when_it_is_taken() {
+        let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+        let mut input = TerminalInput::reading(Live(VecDeque::from([key('a')])));
+        let Some(Ok(Event::Key(_))) = input.next().await else {
+            panic!("no key");
+        };
+        let first = input.read_at();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        input.source.0.push_back(key('y'));
+        let Some(Ok(Event::Key(_))) = input.next().await else {
+            panic!("no key");
+        };
+        assert!(input.read_at() >= first + std::time::Duration::from_millis(20));
     }
 
     /// Keys waiting count as input that came first, and are still handed
