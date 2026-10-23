@@ -6,9 +6,10 @@
  * reasoned about and tested on their own.
  */
 import type { IconName } from "./icons";
-import type { FileDiff, Item } from "@haarness/sdk";
+import type { FileDiff, Item, PermissionReview } from "@haarness/sdk";
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
+import { reviewReason } from "./approval-mode";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -408,6 +409,15 @@ export function ranInChrome(name: string, args: unknown, result?: ToolResult) {
 export function answeredByHook(name: string, result?: ToolResult) {
   return toolName(name) === "question" && object(result?.metadata)?.answeredBy === "hook";
 }
+/** The reason Auto's reviewer gave for blocking the call (`metadata.review`
+ * of status `blocked`), in the person's language when Haarness wrote it;
+ * empty when it gave none, undefined when it did not block it. */
+export function reviewBlock(result?: ToolResult): string | undefined {
+  if (!result?.is_error) return undefined;
+  const review = object(object(result.metadata)?.review);
+  if (review?.status !== "blocked") return undefined;
+  return reviewReason(review as unknown as PermissionReview, t);
+}
 export function toolFailed(name: string, result?: ToolResult) {
   if (!result) return false;
   if (result.is_error) return true;
@@ -587,6 +597,45 @@ export function permissionCommand(detail: unknown) {
   const value =
     record.command ?? record.path ?? record.file_path ?? record.url;
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * The script a shell command's request runs, as the server read it when it
+ * asked: its path (inside the project, relative to it), its lines without
+ * the final line break, whether the file goes on, and why its text is
+ * withheld when what runs may not be what is on disk. Any card a shell
+ * command raises carries one (under the default rules, the one about a
+ * folder outside the project); nothing for an older server that sends none.
+ */
+export function permissionScript(
+  permission: { permission?: string; script?: unknown },
+  workspace = "",
+) {
+  const script = permission.script;
+  if (!script || typeof script !== "object") return undefined;
+  const { path, content, truncated, withheld } = script as Record<string, unknown>;
+  if (typeof path !== "string" || typeof content !== "string") return undefined;
+  const text = content.replace(/\n$/, "");
+  const root = workspace.replace(/\/+$/, "");
+  return {
+    path: root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path,
+    lines: text ? text.split("\n").map(expandTabs) : [],
+    truncated: truncated === true,
+    // Why its text is not shown, when it is not: the command writes it
+    // first ("written"), or an earlier step may change it ("changeable",
+    // also for a reason a newer server gives that this one does not know).
+    withheld: withheld === "written" ? ("written" as const) : withheld ? ("changeable" as const) : undefined,
+  };
+}
+
+/** A line with its tabs as spaces to the next stop of four, as the terminal
+ * UI draws them, so a wrapped line's hanging indent cannot shift them. */
+function expandTabs(line: string) {
+  if (!line.includes("\t")) return line;
+  let text = "";
+  for (const character of line)
+    text += character === "\t" ? " ".repeat(4 - (text.length % 4)) : character;
+  return text;
 }
 
 /**

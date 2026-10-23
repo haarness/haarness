@@ -79,7 +79,7 @@ impl App {
             self.stash_view(input)?
         } else if resource == "keybinds" {
             let view = crate::keybindings::view(input)?;
-            self.keybindings = crate::keybindings::load()?;
+            self.keybindings = crate::keybindings::load().0;
             view
         } else {
             serde_json::from_value(client.manage(resource, input).await?)?

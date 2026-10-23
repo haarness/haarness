@@ -29,6 +29,10 @@ pub enum CoreError {
     /// the model should adjust course, not treat it as policy.
     #[error("{0}")]
     PermissionRejected(String),
+    /// Auto's reviewer refused the call. The model reads why, and that it
+    /// should not reach the same result another way.
+    #[error("{}", crate::auto_review::blocked_message(.0))]
+    ReviewBlocked(Box<haarness_protocol::PermissionReview>),
     #[error("invalid request: {0}")]
     Invalid(String),
     #[error("provider error: {0}")]
@@ -59,6 +63,7 @@ impl CoreError {
             Self::Conflict(_) => "conflict",
             Self::PermissionDenied(_) => "permission_denied",
             Self::PermissionRejected(_) => "permission_rejected",
+            Self::ReviewBlocked(_) => "review_blocked",
             Self::Invalid(_) => "invalid_request",
             Self::Provider(_) => "provider_error",
             Self::ProviderBlocked(_) => "provider_blocked",
@@ -142,6 +147,14 @@ pub trait ThreadRepository: Send + Sync {
     ) -> CoreResult<bool> {
         Ok(false)
     }
+    /// The turn request `request` of chat `id` started, if it started one.
+    async fn turn_for_request(
+        &self,
+        _id: ThreadId,
+        _request: haarness_protocol::RequestId,
+    ) -> CoreResult<Option<Turn>> {
+        Ok(None)
+    }
     async fn input_queue(&self, _id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         Ok(Default::default())
     }
@@ -151,6 +164,19 @@ pub trait ThreadRepository: Send + Sync {
         _input: haarness_protocol::PendingInput,
     ) -> CoreResult<haarness_protocol::InputQueue> {
         Err(CoreError::Invalid("Deferred input is unavailable".into()))
+    }
+    /// Appends `data` to running turn `turn` of chat `id` as request
+    /// `request`'s steer, and records the request so `has_input_admission`
+    /// finds a retry of it, both at once. `None`, and nothing appended, when
+    /// the request was already taken. A store that keeps no records appends.
+    async fn append_steered_input(
+        &self,
+        id: ThreadId,
+        turn: TurnId,
+        _request: haarness_protocol::RequestId,
+        data: ItemData,
+    ) -> CoreResult<Option<Item>> {
+        self.append_item(id, Some(turn), data).await.map(Some)
     }
     async fn change_input_queue(
         &self,
@@ -170,6 +196,13 @@ pub trait ThreadRepository: Send + Sync {
         Ok(None)
     }
     async fn list_items(&self, id: ThreadId, after: Option<u64>) -> CoreResult<Vec<Item>>;
+    /// The newest `limit` items of a thread, oldest first. Stores that can
+    /// read only that many override it; the default reads them all.
+    async fn recent_items(&self, id: ThreadId, limit: usize) -> CoreResult<Vec<Item>> {
+        let mut items = self.list_items(id, None).await?;
+        let start = items.len().saturating_sub(limit);
+        Ok(items.split_off(start))
+    }
     async fn start_turn(
         &self,
         id: ThreadId,

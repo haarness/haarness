@@ -279,7 +279,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "messages",
         &["message", "browse"],
-        "Search prompts and replies · jump, read, copy or fork · Alt+M",
+        "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages",
     ),
     command(
         "rename",
@@ -4013,6 +4013,7 @@ impl App {
                     } else {
                         self.attachments.clone()
                     },
+                    resources: Vec::new(),
                     agent: workflow.then(|| self.agent().to_owned()),
                     provider: workflow.then(|| self.thread.provider.clone()),
                     model: workflow.then(|| self.thread.model.clone()),
@@ -4054,6 +4055,9 @@ impl App {
 
     pub async fn submit_prompt(&mut self, text: String, client: &ApiClient) -> Result<bool> {
         self.normalize_reasoning();
+        if self.still_sending() {
+            return Ok(false);
+        }
         if self.active_turn.is_some() {
             self.notice = "A turn is already running".into();
             return Ok(false);
@@ -4076,34 +4080,52 @@ impl App {
             return Ok(false);
         }
         let attachments = self.attachments.clone();
-        let turn = client
-            .start_turn(
-                self.thread.id,
-                StartTurnRequest {
-                    request_id: RequestId::new(),
-                    text,
-                    attachments,
-                    synthetic: false,
-                    auto_approve: false,
-                    agent: Some(self.agent().into()),
-                    provider: None,
-                    model: None,
-                    reasoning_effort: self.reasoning_effort.clone(),
-                    // A terminal shows no file previews; saying so keeps a
-                    // Desktop chat's preview tool out of terminal turns.
-                    tools: Some(std::collections::HashMap::from([("preview".into(), false)])),
-                    command: None,
-                },
-            )
-            .await?;
+        let draft = text.clone();
+        let Some((text, resources)) = self.take_mentions(&text)? else {
+            return Ok(false);
+        };
+        let request = StartTurnRequest {
+            request_id: RequestId::new(),
+            text,
+            attachments,
+            resources,
+            synthetic: false,
+            auto_approve: false,
+            agent: Some(self.agent().into()),
+            provider: None,
+            model: None,
+            reasoning_effort: self.reasoning_effort.clone(),
+            // A terminal shows no file previews; saying so keeps a
+            // Desktop chat's preview tool out of terminal turns.
+            tools: Some(std::collections::HashMap::from([("preview".into(), false)])),
+            command: None,
+        };
+        if !request.resources.is_empty() {
+            let mentions = request.resources.clone();
+            let (client, chat) = (client.clone(), self.thread.id);
+            self.send_with_mentions(draft, &mentions, async move {
+                client
+                    .start_turn(chat, request)
+                    .await
+                    .map(crate::resource_mentions::Outcome::Started)
+            })
+            .await;
+            return Ok(true);
+        }
+        let turn = client.start_turn(self.thread.id, request).await?;
         self.attachments.clear();
+        self.turn_sent(turn);
+        Ok(true)
+    }
+
+    /// A turn a prompt started: its activity shows from now on.
+    pub(crate) fn turn_sent(&mut self, turn: haarness_protocol::Turn) {
         self.active_turn = Some(turn.id);
         self.preview.clear();
         self.reasoning_preview.clear();
         self.live_threads.remove(&self.thread.id);
         self.turn_started = Some(std::time::Instant::now());
         self.notice = "Thinking…".into();
-        Ok(true)
     }
 
     pub async fn switch_thread(&mut self, thread: Thread, client: &ApiClient) -> Result<()> {
@@ -4247,42 +4269,58 @@ impl App {
     /// Send input while a turn is running: the server queues it and steers it
     /// into the running turn's next provider round.
     pub async fn queue_prompt(&mut self, text: String, client: &ApiClient) -> Result<bool> {
+        if self.still_sending() {
+            return Ok(false);
+        }
         let attachments = self.attachments.clone();
-        match client
-            .queue_input(
-                self.thread.id,
-                haarness_protocol::QueueInputRequest {
-                    preview: Some(false),
-                    reasoning_effort: self.reasoning_effort.clone(),
-                    delivery: haarness_protocol::InputDelivery::Steer,
-                    request_id: haarness_protocol::RequestId::new(),
-                    text,
-                    attachments,
-                    synthetic: false,
-                },
-            )
-            .await
-        {
-            Ok(response) if response.queued => {
-                self.attachments.clear();
-                self.refresh_needed = true;
-                self.notice = "Follow-up sent — the agent will address it next".into();
-                Ok(true)
+        let draft = text.clone();
+        let Some((text, resources)) = self.take_mentions(&text)? else {
+            return Ok(false);
+        };
+        let request = haarness_protocol::QueueInputRequest {
+            preview: Some(false),
+            reasoning_effort: self.reasoning_effort.clone(),
+            delivery: haarness_protocol::InputDelivery::Steer,
+            request_id: haarness_protocol::RequestId::new(),
+            text,
+            attachments,
+            resources,
+            synthetic: false,
+        };
+        if !request.resources.is_empty() {
+            let mentions = request.resources.clone();
+            let (client, chat) = (client.clone(), self.thread.id);
+            self.send_with_mentions(draft, &mentions, async move {
+                client
+                    .queue_input(chat, request)
+                    .await
+                    .map(crate::resource_mentions::Outcome::Steered)
+            })
+            .await;
+            return Ok(true);
+        }
+        let response = client.queue_input(self.thread.id, request).await?;
+        self.attachments.clear();
+        self.steer_sent(response);
+        Ok(true)
+    }
+
+    /// A follow-up the server took: steered into the running turn, or the
+    /// start of a fresh one when that turn ended meanwhile.
+    pub(crate) fn steer_sent(&mut self, response: haarness_protocol::QueueInputResponse) {
+        if response.queued {
+            self.refresh_needed = true;
+            self.notice = "Follow-up sent — the agent will address it next".into();
+            return;
+        }
+        // The turn ended while we typed; a fresh turn started.
+        if let Some(turn) = response.turn {
+            self.active_turn = Some(turn.id);
+            if self.thread.id == self.root_thread_id {
+                self.root_active_turn = Some(turn.id);
             }
-            Ok(response) => {
-                self.attachments.clear();
-                // The turn ended while we typed; a fresh turn started.
-                if let Some(turn) = response.turn {
-                    self.active_turn = Some(turn.id);
-                    if self.thread.id == self.root_thread_id {
-                        self.root_active_turn = Some(turn.id);
-                    }
-                    self.turn_started = Some(std::time::Instant::now());
-                    self.notice = "Thinking…".into();
-                }
-                Ok(true)
-            }
-            Err(error) => Err(error),
+            self.turn_started = Some(std::time::Instant::now());
+            self.notice = "Thinking…".into();
         }
     }
 
@@ -4818,12 +4856,15 @@ impl App {
         include_archived: bool,
         client: &ApiClient,
     ) -> Result<()> {
-        self.threads = if include_archived {
+        let threads = if include_archived {
             client.threads_including_archived().await?
         } else {
             client.threads().await?
         };
+        let anchor = self.session_list_anchor();
+        self.threads = threads;
         self.session_include_archived = include_archived;
+        self.keep_session_list_anchor(anchor);
         Ok(())
     }
 

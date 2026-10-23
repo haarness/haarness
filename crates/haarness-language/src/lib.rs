@@ -697,6 +697,12 @@ impl LanguageService {
         if !used_file {
             command.arg(file);
         }
+        // The server's credentials, OpenTelemetry settings and an inherited
+        // chat id stay out (`private_env_names`); the configured
+        // environment can still set them.
+        for name in haarness_core::private_env_names() {
+            command.env_remove(name);
+        }
         command
             .current_dir(dunce::simplified(&self.workspace))
             .envs(&formatter.environment)
@@ -855,6 +861,10 @@ impl Client {
         cancel: &CancellationToken,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(&config.command[0]);
+        // As for a formatter: the configured environment still wins.
+        for name in haarness_core::private_env_names() {
+            command.env_remove(name);
+        }
         command
             .args(config.command.iter().skip(1))
             .current_dir(dunce::simplified(&workspace))

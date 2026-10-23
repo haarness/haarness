@@ -470,3 +470,30 @@ test("a streamed side question that ends early, is refused, or goes quiet fails"
   );
   await assert.rejects(drain(respond(null), { idleTimeoutMs: 50 }), /sent nothing for 50 ms/);
 });
+
+test("a method that later took a query still takes its options first", async () => {
+  const calls = [];
+  const client = new Haarness({
+    baseUrl: "http://localhost:8080",
+    token: "fixture-token",
+    fetch: async (url, init) => {
+      calls.push([url, init]);
+      return new Response("[]", { headers: { "content-type": "application/json" } });
+    },
+  });
+  const controller = new AbortController();
+  await client.mcpServers({ timeoutMs: 5000, signal: controller.signal, headers: { "x-fixture": "1" } });
+  await client.mcpServers({ threadId: "chat", agent: "build" });
+  await client.mcpServers({ threadId: "chat" }, { headers: { "x-fixture": "2" } });
+  await client.mcpServers();
+  // A mixed object (only plain JavaScript can pass one) sends its options as options.
+  await client.mcpServers({ threadId: "chat", timeoutMs: 5000, headers: { "x-fixture": "3" } });
+  assert.equal(calls[4][0], "http://localhost:8080/v1/mcp?threadId=chat");
+  assert.equal(new Headers(calls[4][1].headers).get("x-fixture"), "3");
+  assert.equal(calls[0][0], "http://localhost:8080/v1/mcp");
+  assert.equal(new Headers(calls[0][1].headers).get("x-fixture"), "1");
+  assert.equal(calls[1][0], "http://localhost:8080/v1/mcp?threadId=chat&agent=build");
+  assert.equal(calls[2][0], "http://localhost:8080/v1/mcp?threadId=chat");
+  assert.equal(new Headers(calls[2][1].headers).get("x-fixture"), "2");
+  assert.equal(calls[3][0], "http://localhost:8080/v1/mcp");
+});

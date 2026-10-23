@@ -2,6 +2,8 @@ import DOMPurify from "dompurify";
 import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
 import { holdRemoteImages, madeHere, replyAttribute, type RemoteImageLabels } from "./remote-images";
+import { holdProjectImages, type ProjectImageLabels, type ShownImage } from "./project-images";
+import { openMark } from "./ImageViewer";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -15,6 +17,13 @@ const CSS_URL_ATTRIBUTES = new Set([
 // never changes what a reply may contain, and the hook below, which keeps
 // `file:` and file-share links, stays out of theirs.
 const purifier = DOMPurify(window);
+/**
+ * Each image's source as the reply wrote it, before the rules below or the
+ * default ones decide on it: a local `file:` URL, which they drop, still
+ * names a file of the project (project-images.ts). Only a reply drawn in the
+ * conversation reads it, and only through the server.
+ */
+const written = new WeakMap<Element, string>();
 // Every link click goes through Markdown.tsx, which decides where it may go
 // and says why a link does not open. So a link keeps a `file:` address, a
 // file share's address or a Windows drive path, none of which can run
@@ -34,6 +43,7 @@ purifier.addHook("uponSanitizeAttribute", (node, data) => {
     return;
   }
   data.attrValue = kept;
+  if (node.nodeName === "IMG" && data.attrName === "src") written.set(node as Element, kept);
   if (!URL_ATTRIBUTES.has(data.attrName)) {
     const css = CSS_URL_ATTRIBUTES.has(data.attrName) || /url\(/i.test(data.attrValue);
     if (css && cssReferencesOutside(data.attrValue)) data.keepAttr = false;
@@ -81,7 +91,8 @@ function nodes(parent: Node, previous: Node[], next: Node[], end: Node | null = 
     if (current instanceof Text) { text(current, target.textContent ?? ""); continue; }
     if (!(current instanceof Element) || !(target instanceof Element)) continue;
     for (const attribute of current.getAttributeNames()) {
-      if (attribute === "data-language") continue;
+      // The language label and an image's marks for opening it are the app's, set after drawing.
+      if (attribute === "data-language" || openMark(current, attribute)) continue;
       if (!target.hasAttribute(attribute)) current.removeAttribute(attribute);
     }
     for (const attribute of target.attributes) {
@@ -117,6 +128,9 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
 /**
  * `images` decides what an image from another host shows: the one this chat
  * already loaded, or a placeholder whose button loads it (remote-images.ts).
+ * With `project`, as in the conversation, an image whose source is a path
+ * shows the file of the project it names, or a placeholder while it is read
+ * (project-images.ts).
  */
 export function createMarkdownDOM(
   host: HTMLElement,
@@ -124,6 +138,12 @@ export function createMarkdownDOM(
     loaded: (src: string) => string | undefined;
     loading: (src: string) => boolean;
     labels: () => RemoteImageLabels;
+    project?: {
+      /** The project's folders, absolute (`projectRoots`). */
+      root: () => readonly string[];
+      shown: (path: string) => ShownImage | undefined;
+      labels: () => ProjectImageLabels;
+    };
   },
 ) {
   const blocks: Block[] = [];
@@ -148,6 +168,15 @@ export function createMarkdownDOM(
         FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
         FORBID_ATTR: ["style"],
       });
+      const project = images?.project;
+      if (project)
+        holdProjectImages(
+          fragment,
+          project.root(),
+          (image) => written.get(image) ?? image.getAttribute("src"),
+          project.shown,
+          project.labels(),
+        );
       if (images) holdRemoteImages(fragment, images.loaded, images.labels(), images.loading);
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);
       block.html = html;

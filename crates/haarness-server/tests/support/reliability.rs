@@ -410,6 +410,7 @@ async fn reliability_input_arriving_during_failure_hook_starts_a_fresh_turn() {
                         request_id: haarness_protocol::RequestId::new(),
                         text: "follow up during cleanup".into(),
                         attachments: vec![],
+                        resources: Vec::new(),
                         synthetic: false,
                     },
                 )

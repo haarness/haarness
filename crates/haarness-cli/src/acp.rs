@@ -203,6 +203,7 @@ impl Service {
                     request_id: RequestId::new(),
                     text,
                     attachments,
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: self.auto_approve,
                     agent: None,
@@ -467,22 +468,29 @@ impl Service {
             .as_str()
             .unwrap_or("Approve tool use")
             .to_owned();
+        // Why Auto's reviewer left it to the person, after the request.
+        let operation = match serde_json::from_value::<haarness_protocol::PermissionReview>(
+            payload["review"].clone(),
+        ) {
+            Ok(review) => format!("{operation} — {}", crate::review_note(&review)),
+            Err(_) => operation,
+        };
         let detail = payload.get("detail").cloned().unwrap_or(Value::Null);
         let call = asked_call(calls, child.map(|child| child.id), &detail)
             .unwrap_or_else(|| asked.id.clone());
         let options = permission_options(payload);
+        let mut fields = ToolCallUpdateFields::new()
+            .title(child.map_or_else(|| operation.clone(), |child| child.titled(&operation)))
+            .status(ToolCallStatus::Pending)
+            .raw_input(detail);
+        // The script the command runs, for the person answering; the call's
+        // result replaces it once it runs.
+        if let Some(text) = script_content(payload) {
+            fields = fields.content(vec![ContentBlock::Text(TextContent::new(text)).into()]);
+        }
         let request = RequestPermissionRequest::new(
             session.clone(),
-            ToolCallUpdate::new(
-                call,
-                ToolCallUpdateFields::new()
-                    .title(
-                        child.map_or_else(|| operation.clone(), |child| child.titled(&operation)),
-                    )
-                    .status(ToolCallStatus::Pending)
-                    .raw_input(detail),
-            )
-            .meta(child.map(Child::meta)),
+            ToolCallUpdate::new(call, fields).meta(child.map(Child::meta)),
             options,
         )
         .meta(child.map(Child::meta));
@@ -671,27 +679,29 @@ impl Service {
                 call_id,
                 output,
                 is_error,
+                metadata,
                 ..
-            } => notify(
-                connection,
-                session,
-                SessionUpdate::ToolCallUpdate(
-                    ToolCallUpdate::new(
-                        child.call(&call_id),
-                        ToolCallUpdateFields::new()
-                            .status(if is_error {
-                                ToolCallStatus::Failed
-                            } else {
-                                ToolCallStatus::Completed
-                            })
-                            .content(vec![
-                                ContentBlock::Text(TextContent::new(output.clone())).into(),
-                            ])
-                            .raw_output(parse_output(&output)),
-                    )
-                    .meta(child.meta()),
-                ),
-            ),
+            } => {
+                let (shown, raw) = shown_result(&output, &metadata);
+                notify(
+                    connection,
+                    session,
+                    SessionUpdate::ToolCallUpdate(
+                        ToolCallUpdate::new(
+                            child.call(&call_id),
+                            ToolCallUpdateFields::new()
+                                .status(if is_error {
+                                    ToolCallStatus::Failed
+                                } else {
+                                    ToolCallStatus::Completed
+                                })
+                                .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
+                                .raw_output(raw),
+                        )
+                        .meta(child.meta()),
+                    ),
+                )
+            }
             _ => Ok(()),
         }
     }
@@ -725,23 +735,12 @@ impl Service {
                 call_id,
                 output,
                 is_error,
+                metadata,
                 ..
             } => notify(
                 connection,
                 session,
-                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    call_id,
-                    ToolCallUpdateFields::new()
-                        .status(if is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        })
-                        .content(vec![
-                            ContentBlock::Text(TextContent::new(output.clone())).into(),
-                        ])
-                        .raw_output(parse_output(&output)),
-                )),
+                SessionUpdate::ToolCallUpdate(result_update(call_id, &output, is_error, &metadata)),
             ),
             ItemData::Todo { items } => notify(
                 connection,
@@ -808,19 +807,10 @@ impl Service {
                 call_id,
                 output,
                 is_error,
+                metadata,
                 ..
-            } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                call_id,
-                ToolCallUpdateFields::new()
-                    .status(if is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    })
-                    .content(vec![
-                        ContentBlock::Text(TextContent::new(output.clone())).into(),
-                    ])
-                    .raw_output(parse_output(&output)),
+            } => Some(SessionUpdate::ToolCallUpdate(result_update(
+                call_id, &output, is_error, &metadata,
             ))),
             _ => None,
         };
@@ -838,6 +828,49 @@ fn asked_call(calls: &Calls, chat: Option<ThreadId>, detail: &Value) -> Option<S
         .iter()
         .find(|(_, (owner, input))| *owner == chat && input == detail)
         .map(|(call, _)| call.clone())
+}
+
+/// The script a shell request's command runs (`script` on the request), as
+/// Markdown: its path, then its text in a fence longer than any run of
+/// backticks in it.
+fn script_content(payload: &Value) -> Option<String> {
+    let script = &payload["script"];
+    let path = script["path"].as_str()?;
+    let content = script["content"].as_str()?;
+    // The longest run of backticks in `text`: a fence or code span one
+    // longer cannot be closed from inside.
+    let longest = |text: &str| {
+        let (mut longest, mut run) = (0, 0);
+        for character in text.chars() {
+            run = if character == '`' { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        longest
+    };
+    let span = "`".repeat(longest(path) + 1);
+    // Its text may not be what runs: one quiet line says why.
+    match script["withheld"].as_str() {
+        Some("written") => {
+            return Some(format!(
+                "This command writes {span} {path} {span} before running it, so its contents can't be shown."
+            ));
+        }
+        Some(_) => {
+            return Some(format!(
+                "An earlier step of this command can change {span} {path} {span}, so its contents aren't shown."
+            ));
+        }
+        None => {}
+    }
+    let fence = "`".repeat(longest(content).max(2) + 1);
+    let mut text = format!(
+        "Script: {span} {path} {span}\n\n{fence}\n{}\n{fence}",
+        content.strip_suffix('\n').unwrap_or(content)
+    );
+    if script["truncated"] == true {
+        text.push_str("\n\nOnly the start of the file is shown.");
+    }
+    Some(text)
 }
 
 /// What the client may answer. A request that may only be allowed once
@@ -1206,6 +1239,46 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
+/// What the editor shows for a tool result, and its raw output. A call Auto's
+/// reviewer refused shows its reason and the reviewer's note, never the text
+/// written for the model.
+fn shown_result(output: &str, metadata: &Value) -> (String, Value) {
+    match metadata
+        .get("review")
+        .filter(|review| review["status"] == "blocked")
+    {
+        Some(review) => (
+            match review["rationale"].as_str() {
+                Some(reason) => format!("Blocked by Auto review: {reason}"),
+                None => "Blocked by Auto review".to_owned(),
+            },
+            json!({"review": review}),
+        ),
+        None => (output.to_owned(), parse_output(output)),
+    }
+}
+
+/// The session's own tool result, live or replayed.
+fn result_update(
+    call_id: String,
+    output: &str,
+    is_error: bool,
+    metadata: &Value,
+) -> ToolCallUpdate {
+    let (shown, raw) = shown_result(output, metadata);
+    ToolCallUpdate::new(
+        call_id,
+        ToolCallUpdateFields::new()
+            .status(if is_error {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
+            })
+            .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
+            .raw_output(raw),
+    )
+}
+
 fn parse_output(output: &str) -> Value {
     serde_json::from_str(output).unwrap_or_else(|_| Value::String(output.into()))
 }
@@ -1311,6 +1384,58 @@ mod tests {
         // A second read changes nothing.
         approvals.refresh(vec![asked("waiting"), asked("missed")]);
         assert_eq!(approvals.waiting.len(), 2);
+    }
+
+    #[test]
+    fn a_shell_request_shows_the_script_its_command_runs() {
+        assert_eq!(script_content(&json!({"detail": {"command": "ls"}})), None);
+        // Neither can a backtick in the path close its code span.
+        assert_eq!(
+            script_content(&json!({"script": {"path": "/work/a``b.sh", "content": "x"}}))
+                .unwrap()
+                .lines()
+                .next(),
+            Some("Script: ``` /work/a``b.sh ```")
+        );
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/x.sh", "content": "echo hi\n", "truncated": false,
+            }}))
+            .as_deref(),
+            Some("Script: ` /work/x.sh `\n\n```\necho hi\n```")
+        );
+        // A fence inside the script cannot close the block early.
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/x.sh", "content": "cat <<'EOF'\n````\nEOF", "truncated": true,
+            }}))
+            .as_deref(),
+            Some(
+                "Script: ` /work/x.sh `\n\n`````\ncat <<'EOF'\n````\nEOF\n`````\n\nOnly the start of the file is shown."
+            )
+        );
+    }
+
+    #[test]
+    fn a_script_whose_text_may_not_be_what_runs_is_one_line() {
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/run.sh", "content": "", "withheld": "changeable",
+            }}))
+            .as_deref(),
+            Some(
+                "An earlier step of this command can change ` /work/run.sh `, so its contents aren't shown."
+            )
+        );
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/gen.sh", "content": "", "withheld": "written",
+            }}))
+            .as_deref(),
+            Some(
+                "This command writes ` /work/gen.sh ` before running it, so its contents can't be shown."
+            )
+        );
     }
 
     #[test]

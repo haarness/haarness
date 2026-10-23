@@ -564,6 +564,9 @@
       "items": {
         "$ref": "#/components/schemas/McpServerInfo"
       }
+    },
+    "query": {
+      "$ref": "#/components/schemas/McpServersQuery"
     }
   },
   {

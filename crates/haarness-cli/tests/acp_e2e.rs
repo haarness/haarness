@@ -765,3 +765,109 @@ async fn a_request_raised_between_prompts_is_asked_on_the_next_one() {
     assert!(status.success(), "Haarness ACP process failed");
     daemon_guard.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_auto_review_blocked_shows_its_reason_live_from_a_subagent_and_on_reload() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, session) =
+        acp_session(&directory).await;
+    let api = daemon_api(&data);
+    daemon(
+        &api,
+        reqwest::Method::PUT,
+        &format!("/threads/{session}/approval-mode"),
+        Some(json!({"mode":"auto"})),
+    )
+    .await;
+    let blocked = |message: &Value| {
+        message["method"].as_str() == Some("session/update")
+            && message["params"]["update"]["sessionUpdate"] == "tool_call_update"
+            && message["params"]["update"]["content"][0]["content"]["text"]
+                == "Blocked by Auto review: Test verdict: deny."
+    };
+    // The text written for the model reaches the editor only in the model's
+    // own words (the echo provider repeats it, a task returns its child's
+    // reply), never as the blocked call's result.
+    let model_text = |messages: &[Value]| {
+        messages.iter().any(|message| {
+            message["params"]["update"]["sessionUpdate"] == "tool_call_update"
+                && message["params"]["update"]["status"] == "failed"
+                && message.to_string().contains("Do not try to reach")
+        })
+    };
+
+    // The session's own call, live.
+    let write = json!({"path":"own.txt", "content":"NEVER"});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool write {write} [review:deny]")}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{messages:?}");
+    let update = messages
+        .iter()
+        .find(|message| blocked(message))
+        .unwrap_or_else(|| panic!("no blocked update: {messages:?}"));
+    assert_eq!(update["params"]["update"]["status"], "failed");
+    assert_eq!(
+        update["params"]["update"]["rawOutput"]["review"]["status"],
+        "blocked"
+    );
+    assert!(!model_text(&messages), "{messages:?}");
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message["method"].as_str() == Some("session/request_permission")),
+        "a block asks nobody: {messages:?}"
+    );
+
+    // A subagent's call, on the session's updates under the subagent's name.
+    let task = json!({
+        "description":"Child writer",
+        "prompt":format!("!tool write {} [review:deny]", json!({"path":"child.txt", "content":"NEVER"})),
+    });
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":4, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool task {task}")}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    receive_response(&mut lines, &mut stdin, 4, &mut messages).await;
+    let update = messages
+        .iter()
+        .find(|message| blocked(message))
+        .unwrap_or_else(|| panic!("no blocked subagent update: {messages:?}"));
+    assert!(
+        update["params"]["update"]["_meta"].is_object(),
+        "the subagent's update names it: {update:?}"
+    );
+    assert!(!model_text(&messages), "{messages:?}");
+
+    // Loading the session again replays the block the same way.
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":5, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let mut replayed = Vec::new();
+    receive_response(&mut lines, &mut stdin, 5, &mut replayed).await;
+    assert!(replayed.iter().any(blocked), "{replayed:?}");
+    assert!(!model_text(&replayed), "{replayed:?}");
+    assert!(!workspace.join("own.txt").exists());
+    assert!(!workspace.join("child.txt").exists());
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}

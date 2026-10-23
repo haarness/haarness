@@ -805,6 +805,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             haarness_protocol::INPUT_QUEUE_CAPABILITY.into(),
             haarness_protocol::APPROVAL_MODE_CAPABILITY.into(),
             haarness_protocol::THREAD_CREATE_ID_CAPABILITY.into(),
+            haarness_protocol::RESOURCE_MENTIONS_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
         ]
@@ -820,6 +821,13 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         .chain(
             (state.browser.is_some() && state.management.is_some())
                 .then(|| "browser-extension.v1".into()),
+        )
+        // Auto asks a reviewer model here (`auto_review.enabled`).
+        .chain(
+            state
+                .runtime
+                .auto_review_enabled()
+                .then(|| haarness_protocol::APPROVAL_REVIEW_CAPABILITY.into()),
         )
         .chain(state.management.as_ref().into_iter().flat_map(|_| {
             [
@@ -1297,8 +1305,54 @@ async fn load_skill(
         json!({"name":name,"instructions":state.skills.load(&name).await?}),
     ))
 }
-async fn mcp_servers(State(state): State<ServerState>) -> ApiResult<Json<Vec<McpServerInfo>>> {
-    Ok(Json(state.mcp.list().await?))
+/// Whom a server list is for: with a chat (or, before one exists, an agent)
+/// named, each server that chat cannot reach says so (`turnedOff`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServersQuery {
+    #[serde(default)]
+    thread_id: Option<ThreadId>,
+    #[serde(default)]
+    agent: Option<String>,
+}
+async fn mcp_servers(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<McpServersQuery>,
+) -> ApiResult<Json<Vec<McpServerInfo>>> {
+    let mut servers = state.mcp.list().await?;
+    // A published chat's viewers are offered no resources to mention.
+    if (query.thread_id.is_some() || query.agent.is_some())
+        && crate::remote_scope::root(&headers).is_none()
+    {
+        let mut agents = vec![query.agent];
+        // A message sent while a turn runs follows both the running turn's
+        // agent and the chat's (see `queue_input`), so its list does too.
+        if let Some(running) = query
+            .thread_id
+            .and_then(|thread| state.runtime.running_agent(thread))
+        {
+            agents.extend([None, Some(running)]);
+        }
+        let mut policies = Vec::new();
+        for agent in &agents {
+            policies.push(
+                state
+                    .runtime
+                    .resource_mention_policy(query.thread_id, agent.as_deref())
+                    .await?,
+            );
+        }
+        for server in &mut servers {
+            if policies
+                .iter()
+                .any(|policy| policy.turned_off(&server.name))
+            {
+                server.turned_off = Some(true);
+            }
+        }
+    }
+    Ok(Json(servers))
 }
 async fn configure_mcp(
     State(state): State<ServerState>,
@@ -1565,7 +1619,7 @@ async fn start_turn(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
     headers: HeaderMap,
-    Json(request): Json<StartTurnRequest>,
+    Json(mut request): Json<StartTurnRequest>,
 ) -> ApiResult<(StatusCode, Json<Turn>)> {
     // A published chat follows its own Auto/Review setting; a remote client
     // cannot approve a turn's requests wholesale.
@@ -1585,26 +1639,95 @@ async fn start_turn(
         ))
         .into());
     }
-    let turn = state
-        .runtime
-        .start_turn(id, request)
-        .await
-        .map_err(|error| match error {
-            // A chat busy elsewhere is said as a sentence, without the
-            // category the error type adds ("conflict: …").
-            CoreError::Conflict(message) => {
-                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
-            }
-            other => other.into(),
-        })?;
+    let resources = std::mem::take(&mut request.resources);
+    let agents = vec![
+        state
+            .runtime
+            .message_agent(request.agent.as_deref(), request.command.as_deref()),
+    ];
+    let turn = admit(resources.is_empty(), async move {
+        let _reading = read_mentions(
+            &state,
+            &headers,
+            Mentioning {
+                chat: id,
+                request: request.request_id,
+                agents,
+            },
+            resources,
+            &mut request.text,
+            &mut request.attachments,
+        )
+        .await?;
+        state
+            .runtime
+            .start_turn(id, request)
+            .await
+            .map_err(|error| match error {
+                // A chat busy elsewhere is said as a sentence, without the
+                // category the error type adds ("conflict: …").
+                CoreError::Conflict(message) => {
+                    ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+                }
+                other => other.into(),
+            })
+    })
+    .await?;
     Ok((StatusCode::ACCEPTED, Json(turn)))
 }
 async fn execute_command(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
-    Json(request): Json<ExecuteCommandRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<ExecuteCommandRequest>,
 ) -> ApiResult<(StatusCode, Json<CommandExecutionResponse>)> {
-    let response = crate::command::execute(&state, id, request).await?;
+    let resources = std::mem::take(&mut request.resources);
+    let mut text = None;
+    if !resources.is_empty() {
+        // Mentions join the command's argument text, as attached files do.
+        text = Some(match request.arguments.take() {
+            None => String::new(),
+            Some(Value::String(text)) => text,
+            Some(_) => {
+                return Err(CoreError::Invalid(
+                    "MCP resource mentions need string command arguments".into(),
+                )
+                .into());
+            }
+        });
+    }
+    let agents = vec![
+        state
+            .runtime
+            .message_agent(request.agent.as_deref(), Some(&request.name)),
+    ];
+    // Boxed: a command's future is large.
+    let response = admit(
+        resources.is_empty(),
+        Box::pin(async move {
+            let mut reading = None;
+            if let Some(mut text) = text {
+                reading = read_mentions(
+                    &state,
+                    &headers,
+                    Mentioning {
+                        chat: id,
+                        request: request.request_id,
+                        agents,
+                    },
+                    resources,
+                    &mut text,
+                    &mut request.attachments,
+                )
+                .await?;
+                request.arguments = Some(Value::String(text));
+            }
+            let response = crate::command::execute(&state, id, request).await?;
+            drop(reading);
+            Ok(response)
+        }),
+    )
+    .await?;
     let status = match &response {
         CommandExecutionResponse::Turn { .. } => StatusCode::ACCEPTED,
         CommandExecutionResponse::WorkflowRun { run }
@@ -1980,6 +2103,9 @@ fn explicit_path_suggestions(
 }
 
 /// Subsequence match with bonuses for substring hits and file-name hits.
+/// Desktop's `fileScore` (`apps/desktop/src/renderer/prompt-context.ts`)
+/// scores the files it keeps while a search runs the same way: change both,
+/// and the scores both tests pin.
 fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(-i64::try_from(path.len()).unwrap_or(i64::MAX));
@@ -2013,7 +2139,21 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod file_search_tests {
-    use super::explicit_path_suggestions;
+    use super::{explicit_path_suggestions, fuzzy_score};
+
+    /// The scores Desktop's port is pinned to as well.
+    #[test]
+    fn file_scores_match_the_desktop_port() {
+        let score = |path: &str, query: &str| fuzzy_score(&path.to_ascii_lowercase(), query);
+        assert_eq!(score("setup.md", "s"), Some(1492));
+        assert_eq!(score("style.css", "st"), Some(1491));
+        assert_eq!(score("setup.md", "st"), Some(92));
+        assert_eq!(score("src/Setup.MD", "setup"), Some(1484));
+        assert_eq!(score("docs/guide.md", ""), Some(-13));
+        assert_eq!(score("readme.md", "q"), None);
+        assert_eq!(score("É/é.md", "é"), Some(1489));
+        assert_eq!(score("É.md", "é"), None);
+    }
 
     struct TestTree(std::path::PathBuf);
 
@@ -2317,12 +2457,154 @@ async fn list_questions(
 async fn queue_input(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
-    Json(request): Json<QueueInputRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<QueueInputRequest>,
 ) -> ApiResult<(StatusCode, Json<QueueInputResponse>)> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(state.runtime.queue_input(id, request).await?),
-    ))
+    let resources = std::mem::take(&mut request.resources);
+    // Steered, it joins the running turn; queued (or steered as that turn
+    // ends) it runs as a turn of its own under the chat's agent. Both must
+    // allow a mention.
+    let mut agents = vec![None];
+    if let Some(running) = state.runtime.running_agent(id) {
+        agents.push(Some(running));
+    }
+    let response = admit(resources.is_empty(), async move {
+        let _reading = read_mentions(
+            &state,
+            &headers,
+            Mentioning {
+                chat: id,
+                request: request.request_id,
+                agents,
+            },
+            resources,
+            &mut request.text,
+            &mut request.attachments,
+        )
+        .await?;
+        Ok(state.runtime.queue_input(id, request).await?)
+    })
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// The MCP resources a message to chat `id` mentions, read into it when it
+/// arrives, so a queued message holds what was read; the chat's rules under
+/// each agent the message may run with keep from it what they keep from the
+/// model. A published chat's viewers cannot read the owner's MCP servers, so
+/// a mention from one is refused.
+///
+/// The returned gate is held until the message is admitted: a retry of the
+/// same request meanwhile waits for it, then finds the message taken and
+/// reads nothing again.
+async fn read_mentions(
+    state: &ServerState,
+    headers: &HeaderMap,
+    message: Mentioning,
+    resources: Vec<haarness_protocol::ResourceMention>,
+    text: &mut String,
+    attachments: &mut Vec<String>,
+) -> ApiResult<Option<Reading>> {
+    if resources.is_empty() {
+        return Ok(None);
+    }
+    if crate::remote_scope::root(headers).is_some() {
+        return Err(CoreError::PermissionDenied(
+            "A shared chat cannot read this computer's MCP resources".into(),
+        )
+        .into());
+    }
+    let Mentioning {
+        chat: id,
+        request,
+        agents,
+    } = message;
+    let reading = Reading::start(id, request).await;
+    if state.runtime.request_admitted(id, request).await? {
+        return Ok(Some(reading));
+    }
+    let mut policies = Vec::new();
+    for agent in &agents {
+        policies.push(
+            state
+                .runtime
+                .resource_mention_policy(Some(id), agent.as_deref())
+                .await?,
+        );
+    }
+    crate::mcp_resources::read_mentions(
+        state.mcp.as_ref(),
+        &state.workspace,
+        resources,
+        &|server, uri| policies.iter().any(|policy| policy.denies(server, uri)),
+        crate::mcp_resources::MENTION_BUDGET,
+        text,
+        attachments,
+    )
+    .await?;
+    Ok(Some(reading))
+}
+
+/// The message whose mentions are read: its chat, its request, and the
+/// agents it may run under (`None` for the chat's), each of whose rules
+/// must allow a mention.
+struct Mentioning {
+    chat: ThreadId,
+    request: haarness_protocol::RequestId,
+    agents: Vec<Option<String>>,
+}
+
+type ReadingKey = (ThreadId, haarness_protocol::RequestId);
+/// The messages whose mentions are being read and admitted, by chat and
+/// request.
+static READING: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<ReadingKey, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// One message's reads and admission, held from the first read until it is
+/// admitted; a retry of the same request waits for it.
+struct Reading {
+    key: ReadingKey,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+impl Reading {
+    async fn start(id: ThreadId, request: haarness_protocol::RequestId) -> Self {
+        let gate = READING.lock().entry((id, request)).or_default().clone();
+        Self {
+            key: (id, request),
+            _held: gate.lock_owned().await,
+        }
+    }
+}
+impl Drop for Reading {
+    fn drop(&mut self) {
+        let mut reading = READING.lock();
+        // The map's and this one's: nobody else waits.
+        if reading
+            .get(&self.key)
+            .is_some_and(|gate| Arc::strong_count(gate) <= 2)
+        {
+            reading.remove(&self.key);
+        }
+    }
+}
+
+/// Admits a message. One that mentions resources is read and admitted on a
+/// task of its own (`plain` is false), so a client that goes away while the
+/// reads run cannot lose the message; its retry with the same request id
+/// finds it.
+async fn admit<T: Send + 'static>(
+    plain: bool,
+    work: impl std::future::Future<Output = ApiResult<T>> + Send + 'static,
+) -> ApiResult<T> {
+    if plain {
+        return work.await;
+    }
+    tokio::spawn(work).await.map_err(|error| {
+        ApiFailure::from(CoreError::Tool(format!(
+            "the message could not be admitted: {error}"
+        )))
+    })?
 }
 
 async fn input_queue(
@@ -2599,6 +2881,7 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         CoreError::Conflict(_) => (StatusCode::CONFLICT, "conflict", true),
         CoreError::PermissionDenied(_) => (StatusCode::FORBIDDEN, "permission_denied", false),
         CoreError::PermissionRejected(_) => (StatusCode::FORBIDDEN, "permission_rejected", false),
+        CoreError::ReviewBlocked(_) => (StatusCode::FORBIDDEN, "review_blocked", false),
         CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
         CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
         CoreError::ProviderBlocked(_) => (StatusCode::BAD_GATEWAY, "provider_blocked", false),

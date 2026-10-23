@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 fs2.workspace = true
+haarness-core = { path = "../haarness-core" }
 haarness-protocol = { path = "../haarness-protocol" }
 serde.workspace = true
 serde_json.workspace = true

@@ -149,6 +149,7 @@ fn request() -> StartTurnRequest {
         request_id: haarness_protocol::RequestId::new(),
         text: "Analyze the code for security issues".into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: false,
         agent: None,

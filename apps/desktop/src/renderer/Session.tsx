@@ -1,6 +1,7 @@
-import { measureRow } from "./measure-row";
+import { keepsRowsAbove, measureRow } from "./measure-row";
 import { toastAnchor } from "./toast-anchors";
-import { t, splitAround, parseLanguage } from "./i18n";
+import { t, splitAround, parseLanguage, formatNumber } from "./i18n";
+import { isOpen, setOpen } from "./disclosure";
 import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
 import {
@@ -20,7 +21,10 @@ import {
 import { retainedItems } from "./conversation-history";
 import { PromptContextControls, pasteLabel } from "./PromptContext";
 import {
+  carriedResource,
   commandPrompt,
+  contextKey,
+  resourceToRead,
   countLines,
   mentionAgents,
   pasteFolds,
@@ -44,7 +48,13 @@ import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
-import { canAutoApprove, describeAlwaysRule } from "./approval-mode";
+import {
+  alreadySettled,
+  autoApprovalHint,
+  canAutoApprove,
+  describeAlwaysRule,
+  reviewNoteParts,
+} from "./approval-mode";
 import {
   chromeApproval,
   chromeApprovalLines,
@@ -79,6 +89,7 @@ import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
+import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
@@ -104,6 +115,7 @@ import {
   describeTool,
   errorRecovery,
   permissionCommand,
+  permissionScript,
   shortPath,
   toolActivity,
   toolChanges,
@@ -114,6 +126,8 @@ import {
 /* The plan already has a home above the composer, so its bookkeeping calls do
    not also belong in the transcript. */
 const PLAN_TOOLS = ["todo", "todowrite", "todoread"];
+/** How long Auto's reviewer runs before the activity line says so. */
+const REVIEW_NOTICE_MS = 800;
 
 /** Four openings for a conversation in the selected project. */
 interface Starter {
@@ -185,9 +199,12 @@ export function Session() {
   // command, and browser sites ask only when Settings → Browser says so.
   const approvalModeHint = () =>
     app.isAutoApproval()
-      ? state.selected
-        ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
-        : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
+      ? autoApprovalHint(
+          !!state.selected,
+          // A server that asks a reviewer in Auto says so in its capabilities.
+          !!state.connection?.info.capabilities.includes("approval-review.v1"),
+          t,
+        )
       : state.selected
         ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
         : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
@@ -703,6 +720,8 @@ export function Session() {
     baseAttachments: { name: string; data: string }[];
     /** Chips the undone prompt's pastes came back as. */
     pastes?: string[];
+    /** Chips its resources came back as, by context key. */
+    resources?: string[];
   };
   let restoredDraft: RestoredDraft | undefined;
   const pristineUndoDraft = () =>
@@ -729,22 +748,28 @@ export function Session() {
     restored: (item) => {
       if (item?.data.type !== "user_message") return;
       // A slash command comes back as the line typed, so sending it again
-      // runs the command; pastes come back as their chips.
+      // runs the command; pastes come back as their chips, resources as
+      // chips holding what was read, and one that could not be read as a
+      // chip to read again.
       const parts = sentParts(item.data.command_line || item.data.text);
       const pastes = parts.flatMap((part) =>
         part.kind === "paste"
           ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }]
           : [],
       );
-      const text = pastes.length
-        ? parts
-            .flatMap((part) => (part.kind === "text" ? [part.text] : []))
-            .join("")
-            .trimEnd()
-        : parts.map((part) => part.text).join("");
+      const resources = parts.flatMap((part) =>
+        part.kind === "resource" ? [part.failed ? resourceToRead(part) : carriedResource(part)] : [],
+      );
+      const text =
+        pastes.length || resources.length
+          ? parts
+              .flatMap((part) => (part.kind === "text" ? [part.text] : []))
+              .join("")
+              .trimEnd()
+          : parts.map((part) => part.text).join("");
       const key = app.draftKey();
-      for (const paste of pastes)
-        void app.run(() => app.addPromptContext(paste, key));
+      for (const chip of [...pastes, ...resources])
+        void app.run(() => app.addPromptContext(chip, key));
       const baseText = pristineUndoDraft()
         ? restoredDraft!.baseText
         : /^\/(undo|redo|compact)\s*$/.test(draft())
@@ -773,6 +798,7 @@ export function Session() {
         baseText,
         baseAttachments,
         pastes: pastes.map((paste) => paste.id),
+        resources: resources.map(contextKey),
       };
       void window.haarness.storage("history-draft:" + owner(), restoredDraft);
       persistDraft();
@@ -784,12 +810,19 @@ export function Session() {
         change(restoredDraft!.baseText);
         setAttachments(restoredDraft!.baseAttachments);
         const pastes = new Set(restoredDraft!.pastes ?? []);
+        const resources = new Set(restoredDraft!.resources ?? []);
         const key = app.draftKey();
-        if (pastes.size)
+        if (pastes.size || resources.size)
           void app.run(() =>
             app.setPromptContext(
               key,
-              app.promptContext().filter((item) => item.kind !== "paste" || !pastes.has(item.id)),
+              app
+                .promptContext()
+                .filter(
+                  (item) =>
+                    !(item.kind === "paste" && pastes.has(item.id)) &&
+                    !(item.kind === "resource" && resources.has(contextKey(item))),
+                ),
             ),
           );
         persistDraft();
@@ -994,6 +1027,16 @@ export function Session() {
     overscan: 8,
     getItemKey: (index) => rows()[index]?.id ?? index,
   });
+  // A row wholly above the view that grows keeps what is read in place, also
+  // while scrolling up (measure-row.ts). The view moves down before the list's
+  // height has grown, which near its end would cut the move short, so the
+  // list is made that tall first.
+  virtual.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    if (!keepsRowsAbove(item, instance)) return false;
+    const body = instance.scrollElement?.querySelector<HTMLElement>(":scope > .transcript-body");
+    if (body && delta > 0) body.style.height = `${instance.getTotalSize() + delta}px`;
+    return true;
+  };
   // The outline lists every prompt the user wrote and marks the one being
   // read. It is measured from the virtualizer's own row offsets, at most once
   // a frame, so streaming and scrolling never read every row's layout.
@@ -1259,6 +1302,9 @@ export function Session() {
     undefined,
     { equals: (a, b) => a?.permissionId === b?.permissionId },
   );
+  // A request announced again (Auto's reviewer took it up, or left it to the
+  // person) keeps its card; only the note follows.
+  const currentReview = () => visiblePermissions()[0]?.review;
   const currentQuestion = createMemo(
     () => (visiblePermissions().length ? undefined : visibleQuestions()[0]),
     undefined,
@@ -1370,9 +1416,15 @@ export function Session() {
   const waitingForModels = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
     if (queue.editing()) {
-      // A queued message keeps only its pastes among the chips.
+      // A queued message keeps only its pastes and the resources it held
+      // among the chips: its edit saves text.
       await queue.save({
-        text: promptWithContext(draft(), app.promptContext().filter((item) => item.kind === "paste")),
+        text: promptWithContext(
+          draft(),
+          app
+            .promptContext()
+            .filter((item) => item.kind === "paste" || (item.kind === "resource" && item.block !== undefined)),
+        ),
         attachments: attachments(),
       });
       return;
@@ -1641,6 +1693,7 @@ export function Session() {
       ? latestThought(stream()?.reasoning ?? "")
       : "",
   );
+  const [reviewClock, setReviewClock] = createSignal(0);
   const activity = createMemo(() => {
     const turn = active();
     if (!turn) return "";
@@ -1657,8 +1710,23 @@ export function Session() {
     const tool = tools.at(-1)?.data as
       | Extract<T.ItemData, { type: "tool_call" }>
       | undefined;
+    // Auto's reviewer deciding a request: said only once it takes a moment,
+    // so a quick review never flashes a word.
+    const review = state.reviews?.[turn.id];
+    if (review && reviewClock() - review.at >= REVIEW_NOTICE_MS)
+      return t("Reviewing…");
     if (tool) return toolActivity(tool.name, tool.arguments);
     return stream()?.text ? t("Writing a reply") : t("Thinking");
+  });
+  // Re-read the activity when a running review reaches the notice delay.
+  createEffect(() => {
+    const turn = active();
+    const review = turn ? state.reviews?.[turn.id] : undefined;
+    if (!review) return;
+    const wait = REVIEW_NOTICE_MS - (Date.now() - review.at);
+    if (wait <= 0) return setReviewClock(Date.now());
+    const timer = setTimeout(() => setReviewClock(Date.now()), wait);
+    onCleanup(() => clearTimeout(timer));
   });
   /**
    * Where the next message will run. Each choice says which checkout it is and
@@ -2017,6 +2085,7 @@ export function Session() {
                 {(permission) => (
                   <Permission
                     permission={permission}
+                    review={currentReview()}
                     queued={visiblePermissions().length}
                   />
                 )}
@@ -2254,6 +2323,11 @@ export function Session() {
                 change={change}
                 insert={insertText}
                 disabled={submitting() || stopping() || !state.ready}
+                // A queued message's edit saves text, so no new resource.
+                resources={!queue.editing()}
+                // The agent the next message runs under decides, as for the
+                // message itself.
+                chat={state.selected ? { threadId: state.selected, agent: selectedAgent() } : { agent: selectedAgent() }}
               />
               <Show when={slashOpen()}>
                 <div
@@ -2629,20 +2703,27 @@ function Message(props: {
                       .attachments
                   }
                 >
-                  {(attachment) => (
-                    <span class="attachment-chip">
-                      {attachment.startsWith("data:image/") ? (
+                  {(attachment) =>
+                    attachment.startsWith("data:image/") ? (
+                      <span
+                        class="attachment-chip attachment-image"
+                        ref={(element) => {
+                          // Shown smaller than it is, an attached image opens full size.
+                          const opening = watchOpenImages(element, () => t("Attached image"));
+                          onCleanup(opening.dispose);
+                        }}
+                      >
                         <img src={attachment} alt={t("Attached image")} />
-                      ) : (
-                        <>
-                          <Icon name="file" size="sm" />
-                          <span class="attachment-name">
-                            {attachmentName(attachment)}
-                          </span>
-                        </>
-                      )}
-                    </span>
-                  )}
+                      </span>
+                    ) : (
+                      <span class="attachment-chip">
+                        <Icon name="file" size="sm" />
+                        <span class="attachment-name">
+                          {attachmentName(attachment)}
+                        </span>
+                      </span>
+                    )
+                  }
                 </For>
               </UserMessageBody>
             </div>
@@ -2840,6 +2921,8 @@ const permissionTitles: Record<string, string> = {
  */
 function Permission(props: {
   permission: T.PendingPermissionInfo;
+  /** Its review note as announced last (it can change while it is shown). */
+  review?: T.PermissionReview | null;
   /** How many requests wait for this conversation, this one included. */
   queued: number;
 }) {
@@ -2870,6 +2953,23 @@ function Permission(props: {
       ...Object.fromEntries(Object.entries(value).filter(([key]) => key !== "__browser")),
     });
   };
+  let allowOnce: HTMLButtonElement | undefined;
+  // Settled already (Auto's reviewer, another window): one quiet line takes
+  // the buttons' place, at their height, until the card goes. No toast: the
+  // person's answer did nothing, and nothing else needs saying.
+  const [settled, setSettled] = createSignal<{ height: number; focused: boolean }>();
+  let settledTimer: ReturnType<typeof setTimeout> | undefined;
+  let footer: HTMLElement | undefined;
+  onCleanup(() => clearTimeout(settledTimer));
+  const showSettled = () => {
+    // The line holds the buttons' height, a second row of them included,
+    // and keeps the keyboard where it was.
+    setSettled({
+      height: footer?.offsetHeight ?? 0,
+      focused: !!footer?.contains(document.activeElement),
+    });
+    settledTimer = setTimeout(() => void app.refresh(), SETTLED_NOTE_MS);
+  };
   const decide = (decision: string) => {
     if (answered()) return;
     const connection = app.state.connection!.id;
@@ -2877,13 +2977,16 @@ function Permission(props: {
     setAnswered(true);
     void app.run(async () => {
       try {
-        if (decision === "auto") await app.allowOnceAndAuto(props.permission);
-        else
+        // Once + Auto still turns Auto on.
+        if (decision === "auto") {
+          if (await app.allowOnceAndAuto(props.permission)) return showSettled();
+        } else
           await app.api("replyPermission", props.permission.permissionId, {
             decision,
           });
         await app.refresh();
       } catch (error) {
+        if (alreadySettled(error)) return showSettled();
         setAnswered(false);
         app.recordPermissionError(connection, id, error);
         throw error;
@@ -2921,6 +3024,13 @@ function Permission(props: {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     return typeof value.__readLimit === "string" ? value.__readLimit : undefined;
   };
+  // The script the command runs, as the server read it when it asked. Shut
+  // until asked for, so a short card stays short, and held open by request
+  // so a refresh of the list never closes it under the reader.
+  const script = () =>
+    permissionScript(props.permission, app.state.connection?.workspace ?? "");
+  const scriptKey = () => `permission:${props.permission.permissionId}:script`;
+  const scriptBody = `permission-script-${props.permission.permissionId}`;
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
   const changes = () =>
@@ -3011,6 +3121,92 @@ function Permission(props: {
             {permissionCommand(props.permission.detail)}
           </pre>
         </Show>
+        {/* Why Auto's reviewer left this to the person: one quiet line under
+            the command, there from the card's first paint, above the script. */}
+        <Show when={reviewNoteParts(props.review, t)}>
+          {(note) => (
+            <p class="approval-review">
+              {note().lead}
+              <Show when={note().rule}>
+                {(rule) => (
+                  <>
+                    {" · "}
+                    <bdi>{rule()}</bdi>
+                  </>
+                )}
+              </Show>
+              <Show when={note().reason}>
+                {(reason) => (
+                  <>
+                    {": "}
+                    <bdi>{reason()}</bdi>
+                  </>
+                )}
+              </Show>
+            </p>
+          )}
+        </Show>
+        <Show when={script()?.withheld ? script() : undefined}>
+          {(item) => (
+            <p class="approval-script-note">
+              {splitAround(
+                item().withheld === "written"
+                  ? t("This command writes {path} before running it, so its contents can't be shown.")
+                  : t("An earlier step of this command can change {path}, so its contents aren't shown."),
+                () => <bdi><code>{item().path}</code></bdi>,
+                "{path}",
+              )}
+            </p>
+          )}
+        </Show>
+        <Show when={script()?.withheld ? undefined : script()}>
+          {(item) => (
+            <div class="approval-script" classList={{ open: isOpen(scriptKey()) }}>
+              <button
+                type="button"
+                class="approval-script-toggle"
+                aria-expanded={isOpen(scriptKey())}
+                aria-controls={scriptBody}
+                onClick={() => setOpen(scriptKey(), !isOpen(scriptKey()))}
+              >
+                <Icon name="chevron" size="xs" class="approval-script-chevron" />
+                <span>
+                  {isOpen(scriptKey()) ? t("Hide script") : scriptLabel(item())}
+                </span>
+              </button>
+              <Show when={isOpen(scriptKey())}>
+                {/* Inside the card's alert, opening it is not news: a screen
+                    reader reads it when asked, not 30 KB at once. */}
+                <div
+                  class="change-preview approval-script-body"
+                  id={scriptBody}
+                  aria-live="off"
+                >
+                  <div class="change-path" title={item().path}>
+                    <bdi dir="ltr">{item().path}</bdi>
+                  </div>
+                  <div
+                    class="change-lines"
+                    tabindex="0"
+                    role="region"
+                    aria-label={t("Script")}
+                  >
+                    <For each={item().lines}>
+                      {(line) => (
+                        <div class="diff-line">
+                          <code>{line || " "}</code>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                  <Show when={item().truncated}>
+                    <p class="change-more">{t("Only the start of the file is shown.")}</p>
+                  </Show>
+                </div>
+              </Show>
+            </div>
+          )}
+        </Show>
         <For each={linkTargets()}>
           {(target) => (
             <p class="approval-target">
@@ -3049,8 +3245,23 @@ function Permission(props: {
           {app.permissionError(props.permission.permissionId)}
         </p>
       </Show>
-      <Show when={explicit()}>
-        <footer class="prompt-actions">
+      <Show when={settled()}>
+        {(state) => (
+          <p
+            class="prompt-actions approval-settled"
+            role="status"
+            tabindex={state().focused ? -1 : undefined}
+            style={{ "min-height": state().height ? `${state().height}px` : undefined }}
+            ref={(line) => {
+              if (state().focused) queueMicrotask(() => line.focus());
+            }}
+          >
+            {t("Already answered")}
+          </p>
+        )}
+      </Show>
+      <Show when={explicit() && !settled()}>
+        <footer class="prompt-actions" ref={footer}>
           <button
             class="ghost"
             disabled={answered()}
@@ -3071,8 +3282,26 @@ function Permission(props: {
           </button>
         </footer>
       </Show>
-      <Show when={!explicit()}>
-        <footer class="prompt-actions">
+      <Show when={!explicit() && !settled()}>
+        <footer class="prompt-actions" ref={footer}>
+          {/* At the start, apart from the answers: when Auto turns on and it
+              goes, nothing else moves, and its focus passes to Allow once. */}
+          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+            <button
+              class="prompt-auto"
+              ref={(button) =>
+                onCleanup(() => {
+                  if (document.activeElement === button)
+                    queueMicrotask(() => allowOnce?.focus());
+                })
+              }
+              disabled={answered()}
+              onClick={() => decide("auto")}
+              title={t("Allow this request once and enable Auto for this chat and its agents")}
+            >
+              {t("Allow once + Auto")}
+            </button>
+          </Show>
           <button
             class="ghost"
             disabled={answered()}
@@ -3107,17 +3336,9 @@ function Permission(props: {
               />
             </Show>
           </Show>
-          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
-            <button
-              disabled={answered()}
-              onClick={() => decide("auto")}
-              title={t("Allow this request once and enable Auto for this chat and its agents")}
-            >
-              {t("Allow once + Auto")}
-            </button>
-          </Show>
           <button
             class="primary"
+            ref={allowOnce}
             disabled={answered()}
             onClick={() => decide("once")}
           >
@@ -3127,6 +3348,18 @@ function Permission(props: {
       </Show>
     </section>
   );
+}
+/** The closed script toggle: its size, which for a cut file counts only
+ * what was read. */
+function scriptLabel(script: { lines: string[]; truncated: boolean }) {
+  const count = script.lines.length;
+  if (script.truncated)
+    return count === 1
+      ? t("View script · start of the file")
+      : t("View script · first {count} lines", { count: formatNumber(count) });
+  return count === 1
+    ? t("View script · 1 line")
+    : t("View script · {count} lines", { count: formatNumber(count) });
 }
 /** What an explicit Chrome request lets the agent do, with `{origin}` left
  * for the caller to isolate (an origin is a Latin run in any language). */
@@ -3142,6 +3375,8 @@ function chromeRequestText(category: ChromeField) {
       return t("Run scripts on {origin} in Chrome");
   }
 }
+/** How long a card answered elsewhere says so before it goes. */
+const SETTLED_NOTE_MS = 1500;
 /** Enter that confirms an input method's composition belongs to the input method. */
 const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 

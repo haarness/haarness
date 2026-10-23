@@ -10,6 +10,7 @@
 
 pub mod arity;
 pub mod bash;
+pub mod script;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -39,6 +40,10 @@ pub struct Evaluation {
     /// [`is_config_path`]): only a person answers it, never Auto, a
     /// `--yolo` or scheduled run, or a hook, and it offers no "always".
     pub protected: bool,
+    /// A rule someone configured decided (a person's, a project's or an
+    /// agent's), not one of Haarness's defaults: Auto's reviewer leaves a
+    /// configured ask about something narrower than a whole tool to a person.
+    pub configured: bool,
 }
 
 /// The rule an edit of a configuration file is asked under, as
@@ -272,6 +277,8 @@ fn names_file(rule: &PermissionRule, name: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct PermissionEngine {
     rules: Vec<PermissionRule>,
+    /// How many of `rules`, from the start, are Haarness's defaults.
+    builtin: usize,
     repository_grants: Vec<PermissionRule>,
     session_rules: Vec<PermissionRule>,
     /// Evaluated independently of the rules: a ceiling `deny` wins even when
@@ -331,6 +338,7 @@ impl PermissionEngine {
     pub fn new(rules: Vec<PermissionRule>) -> Self {
         let mut engine = Self {
             rules: rules.into_iter().map(normalize_rule_aliases).collect(),
+            builtin: 0,
             session_rules: Vec::new(),
             repository_grants: Vec::new(),
             ceilings: Vec::new(),
@@ -397,7 +405,9 @@ impl PermissionEngine {
                 .iter()
                 .map(|(pattern, decision)| rule(&format!("read:{pattern}"), *decision)),
         );
-        Self::new(rules)
+        let mut engine = Self::new(rules);
+        engine.builtin = engine.rules.len();
+        engine
     }
 
     /// The plan agent gets the same base rules plus a write-denying ceiling
@@ -554,10 +564,12 @@ impl PermissionEngine {
                     decision: PermissionDecision::Deny,
                     matched: Some(ceiling.pattern.clone()),
                     protected: false,
+                    configured: true,
                 };
             }
         }
-        let configured = self.rules.iter().rfind(names);
+        let configured_at = self.rules.iter().rposition(|rule| names(&rule));
+        let configured = configured_at.map(|index| &self.rules[index]);
         let grant = self.session_rules.iter().rfind(names);
         let repository = self.repository_grants.iter().rfind(names);
         // An "always" answer or sharing consent never reopens a configured
@@ -594,6 +606,7 @@ impl PermissionEngine {
                     decision: PermissionDecision::Deny,
                     matched: Some(rule.pattern.clone()),
                     protected: false,
+                    configured: true,
                 };
             }
             let opener = [
@@ -614,12 +627,19 @@ impl PermissionEngine {
                     opener.map_or_else(|| CONFIG_EDIT_RULE.into(), |rule| rule.pattern.clone()),
                 ),
                 protected: opener.is_none(),
+                configured: opener.is_some(),
             };
         }
+        // The rule that decided is a configured one when it is among the
+        // rules after the defaults, rather than an answer someone gave.
+        let from_rules = matched
+            .zip(configured)
+            .is_some_and(|(chosen, rule)| std::ptr::eq(chosen, rule));
         Evaluation {
             decision: matched.map_or(unmatched, |rule| rule.decision),
             matched: matched.map(|rule| rule.pattern.clone()),
             protected: false,
+            configured: from_rules && configured_at.is_some_and(|index| index >= self.builtin),
         }
     }
 

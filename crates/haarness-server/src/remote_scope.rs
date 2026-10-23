@@ -187,6 +187,7 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
                 !c.as_str().is_some_and(|c| {
                     c.starts_with("pty")
                         || c.starts_with("workspace")
+                        || c.starts_with("mcp-resource-mentions")
                         || c.starts_with("session.archive")
                         || c.starts_with("browser-extension")
                 })

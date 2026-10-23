@@ -215,12 +215,15 @@ impl ModelProvider for Capturing {
     async fn stream(
         &self,
         request: ProviderRequest,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
         if let Some(title) = title_fixture(&request) {
             return title;
         }
         self.requests.lock().unwrap().push(request.clone());
+        if let Some(review) = haarness_core::auto_review::test_review(&request, &cancel) {
+            return Ok(review);
+        }
         let mut last_user_index = None;
         let mut last_tool_result = None;
         for (index, message) in request.messages.iter().enumerate() {
@@ -244,6 +247,11 @@ impl ModelProvider for Capturing {
         let scripted_prompt = prompt
             .rsplit_once("</goal-harness>\n\n")
             .map_or(prompt.as_str(), |(_, suffix)| suffix);
+        // Another chat's agent (`session_message`) scripts after its header.
+        let scripted_prompt = scripted_prompt
+            .strip_prefix(haarness_core::SESSION_MESSAGE_PREFIX)
+            .and_then(|rest| rest.split_once('\n'))
+            .map_or(scripted_prompt, |(_, rest)| rest);
         let events = if let Some(script) = scripted_prompt.trim_start().strip_prefix("!preface ") {
             if last_tool_result > last_user_index {
                 vec![Ok(ProviderEvent::TextDelta("Tool finished".into()))]
@@ -252,8 +260,11 @@ impl ModelProvider for Capturing {
                     .trim()
                     .split_once(char::is_whitespace)
                     .unwrap_or((script.trim(), ""));
-                let arguments: Value =
-                    serde_json::from_str(rest.trim()).unwrap_or(serde_json::json!({}));
+                let arguments: Value = serde_json::Deserializer::from_str(rest.trim())
+                    .into_iter::<Value>()
+                    .next()
+                    .and_then(Result::ok)
+                    .unwrap_or(serde_json::json!({}));
                 vec![
                     Ok(ProviderEvent::ReasoningDelta("Inspecting".into())),
                     Ok(ProviderEvent::TextDelta(String::new())),
@@ -277,8 +288,11 @@ impl ModelProvider for Capturing {
                     .trim()
                     .split_once(char::is_whitespace)
                     .unwrap_or((script.trim(), ""));
-                let arguments: Value =
-                    serde_json::from_str(rest.trim()).unwrap_or(serde_json::json!({}));
+                let arguments: Value = serde_json::Deserializer::from_str(rest.trim())
+                    .into_iter::<Value>()
+                    .next()
+                    .and_then(Result::ok)
+                    .unwrap_or(serde_json::json!({}));
                 vec![Ok(ProviderEvent::ToolCall {
                     call_id: "cap-call-1".into(),
                     name: name.to_owned(),
@@ -292,7 +306,12 @@ impl ModelProvider for Capturing {
             if last_tool_result > last_user_index {
                 vec![Ok(ProviderEvent::TextDelta("All tools finished".into()))]
             } else {
-                let calls: Vec<Value> = serde_json::from_str(script.trim()).unwrap();
+                // A `[review:…]` marker may follow the calls.
+                let calls: Vec<Value> = serde_json::Deserializer::from_str(script.trim())
+                    .into_iter()
+                    .next()
+                    .unwrap()
+                    .unwrap();
                 calls
                     .iter()
                     .enumerate()
@@ -2293,6 +2312,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
         request_id: RequestId::new(),
         text: text.into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: false,
         agent: None,
@@ -3171,6 +3191,7 @@ async fn authenticated_rest_turn_runs_end_to_end() {
             request_id: RequestId::new(),
             text: "tested".into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -5094,6 +5115,7 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -5429,6 +5451,7 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -6167,6 +6190,7 @@ async fn duplicate_request_id_is_not_replayed() {
         request_id: RequestId::new(),
         text: "once".into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: false,
         agent: None,
@@ -9226,6 +9250,7 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
                 request_id: RequestId::new(),
                 text: "arrived during streaming".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -9294,6 +9319,7 @@ async fn queued_message_steers_into_running_turn() {
                 request_id: RequestId::new(),
                 text: "hi".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -9385,6 +9411,7 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
                 request_id: RequestId::new(),
                 text: "hello there".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -10622,6 +10649,7 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
                 request_id: RequestId::new(),
                 text: "steer through the status tool".into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -11297,6 +11325,7 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
                 request_id: RequestId::new(),
                 text: "begin the new objective".into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -12023,6 +12052,7 @@ fn deferred_request(text: &str) -> haarness_protocol::QueueInputRequest {
         request_id: RequestId::new(),
         text: text.into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
     }
 }
@@ -12733,6 +12763,14 @@ mod inherited_ceilings;
 #[path = "cases/shell_readings.rs"]
 mod shell_readings;
 
+#[path = "cases/agent_shell.rs"]
+mod agent_shell;
+#[path = "cases/auto_review.rs"]
+mod auto_review;
+
+#[path = "cases/permission_script.rs"]
+mod permission_script;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =
@@ -12959,6 +12997,128 @@ async fn a_preview_whose_folder_was_removed_is_restored_into_a_new_folder() {
     assert!(!workspace.join(".git").exists());
     handle.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(preview_versions(&workspace));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+/// Desktop shows a reply's `![](out/chart.png)` by reading the file through
+/// the file API, so that read must stay inside the project wherever a path or
+/// a link leads.
+#[tokio::test]
+async fn a_reply_image_is_read_only_from_inside_the_project_wherever_its_links_lead() {
+    use base64::Engine as _;
+    let base = std::env::temp_dir().join(format!("haarness-reply-image-{}", uuid::Uuid::now_v7()));
+    let (workspace, outside) = (base.join("workspace"), base.join("outside"));
+    std::fs::create_dir_all(workspace.join("out")).unwrap();
+    std::fs::create_dir_all(workspace.join(".git")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    std::fs::write(workspace.join("out/chart.png"), png).unwrap();
+    std::fs::write(workspace.join(".git/chart.png"), png).unwrap();
+    std::fs::write(outside.join("secret.png"), b"\x89PNG\r\n\x1a\nSECRET").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink("out/chart.png", workspace.join("inside.png")).unwrap();
+        symlink(outside.join("secret.png"), workspace.join("escape.png")).unwrap();
+        symlink("../outside", workspace.join("shared")).unwrap();
+    }
+    let workspace = workspace.canonicalize().unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "image-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base_url = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    let read = |path: String| {
+        let path = url::form_urlencoded::byte_serialize(path.as_bytes()).collect::<String>();
+        http.get(format!("{base_url}/v1/files/content?path={path}"))
+            .bearer_auth("image-fixture")
+            .send()
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    let image: Value = read("out/chart.png".into())
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            image["encoding"].as_str(),
+            image["mime"].as_str(),
+            image["content"].as_str()
+        ),
+        (Some("base64"), Some("image/png"), Some(encoded.as_str()))
+    );
+    let mut refused = vec![
+        (
+            "../outside/secret.png".to_owned(),
+            "Path must be relative to the workspace",
+        ),
+        (
+            outside.join("secret.png").display().to_string(),
+            "Path must be relative to the workspace",
+        ),
+        (
+            workspace.join("out/chart.png").display().to_string(),
+            "Path must be relative to the workspace",
+        ),
+        (
+            ".git/chart.png".into(),
+            "Git metadata is not editable in the file explorer",
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        // A link inside the project is read where it leads; one out of it is refused.
+        let linked: Value = read("inside.png".into())
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(linked["content"].as_str(), Some(encoded.as_str()));
+        refused.push(("escape.png".into(), "Path escapes the workspace"));
+        refused.push(("shared/secret.png".into(), "Path escapes the workspace"));
+    }
+    for (path, reason) in refused {
+        let response = read(path.clone()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+        assert_eq!(response.text().await.unwrap(), reason, "{path}");
+    }
+    let missing = read("out/missing.png".into()).await.unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    handle.shutdown().await.unwrap();
     std::fs::remove_dir_all(base).unwrap();
 }
 
@@ -13279,6 +13439,7 @@ fn queued(text: &str, effort: Option<&str>) -> haarness_protocol::QueueInputRequ
         request_id: RequestId::new(),
         text: text.into(),
         attachments: Vec::new(),
+        resources: Vec::new(),
         synthetic: false,
     }
 }
@@ -13656,3 +13817,6 @@ async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
     );
     tokio::fs::remove_dir_all(workspace).await.unwrap();
 }
+
+#[path = "cases/resource_mentions.rs"]
+mod resource_mentions;
