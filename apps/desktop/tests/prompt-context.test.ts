@@ -17,6 +17,7 @@ import {
   promptWithContext,
   readContext,
   resourceMentions,
+  resourceToRead,
   sentParts,
 } from "../src/renderer/prompt-context";
 import { elementContext, elementLabel, shortPage } from "../src/renderer/element-context";
@@ -318,4 +319,14 @@ test("a resource a sent or queued message brings back is a chip that sends what 
   // What was read counts toward no context limit, as a paste does not.
   const big = { ...chips[0], uri: "docs://big", block: "x".repeat(200 * 1024) };
   assert.doesNotThrow(() => addContext(chips, big));
+});
+test("a resource that could not be read comes back from Undo as one to read again", () => {
+  const unread =
+    "<details>\n<summary>MCP resource: logo · wiki:docs://logo (not read)</summary>\n\n```\na rule keeps this resource from the model\n```\n\n</details>";
+  const [part] = sentParts(unread);
+  assert.equal(part.kind, "resource");
+  if (part.kind !== "resource") return;
+  const chip = resourceToRead(part);
+  assert.deepEqual(chip, { kind: "resource", server: "wiki", uri: "docs://logo", name: "logo" });
+  assert.deepEqual(resourceMentions([chip]), [{ server: "wiki", uri: "docs://logo", name: "logo" }]);
 });

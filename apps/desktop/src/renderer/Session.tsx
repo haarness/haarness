@@ -23,6 +23,7 @@ import {
   carriedResource,
   commandPrompt,
   contextKey,
+  resourceToRead,
   countLines,
   mentionAgents,
   pasteFolds,
@@ -733,15 +734,18 @@ export function Session() {
     restored: (item) => {
       if (item?.data.type !== "user_message") return;
       // A slash command comes back as the line typed, so sending it again
-      // runs the command; pastes come back as their chips, and resources as
-      // chips holding what was read.
+      // runs the command; pastes come back as their chips, resources as
+      // chips holding what was read, and one that could not be read as a
+      // chip to read again.
       const parts = sentParts(item.data.command_line || item.data.text);
       const pastes = parts.flatMap((part) =>
         part.kind === "paste"
           ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }]
           : [],
       );
-      const resources = parts.flatMap((part) => (part.kind === "resource" ? [carriedResource(part)] : []));
+      const resources = parts.flatMap((part) =>
+        part.kind === "resource" ? [part.failed ? resourceToRead(part) : carriedResource(part)] : [],
+      );
       const text =
         pastes.length || resources.length
           ? parts
@@ -803,7 +807,7 @@ export function Session() {
                 .filter(
                   (item) =>
                     !(item.kind === "paste" && pastes.has(item.id)) &&
-                    !(item.kind === "resource" && item.block !== undefined && resources.has(contextKey(item))),
+                    !(item.kind === "resource" && resources.has(contextKey(item))),
                 ),
             ),
           );
@@ -2277,7 +2281,9 @@ export function Session() {
                 disabled={submitting() || stopping() || !state.ready}
                 // A queued message's edit saves text, so no new resource.
                 resources={!queue.editing()}
-                chat={state.selected ? { threadId: state.selected } : { agent: selectedAgent() }}
+                // The agent the next message runs under decides, as for the
+                // message itself.
+                chat={state.selected ? { threadId: state.selected, agent: selectedAgent() } : { agent: selectedAgent() }}
               />
               <Show when={slashOpen()}>
                 <div

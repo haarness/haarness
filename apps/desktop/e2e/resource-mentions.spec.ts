@@ -295,6 +295,9 @@ test("Undo brings a resource back as a chip holding what was read, sent again wi
   await settled();
   await input().fill("Undo me @set");
   await row("setup", "docs").click();
+  // One a rule keeps from the chat comes back to be read again.
+  await input().pressSequentially("@logo");
+  await row("logo", "wiki").click();
   await input().press("Enter");
   await expect.poll(async () => (await sent()).at(-1)?.text.startsWith("Undo me")).toBe(true);
   await settled();
@@ -304,12 +307,15 @@ test("Undo brings a resource back as a chip holding what was read, sent again wi
   await page.getByRole("button", { name: "Chat actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Undo last turn", exact: true }).click();
   await expect(input()).toHaveValue("Undo me");
-  await expect(chips()).toHaveCount(1);
-  await expect(chips().locator("summary")).toHaveText("@setup");
-  await chips().locator("summary").click();
-  await expect(chips().locator(".prompt-context-preview pre")).toHaveText("# Setup\nRun the fixture.");
-  await expect(chips().locator(".prompt-context-preview")).toContainText("Sent again as it was read.");
-  await pictures([chips().locator(".prompt-context-preview"), page.locator(".composer")], "resource-chip-undone");
+  await expect(chips()).toHaveCount(2);
+  await expect(chips().locator("summary")).toHaveText(["@setup", "@logo"]);
+  await chips().first().locator("summary").click();
+  await expect(chips().first().locator(".prompt-context-preview pre")).toHaveText("# Setup\nRun the fixture.");
+  await expect(chips().first().locator(".prompt-context-preview")).toContainText("Sent again as it was read.");
+  await pictures([chips().first().locator(".prompt-context-preview"), page.locator(".composer")], "resource-chip-undone");
+  await page.keyboard.press("Escape");
+  await chips().last().locator("summary").click();
+  await expect(chips().last().locator(".prompt-context-preview")).toContainText("Read from wiki when the message is sent.");
   await page.keyboard.press("Escape");
   await input().press("Enter");
   // The undone message is gone, and the one sent in its place is the same.
