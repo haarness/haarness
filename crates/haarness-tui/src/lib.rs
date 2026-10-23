@@ -21,6 +21,7 @@ mod preferences;
 mod prompt_context;
 mod pty_view;
 mod remote_control;
+mod resource_mentions;
 mod servers;
 mod side_chat;
 mod state;
@@ -575,6 +576,9 @@ async fn run_with_client(
     // for a list), applied when they come.
     let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
     app.catalog_tx = Some(catalog_tx.clone());
+    // MCP resources for the `@` list, read off the loop when it first opens.
+    let (resources_tx, mut resources_rx) = tokio::sync::mpsc::channel(1);
+    app.resources_tx = Some(resources_tx);
     // Side chat answers being written, applied as they arrive.
     let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel();
     app.side.sender = Some(side_tx.clone());
@@ -617,6 +621,9 @@ async fn run_with_client(
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
                     catalog_rx = receiver;
                     app.catalog_tx = Some(sender);
+                    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                    resources_rx = receiver;
+                    app.resources_tx = Some(sender);
                     app.side.sender = Some(side_tx.clone());
                     force_redraw = true;
                 }
@@ -965,6 +972,7 @@ async fn run_with_client(
                 }
             },
             Some(message) = side_rx.recv() => app.side_message(message),
+            Some(listed) = resources_rx.recv() => app.resources_arrived(listed),
             Some(listed) = catalog_rx.recv() => {
                 match listed {
                     Some(providers) => app.catalog_arrived(providers, &client).await,

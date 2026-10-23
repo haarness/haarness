@@ -188,9 +188,14 @@ fn reference_at(text: &str) -> Option<(Part<'_>, usize)> {
         let label = if paste {
             ""
         } else {
-            let label = ["File context: ", "Directory listing: ", "Page element: "]
-                .iter()
-                .find_map(|kind| summary.strip_prefix(kind))?;
+            let label = [
+                "File context: ",
+                "Directory listing: ",
+                "Page element: ",
+                "MCP resource: ",
+            ]
+            .iter()
+            .find_map(|kind| summary.strip_prefix(kind))?;
             [" (snapshot)", " (unsaved editor snapshot)"]
                 .iter()
                 .find_map(|suffix| label.strip_suffix(suffix))
@@ -243,6 +248,17 @@ fn reference_at(text: &str) -> Option<(Part<'_>, usize)> {
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
             .replace("&amp;", "&");
+        // An MCP resource the server read (or a picked one's marker) reads as
+        // the chip it was picked as: its name, without its address.
+        let label = if summary.starts_with("MCP resource: ") {
+            let (named, note) = label
+                .strip_suffix(" (not read)")
+                .map_or((label.as_str(), ""), |named| (named, " (not read)"));
+            let name = named.rsplit_once(" · ").map_or(named, |(name, _)| name);
+            format!("{name}{note}")
+        } else {
+            label
+        };
         Some((
             Part::Reference {
                 label: format!("@{label}"),
@@ -343,6 +359,9 @@ pub(crate) async fn apply(app: &mut App, client: &ApiClient) -> Result<bool> {
     let Some(selected) = app.mention_suggestions.get(app.selection).cloned() else {
         return Ok(false);
     };
+    if app.attach_resource(&selected) {
+        return Ok(true);
+    }
     if selected.ends_with('/')
         || selected.starts_with("../")
         || selected.starts_with("~/")

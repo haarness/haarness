@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "MCP resurs · {server}",
   "Read from {server} when the message is sent.": "Čita se iz {server} kada se poruka pošalje.",
   "MCP server": "MCP server",
-  "not read": "nije pročitano"
+  "not read": "nije pročitano",
+  "agents · files · resources": "agenti · datoteke · resursi",
+  "files · agents · resources": "datoteke · agenti · resursi"
 }

@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "MCP 리소스 · {server}",
   "Read from {server} when the message is sent.": "메시지를 보낼 때 {server}에서 읽습니다.",
   "MCP server": "MCP 서버",
-  "not read": "읽지 못함"
+  "not read": "읽지 못함",
+  "agents · files · resources": "에이전트 · 파일 · 리소스",
+  "files · agents · resources": "파일 · 에이전트 · 리소스"
 }

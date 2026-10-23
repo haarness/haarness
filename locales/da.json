@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "MCP-ressource · {server}",
   "Read from {server} when the message is sent.": "Læses fra {server}, når beskeden sendes.",
   "MCP server": "MCP-server",
-  "not read": "ikke læst"
+  "not read": "ikke læst",
+  "agents · files · resources": "agenter · filer · ressourcer",
+  "files · agents · resources": "filer · agenter · ressourcer"
 }

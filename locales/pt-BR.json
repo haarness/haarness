@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "Recurso MCP · {server}",
   "Read from {server} when the message is sent.": "Lido de {server} quando a mensagem é enviada.",
   "MCP server": "Servidor MCP",
-  "not read": "não lido"
+  "not read": "não lido",
+  "agents · files · resources": "agentes · arquivos · recursos",
+  "files · agents · resources": "arquivos · agentes · recursos"
 }
