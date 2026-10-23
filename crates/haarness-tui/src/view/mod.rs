@@ -624,6 +624,29 @@ impl App {
             && self.pending_questions.is_empty()
     }
 
+    /// Open or close the fold nearest the prompt among those on screen (a
+    /// tool's output, a long prompt, a thought), as a click on it would.
+    pub fn toggle_nearest_fold(&mut self) {
+        let nearest = self
+            .hit_rows
+            .borrow()
+            .iter()
+            .filter_map(|hit| match hit.target {
+                frame::HitTarget::ToolToggle(item) => Some((hit.row, item)),
+                _ => None,
+            })
+            .max_by_key(|(row, _)| *row)
+            .map(|(_, item)| item);
+        match nearest {
+            Some(item) => {
+                if !self.expanded.remove(&item) {
+                    self.expanded.insert(item);
+                }
+            }
+            None => self.notice = "Nothing to expand on screen".into(),
+        }
+    }
+
     /// The click target at a screen cell, resolved against the last frame.
     pub fn hit_at(&self, row: usize, column: usize) -> Option<frame::HitTarget> {
         self.hit_rows

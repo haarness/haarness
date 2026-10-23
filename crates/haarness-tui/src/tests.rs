@@ -2551,6 +2551,189 @@ fn a_question_a_hook_answered_says_so_on_its_row() {
     };
     assert!(row("hooked").contains("·  Answered by hook"), "{text:#?}");
     assert!(!row("asked").contains("Answered by hook"), "{text:#?}");
+    // Once answered, a question's row says what was chosen.
+    assert!(row("asked").contains("·  Unit tests"), "{text:#?}");
+}
+
+/// A long question is asked in full, wrapped under its mark, whatever the
+/// terminal's width.
+#[tokio::test]
+async fn a_long_question_wraps_instead_of_losing_its_end() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let prompt = "The migration touches three services and the nightly export job; should I also rewrite the export job to stream rows instead of buffering them, given the TAIL-OF-QUESTION?";
+    app.reduce(
+        fixture_event(
+            "question.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({"questionId": "q-long", "prompt": prompt, "choices": ["Yes", "No"]}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    for width in [80, 120] {
+        let text = frame_text(&app, (width, 30));
+        assert!(text.contains("TAIL-OF-QUESTION?"), "{width}: {text}");
+        let rows: Vec<&str> = text.lines().collect();
+        let first = rows
+            .iter()
+            .position(|row| row.starts_with("  ? The migration"))
+            .expect("question row");
+        assert!(rows[first + 1].starts_with("    "), "{width}: {text}");
+        assert!(!rows[first].contains('…'), "{width}: {text}");
+    }
+}
+
+/// A failure's output wraps under the gutter, so a long compiler line is
+/// readable to its last word; so does output opened to be read, while a
+/// quiet preview keeps one row per line. The caps count rows on screen and
+/// the fold names the lines it hides.
+#[test]
+fn tool_output_wraps_when_it_is_read_and_folds_by_lines() {
+    let thread = fixture_thread();
+    let long = "ERROR-START this is a very long diagnostic line from a compiler that explains exactly what went wrong and where, with a path /very/long/path/to/some/file.rs:123:45 and a hint at the END-OF-LINE";
+    let call = |sequence, id: &str, command: &str| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let result = |sequence, id: &str, output: String, exit: i64| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolResult {
+                call_id: id.into(),
+                name: "bash".into(),
+                output,
+                is_error: false,
+                metadata: serde_json::json!({"exit": exit, "truncated": false}),
+            },
+        )
+    };
+    let items = vec![
+        call(1, "fails", "cargo build"),
+        result(2, "fails", format!("exit: 1\n{long}"), 1),
+    ];
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let text = frame_text(&app, (80, 30));
+    assert!(text.contains("END-OF-LINE"), "{text}");
+    assert!(!text.contains("ex…"), "{text}");
+    let gutter = text.lines().filter(|row| row.starts_with("  ▏ ")).count();
+    assert!(gutter >= 3, "one line, wrapped: {text}");
+
+    // Many long failing lines: the cap counts rows, the fold counts lines.
+    let many = (1..=6)
+        .map(|index| format!("line {index}: {long}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = vec![
+        call(1, "many", "cargo test"),
+        result(2, "many", format!("exit: 1\n{many}"), 1),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let id = app.items[1].id;
+    let text = frame_text(&app, (80, 40));
+    let gutter = text.lines().filter(|row| row.starts_with("  ▏ ")).count();
+    // Eight rows of output and the fold under them; the third line, cut
+    // part way, is one of the four it hides.
+    assert_eq!(gutter, 9, "{text}");
+    assert!(
+        text.contains("… +4 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
+    app.expanded.insert(id);
+    let text = frame_text(&app, (80, 60));
+    assert!(text.contains("line 6: ERROR-START"), "{text}");
+    assert!(text.contains("… ctrl+r or click to collapse"), "{text}");
+
+    // A successful preview stays one row per line.
+    let items = vec![
+        call(1, "ok", "cat notes"),
+        result(2, "ok", format!("exit: 0\n{long}"), 0),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.tool_details = true;
+    let text = frame_text(&app, (80, 30));
+    assert_eq!(
+        text.lines().filter(|row| row.starts_with("  ▏ ")).count(),
+        1,
+        "{text}"
+    );
+    let id = app.items[1].id;
+    app.expanded.insert(id);
+    assert!(frame_text(&app, (80, 30)).contains("END-OF-LINE"));
+}
+
+/// The key bound to folds (Ctrl+R) opens the fold nearest the prompt among
+/// those on screen and closes it again, as a click does.
+#[tokio::test]
+async fn ctrl_r_opens_and_closes_the_nearest_fold() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    let _ = app.lines((100, 30));
+    crate::input::handle_key(&mut app, ctrl_r, &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.notice, "Nothing to expand on screen");
+    let listing = (1..=20)
+        .map(|index| format!("row-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let older = message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: listing.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+    );
+    let call = message_item(
+        2,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "notes.txt"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    );
+    let result = message_item(
+        3,
+        &thread,
+        ItemData::ToolResult {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            output: listing,
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let newest = result.id;
+    app.items = vec![older, call, result];
+    let _ = app.lines((100, 40));
+    crate::input::handle_key(&mut app, ctrl_r, &offline_client())
+        .await
+        .unwrap();
+    assert!(app.expanded.contains(&newest), "the newest fold opened");
+    assert_eq!(app.expanded.len(), 1);
+    assert!(frame_text(&app, (100, 40)).contains("row-20"));
+    crate::input::handle_key(&mut app, ctrl_r, &offline_client())
+        .await
+        .unwrap();
+    assert!(app.expanded.is_empty(), "and closed again");
 }
 
 #[test]
@@ -13824,7 +14007,10 @@ fn shell_mode_output_shows_under_the_command_and_a_non_zero_exit_reads_as_failed
     assert!(text.contains("file-1.py"), "{text}");
     assert!(text.contains("file-10.py"), "{text}");
     assert!(!text.contains("file-11.py"), "{text}");
-    assert!(text.contains("… +4 more lines · click to expand"), "{text}");
+    assert!(
+        text.contains("… +4 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
     assert!(!text.contains("exit: 0"), "{text}");
     // A non-zero exit fails the row and keeps its stderr in view, whoever ran it.
     assert!(text.contains("✗ bash cat missing.txt  exit 1"), "{text}");
@@ -17025,7 +17211,7 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
     );
     assert!(!folded.contains("pasted line 60"), "{folded}");
     assert!(
-        folded.contains("▎ … +53 more lines · click to expand"),
+        folded.contains("▎ … +53 more lines · ctrl+r or click to expand"),
         "{folded}"
     );
     assert!(
@@ -17038,7 +17224,32 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
     app.expanded.insert(id);
     let open = text(&app);
     assert!(open.contains("▎ pasted line 60"), "{open}");
-    assert!(open.contains("▎ … click to collapse"), "{open}");
+    assert!(open.contains("▎ … ctrl+r or click to collapse"), "{open}");
+}
+
+/// A long prompt's fold counts the lines it was written in, not the rows they
+/// wrap to: a line cut part way counts as hidden.
+#[test]
+fn a_folded_prompt_counts_hidden_lines_not_rows() {
+    let thread = fixture_thread();
+    let long = "word ".repeat(200);
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: format!("{long}\nsecond line\nthird line"),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+    )];
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = frame_text(&app, (80, 40));
+    assert!(
+        text.contains("▎ … +3 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
 }
 
 #[test]

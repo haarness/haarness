@@ -6,8 +6,13 @@ use haarness_protocol::{ManagementField, ManagementView};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// Opens or closes the fold nearest the prompt: a tool's output, a long
+/// prompt, a thought.
+pub(crate) const FOLD_ACTION: &str = "fold";
+
 pub(crate) const ACTIONS: &[(&str, &str, &str)] = &[
     ("commands", "Command palette", "ctrl+p"),
+    (FOLD_ACTION, "Expand or collapse output", "ctrl+r"),
     ("sessions", "Sessions", "ctrl+l"),
     ("messages", "Message browser", "alt+m"),
     ("models", "Models", "F2"),

@@ -123,7 +123,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         screen("tui-paste-chip")
         text(" summarise")
         keys("Enter")
-        until(lambda: "+" in pane() and "more lines · click to expand" in pane(), "the long prompt did not fold")
+        until(lambda: "+" in pane() and "more lines · ctrl+r or click to expand" in pane(), "the long prompt did not fold")
         idle()
         thread = api("/threads")[0]["id"]
         sent = next(item for item in api(f"/threads/{thread}/items") if item["data"]["type"] == "user_message")
