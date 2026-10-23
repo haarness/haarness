@@ -405,9 +405,14 @@ fn script_rows(
         (false, 1) => language.text("1 line").to_owned(),
         (false, _) => language.format("{count} lines", &[("count", &count)]),
     };
+    // A long path gives way from its start: the file's own name and the
+    // size stay in view. The row has the gutter's two cells more.
+    let label = format!("{}: ", language.text("Script"));
+    let suffix = format!(" · {size}");
+    let room = (width + 2).saturating_sub(label.width() + suffix.width());
     let mut rows = vec![(
         Row::ScriptName,
-        format!("{}: {path} · {size}", language.text("Script")),
+        format!("{label}{}{suffix}", path_tail(path, room)),
     )];
     for line in lines {
         for part in hard_wrap(&printable(line), width.max(1)) {
@@ -423,6 +428,25 @@ fn script_rows(
         ));
     }
     rows
+}
+
+/// `path` in at most `width` cells: whole, or its end after `…`.
+fn path_tail(path: &str, width: usize) -> String {
+    if path.width() <= width {
+        return path.to_owned();
+    }
+    let mut kept = Vec::new();
+    let mut used = 1;
+    for grapheme in path.graphemes(true).rev() {
+        let cells = grapheme.width();
+        if used + cells > width {
+            break;
+        }
+        kept.push(grapheme);
+        used += cells;
+    }
+    kept.reverse();
+    format!("…{}", kept.concat())
 }
 
 /// A script line as the terminal can draw it: tabs as spaces to the next
@@ -696,6 +720,7 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
             spans.extend(scroll_hint(
                 app,
                 hidden.then(|| (offset + 1, offset + subject_count, subject_rows.len())),
+                script.is_some(),
                 fit.expandable,
                 expanded,
                 inner.saturating_sub(2),
@@ -859,6 +884,7 @@ fn spend(room: &mut usize, wanted: usize) -> usize {
 fn scroll_hint(
     app: &App,
     window: Option<(usize, usize, usize)>,
+    rows: bool,
     expandable: bool,
     expanded: bool,
     width: usize,
@@ -877,10 +903,18 @@ fn scroll_hint(
             pairs.push(("ctrl+e", "expand"));
         }
     }
+    // With a script on the card the window counts screen rows (its long
+    // lines wrap), while its header counts the script's lines: so it says
+    // rows.
+    let key = if rows {
+        "rows {from}–{to} of {total}"
+    } else {
+        "lines {from}–{to} of {total}"
+    };
     let position = window.map(|(from, to, total)| {
         single_line(
             &language.format(
-                "lines {from}–{to} of {total}",
+                key,
                 &[
                     ("from", &from.to_string()),
                     ("to", &to.to_string()),

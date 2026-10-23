@@ -1717,6 +1717,7 @@
   "expand": "proširi",
   "collapse": "skupi",
   "lines {from}–{to} of {total}": "redovi {from}–{to} od {total}",
+  "rows {from}–{to} of {total}": "redovi ekrana {from}–{to} od {total}",
   "always allows": "uvijek dozvoljava",
   "Haarness could not read all of this command.": "Haarness nije mogao pročitati cijelu ovu naredbu.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness nije mogao pročitati cijelu ovu naredbu; možda vrijedi pravilo za {rule}.",

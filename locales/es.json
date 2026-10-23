@@ -1717,6 +1717,7 @@
   "expand": "expandir",
   "collapse": "contraer",
   "lines {from}–{to} of {total}": "líneas {from}–{to} de {total}",
+  "rows {from}–{to} of {total}": "filas {from}–{to} de {total}",
   "always allows": "siempre permite",
   "Haarness could not read all of this command.": "Haarness no pudo leer todo este comando.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness no pudo leer todo este comando; puede aplicarse una regla para {rule}.",

@@ -1717,6 +1717,7 @@
   "expand": "ขยาย",
   "collapse": "ยุบ",
   "lines {from}–{to} of {total}": "บรรทัด {from}–{to} จาก {total}",
+  "rows {from}–{to} of {total}": "แถว {from}–{to} จาก {total}",
   "always allows": "อนุญาตเสมอ",
   "Haarness could not read all of this command.": "Haarness อ่านคำสั่งนี้ได้ไม่ครบ",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness อ่านคำสั่งนี้ได้ไม่ครบ อาจมีกฎสำหรับ {rule} ที่ใช้ได้",

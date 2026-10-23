@@ -39,6 +39,15 @@ deploy = [
 )
 (workspace / '.env.local').write_text('TOKEN=fixture-only\n')
 (workspace / '.envrc').write_text('export TOKEN=fixture-only\n')
+# A project with the default rules, where `bash` asks nothing and the card a
+# command raises is about a folder outside the project.
+plain = root / 'plain'
+(plain / '.haarness').mkdir(parents=True)
+(plain / '.haarness/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+outside = root / 'outside'
+outside.mkdir()
+(outside / 'run.sh').write_text('#!/bin/sh\nprintf ran > ran.txt\n')
+(outside / 'run.sh').chmod(0o755)
 variant = os.environ.get('HAARNESS_TUI_VARIANT')
 binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve())
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
@@ -55,11 +64,12 @@ if variant:
 name = 'haarness-script-' + uuid.uuid4().hex[:10]
 checks = []
 connection = None
+thread = None
 
 
-def cli(*args, input=None):
+def cli(*args, input=None, ws=workspace):
     return subprocess.run(
-        [binary, '--workspace', str(workspace), *args],
+        [binary, '--workspace', str(ws), *args],
         input=input, env=env, text=True, capture_output=True, check=True, timeout=60,
     ).stdout
 
@@ -125,13 +135,19 @@ def approval():
     return api('/permissions')[0]
 
 
-try:
-    connection = json.loads(cli('desktop', input='{"action":"connect"}'))
+def attach(ws):
+    """Starts the server for `ws` and a TUI attached to a new chat in it."""
+    global connection, thread
+    connection = json.loads(cli('desktop', input='{"action":"connect"}', ws=ws))
     env['HAARNESS_SERVER_TOKEN'] = connection.get('token', '')
     thread = api('/threads', {'title': 'Script on the card', 'provider': 'echo', 'model': 'echo-1'})
-    command = [binary, '--workspace', str(workspace), 'attach', connection['url'], '--thread', thread['id']]
+    command = [binary, '--workspace', str(ws), 'attach', connection['url'], '--thread', thread['id']]
     tmux('new-session', '-d', '-s', name, '-x', '110', '-y', '40', pane_command(env, command))
     until(lambda: 'Echo 1' in capture(), 'TUI attach')
+
+
+try:
+    attach(workspace)
 
     started = turn('cd scripts && sh deploy.sh')
     pending = approval()
@@ -179,12 +195,31 @@ try:
         keys('n')
         finish(started)
     check('a secret-named file, a credential file or a command that runs no script shows nothing more', 'none')
+
+    # Under the default rules the only card is the outside folder's, and it
+    # shows the script that runs there.
+    subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
+    cli('serve', '--stop')
+    attach(plain)
+    started = turn(f'cd {outside} && ./run.sh')
+    pending = approval()
+    assert pending['permission'] == 'external_directory', pending
+    screen = until(lambda: (text if 'Script:' in (text := capture()) else None), 'outside script row')
+    assert 'Access outside the project' in screen, screen
+    # A long path gives way from its start; the name and size stay.
+    assert 'outside/run.sh · 2 lines' in screen, screen
+    assert '│ printf ran > ran.txt' in screen, screen
+    check('under the default rules the outside folder card shows the script that runs there', 'outside')
+    keys('y')
+    finish(started)
+    assert (outside / 'ran.txt').read_text() == 'ran'
     (root / 'results.json').write_text(json.dumps(checks, indent=2))
     print('PASS', len(checks), 'script card scenarios.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
-    try:
-        cli('serve', '--stop')
-    except Exception:
-        pass
+    for ws in [workspace, plain]:
+        try:
+            cli('serve', '--stop', ws=ws)
+        except Exception:
+            pass
     e2e_scratch.settle(root)

@@ -1717,6 +1717,7 @@
   "expand": "توسيع",
   "collapse": "طي",
   "lines {from}–{to} of {total}": "الأسطر {from}–{to} من {total}",
+  "rows {from}–{to} of {total}": "صفوف العرض {from}–{to} من {total}",
   "always allows": "يسمح دائمًا",
   "Haarness could not read all of this command.": "تعذّر على Haarness قراءة هذا الأمر كاملًا.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "تعذّر على Haarness قراءة هذا الأمر كاملًا؛ قد تنطبق عليه قاعدة لـ {rule}.",

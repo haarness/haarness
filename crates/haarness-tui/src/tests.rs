@@ -9151,6 +9151,10 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
     assert!(text.contains("│     curl xxx"), "{text}");
     assert!(!text.contains("step-09"), "{text}");
     assert!(text.contains("ctrl+e expand"), "{text}");
+    // The window counts screen rows (the script's long lines wrap), not the
+    // script's lines its header counts.
+    assert!(text.contains("rows 1–5 of "), "{text}");
+    assert!(!text.contains("lines 1–5"), "{text}");
     // Expanded, all of it: the long line whole, the escape drawn, the cut
     // said.
     press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
@@ -9196,6 +9200,15 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         text.contains("Script: run.sh · start of the file"),
         "{text}"
     );
+    // A long path gives way from its start; the name and size stay.
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: format!("/elsewhere/{}/tools/run.sh", "deep/".repeat(30)),
+        content: "echo one\n".into(),
+        truncated: false,
+    });
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Script: …"), "{text}");
+    assert!(text.contains("/tools/run.sh · 1 line"), "{text}");
     // A request without one keeps the card it had.
     app.pending_permissions[0].script = None;
     assert!(!frame_text(&app, (100, 40)).contains("Script:"));

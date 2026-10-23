@@ -1717,6 +1717,7 @@
   "expand": "rozwiń",
   "collapse": "zwiń",
   "lines {from}–{to} of {total}": "wiersze {from}–{to} z {total}",
+  "rows {from}–{to} of {total}": "wiersze ekranu {from}–{to} z {total}",
   "always allows": "zawsze zezwala",
   "Haarness could not read all of this command.": "Haarness nie mógł odczytać całego tego polecenia.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness nie mógł odczytać całego tego polecenia; może obowiązywać reguła dla {rule}.",
