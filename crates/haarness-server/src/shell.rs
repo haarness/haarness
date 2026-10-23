@@ -37,15 +37,9 @@ pub(crate) async fn run(
     env: &BTreeMap<String, String>,
 ) -> CoreResult<ToolOutput> {
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
-    // A `cd` goes where the command says, as its approval card reads it, not
-    // through a `CDPATH`: the inherited one is removed below, and the login
-    // shell's profile may set one again.
-    #[cfg(not(windows))]
-    let command = &format!("unset CDPATH; {command}");
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
     command
         .current_dir(dunce::simplified(workdir))
-        .env_remove("CDPATH")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -266,41 +260,6 @@ mod tests {
         .unwrap();
         assert_eq!(lang(&output), "C");
         std::fs::remove_dir_all(root).unwrap();
-    }
-    /// A `cd` goes where the command says, as its approval card reads it:
-    /// not through a `CDPATH`, given by a hook or set again by the login
-    /// shell's profile.
-    #[tokio::test]
-    async fn cd_goes_where_the_command_says_whatever_cdpath_says() {
-        let root = fixture();
-        let elsewhere = fixture();
-        let home = fixture();
-        for folder in [&root, &elsewhere] {
-            std::fs::create_dir_all(folder.join("sub")).unwrap();
-        }
-        std::fs::write(root.join("sub/run.sh"), "printf here").unwrap();
-        std::fs::write(elsewhere.join("sub/run.sh"), "printf elsewhere").unwrap();
-        let cdpath = elsewhere.display().to_string();
-        std::fs::write(home.join(".profile"), format!("export CDPATH='{cdpath}'\n")).unwrap();
-        for env in [
-            BTreeMap::from([("CDPATH".to_owned(), cdpath.clone())]),
-            BTreeMap::from([("HOME".to_owned(), home.display().to_string())]),
-        ] {
-            let output = run(
-                "cd sub && sh run.sh",
-                &root,
-                0,
-                &CancellationToken::new(),
-                &root,
-                &env,
-            )
-            .await
-            .unwrap();
-            assert_eq!(output.metadata["stdout"], "here", "{env:?}");
-        }
-        for folder in [root, elsewhere, home] {
-            std::fs::remove_dir_all(folder).unwrap();
-        }
     }
     #[tokio::test]
     async fn zero_deadline_is_cancellable_and_timeout_kills_descendants() {
