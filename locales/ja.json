@@ -2768,5 +2768,7 @@
   "Ask about this chat without adding to it": "このチャットに追加せずに質問する",
   "Hide side chat": "サイドチャットを隠す",
   "Resize side chat": "サイドチャットのサイズを変更",
-  "This server answers each question on its own": "このサーバーは質問を一つずつ個別に答えます"
+  "This server answers each question on its own": "このサーバーは質問を一つずつ個別に答えます",
+  "Outside this project": "このプロジェクトの外にあります",
+  "Too large to show": "大きすぎて表示できません"
 }

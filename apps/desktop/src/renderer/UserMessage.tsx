@@ -15,6 +15,7 @@ import { Button } from "./ui";
 import { pasteLabel } from "./PromptContext";
 import { commandPrompt, countLines, sentParts } from "./prompt-context";
 import { isOpen, setOpen } from "./disclosure";
+import { pictureLines } from "./picture-lines";
 import "./user-message.css";
 
 /** A prompt taller than this many lines folds to its first eight
@@ -66,10 +67,12 @@ export function UserMessageBody(props: {
   let content!: HTMLDivElement;
   onMount(() => {
     // Measured from the unclamped content, before the frame is painted, so a
-    // long message never shows unfolded first.
+    // long message never shows unfolded first. An image is a thumbnail that
+    // opens full size, so it does not make a message long: only the line it
+    // sits on counts.
     const measure = () => {
       const line = parseFloat(getComputedStyle(body).lineHeight) || 22;
-      setTall(content.scrollHeight > line * FOLD_LINES + 1);
+      setTall(content.scrollHeight - pictureLines(content, line) > line * FOLD_LINES + 1);
     };
     const observer = new ResizeObserver(measure);
     observer.observe(content);

@@ -336,10 +336,34 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   max-height: 420px;
   border-radius: var(--r-md);
 }
-/* An image from another host waits for a click (remote-images.ts): framed
-   like inline code, sized to its text, and inline like the image it stands
-   for, so a badge in a sentence stays in it. */
-.markdown .remote-image {
+/* In the conversation (replies, thinking, side chats, your own messages) an
+   image is no taller than 320px and its width follows, so the ratio holds
+   and a smaller one keeps its own size. One whose markup gives it a width of
+   its own is fitted inside that box, never stretched. A Markdown file's
+   preview keeps the larger bound. */
+.markdown:not(.markdown-document) img {
+  max-height: 320px;
+  height: auto;
+  object-fit: contain;
+}
+/* In your own message an image is a thumbnail, as an attachment is, and it
+   opens full size; it never folds the message (UserMessage.tsx). */
+.bubble .markdown img {
+  max-height: 120px;
+}
+/* An image the conversation shows smaller than it is opens full size (ImageViewer.tsx). */
+:is(.markdown, .tool-image, .attachment-image) img[data-image-open] {
+  cursor: zoom-in;
+}
+:root:not([data-pointer-focus]) :is(.markdown, .tool-image, .attachment-image) img[data-image-open]:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
+}
+/* An image from another host waits for a click (remote-images.ts), and one
+   from the project while it is read (project-images.ts): framed like inline
+   code, sized to its text, and inline like the image it stands for, so a
+   badge in a sentence stays in it. */
+.markdown :is(.remote-image, .project-image) {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -356,13 +380,22 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   line-height: 1.4;
   color: var(--muted);
 }
-.markdown .remote-image-alt {
+/* No button ends a project image's frame, so its text sits as far from either edge. */
+.markdown .project-image {
+  padding-inline: var(--s3);
+}
+.markdown :is(.remote-image-alt, .project-image-alt) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
   unicode-bidi: plaintext;
+}
+/* Why no picture comes: outside the project, too large, or not available. */
+.markdown .project-image-note {
+  color: var(--muted);
+  white-space: nowrap;
 }
 /* The button names the host and is never cut short: the end of a host name
    says who gets the request. */
@@ -680,6 +713,18 @@ html[dir="rtl"] .tool-target {
 }
 .tool-body .tool-output {
   color: var(--text);
+}
+/* The image a read returned, under its result: no taller than a reply's,
+   and opens full size. */
+.tool-image {
+  padding: 0 var(--s3) var(--s3);
+}
+.tool-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border-radius: var(--r-md);
 }
 
 /* An edit shown as a change rather than as arguments. */

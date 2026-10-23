@@ -1,4 +1,4 @@
-import { measureRow } from "./measure-row";
+import { keepsRowsAbove, measureRow } from "./measure-row";
 import { toastAnchor } from "./toast-anchors";
 import { t, splitAround, parseLanguage } from "./i18n";
 import { InputQueue, createInputQueue } from "./InputQueue";
@@ -79,6 +79,7 @@ import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
+import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
@@ -994,6 +995,16 @@ export function Session() {
     overscan: 8,
     getItemKey: (index) => rows()[index]?.id ?? index,
   });
+  // A row wholly above the view that grows keeps what is read in place, also
+  // while scrolling up (measure-row.ts). The view moves down before the list's
+  // height has grown, which near its end would cut the move short, so the
+  // list is made that tall first.
+  virtual.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    if (!keepsRowsAbove(item, instance)) return false;
+    const body = instance.scrollElement?.querySelector<HTMLElement>(":scope > .transcript-body");
+    if (body && delta > 0) body.style.height = `${instance.getTotalSize() + delta}px`;
+    return true;
+  };
   // The outline lists every prompt the user wrote and marks the one being
   // read. It is measured from the virtualizer's own row offsets, at most once
   // a frame, so streaming and scrolling never read every row's layout.
@@ -2629,20 +2640,27 @@ function Message(props: {
                       .attachments
                   }
                 >
-                  {(attachment) => (
-                    <span class="attachment-chip">
-                      {attachment.startsWith("data:image/") ? (
+                  {(attachment) =>
+                    attachment.startsWith("data:image/") ? (
+                      <span
+                        class="attachment-chip attachment-image"
+                        ref={(element) => {
+                          // Shown smaller than it is, an attached image opens full size.
+                          const opening = watchOpenImages(element, () => t("Attached image"));
+                          onCleanup(opening.dispose);
+                        }}
+                      >
                         <img src={attachment} alt={t("Attached image")} />
-                      ) : (
-                        <>
-                          <Icon name="file" size="sm" />
-                          <span class="attachment-name">
-                            {attachmentName(attachment)}
-                          </span>
-                        </>
-                      )}
-                    </span>
-                  )}
+                      </span>
+                    ) : (
+                      <span class="attachment-chip">
+                        <Icon name="file" size="sm" />
+                        <span class="attachment-name">
+                          {attachmentName(attachment)}
+                        </span>
+                      </span>
+                    )
+                  }
                 </For>
               </UserMessageBody>
             </div>

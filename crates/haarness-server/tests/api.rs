@@ -12965,6 +12965,128 @@ async fn a_preview_whose_folder_was_removed_is_restored_into_a_new_folder() {
     std::fs::remove_dir_all(base).unwrap();
 }
 
+/// Desktop shows a reply's `![](out/chart.png)` by reading the file through
+/// the file API, so that read must stay inside the project wherever a path or
+/// a link leads.
+#[tokio::test]
+async fn a_reply_image_is_read_only_from_inside_the_project_wherever_its_links_lead() {
+    use base64::Engine as _;
+    let base = std::env::temp_dir().join(format!("haarness-reply-image-{}", uuid::Uuid::now_v7()));
+    let (workspace, outside) = (base.join("workspace"), base.join("outside"));
+    std::fs::create_dir_all(workspace.join("out")).unwrap();
+    std::fs::create_dir_all(workspace.join(".git")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    std::fs::write(workspace.join("out/chart.png"), png).unwrap();
+    std::fs::write(workspace.join(".git/chart.png"), png).unwrap();
+    std::fs::write(outside.join("secret.png"), b"\x89PNG\r\n\x1a\nSECRET").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink("out/chart.png", workspace.join("inside.png")).unwrap();
+        symlink(outside.join("secret.png"), workspace.join("escape.png")).unwrap();
+        symlink("../outside", workspace.join("shared")).unwrap();
+    }
+    let workspace = workspace.canonicalize().unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "image-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base_url = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    let read = |path: String| {
+        let path = url::form_urlencoded::byte_serialize(path.as_bytes()).collect::<String>();
+        http.get(format!("{base_url}/v1/files/content?path={path}"))
+            .bearer_auth("image-fixture")
+            .send()
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    let image: Value = read("out/chart.png".into())
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            image["encoding"].as_str(),
+            image["mime"].as_str(),
+            image["content"].as_str()
+        ),
+        (Some("base64"), Some("image/png"), Some(encoded.as_str()))
+    );
+    let mut refused = vec![
+        (
+            "../outside/secret.png".to_owned(),
+            "Path must be relative to the workspace",
+        ),
+        (
+            outside.join("secret.png").display().to_string(),
+            "Path must be relative to the workspace",
+        ),
+        (
+            workspace.join("out/chart.png").display().to_string(),
+            "Path must be relative to the workspace",
+        ),
+        (
+            ".git/chart.png".into(),
+            "Git metadata is not editable in the file explorer",
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        // A link inside the project is read where it leads; one out of it is refused.
+        let linked: Value = read("inside.png".into())
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(linked["content"].as_str(), Some(encoded.as_str()));
+        refused.push(("escape.png".into(), "Path escapes the workspace"));
+        refused.push(("shared/secret.png".into(), "Path escapes the workspace"));
+    }
+    for (path, reason) in refused {
+        let response = read(path.clone()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+        assert_eq!(response.text().await.unwrap(), reason, "{path}");
+    }
+    let missing = read("out/missing.png".into()).await.unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 #[tokio::test]
 async fn published_remote_chat_cannot_read_or_control_other_conversations() {
     let workspace =
