@@ -306,6 +306,10 @@ test("a tool's family comes from whole words of its name, never from letters ins
   assert.equal(toolKind("run_shell_command"), "run");
   assert.equal(toolKind("str_replace_editor"), "edit");
   assert.equal(toolKind("http_get"), "web");
+  // An MCP tool is read by its own words, not by its server's name.
+  assert.equal(toolKind("mcp__web-search__create_note"), "other");
+  assert.equal(toolKind("mcp__file_reader__summarize"), "other");
+  assert.equal(toolKind("mcp__github__search_issues"), "search");
   // Haarness's own family tools keep theirs, though their names are one word.
   for (const [name, kind] of [["multiedit", "edit"], ["webfetch", "web"], ["apply_patch", "edit"], ["bash", "run"]])
     assert.equal(toolKind(name), kind, name);
@@ -323,6 +327,8 @@ test("a result reads without the engine's category, the system's error number or
   );
   assert.equal(resultText("bash", { output: "exit: 0\ntotal 8\n.\n", is_error: false, metadata: { exit: 0 } }), "total 8\n.\n");
   assert.equal(resultText("bash", { output: "exit: 3\nboom", is_error: false, metadata: { exit: 3 } }), "boom");
+  // Without the status in the result, its line stays: nothing else says it.
+  assert.equal(resultText("bash", { output: "exit: 3\nboom", is_error: false }), "exit: 3\nboom");
   // Output that only mentions those words keeps them.
   assert.equal(resultText("read", { output: "exit: 0\ntool error: x", is_error: false }), "exit: 0\ntool error: x");
   assert.equal(exitStatus("bash", { output: "", is_error: false, metadata: { exit: 3 } }), 3);

@@ -1457,7 +1457,8 @@ export function Session() {
       virtual.scrollToIndex(Math.max(0, index), { align: "center" });
       scrolling.focus({ preventScroll: true });
       clearTimeout(sourceTimer);
-      setSourceReply(rows()[Math.max(0, index)]?.id);
+      // Only the reply it was forked from: nothing when it is not there.
+      setSourceReply(index >= 0 ? rows()[index]?.id : undefined);
       sourceTimer = setTimeout(() => setSourceReply(undefined), 1600);
     }
   }
@@ -3757,22 +3758,35 @@ function Permission(props: {
           >
             {t("Deny")}
           </button>
-          {/* Always a menu, whatever it holds, so the answers keep their
-              places when Auto comes or goes. */}
+          {/* The ways of allowing more than this request share one slot: a
+              menu, or the one way as a button of its own. */}
           <Show when={props.permission.allowAlways !== false}>
-            <MenuButton
-              label={t("Always allow")}
-              content={
-                <>
-                  {t("Always allow")}
-                  <Icon name="down" size="xs" />
-                </>
+            <Show
+              when={alwaysChoices().length > 1}
+              fallback={
+                <button
+                  disabled={answered()}
+                  onClick={() => alwaysChoices()[0]?.run?.()}
+                  title={alwaysRules().join("\n") || alwaysChoices()[0]?.detail}
+                >
+                  {alwaysChoices()[0]?.label}
+                </button>
               }
-              class="prompt-always"
-              disabled={answered()}
-              title={alwaysRules().join("\n") || t("Always allow")}
-              items={alwaysChoices()}
-            />
+            >
+              <MenuButton
+                label={t("Always allow")}
+                content={
+                  <>
+                    {t("Always allow")}
+                    <Icon name="down" size="xs" />
+                  </>
+                }
+                class="prompt-always"
+                disabled={answered()}
+                title={alwaysRules().join("\n") || t("Always allow")}
+                items={alwaysChoices()}
+              />
+            </Show>
           </Show>
           <button
             class="primary"
@@ -3789,7 +3803,7 @@ function Permission(props: {
 }
 /** A menu line too long for the menu, with its start and its end kept (a
  * command's start, a path's last folders) and the middle left out. */
-function middleTruncate(text: string, length = 34) {
+function middleTruncate(text: string, length = 30) {
   const characters = Array.from(text);
   if (characters.length <= length) return text;
   const head = Math.ceil((length - 1) / 2);

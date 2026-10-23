@@ -178,7 +178,9 @@ export const toolWords = (name: string) =>
     .filter(Boolean);
 export function toolKind(name: string): ToolKind {
   if (Object.hasOwn(ownFamily, name)) return ownFamily[name];
-  const words = toolWords(name);
+  // An MCP tool (`mcp__<server>__<tool>`) is read by its own words, not its
+  // server's: `mcp__web-search__create_note` creates a note.
+  const words = toolWords(/^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(name)?.[1] ?? name);
   return familyWords.find(([, family]) => words.some((word) => family.includes(word)))?.[0] ?? "other";
 }
 const kindShape: Record<ToolKind, { icon: IconName } & Verbs> = {
@@ -428,7 +430,9 @@ export function resultText(name: string, result: ToolResult) {
     text = text
       .replace(/^(?:tool error|invalid request|provider error|storage error|conflict): /, "")
       .replace(/ ?\(os error \d+\)/g, "");
-  else if (toolName(name) === "bash") text = text.replace(/^exit: -?\d+\n/, "");
+  // Only when the status is known: then the row says it, as a chip or not at all.
+  else if (toolName(name) === "bash" && typeof object(result.metadata)?.exit === "number")
+    text = text.replace(/^exit: -?\d+\n/, "");
   return toolOutput(name, text);
 }
 /** A command's exit status, when it is not 0. */
