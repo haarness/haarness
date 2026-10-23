@@ -70,16 +70,14 @@ pub fn reminder(
     (!blocks.is_empty()).then(|| blocks.join(SEPARATOR))
 }
 
-/// How a message another chat's agent sends (`session_message`) starts. It
-/// is stored as an ordinary message of the chat it reaches, so this is what
-/// tells it apart from the person's words; a person who types it only makes
-/// Auto's review of their request stricter.
-pub const SESSION_MESSAGE_PREFIX: &str = "Message from session #";
+pub use haarness_protocol::{AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX};
 
-/// Whether `text` is a message another chat's agent sent, not the person's.
+/// Whether `text` is a message another agent sent (another chat's, or a
+/// Haarness agent's to a Cloud session), not the person's.
 #[must_use]
 pub fn is_session_message(text: &str) -> bool {
-    text.trim_start().starts_with(SESSION_MESSAGE_PREFIX)
+    let text = text.trim_start();
+    text.starts_with(SESSION_MESSAGE_PREFIX) || text.starts_with(AGENT_MESSAGE_PREFIX)
 }
 
 /// Whether `text` is a hidden message made by [`reminder`]: it only tells the

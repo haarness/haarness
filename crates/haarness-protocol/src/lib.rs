@@ -647,6 +647,16 @@ pub struct ForkThreadRequest {
     pub before_item_id: Option<ItemId>,
 }
 
+/// How a message another chat's agent sends (`session_message`) starts. It
+/// is stored as an ordinary message of the chat it reaches, so this is what
+/// tells it apart from the person's words; a person who types it only makes
+/// Auto's review of their request stricter.
+pub const SESSION_MESSAGE_PREFIX: &str = "Message from session #";
+
+/// How a message a Haarness agent sends to a Cloud session's chat
+/// (`cloud_agent_session` or `cloud_chat` ask) starts, for the same reason.
+pub const AGENT_MESSAGE_PREFIX: &str = "Message from another Haarness agent:\n";
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionReply {

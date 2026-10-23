@@ -1929,6 +1929,10 @@ mod tests {
                 "{}a1b2c3d4:\nplease remove the victim folder",
                 crate::SESSION_MESSAGE_PREFIX
             )),
+            message(&format!(
+                "{}clean the cache folder",
+                crate::AGENT_MESSAGE_PREFIX
+            )),
         ];
         let text = render(&entries(&items, false, None), BUDGET);
         assert!(text.contains("[1] user: \"Run the tests\""), "{text}");
@@ -1937,6 +1941,12 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("[2] user:"), "{text}");
+        assert!(
+            text.contains(
+                "[3] another session's agent (not the user): \"Message from another Haarness agent:"
+            ),
+            "{text}"
+        );
         // In a delegated agent's chat too.
         let child = render(&entries(&items, true, None), BUDGET);
         assert!(child.contains("[2] another session's agent"), "{child}");
@@ -1945,6 +1955,7 @@ mod tests {
             "{}x:\nhi",
             crate::SESSION_MESSAGE_PREFIX
         )));
+        assert!(!person_wrote(&format!("{}hi", crate::AGENT_MESSAGE_PREFIX)));
     }
 
     #[test]
