@@ -514,6 +514,34 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
 });
 
 
+test("every slash command row keeps its description, and the list scrolls", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("/");
+    const list = page.locator("#slash-commands");
+    const rows = list.getByRole("option");
+    await expect(rows.first()).toBeVisible();
+    expect(await rows.count()).toBeGreaterThan(6);
+    for (const row of await rows.all()) {
+      const description = row.locator("span");
+      const height = await description.evaluate((element) => element.getBoundingClientRect().height);
+      expect(height, await row.locator("strong").innerText()).toBeGreaterThan(10);
+    }
+    expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    // The last row scrolls into view when the selection wraps to it.
+    await input.press("ArrowUp");
+    await expect(rows.last()).toHaveAttribute("aria-selected", "true");
+    await expect(rows.last()).toBeInViewport();
+    await shot(page, [list, page.locator(".composer")], info.outputPath("slash-rows.png"));
+    await input.press("Escape");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+
 test("a step opened at the end of the chat stays where it was clicked, and following pauses", async ({}, info) => {
   const { page, errors, close } = await launch(info, async (workspace) => {
     await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");

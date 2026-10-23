@@ -184,7 +184,7 @@ Schedules use frequency, day/time, agent, model and reasoning-effort pickers. Co
 Scheduled conversations live below ordinary chats in a collapsible **Scheduled** section, grouped by schedule within their original checkout and ordered newest first. Opening a run expands its group, and each group initially shows ten conversations with a show-more control. Renaming a conversation or schedule does not split new runs into new groups. Removing a schedule leaves its conversations available; archiving a run removes just that conversation from the sidebar. Independent forks remain ordinary chats. Older runs with the historical `Schedule: name @ timestamp` title remain discoverable.
 
 
-Slash suggestions open above the composer without moving the conversation. Long names wrap within the available width, descriptions truncate, arrow keys move the selection, Enter or Tab completes it, and Escape dismisses it.
+Slash suggestions open above the composer without moving the conversation. Long names wrap within the available width, every row keeps its one-line description (it truncates; the list scrolls rather than squeezing rows), arrow keys move the selection, Enter or Tab completes it, and Escape dismisses it.
 
 New chats have the same searchable project picker in the welcome heading and composer. It lists saved projects in the user's order, marks the selection, and opens the native folder chooser from New project. Every conversation belongs to a project folder or worktree; switching projects preserves each draft.
 
