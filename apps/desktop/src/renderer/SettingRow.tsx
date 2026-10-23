@@ -45,19 +45,25 @@ export function SettingRow(props: {
   tag?: JSX.Element;
   /** Content under the title that is not a sentence, such as a path. */
   detail?: JSX.Element;
+  /** The title and description are names and text from elsewhere (a tool's
+   * own), shown as they are rather than looked up in the catalog. */
+  literal?: boolean;
   children: JSX.Element;
 }) {
   const [expanded, setExpanded] = createSignal(false);
-  const description = () => (props.description ? t(props.description) : "");
+  // Text from elsewhere keeps its own direction (an English description in
+  // an Arabic page keeps its full stop at its end) inside the page's row.
+  const text = (value: string) => (props.literal ? <span dir="auto">{value}</span> : t(value));
+  const description = () => (!props.description ? "" : props.literal ? props.description : t(props.description));
   const long = () => description().length > CLAMP_OVER;
   return (
     <div class="setting-row" data-setting={props.target ?? props.title}>
       <div>
-        <strong>{t(props.title)}</strong>
+        <strong>{text(props.title)}</strong>
         {props.tag}
         {props.detail}
         <Show when={props.description}>
-          <p classList={{ clamped: long() && !expanded() }}>{description()}</p>
+          <p classList={{ clamped: long() && !expanded() }}>{props.literal ? <span dir="auto">{description()}</span> : description()}</p>
         </Show>
         <Show when={long()}>
           <button
