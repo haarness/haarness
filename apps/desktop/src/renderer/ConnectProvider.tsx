@@ -345,25 +345,39 @@ export function ConnectProvider(props: {
       </Show>
       <Switch>
         <Match when={step().kind === "pick"}>
+          {/* The filter leads, where typing starts; the account card stays
+              under it as one more way in, so filtering moves nothing above. */}
+          <div class="search-field connect-search">
+            <input
+              ref={search}
+              type="search"
+              autofocus
+              aria-label={t("Search providers")}
+              placeholder={t("Search providers…")}
+              value={query()}
+              onInput={(event) => setQuery(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                const first = [...filtered().popular, ...filtered().other][0];
+                if (first) {
+                  event.preventDefault();
+                  choose(first);
+                }
+              }}
+            />
+            <Show when={query()}>
+              <Button
+                icon="close"
+                size="sm"
+                label={t("Clear search")}
+                onClick={() => {
+                  setQuery("");
+                  search?.focus();
+                }}
+              />
+            </Show>
+          </div>
           <Show when={local()}><AccountMenu models connected={props.close} /></Show>
-          <input
-            ref={search}
-            class="connect-search"
-            type="search"
-            autofocus
-            aria-label={t("Search providers")}
-            placeholder={t("Search providers…")}
-            value={query()}
-            onInput={(event) => setQuery(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter") return;
-              const first = [...filtered().popular, ...filtered().other][0];
-              if (first) {
-                event.preventDefault();
-                choose(first);
-              }
-            }}
-          />
           <div class="connect-list">
             <Show when={loading() && !catalog().length}>
               <p class="muted connect-empty">{t("Loading…")}</p>
