@@ -71,8 +71,8 @@
   position: absolute;
   z-index: 20;
   bottom: calc(100% + var(--s2));
-  inset-inline-start: 0;
-  width: min(620px, 100%);
+  /* As wide as the message box it completes, as the slash list is. */
+  inset-inline: 0;
   max-height: min(380px, 50vh);
   overflow: auto;
   padding: var(--s2);
