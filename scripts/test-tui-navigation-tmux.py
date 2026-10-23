@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Real TUI message keys, driven through tmux with an isolated echo server.
+"""Real TUI message keys and the waiting-first session list, through tmux with an echo server.
 
 The keys go in as terminals send them: tmux's own Alt+Up (`ESC [1;3A`, what iTerm2
 and other xterm-style terminals send) and macOS Terminal's Option+Up (`ESC ESC [A`,
 written to the pane as bytes), with a draft in the prompt and over an approval card
-that holds the keyboard. A private tmux server and temporary HAARNESS_HOME/DATA_DIR
-keep it away from anything already running; captures and a report go to
+that holds the keyboard. Then other chats ask for an approval and an answer: the
+session list leads with them, marked, keeps its cursor on its chat while a request
+arrives and lets them go when answered elsewhere. A private tmux server and temporary
+HAARNESS_HOME/DATA_DIR keep it away from anything already running; captures (text and
+`capture-pane -e`, the list in the dark and light palettes) and a report go to
 TUI_NAVIGATION_EVIDENCE (default /tmp/haarness-tui-navigation).
 """
 import json
@@ -106,7 +109,8 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
             # A prompt is drawn as typed; its reply as "Echo: …".
             return until(lambda: expected in top() and top() or None, f"{message}: top row is {top()!r}", timeout=10)
 
-        tmux("new-session", "-d", "-x", "100", "-y", "30", "-s", session, pane_command(env, [BINARY, "--workspace", project, "--trust-project"]))
+        tui = pane_command(env, [BINARY, "--workspace", project, "--trust-project"])
+        tmux("new-session", "-d", "-x", "100", "-y", "30", "-s", session, tui)
         until(lambda: "/ commands" in pane(), "TUI did not open")
         text("NAV-PROMPT-0 opening")
         keys("Enter")
@@ -177,6 +181,92 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         keys("y")
         until(lambda: not api("/permissions") and not api("/turns/active"), "approval did not finish")
         checks.append("Over a focused approval card both forms move the transcript and leave the request waiting")
+
+        # Other chats wait: one for an approval, one for an answer. The list
+        # leads with them, newest first, and marks them as Desktop's sidebar does.
+        def chat(title):
+            return api("/threads", {"title": title, "provider": "echo", "model": "echo-1"})["id"]
+
+        late = chat("Late approval")
+        quiet = chat("Quiet chat")
+        approval = chat("Waits for approval")
+        question = chat("Asks a question")
+        turn(quiet, "nothing to wait for")
+        idle()
+        turn(approval, '!tool bash {"command":"echo waiting"}')
+        until(lambda: len(api("/permissions")) == 1, "the approval did not wait")
+        turn(question, "!tool question " + json.dumps({"prompt": "Which colour?", "choices": ["red", "blue"]}))
+        until(lambda: len(api("/questions")) == 1, "the question did not wait")
+
+        def rows():
+            """The list's rows as (gutter sign, row): the sign sits in the filter line's column.
+            Each row's detail names the agent and model (long ones are cut)."""
+            lines = pane().splitlines()
+            column = next((line.index(hint) for line in lines for hint in ("Type to filter", "Search  ") if hint in line), None)
+            if column is None:
+                return []
+            listed = [line[column:] for line in lines if "build · Echo" in line and len(line) > column]
+            return [(line[0] if line[0] in "⚠?●" else "", line) for line in listed]
+
+        def titles():
+            names = ("Asks a question", "Waits for approval", "Late approval", "Quiet chat")
+            return [next((name for name in names if name in line), "this chat" if " current " in line else line) for _, line in rows()]
+
+        keys("C-l")
+        until(lambda: "Sessions" in pane() and len(rows()) >= 5, "the session list did not open")
+        assert titles()[:4] == ["Asks a question", "Waits for approval", "Quiet chat", "Late approval"], titles()
+        signs = [sign for sign, _ in rows()]
+        assert signs[:2] == ["?", "⚠"], signs
+        assert "waiting for your answer" in rows()[0][1] and "waiting for approval" in rows()[1][1], rows()
+        assert "waiting" not in rows()[2][1]
+        screen("session-list-waiting")
+        checks.append("The session list leads with the chats that wait, ? for an answer and ⚠ for an approval, in words too")
+
+        # A request arrives while the cursor is on a quiet chat: it stays there.
+        current = titles().index("this chat")
+        keys(*["Up"] * (current - titles().index("Quiet chat")))
+        turn(late, '!tool bash {"command":"echo late"}')
+        until(lambda: len(api("/permissions")) == 2, "the late approval did not wait")
+        until(lambda: titles()[:3] == ["Asks a question", "Waits for approval", "Late approval"], "the late approval did not join the waiting chats")
+        keys("Right")
+        until(lambda: "Resume" in pane(), "session actions did not open")
+        heading = next(line for line in pane().splitlines() if "esc" in line)
+        assert "Quiet chat" in heading, f"the cursor left its chat: {heading!r}"
+        screen("session-list-cursor-kept")
+        keys("Escape")
+        checks.append("A chat that starts waiting moves up while the cursor stays on its own chat")
+
+        # The list in both palettes and in Arabic, with three chats waiting.
+        config = root / "data" / "config" / "config.toml"
+        base = config.read_text() if config.exists() else ""
+        for name, variant, language in (("dark", "dark", "en"), ("light", "light", "en"), ("arabic", "dark", "ar")):
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(base + f'\n[tui]\ntheme = "haarness"\nvariant = "{variant}"\nbackground_mode = "theme"\nlanguage = "{language}"\n')
+            tmux("respawn-pane", "-k", "-t", session, tui)
+            until(lambda: "haarness" in pane().replace(" ", ""), f"TUI did not reopen ({name})")
+            time.sleep(1)
+            keys("C-l")
+            until(lambda: len([line for line in pane().splitlines() if "Echo 1" in line]) >= 5, f"the session list did not open ({name})")
+            screen(f"session-list-{name}")
+            keys("Escape")
+        config.write_text(base)
+        tmux("respawn-pane", "-k", "-t", session, tui)
+        until(lambda: "haarness" in pane().replace(" ", ""), "TUI did not reopen in English")
+        time.sleep(1)
+
+        # Answered elsewhere (here: through the API), a chat goes back to its place.
+        keys("C-l")
+        until(lambda: "Sessions" in pane() and len(rows()) >= 5, "the session list did not reopen")
+        for pending in api("/permissions"):
+            api(f"/permissions/{pending['permissionId']}", {"decision": "once"})
+        until(lambda: titles()[0] == "Asks a question" and [sign for sign, _ in rows()].count("⚠") == 0, "answered approvals stayed marked")
+        assert [sign for sign, _ in rows()].count("?") == 1
+        screen("session-list-answered")
+        api(f"/questions/{api('/questions')[0]['questionId']}", {"answer": "red"})
+        until(lambda: not any(sign in ("⚠", "?") for sign, _ in rows()), "the answered question stayed marked")
+        idle()
+        keys("Escape")
+        checks.append("Answered elsewhere, a chat loses its mark and its place at the top")
 
         (EVIDENCE / "results.json").write_text(json.dumps({"checks": checks, "status": "passed"}, indent=2))
         print("PASS: " + "\nPASS: ".join(checks))

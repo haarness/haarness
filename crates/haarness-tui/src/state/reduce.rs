@@ -3,7 +3,8 @@
 //! Events are kept when they belong to the current thread OR to the same
 //! root conversation — child-agent activity (progress, permission prompts)
 //! must reach the view even though it happens on other threads. Dropping
-//! everything else keeps unrelated threads from mutating this view.
+//! everything else keeps unrelated threads from mutating this view; only
+//! which chats wait for a person is followed everywhere, for the session list.
 
 use anyhow::Result;
 use haarness_protocol::{
@@ -12,7 +13,10 @@ use haarness_protocol::{
 };
 
 use crate::api::ApiClient;
-use crate::state::{App, ChildTask, PhaseInfo, ToastVariant, TurnEnd, task_runs_in_background};
+use crate::state::{
+    App, ChildTask, PhaseInfo, ToastVariant, TurnEnd, Waiting, WaitingRequest,
+    task_runs_in_background,
+};
 
 fn string_list(value: &serde_json::Value) -> Vec<String> {
     value
@@ -194,6 +198,7 @@ impl App {
     ) {
         self.refresh_approval_mode(client).await;
         let mut pending = Vec::new();
+        let mut waiting = Vec::new();
         for request in requests {
             // Chrome site access always waits for a person, whatever this
             // client's yolo or Auto says.
@@ -215,14 +220,57 @@ impl App {
             {
                 continue;
             }
+            waiting.push((
+                request.permission_id.clone(),
+                request.thread_id,
+                request.root_thread_id,
+            ));
             if in_conversation {
                 pending.push(request);
             }
         }
+        self.hydrate_waiting(Waiting::Approval, waiting);
         self.pending_permissions = pending;
     }
 
     pub async fn reduce(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
+        // An event can reorder the session list under its cursor: the cursor
+        // keeps its chat.
+        let anchor = self.session_list_anchor();
+        let result = self.reduce_event(event, client).await;
+        self.keep_session_list_anchor(anchor);
+        result
+    }
+
+    /// Follow which chats wait for a person, in every chat on the server.
+    fn follow_waiting(&mut self, event: &EventEnvelope) {
+        let (kind, id) = match event.event_type.as_str() {
+            "permission.requested" | "permission.resolved" => {
+                (Waiting::Approval, event.payload["permissionId"].as_str())
+            }
+            "question.requested" | "question.resolved" => {
+                (Waiting::Answer, event.payload["questionId"].as_str())
+            }
+            _ => return,
+        };
+        let Some(id) = id else {
+            return;
+        };
+        if event.event_type.ends_with(".resolved") {
+            self.waiting.remove(id);
+        } else if let Some(thread_id) = event.thread_id {
+            self.waiting.insert(
+                id.to_owned(),
+                WaitingRequest {
+                    thread_id,
+                    root_thread_id: event.root_thread_id,
+                    kind,
+                },
+            );
+        }
+    }
+
+    async fn reduce_event(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
         if event.event_type == "approval_mode.changed" {
             if let Ok(info) = serde_json::from_value(event.payload.clone()) {
                 self.show_approval_mode(info);
@@ -248,6 +296,7 @@ impl App {
                 return Ok(());
             }
         }
+        self.follow_waiting(&event);
         let on_current = event.thread_id == Some(self.thread.id);
         let in_root = event.root_thread_id == Some(self.root_thread_id);
         // A workflow dashboard is a global run catalog, so keep its rows live
@@ -1179,6 +1228,7 @@ impl App {
             .map(|pending| (self.approval_notification(pending), pending.thread_id));
         self.pending_permissions
             .retain(|pending| pending.permission_id != id);
+        self.waiting.remove(id);
         self.confirm_always = None;
         self.permission_typed = None;
         self.permission_selection = 0;
