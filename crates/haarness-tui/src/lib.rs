@@ -35,8 +35,7 @@ mod width;
 mod tests;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as TerminalEvent, EventStream};
-use futures::StreamExt;
+use crossterm::event::Event as TerminalEvent;
 use haarness_opentui::{Color, ColorSupport, Renderer};
 use haarness_protocol::CreateThreadRequest;
 use std::{path::PathBuf, time::Duration};
@@ -514,7 +513,7 @@ async fn run_with_client(
         initial_background_mode,
         color_support,
     ));
-    let mut input = EventStream::new();
+    let mut input = crate::input::meta::TerminalInput::new();
     let initial_cursor = app
         .server_info
         .as_ref()

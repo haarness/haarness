@@ -1,6 +1,7 @@
 //! Keyboard handling.
 
 pub mod composer;
+pub(crate) mod meta;
 pub mod mouse;
 
 use anyhow::Result;
