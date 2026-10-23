@@ -366,9 +366,21 @@ test("a step opened while its turn waits on a card stays where it was clicked", 
   await idle();
   await expect(transcript).toContainText("All tools finished");
   await expect(jump).toHaveCount(0);
-  await expect
-    .poll(() => transcript.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
-    .toBeLessThan(5);
+  const below = () => transcript.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight);
+  await expect.poll(below).toBeLessThan(5);
+  // End, pressed before an opening has settled, still goes back to the
+  // latest: the opening's hold gives way instead of pausing again after it.
+  if ((await finished.getAttribute("open")) !== null) {
+    await first.click();
+    await settle();
+  }
+  await transcript.evaluate((element) => element.scrollBy({ top: -200 }));
+  await first.click();
+  await page.keyboard.press("End");
+  await page.waitForTimeout(700);
+  await expect(finished).toHaveAttribute("open", "");
+  await expect(jump).toHaveCount(0);
+  await expect.poll(below).toBeLessThan(5);
 });
 
 test("under the default rules the outside folder's card offers the script that runs there", async () => {
