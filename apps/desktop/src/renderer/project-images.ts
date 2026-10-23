@@ -249,16 +249,19 @@ export function inViewedTree(
 }
 
 /**
- * What a server event means for a project's images: the file API wrote a
- * file (`{ path }`), or files may have changed because a turn of the chat
- * being viewed ended or one of its tools that write finished (as the Files
- * panel reads them). Another chat's work, however busy, is not a change for
- * the replies on screen; `viewed` says whether an event's chat (or its tree)
- * is the one being viewed.
+ * What a server event means for a project's images: an image file was
+ * written (`{ path }`, relative to the project) by the file API or by a
+ * write or edit tool of the chat being viewed that names it, or files may
+ * have changed because a turn of that chat ended or one of its tools that
+ * write finished (as the Files panel reads them). Another chat's work,
+ * however busy, is not a change for the replies on screen; `viewed` says
+ * whether an event's chat (or its tree) is the one being viewed, and `root`
+ * is the project's folder, which a tool's absolute path is read against.
  */
 export function projectEvent(
   event: { type?: string; payload?: unknown; threadId?: string | null; rootThreadId?: string | null },
   viewed: (thread?: string | null, root?: string | null) => boolean,
+  root = "",
 ): { path: string } | "changed" | undefined {
   if (event.type === "files.updated") {
     const path = (event.payload as { path?: unknown } | undefined)?.path;
@@ -267,7 +270,18 @@ export function projectEvent(
   const mine = () => viewed(event.threadId, event.rootThreadId);
   if (event.type === "turn.finished") return mine() ? "changed" : undefined;
   if (event.type !== "item.created") return undefined;
-  const data = (event.payload as { data?: { type?: string; name?: string; is_error?: boolean } } | undefined)?.data;
+  const data = (
+    event.payload as
+      | { data?: { type?: string; name?: string; is_error?: boolean; arguments?: Record<string, unknown> } }
+      | undefined
+  )?.data;
+  if (data?.type === "tool_call" && /(?:^|\.)(?:write|edit|multiedit)$/i.test(data.name ?? "") && mine()) {
+    const named = [data.arguments?.path, data.arguments?.filePath, data.arguments?.file_path].find(
+      (value): value is string => typeof value === "string",
+    );
+    const found = named === undefined ? undefined : projectImagePath(named, root);
+    return found && "path" in found ? found : undefined;
+  }
   const writes =
     data?.type === "tool_result" && !data.is_error && /write|edit|patch|apply|bash|shell|move|delete/.test(data.name ?? "");
   return writes && mine() ? "changed" : undefined;
@@ -520,6 +534,8 @@ export function askOnce(paths: readonly string[], asked: Set<string>, request: (
 /** The project an image is read from, and whether a server event concerns the chat being viewed. */
 export interface ImageProject {
   connection: string;
+  /** The project's folder, as the server reports it. */
+  root: string;
   /** A remote host's project, whose files the window coming to the front does not change. */
   remote: boolean;
   viewed: (thread?: string | null, root?: string | null) => boolean;
@@ -527,7 +543,7 @@ export interface ImageProject {
 
 /** The project of the window's open chat, read from the app's state when an event arrives. */
 export function imageProject(state: {
-  connection?: { id: string; remote: boolean } | null;
+  connection?: { id: string; remote: boolean; workspace: string } | null;
   selected?: string | null;
   threads: readonly { id: string; parentId?: string | null }[];
 }): ImageProject | undefined {
@@ -535,19 +551,22 @@ export function imageProject(state: {
   if (!connection) return undefined;
   return {
     connection: connection.id,
+    root: connection.workspace,
     remote: connection.remote,
     viewed: (thread, root) => inViewedTree(state.selected, state.threads, thread, root),
   };
 }
 
 let watching = false;
+/** Each project's folder, which a tool's absolute path is read against. */
+const roots = new Map<string, string>();
 /** Images read from a project are read again once its files may have changed (see `projectEvent`). */
 function watchProjects(viewed: ImageProject["viewed"]) {
   if (watching) return;
   watching = true;
   window.haarness.onEvent((event) => {
     if (event.kind !== "server" || !event.connection) return;
-    const change = projectEvent(event.data as Parameters<typeof projectEvent>[0], viewed);
+    const change = projectEvent(event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
     if (change === "changed") projectChanged(event.connection);
     else if (change) projectFileWritten(event.connection, change.path);
   });
@@ -575,6 +594,7 @@ async function decodeImage(data: string) {
 /** Reads one image of the project for a view that shows it until `signal` aborts. */
 export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
   watchProjects(project.viewed);
+  roots.set(project.connection, project.root);
   if (!project.remote) localProject(project.connection);
   requestProjectImage(project.connection, path, reader(project.connection), signal, decodeImage);
 }
