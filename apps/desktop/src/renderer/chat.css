@@ -1934,6 +1934,9 @@ html[dir="rtl"] .tool-target {
   color: var(--muted);
   font-size: var(--ui-sm);
   overflow-wrap: anywhere;
+  /* The note mixes the interface's language with the reviewer's own words
+     and paths: each run keeps its own direction. */
+  unicode-bidi: plaintext;
 }
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */

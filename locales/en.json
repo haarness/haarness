@@ -2775,5 +2775,19 @@
   "reviewing…": "reviewing…",
   "Reviewing…": "Reviewing…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.",
+  "Auto review is deciding…": "Auto review is deciding…",
+  "It took more than {seconds} s.": "It took more than {seconds} s.",
+  "The action is too long to review whole.": "The action is too long to review whole.",
+  "No model was available to review this request.": "No model was available to review this request.",
+  "It could not decide ({detail}).": "It could not decide ({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "It blocked {count} actions in a row, so the rest of this turn is yours to approve.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "It blocked {count} actions this turn, so the rest of it is yours to approve.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "This deletes {path}, outside the project, and your messages do not name it.",
+  "It rated this action critical risk.": "It rated this action critical risk.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "It rated this action low risk, and your messages do not clearly ask for it.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "It rated this action medium risk, and your messages do not clearly ask for it.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "It rated this action high risk, and your messages do not clearly ask for it.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "Auto on for this chat · a reviewer model answers requests · ctrl+y to review",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "allow once and switch this chat to Auto: a reviewer model answers later requests"
 }

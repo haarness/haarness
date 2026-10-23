@@ -2775,5 +2775,19 @@
   "reviewing…": "inceleniyor…",
   "Reviewing…": "İnceleniyor…",
   "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Otomatik: bir inceleme modeli bu sohbetteki ve aracılarındaki olağan izin isteklerini bir kez onaylar, gerisini size sorar. İncelemeye geçmek için tıklayın.",
-  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Otomatik: bir inceleme modeli buradaki yeni sohbetlerdeki olağan izin isteklerini bir kez onaylar, gerisini size sorar. İncelemeye geçmek için tıklayın."
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Otomatik: bir inceleme modeli buradaki yeni sohbetlerdeki olağan izin isteklerini bir kez onaylar, gerisini size sorar. İncelemeye geçmek için tıklayın.",
+  "Auto review is deciding…": "Otomatik inceleme karar veriyor…",
+  "It took more than {seconds} s.": "{seconds} sn'den uzun sürdü.",
+  "The action is too long to review whole.": "Eylem bütünüyle incelenemeyecek kadar uzun.",
+  "No model was available to review this request.": "Bu isteği inceleyecek bir model yoktu.",
+  "It could not decide ({detail}).": "Karar veremedi ({detail}).",
+  "It blocked {count} actions in a row, so the rest of this turn is yours to approve.": "Arka arkaya {count} eylemi engelledi; bu turun geri kalanını sizin onaylamanız gerekiyor.",
+  "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Bu turda {count} eylemi engelledi; geri kalanını sizin onaylamanız gerekiyor.",
+  "This deletes {path}, outside the project, and your messages do not name it.": "Bu, proje dışındaki {path} yolunu siliyor ve mesajlarınız bunu belirtmiyor.",
+  "It rated this action critical risk.": "Bu eylemi kritik risk olarak değerlendirdi.",
+  "It rated this action low risk, and your messages do not clearly ask for it.": "Bu eylemi düşük risk olarak değerlendirdi ve mesajlarınız bunu açıkça istemiyor.",
+  "It rated this action medium risk, and your messages do not clearly ask for it.": "Bu eylemi orta risk olarak değerlendirdi ve mesajlarınız bunu açıkça istemiyor.",
+  "It rated this action high risk, and your messages do not clearly ask for it.": "Bu eylemi yüksek risk olarak değerlendirdi ve mesajlarınız bunu açıkça istemiyor.",
+  "Auto on for this chat · a reviewer model answers requests · ctrl+y to review": "Bu sohbet için otomatik açık · istekleri bir inceleme modeli yanıtlar · incelemek için ctrl+y",
+  "allow once and switch this chat to Auto: a reviewer model answers later requests": "bir kez izin ver ve bu sohbeti otomatiğe geçir: sonraki istekleri bir inceleme modeli yanıtlar"
 }

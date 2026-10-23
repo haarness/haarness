@@ -156,11 +156,18 @@ export function reduceEvent<S extends Live>(
     if (state.reviews?.[event.turnId])
       update("reviews", event.turnId, undefined as unknown as TurnReview);
   }
+  // Announced again (Auto's reviewer took up a request already shown, or
+  // left it to the person): the card is replaced where it stands.
   if (event.type === "permission.requested" && payload.permissionId)
-    update("permissions", (items) => [
-      ...items.filter((item) => item.permissionId !== payload.permissionId),
-      payload as T.PendingPermissionInfo,
-    ]);
+    update("permissions", (items) =>
+      items.some((item) => item.permissionId === payload.permissionId)
+        ? items.map((item) =>
+            item.permissionId === payload.permissionId
+              ? (payload as T.PendingPermissionInfo)
+              : item,
+          )
+        : [...items, payload as T.PendingPermissionInfo],
+    );
   if (event.type === "permission.resolved")
     update("permissions", (items) =>
       items.filter((item) => item.permissionId !== payload.permissionId),

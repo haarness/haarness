@@ -44,7 +44,12 @@ import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
-import { canAutoApprove, describeAlwaysRule, reviewNote } from "./approval-mode";
+import {
+  alreadySettled,
+  canAutoApprove,
+  describeAlwaysRule,
+  reviewNote,
+} from "./approval-mode";
 import {
   chromeApproval,
   chromeApprovalLines,
@@ -2909,6 +2914,12 @@ function Permission(props: {
           });
         await app.refresh();
       } catch (error) {
+        // Settled already (Auto's reviewer, another window): the card goes
+        // with the next read, and there is nothing to report.
+        if (alreadySettled(error)) {
+          await app.refresh();
+          return;
+        }
         setAnswered(false);
         app.recordPermissionError(connection, id, error);
         throw error;

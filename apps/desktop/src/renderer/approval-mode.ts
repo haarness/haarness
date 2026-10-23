@@ -173,14 +173,51 @@ export function describeAlwaysRule(
   return pattern;
 }
 
+/** Haarness's own words for a note it wrote itself, by its code, in the
+ * person's language; undefined for the reviewer's own words or a code this
+ * window does not know (its English `rationale` is shown then). */
+export function reviewReasonText(
+  review: PermissionReview,
+  t: (key: string, values?: Record<string, string | number>) => string,
+): string | undefined {
+  const reason = review.reason;
+  switch (reason?.code) {
+    case "timeout":
+      return t("It took more than {seconds} s.", { seconds: reason.seconds });
+    case "too_long":
+      return t("The action is too long to review whole.");
+    case "no_model":
+      return t("No model was available to review this request.");
+    case "error":
+      return t("It could not decide ({detail}).", { detail: reason.detail });
+    case "streak":
+      return t("It blocked {count} actions in a row, so the rest of this turn is yours to approve.", { count: reason.count });
+    case "turn_limit":
+      return t("It blocked {count} actions this turn, so the rest of it is yours to approve.", { count: reason.count });
+    case "unnamed_deletion":
+      return t("This deletes {path}, outside the project, and your messages do not name it.", { path: reason.path });
+    case "rated":
+      return review.risk === "critical"
+        ? t("It rated this action critical risk.")
+        : review.risk === "low"
+          ? t("It rated this action low risk, and your messages do not clearly ask for it.")
+          : review.risk === "medium"
+            ? t("It rated this action medium risk, and your messages do not clearly ask for it.")
+            : t("It rated this action high risk, and your messages do not clearly ask for it.");
+    default:
+      return undefined;
+  }
+}
+
 /** Why Auto's reviewer left a request to the person, in one line: "Auto
- * review · <rule>: <reason>", or that it was unavailable or paused. Empty
- * when it did not review the request. */
+ * review · <rule>: <reason>", that it was unavailable or paused, or that it
+ * is deciding a request already shown. Empty when it did not review it. */
 export function reviewNote(
   review: PermissionReview | null | undefined,
-  t: (key: string) => string,
+  t: (key: string, values?: Record<string, string | number>) => string,
 ): string {
   if (!review) return "";
+  if (review.status === "reviewing") return t("Auto review is deciding…");
   const lead =
     review.status === "failed"
       ? t("Auto review unavailable")
@@ -188,6 +225,14 @@ export function reviewNote(
         ? t("Auto review paused")
         : t("Auto review");
   const rule = review.rule?.trim();
-  const reason = review.rationale?.trim();
+  const reason = (reviewReasonText(review, t) ?? review.rationale ?? "").trim();
   return lead + (rule ? " · " + rule : "") + (reason ? ": " + reason : "");
+}
+
+/** A reply the server answered with "not found": the request was settled
+ * meanwhile (by Auto's reviewer, a cascade, another window). Only the
+ * message crosses from the main process. */
+export function alreadySettled(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bnot found: permission\b/i.test(message);
 }

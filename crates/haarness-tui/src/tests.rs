@@ -7343,6 +7343,60 @@ fn successful_task_response_lives_in_its_child_instead_of_cluttering_the_parent(
 }
 
 #[tokio::test]
+async fn a_request_announced_again_updates_its_card_in_place() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    let announce = |review: serde_json::Value| {
+        fixture_event(
+            "permission.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "permissionId": "perm-1",
+                "operation": "bash:printf a",
+                "detail": {"command": "printf a"},
+                "review": review,
+            }),
+        )
+    };
+    for review in [
+        serde_json::Value::Null,
+        serde_json::json!({"status": "reviewing"}),
+        serde_json::json!({"status": "asked", "rationale": "Shared branch."}),
+    ] {
+        app.reduce(announce(review), &client).await.unwrap();
+    }
+    assert_eq!(app.pending_permissions.len(), 1);
+    let review = app.pending_permissions[0].review.clone().unwrap();
+    assert_eq!(
+        review.status,
+        haarness_protocol::PermissionReviewStatus::Asked
+    );
+    app.permission_focus = true;
+    let card = frame_text(&app, (120, 40));
+    assert!(card.contains("Auto review: Shared branch."), "{card}");
+}
+
+#[tokio::test]
+async fn in_a_chat_already_in_auto_u_types_instead_of_staging_auto() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "in-auto"));
+    app.permission_focus = true;
+    app.auto_permissions = true;
+    press_key(&mut app, KeyCode::Char('u')).await;
+    assert_eq!(app.confirm_always, None, "nothing staged");
+    assert!(
+        !app.notice.contains("switch this chat to Auto"),
+        "{}",
+        app.notice
+    );
+    assert_eq!(app.pending_permissions.len(), 1, "nothing answered");
+}
+
+#[tokio::test]
 async fn child_thread_permission_surfaces_in_the_root_view() {
     let thread = fixture_thread();
     let child = ThreadId::new();
@@ -9644,6 +9698,34 @@ fn auto_reviews_note_its_block_and_a_slow_review_read_quietly() {
         card.contains("Auto review unavailable: It took longer than 60 seconds."),
         "{card}"
     );
+    // Haarness's own notes read in the interface's language, by their code.
+    pending.review = Some(PermissionReview {
+        status: PermissionReviewStatus::Paused,
+        risk: None,
+        rule: None,
+        rationale: Some("English text".into()),
+        reason: Some(haarness_protocol::ReviewReason::Streak { count: 3 }),
+    });
+    app.pending_permissions = vec![pending.clone()];
+    app.language = crate::locale::Language::parse("de").unwrap();
+    let card = frame_text(&app, (160, 40));
+    assert!(
+        card.contains("Auto-Überprüfung pausiert: Es hat 3 Aktionen nacheinander blockiert"),
+        "{card}"
+    );
+    assert!(!card.contains("English text"), "{card}");
+    app.language = crate::locale::Language::parse("en").unwrap();
+    // A long note takes a second row where the card has one.
+    pending.review = Some(PermissionReview {
+        status: PermissionReviewStatus::Asked,
+        risk: None,
+        rule: None,
+        rationale: Some(format!("{} END", "word ".repeat(40))),
+        reason: None,
+    });
+    app.pending_permissions = vec![pending.clone()];
+    let card = frame_text(&app, (120, 40));
+    assert!(card.contains("END"), "{card}");
     pending.review = None;
     app.pending_permissions = vec![pending];
     let card = frame_text(&app, (120, 40));
@@ -9653,17 +9735,25 @@ fn auto_reviews_note_its_block_and_a_slow_review_read_quietly() {
 
     // A quick review reads as the tool it is about; a slow one says so.
     app.active_turn = Some(haarness_protocol::TurnId::new());
+    // The server's clock plays no part: an old startedAt changes nothing.
     app.phase = Some(crate::state::PhaseInfo {
         state: "reviewing".into(),
         tool: Some("bash".into()),
         call_id: Some("call-2".into()),
-        since: Some(Utc::now()),
+        since: Some(Utc::now() - chrono::Duration::seconds(30)),
+        received: Some(std::time::Instant::now()),
     });
     let band = frame_text(&app, (120, 36));
     let band = band.lines().last().unwrap().to_owned();
     assert!(!band.contains("reviewing"), "{band}");
     assert!(band.contains("bash"), "{band}");
-    app.phase.as_mut().unwrap().since = Some(Utc::now() - chrono::Duration::seconds(2));
+    let heard = |millis| std::time::Instant::now() - std::time::Duration::from_millis(millis);
+    app.phase.as_mut().unwrap().received = Some(heard(900));
+    let band = frame_text(&app, (120, 36));
+    let band = band.lines().last().unwrap().to_owned();
+    assert!(band.contains("reviewing…"), "{band}");
+    assert!(!band.contains("0s"), "no 0s: {band}");
+    app.phase.as_mut().unwrap().received = Some(heard(2_100));
     let band = frame_text(&app, (120, 36));
     let band = band.lines().last().unwrap().to_owned();
     assert!(band.contains("reviewing…   2s"), "{band}");

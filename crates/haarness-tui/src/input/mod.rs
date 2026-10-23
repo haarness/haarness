@@ -31,6 +31,7 @@ fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget)
         tool: None,
         call_id: None,
         since: Some(chrono::Utc::now()),
+        received: Some(std::time::Instant::now()),
     });
     let message = if matches!(target, InterruptTarget::Session(_)) {
         "Stopping session work…"
@@ -84,7 +85,7 @@ pub(crate) async fn answer_permission(
         return Ok(());
     }
     let id = pending.permission_id.clone();
-    let lead = crate::view::approval::staged_lead(choice, pending);
+    let lead = crate::view::approval::staged_lead(choice, pending, app.approval_reviewer);
     // A legacy prompt without patterns stages too: the rule it stores is the
     // subject itself, which the card already shows.
     if matches!(choice, 'a' | 'w' | 'r' | 'u') && !explicit && app.confirm_always != Some(choice) {
@@ -124,6 +125,12 @@ pub(crate) async fn answer_permission(
         )
         .await;
     if let Err(error) = result {
+        // Settled already (Auto's reviewer, another client): the card just
+        // goes, with nothing to report.
+        if crate::api::refusal_status(&error) == Some(reqwest::StatusCode::NOT_FOUND) {
+            app.permission_answered(&id);
+            return Ok(());
+        }
         // Keep the request visible when a reply fails; never enable Auto on failure.
         app.notice = format!("Could not answer permission: {error}");
         return Ok(());
