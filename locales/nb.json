@@ -2767,5 +2767,7 @@
   "Ask about this chat without adding to it": "Spør om denne chatten uten å legge til noe i den",
   "Hide side chat": "Skjul sidechat",
   "Resize side chat": "Endre størrelse på sidechat",
-  "This server answers each question on its own": "Denne serveren svarer på hvert spørsmål for seg"
+  "This server answers each question on its own": "Denne serveren svarer på hvert spørsmål for seg",
+  "Outside this project": "Utenfor dette prosjektet",
+  "Too large to show": "For stor til å vises"
 }

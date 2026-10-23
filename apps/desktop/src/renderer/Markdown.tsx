@@ -14,6 +14,15 @@ import {
   onImageSettled,
   relabelImages,
 } from "./remote-images";
+import {
+  noteImage,
+  onProjectImageSettled,
+  projectImageElement,
+  readProjectImages,
+  relabelProjectImages,
+  shownProjectImage,
+  type ShownImage,
+} from "./project-images";
 
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
@@ -29,6 +38,12 @@ export function Markdown(props: {
   onLink?: (href: string) => void;
 }) {
   const app = useApp();
+  /**
+   * In the conversation an image whose source is a path shows that file of
+   * the project, read through the server; a Markdown file's preview and
+   * release notes draw it as before.
+   */
+  const conversation = !props.document;
   /** Web links leave through the desktop's link check; file links open in the Files panel. */
   function follow(href: string) {
     const connection = app.state.connection;
@@ -120,6 +135,28 @@ export function Markdown(props: {
     load: (from: string) => t("Load image from {host}", { host: from }),
     unnamed: t("Image"),
   });
+  const projectLabels = () => ({
+    unnamed: t("Image"),
+    outside: t("Outside this project"),
+    large: t("Too large to show"),
+    failed: t("Not available"),
+  });
+  /** Reads end with the reply: one still waiting for a slot is never started. */
+  const reading = new AbortController();
+  const asked = new Set<string>();
+  /** A read for this project settled: this reply's placeholders for the path show the image, or why not. */
+  function projectSettled(connection: string, path: string, shown: ShownImage) {
+    if (disposed || !host || connection !== app.state.connection?.id) return;
+    for (const element of Array.from(host.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded"))) {
+      if (!madeHere(element) || element.dataset.projectPath !== path) continue;
+      if (shown.data === undefined) {
+        if (!(element instanceof HTMLImageElement)) noteImage(element, shown.note, projectLabels(), path);
+      } else if (element instanceof HTMLImageElement) {
+        if (element.getAttribute("src") !== shown.data) element.src = shown.data;
+      } else element.replaceWith(projectImageElement(document, path, element.dataset.projectAlt ?? "", shown.data));
+    }
+  }
+  if (conversation) onCleanup(onProjectImageSettled(projectSettled));
   let host!: HTMLDivElement;
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
@@ -130,7 +167,18 @@ export function Markdown(props: {
       loaded: (src) => loadedImage(scope(), src),
       loading: (src) => imageLoading(scope(), src),
       labels: imageLabels,
+      project: conversation
+        ? {
+            root: () => app.state.connection?.workspace ?? "",
+            shown: (path) => {
+              const connection = app.state.connection?.id;
+              return connection ? shownProjectImage(connection, path) : undefined;
+            },
+            labels: projectLabels,
+          }
+        : undefined,
     }))(update);
+    if (conversation) readProjectImages(host, app.state.connection?.id, reading.signal, asked, projectLabels());
     for (const block of host.querySelectorAll("pre")) {
       const code = block.querySelector("code");
       const language = /language-([\w+#-]+)/.exec(code?.className ?? "")?.[1];
@@ -161,16 +209,26 @@ export function Markdown(props: {
   onMount(() => host.addEventListener("markdown-draw-now", drawNow));
   onCleanup(() => host?.removeEventListener("markdown-draw-now", drawNow));
   // Image placeholders already drawn follow a language change.
-  createEffect(on(language, () => relabelImages(host, imageLabels()), { defer: true }));
+  createEffect(
+    on(
+      language,
+      () => {
+        relabelImages(host, imageLabels());
+        relabelProjectImages(host, projectLabels());
+      },
+      { defer: true },
+    ),
+  );
   onCleanup(() => {
     disposed = true;
+    reading.abort();
     client.dispose();
     timers.forEach(clearTimeout);
   });
   return (
     <div
       ref={host}
-      class="markdown"
+      class={props.document ? "markdown markdown-document" : "markdown"}
       onClick={(event) => {
         const target = event.target as HTMLElement;
         const load = target.closest<HTMLButtonElement>(".remote-image-load");
