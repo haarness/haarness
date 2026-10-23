@@ -60,7 +60,9 @@ pub use stream_limits::{
     stream_stall_silence,
 };
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
-pub use turn_context::{SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder};
+pub use turn_context::{
+    AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
+};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 
 /// The `tracing` target for events that may be exported with OpenTelemetry

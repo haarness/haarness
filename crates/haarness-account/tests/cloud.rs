@@ -518,6 +518,11 @@ async fn asynchronous_ask_waits_for_boot_submits_once_and_renews_ticket() {
             .find(|r| r.0 == "POST" && r.1 == format!("/runtime/v1/threads/{THREAD}/turns?"))
             .unwrap();
         assert_eq!(ask.2["reasoningEffort"], "low");
+        // Marked as an agent's words, never the person's, for Auto's reviewer there.
+        assert_eq!(
+            ask.2["text"],
+            format!("{}hello", haarness_protocol::AGENT_MESSAGE_PREFIX)
+        );
         assert!(ask.2.get("autoApprove").is_none());
         assert_eq!(ask.2["tools"]["question"], false);
     }
