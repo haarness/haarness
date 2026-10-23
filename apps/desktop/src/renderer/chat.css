@@ -709,6 +709,30 @@ html[dir="rtl"] .tool-target {
 .tool-body .tool-output {
   color: var(--text);
 }
+/* The image a read returned, under its result: no taller than a reply's,
+   and opens full size. */
+.tool-image {
+  padding: 0 var(--s3) var(--s3);
+}
+.tool-image-open {
+  display: block;
+  max-width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  cursor: zoom-in;
+}
+.tool-image-open:hover:not(:disabled) {
+  background: transparent;
+}
+.tool-image-open img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border-radius: var(--r-md);
+}
 
 /* An edit shown as a change rather than as arguments. */
 .change-preview {

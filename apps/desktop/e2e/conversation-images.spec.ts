@@ -8,7 +8,8 @@ import { crc32, deflateSync } from "node:zlib";
 
 // An image a reply names by a path in its project shows that file, read
 // through the server, which reads only inside the project; a path out of it,
-// through a link or not, is never shown, and any image of the conversation
+// through a link or not, is never shown. A read tool call that returned an
+// image previews it in its opened row, and any image of the conversation
 // opens full size. The echo provider repeats the message, so a message with
 // `![](out/chart.png)` gets a reply with the image.
 // HAARNESS_IMAGE_SCREENSHOTS=<folder> keeps light and dark pictures there.
@@ -238,6 +239,38 @@ test("a reply drawn again shows its image at once, and a changed file shows anew
   expect(errors).toEqual([]);
 });
 
+test("a read that returned an image shows it once its row is open", async () => {
+  // A small image comes back as the file it read, which the row reads from the project.
+  await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
+  let turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: '!tool read {"path":"out/chart.png"}' });
+  await client.waitTurn(turn.id);
+  const items = await client.listItems(thread);
+  const result = items.findLast((item) => item.data.type === "tool_result")!.data as { metadata?: { attachments?: string[] } };
+  expect(result.metadata?.attachments?.[0]).toBe(join(workspace, "out/chart.png"));
+  const row = page.locator(".tool-call").filter({ hasText: "chart.png" }).last();
+  await expect(row).toBeVisible();
+  // Closed, the row is as it was.
+  await expect(row.locator(".tool-image")).toHaveCount(0);
+  await row.locator("summary").click();
+  const preview = row.locator(".tool-image img");
+  await expect(preview).toHaveAttribute("src", /^data:image\/png;base64,/);
+  expect((await size(preview)).natural).toEqual([360, 200]);
+  await pictures(row, "read-image");
+
+  // A large one comes back smaller, carried in the result: shown as it is, not read.
+  turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: '!tool read {"path":"out/wide.png"}' });
+  await client.waitTurn(turn.id);
+  const wide = page.locator(".tool-call").filter({ hasText: "wide.png" }).last();
+  await wide.locator("summary").click();
+  const shown = wide.locator(".tool-image img");
+  await expect(shown).toHaveAttribute("src", /^data:image\/png;base64,/);
+  const measured = await size(shown);
+  expect(measured.natural[0]).toBeLessThanOrEqual(2000);
+  expect(measured.shown[1]).toBeLessThanOrEqual(320);
+  // A read outside the project that the result does not carry shows nothing more than before.
+  expect(errors).toEqual([]);
+});
+
 test("any image of the conversation opens full size; Esc, a click outside or Close shut it", async () => {
   const attached = `data:image/png;base64,${png(64, 48, (x) => [x * 4, 120, 200]).toString("base64")}`;
   const message = await reply("With an attachment: ![Weekly chart](out/chart.png)", [attached]);
@@ -265,10 +298,16 @@ test("any image of the conversation opens full size; Esc, a click outside or Clo
   await page.mouse.click(20, 20);
   await expect(viewer).toHaveCount(0);
 
-  // An attachment opens the same way; Close shuts it.
+  // An attachment and a read's preview open the same way; Close shuts it.
   await page.locator(".message.user").last().locator(".attachment-image").click();
   await expect(full).toHaveAttribute("src", attached);
   await viewer.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(viewer).toHaveCount(0);
+  const read = page.locator(".tool-call").filter({ hasText: "chart.png" }).last();
+  if (!(await read.locator(".tool-image-open").count())) await read.locator("summary").click();
+  await read.locator(".tool-image-open").click();
+  await expect(full).toHaveAttribute("src", /^data:image\/png;base64,/);
+  await page.keyboard.press("Escape");
   await expect(viewer).toHaveCount(0);
   expect(errors).toEqual([]);
 });

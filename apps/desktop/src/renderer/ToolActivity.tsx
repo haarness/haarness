@@ -10,7 +10,10 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  onCleanup,
 } from "solid-js";
+import { onProjectImageSettled, readProjectImage, readToolImage, shownProjectImage } from "./project-images";
+import { openImage } from "./ImageViewer";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
@@ -130,6 +133,15 @@ export function ToolActivity(props: {
     return !mcpServersKnown(connection()) || appsOff(connection(), value.server);
   };
   const app = createMemo(() => (off() ? undefined : payload()));
+  // A read that returned an image shows it once its row is open.
+  const image = createMemo(
+    () => readToolImage(toolName(props.name), props.result, store.state.connection?.workspace ?? ""),
+    undefined,
+    {
+      equals: (a, b) =>
+        a === b || (!!a && !!b && ("data" in a ? "data" in b && a.data === b.data : "path" in b && a.path === b.path)),
+    },
+  );
   /** This row's own menu turned the apps off: it says so where the page was, with Undo. */
   const [turnedOff, setTurnedOff] = createSignal(false);
   const apps = (on: boolean) => {
@@ -236,6 +248,9 @@ export function ToolActivity(props: {
                           <pre class="tool-output">{output()}</pre>
                         </Show>
                       </Show>
+                      <Show when={image()} keyed>
+                        {(found) => <ReadImage image={found} alt={(shape().target ?? "").split(/[\\/]/).pop() ?? ""} />}
+                      </Show>
                     </div>
                   }
                 >
@@ -321,6 +336,48 @@ export function ToolActivity(props: {
       </div>
     </Show>
     </>
+  );
+}
+/**
+ * The image a read returned, inside its open row: the one its result
+ * carries, or the project file it read, read again like a reply's image.
+ * Nothing shows until the image is there; a click opens it full size.
+ */
+function ReadImage(props: { image: { data: string } | { path: string }; alt: string }) {
+  const store = useApp();
+  const image = props.image;
+  const connection = store.state.connection?.id;
+  const [data, setData] = createSignal(
+    "data" in image ? image.data : connection ? shownProjectImage(connection, image.path)?.data : undefined,
+  );
+  if ("path" in image && connection) {
+    const reading = new AbortController();
+    const off = onProjectImageSettled((scope, path, shown) => {
+      if (scope === connection && path === image.path && shown.data !== undefined) setData(shown.data);
+    });
+    readProjectImage(connection, image.path, reading.signal);
+    onCleanup(() => {
+      reading.abort();
+      off();
+    });
+  }
+  return (
+    <Show when={data()}>
+      {(src) => (
+        <div class="tool-image">
+          <button
+            type="button"
+            class="tool-image-open"
+            data-image-open=""
+            aria-haspopup="dialog"
+            aria-label={props.alt || t("Image")}
+            onClick={(event) => openImage(event.currentTarget)}
+          >
+            <img src={src()} alt={props.alt} />
+          </button>
+        </div>
+      )}
+    </Show>
   );
 }
 export function ChangePreview(props: { change: Change; showPath?: boolean }) {
