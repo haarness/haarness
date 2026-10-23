@@ -1717,6 +1717,7 @@
   "expand": "expandir",
   "collapse": "recolher",
   "lines {from}–{to} of {total}": "linhas {from}–{to} de {total}",
+  "rows {from}–{to} of {total}": "linhas da tela {from}–{to} de {total}",
   "always allows": "sempre permite",
   "Haarness could not read all of this command.": "O Haarness não conseguiu ler este comando inteiro.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "O Haarness não conseguiu ler este comando inteiro; uma regra para {rule} pode se aplicar.",

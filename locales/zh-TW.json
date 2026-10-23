@@ -1717,6 +1717,7 @@
   "expand": "展開",
   "collapse": "收合",
   "lines {from}–{to} of {total}": "第 {from}–{to} 行，共 {total} 行",
+  "rows {from}–{to} of {total}": "第 {from}–{to} 顯示列，共 {total} 列",
   "always allows": "一律允許",
   "Haarness could not read all of this command.": "Haarness 無法讀取這條命令的全部內容。",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness 無法讀取這條命令的全部內容；{rule} 的規則可能適用。",

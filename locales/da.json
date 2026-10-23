@@ -1717,6 +1717,7 @@
   "expand": "udvid",
   "collapse": "fold sammen",
   "lines {from}–{to} of {total}": "linjer {from}–{to} af {total}",
+  "rows {from}–{to} of {total}": "rækker {from}–{to} af {total}",
   "always allows": "tillader altid",
   "Haarness could not read all of this command.": "Haarness kunne ikke læse hele denne kommando.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness kunne ikke læse hele denne kommando; en regel for {rule} kan gælde.",

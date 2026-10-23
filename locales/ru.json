@@ -1717,6 +1717,7 @@
   "expand": "развернуть",
   "collapse": "свернуть",
   "lines {from}–{to} of {total}": "строки {from}–{to} из {total}",
+  "rows {from}–{to} of {total}": "экранные строки {from}–{to} из {total}",
   "always allows": "всегда разрешает",
   "Haarness could not read all of this command.": "Haarness не смог прочитать эту команду целиком.",
   "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness не смог прочитать эту команду целиком; может действовать правило для {rule}.",
