@@ -514,6 +514,43 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
 });
 
 
+test("a step opened at the end of the chat stays where it was clicked, and following pauses", async ({}, info) => {
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
+  });
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const transcript = page.locator(".transcript");
+    await input.fill("::long 60");
+    await input.press("Enter");
+    await expect(transcript).toContainText("line 60 marker-60");
+    await input.fill('!tool read {"path":"README.md"}');
+    await input.press("Enter");
+    await expect(transcript).toContainText("Tool read =>");
+    const row = page.locator(".tool-call").filter({ hasText: "README.md" }).last();
+    const summary = row.locator(":scope > summary");
+    const settle = () => page.evaluate(() => new Promise((done) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(done)), 300)));
+    await settle();
+    const at = async () => (await summary.boundingBox())!.y;
+    const before = await at();
+    await summary.click();
+    await expect(row.locator(".tool-body")).toBeVisible();
+    await settle();
+    expect(Math.abs((await at()) - before)).toBeLessThan(2);
+    // Its body pushed the newest output down, so following has paused.
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+    // Closing it from the keyboard keeps it in place too.
+    await summary.press("Enter");
+    await expect(row.locator(".tool-body")).toHaveCount(0);
+    await settle();
+    expect(Math.abs((await at()) - before)).toBeLessThan(2);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+
 test("a turn's reply has one footer, under its last text, with its full time; Copy takes the whole reply", async ({}, info) => {
   const { app, page, errors, close } = await launch(info, async (workspace) => {
     await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");

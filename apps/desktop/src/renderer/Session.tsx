@@ -567,8 +567,52 @@ export function Session() {
     scrollFrame = 0;
     setFollow(false);
   }
+  /* A step or thought the reader opens or closes stays where it was clicked:
+     following pins streamed output to the bottom, not the row's own growth.
+     When opening it pushes the latest output out of view, following pauses,
+     as scrolling up would, and Jump to latest offers the way back. */
+  let toggled:
+    | { control: Element; row: HTMLElement; top: number; height: number; until: number }
+    | undefined;
+  function holdToggled(event: MouseEvent) {
+    const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
+    const row = control?.closest<HTMLElement>("[data-index]");
+    if (!control || !row || !follow() || !scrolling.contains(row)) return;
+    toggled = {
+      control,
+      row,
+      top: control.getBoundingClientRect().top,
+      height: row.offsetHeight,
+      // A click that opens nothing gives the view back soon.
+      until: performance.now() + 400,
+    };
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    requestAnimationFrame(keepToggled);
+  }
+  function keepToggled() {
+    const held = toggled;
+    if (!held) return;
+    const grown = held.row.isConnected ? held.row.offsetHeight - held.height : 0;
+    // The body draws after the toggle event, and a thought's text after
+    // that (Markdown renders in a worker).
+    const drawing =
+      !grown || !!held.row.querySelector('.markdown[data-markdown-ready="false"]');
+    if (held.row.isConnected && drawing && performance.now() < held.until) {
+      requestAnimationFrame(keepToggled);
+      return;
+    }
+    toggled = undefined;
+    if (!held.row.isConnected) return followLatest();
+    const moved = held.control.getBoundingClientRect().top - held.top;
+    if (Math.abs(moved) >= 1) scrolling.scrollTop += moved;
+    lastTop = scrolling.scrollTop;
+    const below = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
+    if (grown > 0 && below > 4) setFollow(false);
+    else followLatest();
+  }
   function followLatest() {
-    if (!follow() || scrollFrame) return;
+    if (!follow() || scrollFrame || toggled) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
       // User input can arrive after a stream delta scheduled this frame.
@@ -621,11 +665,15 @@ export function Session() {
       else followLatest();
     };
     scrolling.addEventListener("scrollend", settle);
+    // Before the row's own handlers, so its place is read before it changes.
+    scrolling.addEventListener("click", holdToggled, true);
     onCleanup(() => {
       children.disconnect();
       resize.disconnect();
       scrolling.removeEventListener("scrollend", settle);
+      scrolling.removeEventListener("click", holdToggled, true);
       cancelAnimationFrame(scrollFrame);
+      toggled = undefined;
     });
   });
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1128,6 +1176,7 @@ export function Session() {
     const target = promptTarget(move, prompts.length, reading, follow());
     if (target === undefined) return false;
     if (target === "latest") {
+      toggled = undefined;
       setFollow(true);
       followLatest();
     } else jumpToPrompt(target);
@@ -2108,6 +2157,7 @@ export function Session() {
               aria-label={t("Jump to latest")}
               title={t("Jump to latest")}
               onClick={() => {
+                toggled = undefined;
                 setFollow(true);
                 followLatest();
               }}
