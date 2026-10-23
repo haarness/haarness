@@ -9747,7 +9747,11 @@ fn auto_reviews_note_its_block_and_a_slow_review_read_quietly() {
     let band = band.lines().last().unwrap().to_owned();
     assert!(!band.contains("reviewing"), "{band}");
     assert!(band.contains("bash"), "{band}");
-    let heard = |millis| std::time::Instant::now() - std::time::Duration::from_millis(millis);
+    let heard = |millis| {
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(millis))
+            .unwrap()
+    };
     app.phase.as_mut().unwrap().received = Some(heard(900));
     let band = frame_text(&app, (120, 36));
     let band = band.lines().last().unwrap().to_owned();
