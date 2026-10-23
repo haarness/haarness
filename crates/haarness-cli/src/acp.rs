@@ -681,18 +681,7 @@ impl Service {
                 metadata,
                 ..
             } => {
-                // A call Auto's reviewer refused shows its reason, not the
-                // text written for the model.
-                let shown = metadata
-                    .get("review")
-                    .filter(|review| review["status"] == "blocked")
-                    .map_or_else(
-                        || output.clone(),
-                        |review| match review["rationale"].as_str() {
-                            Some(reason) => format!("Blocked by Auto review: {reason}"),
-                            None => "Blocked by Auto review".to_owned(),
-                        },
-                    );
+                let (shown, raw) = shown_result(&output, &metadata);
                 notify(
                     connection,
                     session,
@@ -706,7 +695,7 @@ impl Service {
                                     ToolCallStatus::Completed
                                 })
                                 .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
-                                .raw_output(parse_output(&output)),
+                                .raw_output(raw),
                         )
                         .meta(child.meta()),
                     ),
@@ -745,23 +734,12 @@ impl Service {
                 call_id,
                 output,
                 is_error,
+                metadata,
                 ..
             } => notify(
                 connection,
                 session,
-                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    call_id,
-                    ToolCallUpdateFields::new()
-                        .status(if is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        })
-                        .content(vec![
-                            ContentBlock::Text(TextContent::new(output.clone())).into(),
-                        ])
-                        .raw_output(parse_output(&output)),
-                )),
+                SessionUpdate::ToolCallUpdate(result_update(call_id, &output, is_error, &metadata)),
             ),
             ItemData::Todo { items } => notify(
                 connection,
@@ -828,19 +806,10 @@ impl Service {
                 call_id,
                 output,
                 is_error,
+                metadata,
                 ..
-            } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                call_id,
-                ToolCallUpdateFields::new()
-                    .status(if is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    })
-                    .content(vec![
-                        ContentBlock::Text(TextContent::new(output.clone())).into(),
-                    ])
-                    .raw_output(parse_output(&output)),
+            } => Some(SessionUpdate::ToolCallUpdate(result_update(
+                call_id, &output, is_error, &metadata,
             ))),
             _ => None,
         };
@@ -1224,6 +1193,46 @@ fn tool_kind(name: &str) -> ToolKind {
         "todowrite" | "task" | "goal" => ToolKind::Think,
         _ => ToolKind::Other,
     }
+}
+
+/// What the editor shows for a tool result, and its raw output. A call Auto's
+/// reviewer refused shows its reason and the reviewer's note, never the text
+/// written for the model.
+fn shown_result(output: &str, metadata: &Value) -> (String, Value) {
+    match metadata
+        .get("review")
+        .filter(|review| review["status"] == "blocked")
+    {
+        Some(review) => (
+            match review["rationale"].as_str() {
+                Some(reason) => format!("Blocked by Auto review: {reason}"),
+                None => "Blocked by Auto review".to_owned(),
+            },
+            json!({"review": review}),
+        ),
+        None => (output.to_owned(), parse_output(output)),
+    }
+}
+
+/// The session's own tool result, live or replayed.
+fn result_update(
+    call_id: String,
+    output: &str,
+    is_error: bool,
+    metadata: &Value,
+) -> ToolCallUpdate {
+    let (shown, raw) = shown_result(output, metadata);
+    ToolCallUpdate::new(
+        call_id,
+        ToolCallUpdateFields::new()
+            .status(if is_error {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
+            })
+            .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
+            .raw_output(raw),
+    )
 }
 
 fn parse_output(output: &str) -> Value {
