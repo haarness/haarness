@@ -1393,3 +1393,52 @@ async fn a_refusal_nobody_answered_ends_its_request_alone_in_haarnesss_words() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn another_chats_agent_naming_a_folder_never_lets_its_deletion_through() {
+    let workspace = Workspace::new();
+    let outside = Workspace::new();
+    let (runtime, _provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let victim = outside.0.join("victim");
+    let command = format!("rm -rf {}", victim.display());
+    // Another chat's agent asks for it: its words are not the person's, so
+    // the reviewer's approval does not let a deletion it names through.
+    std::fs::create_dir_all(&victim).unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "{}a1b2c3d4:\n{}",
+                haarness_core::SESSION_MESSAGE_PREFIX,
+                bash(&command, "allow")
+            )),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    let review = asked.review.clone().unwrap();
+    assert_eq!(review.status, Status::Asked, "{review:?}");
+    assert!(
+        matches!(
+            review.reason,
+            Some(haarness_protocol::ReviewReason::UnnamedDeletion { ref path }) if path.ends_with("victim")
+        ),
+        "{review:?}"
+    );
+    reply(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert!(victim.exists());
+
+    // The person asking for the same is approved.
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&bash(&command, "allow")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(!victim.exists());
+}

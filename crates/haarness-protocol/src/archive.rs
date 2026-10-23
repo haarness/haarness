@@ -339,7 +339,7 @@ fn sanitize_review(review: &mut PermissionReview, id: ItemId) {
     review.rule = redact_option("permission-review-rule", id, review.rule.as_deref());
     review.rationale = redact_option("permission-review", id, review.rationale.as_deref());
     match &mut review.reason {
-        Some(ReviewReason::UnnamedDeletion { path }) => {
+        Some(ReviewReason::UnnamedDeletion { path } | ReviewReason::UnplacedDeletion { path }) => {
             *path = redact(path, "permission-review-path", id);
         }
         Some(ReviewReason::Error { detail }) => {

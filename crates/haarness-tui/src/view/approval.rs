@@ -362,6 +362,13 @@ pub fn staged_lead(choice: char, pending: &PendingPermissionInfo, reviewer: bool
     }
 }
 
+/// `text` (a path, an error) set apart from the sentence around it, so a
+/// right-to-left sentence keeps it in one piece and its own punctuation in
+/// place (FSI … PDI).
+fn isolated(text: &str) -> String {
+    format!("\u{2068}{text}\u{2069}")
+}
+
 /// Haarness's own words for a note it wrote itself, by its code, in the
 /// person's language; `None` for the reviewer's own words or a code this
 /// client does not know (its English `rationale` is shown then).
@@ -385,7 +392,11 @@ fn review_reason(
         ReviewReason::NoModel => language
             .text("No model was available to review this request.")
             .into(),
-        ReviewReason::Error { detail } => text("It could not decide ({detail}).", "detail", detail),
+        ReviewReason::Error { detail } => text(
+            "It could not decide ({detail}).",
+            "detail",
+            &isolated(detail),
+        ),
         ReviewReason::Streak { count } => text(
             "It blocked {count} actions in a row, so the rest of this turn is yours to approve.",
             "count",
@@ -399,7 +410,12 @@ fn review_reason(
         ReviewReason::UnnamedDeletion { path } => text(
             "This deletes {path}, outside the project, and your messages do not name it.",
             "path",
-            path,
+            &isolated(path),
+        ),
+        ReviewReason::UnplacedDeletion { path } => text(
+            "This deletes {path}, a path Haarness can't place, and your messages do not name it.",
+            "path",
+            &isolated(path),
         ),
         ReviewReason::Rated => language
             .text(match review.risk {
@@ -417,6 +433,34 @@ fn review_reason(
     })
 }
 
+/// The reason in a note of Auto's reviewer, in the person's language when
+/// Haarness wrote it: empty when it gave none.
+pub(crate) fn review_reason_text(
+    review: &haarness_protocol::PermissionReview,
+    language: Language,
+) -> String {
+    review_reason(review, language)
+        .or_else(|| review.rationale.clone())
+        .map(|reason| reason.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// The reviewer's rule as the note shows it: Haarness's own ("Destructive
+/// action", on a note it wrote itself) in the person's language, the
+/// reviewer's as it wrote it.
+fn review_rule(review: &haarness_protocol::PermissionReview, language: Language) -> Option<String> {
+    let rule = review
+        .rule
+        .as_deref()
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())?;
+    Some(if review.reason.is_some() {
+        language.text(rule).to_owned()
+    } else {
+        rule.to_owned()
+    })
+}
+
 /// Why Auto's reviewer left the request to a person, in one line: "Auto
 /// review · <rule>: <reason>", that it was unavailable or paused, or that it
 /// is deciding a request already shown.
@@ -431,14 +475,9 @@ pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Optio
         _ => "Auto review",
     };
     let mut note = language.text(lead).to_owned();
-    if let Some(rule) = review
-        .rule
-        .as_deref()
-        .map(str::trim)
-        .filter(|rule| !rule.is_empty())
-    {
+    if let Some(rule) = review_rule(review, language) {
         note.push_str(" · ");
-        note.push_str(rule);
+        note.push_str(&rule);
     }
     let reason = review_reason(review, language).or_else(|| review.rationale.clone());
     if let Some(reason) = reason

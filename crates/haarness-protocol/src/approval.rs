@@ -114,6 +114,10 @@ pub enum ReviewReason {
     /// The command deletes `path`, outside the project, which the person's
     /// messages do not name.
     UnnamedDeletion { path: String },
+    /// The command deletes `path` (as written: a variable, what `xargs`
+    /// passes, a path after a directory change), which Haarness cannot place
+    /// and the person's messages do not name.
+    UnplacedDeletion { path: String },
     /// The reviewer rated the action's risk (see `risk`) and gave no reason.
     Rated,
     /// A code a newer server sends: show `rationale`.
