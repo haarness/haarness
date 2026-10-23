@@ -212,6 +212,20 @@ try:
     keys('n')
     finish(started)
 
+    # Outside the shape people run (an `export` before it), it is named, not
+    # shown.
+    started = turn('export X=1 && sh scripts/deploy.sh')
+    approval()
+    screen = until(
+        lambda: (text if 'An earlier step' in (text := capture()) else None),
+        'narrow shape note',
+    )
+    assert 'An earlier step of this command can change scripts/deploy.sh,' in screen, screen
+    assert '│ #!/bin/sh' not in screen, screen
+    check('a script after a step outside the narrow shape is named, not shown', 'narrow')
+    keys('n')
+    finish(started)
+
     # `cd scripts &` moves a subshell of its own: the shell runs ./deploy.sh
     # where it is, and the card names that one, its text withheld.
     started = turn('cd scripts & sh deploy.sh; wait')
