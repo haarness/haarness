@@ -8,7 +8,9 @@ import {
   contextLabel,
   countLines,
   fileContext,
+  fileScore,
   keptContext,
+  keptFiles,
   mentionAgents,
   pasteSize,
   pastedText,
@@ -329,4 +331,27 @@ test("a resource that could not be read comes back from Undo as one to read agai
   const chip = resourceToRead(part);
   assert.deepEqual(chip, { kind: "resource", server: "wiki", uri: "docs://logo", name: "logo" });
   assert.deepEqual(resourceMentions([chip]), [{ server: "wiki", uri: "docs://logo", name: "logo" }]);
+});
+
+test("files kept while a search runs are those the server would find, in its order", () => {
+  // The scores of the server's `fuzzy_score`.
+  assert.equal(fileScore("setup.md", "s"), 1492);
+  assert.equal(fileScore("style.css", "st"), 1491);
+  assert.equal(fileScore("setup.md", "st"), 92);
+  assert.equal(fileScore("src/Setup.MD", "setup"), 1484);
+  assert.equal(fileScore("docs/guide.md", ""), -13);
+  assert.equal(fileScore("readme.md", "q"), undefined);
+  // Lengths and positions count UTF-8 bytes, and only ASCII letters fold.
+  assert.equal(fileScore("É/é.md", "é"), 1489);
+  assert.equal(fileScore("É.md", "é"), undefined);
+  assert.deepEqual(keptFiles(["setup.md", "style.css", "settings.md", "readme.md"], "ST"), [
+    "style.css",
+    "setup.md",
+    "settings.md",
+  ]);
+  assert.deepEqual(keptFiles(["a.md", "b.md"], "md"), ["a.md", "b.md"]);
+  assert.equal(keptFiles(Array.from({ length: 30 }, (_, index) => `f${index}.md`), "f").length, 20);
+  // A path spelled out lists a folder on the server: nothing is kept.
+  for (const query of ["/", "~", "~/notes", ".", "..", "./src", "../up"]) assert.deepEqual(keptFiles(["src/a.md"], query), []);
+  assert.deepEqual(keptFiles([".haarness/x.md"], ".haar"), [".haarness/x.md"]);
 });
