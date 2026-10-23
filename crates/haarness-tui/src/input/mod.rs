@@ -300,6 +300,13 @@ fn message_key(app: &App, key: KeyEvent) -> Option<MessageStep> {
     crate::keybindings::resolve(&app.keybindings, key).and_then(MessageStep::of)
 }
 
+/// The key bound to opening the fold nearest the prompt. Like the message
+/// keys it works while a card or a question holds the keyboard, and in a
+/// child agent's view: it only changes what is read.
+fn fold_key(app: &App, key: KeyEvent) -> bool {
+    crate::keybindings::resolve(&app.keybindings, key) == Some(crate::keybindings::FOLD_ACTION)
+}
+
 /// Move the approval panel's chip selection, wrapping both directions.
 fn move_permission_selection(app: &mut App, delta: isize) {
     let count = if app.confirm_always.is_some() {
@@ -512,6 +519,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.step_messages(step);
                 return Ok(AppAction::Continue);
             }
+            if fold_key(app, key) {
+                app.toggle_nearest_fold();
+                return Ok(AppAction::Continue);
+            }
             let plain = key.modifiers.is_empty();
             if let KeyCode::Char(letter) = key.code
                 && (plain || key.modifiers == KeyModifiers::SHIFT)
@@ -634,6 +645,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.step_messages(step);
             return Ok(AppAction::Continue);
         }
+        if action == Some(crate::keybindings::FOLD_ACTION) {
+            app.toggle_nearest_fold();
+            return Ok(AppAction::Continue);
+        }
         app.composer.clear();
         app.attachments.clear();
         app.mention_suggestions.clear();
@@ -680,6 +695,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     if let Some(question) = app.first_pending_question().cloned() {
         if let Some(step) = message_key(app, key) {
             app.step_messages(step);
+            return Ok(AppAction::Continue);
+        }
+        if fold_key(app, key) {
+            app.toggle_nearest_fold();
             return Ok(AppAction::Continue);
         }
         let id = question.question_id;
@@ -900,6 +919,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         }
         match action.as_str() {
             "commands" => app.open_overlay(Overlay::Commands),
+            crate::keybindings::FOLD_ACTION => app.toggle_nearest_fold(),
             "stash_save" => {
                 app.open_management("stash", &serde_json::json!({"action":"save"}), client)
                     .await?;

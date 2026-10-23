@@ -2914,8 +2914,13 @@ impl App {
                     }
                     ["hide" | "off"] => {
                         self.tool_details = false;
-                        self.notice =
-                            "Tool details compact — click a row or /tools show to inspect".into();
+                        self.notice = match crate::view::transcript::fold_key(self) {
+                            Some(key) => format!(
+                                "Tool details compact — {key} or a click opens a row, /tools show opens all"
+                            ),
+                            None => "Tool details compact — click a row or /tools show to inspect"
+                                .to_owned(),
+                        };
                     }
                     ["lazy", "reset"] => {
                         client.update_lazy_tools(None).await?;
