@@ -58,7 +58,21 @@ pub(crate) struct Listing {
     pub sending: bool,
     /// A draft whose unknown picks became plain `@name` text: what the
     /// prompt gets back instead of the draft that was not sent.
-    pub returned: Option<String>,
+    pub returned: Option<Returned>,
+    /// The row a returned pick names: highlighted once its `@` list shows
+    /// it, so Enter picks it again even below a file of the same name.
+    pub want: Option<String>,
+}
+
+/// A draft that comes back instead of being sent, its unknown picks plain
+/// `@name` text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Returned {
+    pub text: String,
+    /// Where the first of them ends, for the cursor, so its `@` list opens.
+    pub at: usize,
+    /// The `@` list row that picks it again.
+    pub row: String,
 }
 
 /// What a listing off the event loop reports, tagged with when it was asked.
@@ -208,8 +222,13 @@ pub(crate) fn suggestions(app: &App, query: &str) -> Vec<String> {
     shown
         .into_iter()
         .take(ROWS)
-        .map(|resource| format!("{KEY}{}\u{1f}{}", resource.server, resource.uri))
+        .map(|resource| key(&resource.server, &resource.uri))
         .collect()
+}
+
+/// The `@` list row of the resource `uri` of `server`.
+fn key(server: &str, uri: &str) -> String {
+    format!("{KEY}{server}\u{1f}{uri}")
 }
 
 /// The resource a suggestion names.
@@ -300,6 +319,9 @@ pub(crate) struct Taken {
     /// The draft with those unknown markers as plain `@name` text, the known
     /// ones still chips.
     pub back: String,
+    /// Where the first unknown marker's `@name` ends in `back`, and the `@`
+    /// list row that picks it again.
+    pub again: Option<(usize, String)>,
 }
 
 /// `text` taken apart around its markers, knowing the picks in `picked`.
@@ -309,6 +331,7 @@ pub(crate) fn take(text: &str, picked: &HashMap<String, ResourceMention>) -> Tak
         mentions: Vec::new(),
         unknown: Vec::new(),
         back: String::new(),
+        again: None,
     };
     for part in crate::prompt_context::parts(text) {
         let piece = match part {
@@ -323,6 +346,12 @@ pub(crate) fn take(text: &str, picked: &HashMap<String, ResourceMention>) -> Tak
                         }
                     } else {
                         taken.back.push_str(&name);
+                        taken.again.get_or_insert_with(|| {
+                            (
+                                taken.back.len(),
+                                key(&marked.mention.server, &marked.mention.uri),
+                            )
+                        });
                         taken.unknown.push(name);
                     }
                     continue;
@@ -454,6 +483,7 @@ impl App {
             self.mention_suggestions.truncate(first);
             self.mention_suggestions.extend(rows);
         }
+        self.select_wanted();
     }
 
     /// Picks the resource row `suggestion` names: it becomes a chip in
@@ -473,12 +503,16 @@ impl App {
         };
         let pick = uuid::Uuid::now_v7().simple().to_string();
         let label = format!("@{}", resource.name);
-        match self.composer.attach_context(
-            start,
-            start + 1 + query.len(),
-            &label,
-            &marker(&mention, &pick),
-        ) {
+        // The chip brings its own space: one already after the query (a pick
+        // made mid-sentence) is not doubled.
+        let mut end = start + 1 + query.len();
+        if self.composer.text()[end..].starts_with(' ') {
+            end += 1;
+        }
+        match self
+            .composer
+            .attach_context(start, end, &label, &marker(&mention, &pick))
+        {
             Ok(()) => {
                 self.mention_resources.picked.insert(pick, mention);
                 self.notice = format!("Attached {label} · Backspace removes the reference");
@@ -487,7 +521,27 @@ impl App {
         }
         self.mention_suggestions.clear();
         self.selection = 0;
+        self.mention_resources.want = None;
         true
+    }
+
+    /// Highlights the row a returned pick names once the open `@` list shows
+    /// it, unless the cursor has left the first row meanwhile.
+    pub(crate) fn select_wanted(&mut self) {
+        let Some(want) = &self.mention_resources.want else {
+            return;
+        };
+        if self.selection != 0 {
+            return;
+        }
+        if let Some(at) = self
+            .mention_suggestions
+            .iter()
+            .position(|suggestion| suggestion == want)
+        {
+            self.selection = at;
+            self.mention_resources.want = None;
+        }
     }
 
     /// A prompt this TUI sends, with its picks as mentions and each as
@@ -511,7 +565,12 @@ impl App {
                 [one] => format!("Pick {one} again to include it"),
                 many => format!("Pick {} again to include them", many.join(", ")),
             };
-            self.mention_resources.returned = Some(taken.back);
+            let (at, row) = taken.again.unwrap_or_default();
+            self.mention_resources.returned = Some(Returned {
+                text: taken.back,
+                at,
+                row,
+            });
             return Ok(None);
         }
         if taken.mentions.is_empty() {
@@ -792,7 +851,7 @@ mod tests {
         let forged = format!("Explain {}", marker(&setup, "not-a-pick"));
         assert!(next.take_mentions(&forged).unwrap().is_none());
         assert_eq!(next.notice, "Pick @setup again to include it");
-        let back = next.mention_resources.returned.take().unwrap();
+        let back = next.mention_resources.returned.take().unwrap().text;
         assert_eq!(back, "Explain @setup");
         // Sent again, it is the plain text it now is.
         assert_eq!(
@@ -1124,8 +1183,11 @@ mod tests {
                     }
                     request.extend_from_slice(&chunk[..read]);
                 }
+                // A project file named like the resource, listed first.
                 let body = if request.starts_with(b"GET /v1/info") {
                     info.clone()
+                } else if request.starts_with(b"GET /v1/files/search") {
+                    r#"["setup.md"]"#.into()
                 } else {
                     "[]".into()
                 };
@@ -1143,8 +1205,9 @@ mod tests {
         format!("http://{address}")
     }
 
-    /// A pick this TUI does not know comes back as plain `@setup` with its
-    /// `@` list open, so one Enter picks it again.
+    /// A pick this TUI does not know comes back as plain `@setup` with the
+    /// cursor after it and its `@` list open on that resource, even below a
+    /// project file of the same name, so one Enter picks it again.
     #[tokio::test]
     async fn an_unknown_pick_comes_back_with_its_list_open_to_pick_it_again() {
         let mut app = app();
@@ -1156,12 +1219,17 @@ mod tests {
         }];
         let capable = info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]);
         app.server_info = Some(capable.clone());
-        app.mention_resources.list = vec![resource("docs", "docs://setup", "setup")];
+        app.mention_resources.list = vec![
+            resource("docs", "docs://setup-notes", "setup-notes"),
+            resource("docs", "docs://setup", "setup"),
+        ];
         app.mention_resources.asked = Some(Instant::now());
         app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
         let setup = mention("docs", "docs://setup", "setup");
-        app.composer
-            .set_text(format!("Explain {}", marker(&setup, "not-a-pick")));
+        app.composer.set_text(format!(
+            "Explain {} in two lines",
+            marker(&setup, "not-a-pick")
+        ));
         let client = ApiClient::new(&answering(capable).await, "token").unwrap();
         let enter = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
@@ -1170,20 +1238,42 @@ mod tests {
         crate::input::handle_key(&mut app, enter, &client)
             .await
             .unwrap();
-        assert_eq!(app.composer.text(), "Explain @setup");
+        assert_eq!(app.composer.text(), "Explain @setup in two lines");
+        assert_eq!(app.composer.cursor(), "Explain @setup".len());
         assert_eq!(app.notice, "Pick @setup again to include it");
+        assert_eq!(app.mention_suggestions[0], "setup.md");
         assert_eq!(
-            app.mention_suggestions
-                .iter()
-                .filter_map(|key| find(&app, key))
-                .map(|resource| resource.uri.as_str())
-                .collect::<Vec<_>>(),
-            ["docs://setup"]
+            find(&app, &app.mention_suggestions[app.selection]).map(|row| row.uri.as_str()),
+            Some("docs://setup")
         );
-        // One Enter picks it again.
+        // One Enter picks it again, not the file.
         crate::input::handle_key(&mut app, enter, &client)
             .await
             .unwrap();
-        assert_eq!(app.composer.text(), "Explain [@setup] ");
+        assert_eq!(app.composer.text(), "Explain [@setup] in two lines");
+        assert!(app.composer.expanded_text().contains("docs://setup\""));
+        assert!(app.mention_resources.want.is_none());
+
+        // A list that comes after the draft does highlights the row as it
+        // arrives.
+        app.mention_resources.list.clear();
+        app.composer.set_text("Explain @setup".into());
+        app.mention_resources.want = Some(key("docs", "docs://setup"));
+        app.mention_suggestions = vec!["setup.md".into()];
+        app.selection = 0;
+        let asked = app.mention_resources.asked.unwrap();
+        app.resources_arrived(Update::Rows {
+            asked,
+            rows: vec![resource("wiki", "wiki://setup", "setup")],
+        });
+        assert_eq!(app.selection, 0);
+        app.resources_arrived(Update::Rows {
+            asked,
+            rows: vec![resource("docs", "docs://setup", "setup")],
+        });
+        assert_eq!(
+            find(&app, &app.mention_suggestions[app.selection]).map(|row| row.uri.as_str()),
+            Some("docs://setup")
+        );
     }
 }
