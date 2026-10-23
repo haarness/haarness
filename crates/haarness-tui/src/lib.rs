@@ -413,6 +413,8 @@ async fn run_with_client(
     }
     app.yolo = client.auto_approves();
     app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
+    // The prompt says what Enter does while work runs; the project decides.
+    app.input_delivery = client.input_delivery().await.ok();
     app.original_client = Some(client.clone());
     app.workspace_local_switching = client.supports_local_workspace_switch();
     if let Ok(todos) = client.todos(app.thread.id).await {

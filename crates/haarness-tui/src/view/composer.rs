@@ -916,8 +916,15 @@ fn phase_text(app: &App) -> String {
     let turn_elapsed = app
         .turn_started
         .map_or(0, |started| started.elapsed().as_secs());
+    // Before a first token the model may be thinking or still on its way:
+    // only reasoning that actually streams is called thinking.
+    let waiting = if app.reasoning_preview.is_empty() {
+        "working"
+    } else {
+        "thinking"
+    };
     let Some(phase) = &app.phase else {
-        return format!("{}   {turn_elapsed}s", app.language.text("thinking"));
+        return format!("{}   {turn_elapsed}s", app.language.text(waiting));
     };
     let elapsed = phase.elapsed_seconds();
     match phase.state.as_str() {
@@ -959,7 +966,29 @@ fn phase_text(app: &App) -> String {
         "retrying" => format!("recovering incomplete response   {elapsed}s"),
         "stopping" => app.language.text("stopping").into(),
         "done" => app.language.text("finishing").into(),
-        _ => format!("{}   {turn_elapsed}s", app.language.text("thinking")),
+        _ => format!("{}   {turn_elapsed}s", app.language.text(waiting)),
+    }
+}
+
+/// What the empty prompt says it is for. While work runs that is what Enter
+/// does with a message, which the project's input mode decides (`/input-mode`;
+/// Alt+Enter always queues).
+pub(crate) fn placeholder(app: &App) -> &'static str {
+    if app.shell_mode {
+        "shell command…"
+    } else if !app.attachments.is_empty() {
+        "Add a question, or Enter to send media"
+    } else if app.active_turn.is_some()
+        && app.queue_edit.is_none()
+        && app.first_pending_question().is_none()
+    {
+        if app.input_delivery == Some(haarness_protocol::InputDelivery::Queue) {
+            "Enter queues until this work is done"
+        } else {
+            "Enter steers · alt+enter queues"
+        }
+    } else {
+        "Ask anything…"
     }
 }
 
@@ -990,20 +1019,13 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
             })
             .collect();
     }
-    let placeholder = if app.shell_mode {
-        "shell command…"
-    } else if app.attachments.is_empty() {
-        "Ask anything…"
-    } else {
-        "Add a question, or Enter to send media"
-    };
     let lead = app
         .shell_mode
         .then(|| Span::new("! ", theme.accent).with_attributes(attr::BOLD));
     editor_rows(
         app,
         &app.composer,
-        app.language.text(placeholder),
+        app.language.text(placeholder(app)),
         lead,
         !card_owns_keys,
         width,

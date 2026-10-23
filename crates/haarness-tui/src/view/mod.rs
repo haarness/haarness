@@ -679,7 +679,7 @@ fn compact_frame(
                 app.language
                     .text("Answer the approval above · ctrl+g to type")
             } else if app.composer.is_empty() {
-                "Ask anything…"
+                app.language.text(composer::placeholder(app))
             } else {
                 app.composer.text()
             };
