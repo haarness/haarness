@@ -24,6 +24,7 @@ import { chatTitle } from "./chat-title";
 import { relativeAge } from "./relative-age";
 import { revealInList } from "./reveal";
 import { searchArchived } from "./UniversalSearch";
+import { focusComposerWhenShown } from "./composer-focus";
 import {
   drawnChats,
   emptySelection,
@@ -803,13 +804,7 @@ export function SessionList(props: {
                 {...openRow(app, () => row(), picking)}
                 onClick={(event) => {
                   if (pick(event)) return;
-                  void app.run(() =>
-                    app.chooseProjectSession(
-                      row().location.id,
-                      row().thread.id,
-                      "preview",
-                    ),
-                  );
+                  void openChat(app, event, row());
                 }}
               >
                 <Show
@@ -961,9 +956,23 @@ type Conversation = ReturnType<
   ReturnType<typeof useApp>["conversations"]
 >[number];
 
-/** A chat row's other ways in: a plain click opens the chat as the preview
- * tab, a middle-click opens it in a tab that stays, and a double-click keeps
- * the preview it opened. In Select chats, clicks only pick. */
+/**
+ * A plain click on a chat row: the chat opens in the preview tab. Clicked
+ * with the pointer, the keyboard then goes to its message box, so typing
+ * lands in the chat on screen; Enter on a row that has the keyboard (or an
+ * Alt+arrow step) leaves it on the row.
+ */
+function openChat(app: ReturnType<typeof useApp>, event: MouseEvent, row: Conversation) {
+  const from = event.currentTarget as Element;
+  return app.run(async () => {
+    await app.chooseProjectSession(row.location.id, row.thread.id, "preview");
+    if (event.detail > 0) focusComposerWhenShown(from);
+  });
+}
+
+/** A chat row's other ways in: a middle-click opens the chat in a tab that
+ * stays, and a double-click keeps the preview it opened. In Select chats,
+ * clicks only pick. */
 function openRow(
   app: ReturnType<typeof useApp>,
   row: () => Conversation,
@@ -1100,15 +1109,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                 aria-current={active()}
                                 title={chatTitle(row().thread.title)}
                                 {...openRow(app, () => row(), () => false)}
-                                onClick={() =>
-                                  app.run(() =>
-                                    app.chooseProjectSession(
-                                      row().location.id,
-                                      row().thread.id,
-                                      "preview",
-                                    ),
-                                  )
-                                }
+                                onClick={(event) => void openChat(app, event, row())}
                               >
                                 <span
                                   class="session-status"

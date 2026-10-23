@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "채팅 보관 {title}",
   "Restore chat {title}": "채팅 복원 {title}",
   "Close chat tab": "채팅 탭 닫기",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "미리 보기 탭입니다. 다음에 여는 채팅으로 바뀝니다. 계속 열어 두려면 두 번 클릭하세요.",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "미리 보기 탭입니다. 다음에 여는 채팅으로 바뀝니다. 계속 열어 두려면 Enter 키를 누르거나 두 번 클릭하세요.",
   "Import chat archive": "채팅 아카이브 가져오기",
   "Chat archive": "채팅 아카이브",
   "Chat archive imported": "채팅 아카이브를 가져왔습니다",

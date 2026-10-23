@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "チャット {title} をアーカイブ",
   "Restore chat {title}": "チャット {title} を復元",
   "Close chat tab": "チャットタブを閉じる",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "プレビュータブです。次に開いたチャットに置き換わります。開いたままにするにはダブルクリックします。",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "プレビュータブです。次に開いたチャットに置き換わります。開いたままにするには Enter キーを押すかダブルクリックします。",
   "Import chat archive": "チャットアーカイブをインポート",
   "Chat archive": "チャットアーカイブ",
   "Chat archive imported": "チャットアーカイブをインポートしました",
