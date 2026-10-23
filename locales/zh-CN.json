@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "MCP 资源 · {server}",
   "Read from {server} when the message is sent.": "发送消息时从 {server} 读取。",
   "MCP server": "MCP 服务器",
-  "not read": "未读取"
+  "not read": "未读取",
+  "agents · files · resources": "智能体 · 文件 · 资源",
+  "files · agents · resources": "文件 · 智能体 · 资源"
 }

@@ -1527,6 +1527,10 @@ impl ApiClient {
         async {
             request.auto_approve |= self.auto_approve;
             request.attachments = self.attachments(request.attachments).await?;
+            // Picked MCP resources travel as mentions, read by the server.
+            let (text, resources) = crate::resource_mentions::take(&request.text);
+            request.text = text;
+            request.resources.extend(resources);
             Ok(self
                 .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
                 .json(&request)
@@ -1546,6 +1550,11 @@ impl ApiClient {
         mut request: ExecuteCommandRequest,
     ) -> Result<CommandExecutionResponse> {
         request.attachments = self.attachments(request.attachments).await?;
+        if let Some(serde_json::Value::String(arguments)) = &mut request.arguments {
+            let (text, resources) = crate::resource_mentions::take(arguments);
+            *arguments = text;
+            request.resources.extend(resources);
+        }
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/commands"))
             .json(&request)
@@ -1648,6 +1657,9 @@ impl ApiClient {
         mut request: haarness_protocol::QueueInputRequest,
     ) -> Result<haarness_protocol::QueueInputResponse> {
         request.attachments = self.attachments(request.attachments).await?;
+        let (text, resources) = crate::resource_mentions::take(&request.text);
+        request.text = text;
+        request.resources.extend(resources);
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/input"))
             .json(&request)

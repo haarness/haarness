@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "MCP リソース · {server}",
   "Read from {server} when the message is sent.": "メッセージの送信時に {server} から読み取ります。",
   "MCP server": "MCP サーバー",
-  "not read": "読み取れませんでした"
+  "not read": "読み取れませんでした",
+  "agents · files · resources": "エージェント · ファイル · リソース",
+  "files · agents · resources": "ファイル · エージェント · リソース"
 }

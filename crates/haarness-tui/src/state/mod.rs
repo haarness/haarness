@@ -809,6 +809,12 @@ pub struct App {
     pub terminal: Option<crate::pty_view::TerminalWorkspace>,
     /// Live @-mention completion results from the server.
     pub mention_suggestions: Vec<String>,
+    /// The attached server's MCP resources for the `@` list.
+    pub(crate) mention_resources: crate::resource_mentions::Listing,
+    /// Where a resource listing read off the event loop goes (see
+    /// `App::resources_arrived`); without it, none is asked for.
+    pub(crate) resources_tx:
+        Option<tokio::sync::mpsc::Sender<Option<Vec<crate::resource_mentions::Resource>>>>,
     /// Escape dismisses autocomplete without deleting the typed query. The
     /// next edit makes suggestions eligible again.
     pub autocomplete_hidden: bool,
@@ -1089,6 +1095,8 @@ impl App {
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
+            mention_resources: crate::resource_mentions::Listing::default(),
+            resources_tx: None,
             autocomplete_hidden: false,
             viewport_offset: 0,
             max_viewport_offset: std::cell::Cell::new(0),

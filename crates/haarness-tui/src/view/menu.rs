@@ -104,6 +104,10 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     || query == ".."
                     || query.starts_with("./")
                     || query.starts_with("../");
+                let resources = app
+                    .mention_suggestions
+                    .iter()
+                    .any(|path| crate::resource_mentions::find(app, path).is_some());
                 let title = if query.starts_with('/') || query.starts_with('~') || dot_path {
                     "files · local paths"
                 } else if app
@@ -111,7 +115,13 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     .iter()
                     .any(|path| path.starts_with("agent://"))
                 {
-                    "agents · files"
+                    if resources {
+                        "agents · files · resources"
+                    } else {
+                        "agents · files"
+                    }
+                } else if resources {
+                    "files · agents · resources"
                 } else {
                     "files · agents"
                 };
@@ -120,7 +130,9 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     app.mention_suggestions
                         .iter()
                         .map(|path| {
-                            if let Some(agent) = path.strip_prefix("agent://") {
+                            if let Some(resource) = crate::resource_mentions::find(app, path) {
+                                crate::resource_mentions::row(resource)
+                            } else if let Some(agent) = path.strip_prefix("agent://") {
                                 (
                                     format!("@{agent}"),
                                     app.language.text("Delegate to agent").into(),

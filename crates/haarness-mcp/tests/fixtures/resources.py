@@ -1,6 +1,7 @@
 """MCP stdio fixture that declares resources: a text page, an image, a template, and a page that never answers.
 
 A read of `docs://slow` gets no answer; the cancellation the client sends for it is appended to CANCEL_LOG.
+With REQUEST_LOG set, the method of every request is appended to it.
 """
 import base64
 import json
@@ -27,6 +28,9 @@ def reply(request_id, result):
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
+    if 'REQUEST_LOG' in os.environ:
+        with open(os.environ['REQUEST_LOG'], 'a') as file:
+            file.write('%s\n' % method)
     if method == 'notifications/cancelled':
         if 'CANCEL_LOG' in os.environ:
             with open(os.environ['CANCEL_LOG'], 'a') as file:

@@ -1182,6 +1182,9 @@ pub(crate) fn apply_mention(app: &mut App) -> bool {
     let Some(path) = selected(&app.mention_suggestions, app.selection).cloned() else {
         return false;
     };
+    if app.attach_resource(&path) {
+        return true;
+    }
     let end = start + 1 + query.len();
     let absolute = if let Some(rest) = path.strip_prefix("~/") {
         haarness_protocol::home_dir().map(|home| home.join(rest))
@@ -1250,6 +1253,10 @@ pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
                     file
                 }
             }));
+            // MCP resources follow agents and files, so a server with many
+            // never pushes files down; asked for the first time `@` opens.
+            suggestions.extend(crate::resource_mentions::suggestions(app, &query));
+            app.ask_resources(client);
             app.mention_suggestions = suggestions;
             app.selection = 0;
         }

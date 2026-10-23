@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "مورد MCP · {server}",
   "Read from {server} when the message is sent.": "يُقرأ من {server} عند إرسال الرسالة.",
   "MCP server": "خادم MCP",
-  "not read": "لم تتم قراءته"
+  "not read": "لم تتم قراءته",
+  "agents · files · resources": "وكلاء · ملفات · موارد",
+  "files · agents · resources": "ملفات · وكلاء · موارد"
 }

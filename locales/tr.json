@@ -2771,5 +2771,7 @@
   "MCP resource · {server}": "MCP kaynağı · {server}",
   "Read from {server} when the message is sent.": "Mesaj gönderildiğinde {server} sunucusundan okunur.",
   "MCP server": "MCP sunucusu",
-  "not read": "okunamadı"
+  "not read": "okunamadı",
+  "agents · files · resources": "ajanlar · dosyalar · kaynaklar",
+  "files · agents · resources": "dosyalar · ajanlar · kaynaklar"
 }
