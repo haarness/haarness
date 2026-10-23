@@ -331,6 +331,7 @@ impl McpRegistry for NativeMcpRegistry {
             scope: None,
             apps: config.apps.filter(|on| !on),
             app_tools: None,
+            turned_off: None,
         };
         self.servers.write().insert(
             name.into(),

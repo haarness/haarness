@@ -10360,6 +10360,7 @@ fn sidebar_renders_on_wide_terminals_and_collapses_on_narrow() {
         scope: None,
         apps: None,
         app_tools: None,
+        turned_off: None,
     }];
     app.children.insert(
         "call-1".into(),

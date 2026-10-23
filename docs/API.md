@@ -387,17 +387,27 @@ an empty list rather than probing an undeclared server method.
 resources a person mentioned with `@`: `[{"server": "docs", "uri":
 "docs://setup", "name": "setup"}]` (`name` optional, at most 50). The server
 reads each from its MCP server when the request arrives, before the turn starts
-or the message is queued, and adds it after the text (after a command's string
-`arguments`) as a block under `MCP resource: setup · docs:docs://setup`, its
-text fenced and cut with the usual note when long; its images and PDFs join
-`attachments` (10 MiB together). A resource that cannot be read is named in its
-block with `(not read)` and the reason, and the message is still sent. The same
-server and URI twice is read once; two servers with one URI are two mentions.
-No permission is asked: the person picked it, as they attach a file. A
-published chat's request with `resources` is refused (`403`), and its
-`/v1/info` leaves the capability out. Servers advertise
+or the message is queued, all of them within 10 s together, and adds each after
+the text (after a command's string `arguments`) as a block under
+`MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
+50 KiB (128 KiB for all of a message's resources) with a note that says where
+the whole text was saved; its images and PDFs join `attachments` (10 MiB
+together). A resource that is not read is named in its block with
+`(not read)`, and the block holds only the reason: the MCP server's error, `did
+not answer within 10 s`, or `a rule keeps this resource from the model`. The
+chat's own rules decide as they do for `mcp_resource_read`, except that an ask
+is not asked (the person picked it, as they attach a file): a deny for
+`<server>:<uri>`, or a rule or tool setting that takes every tool of the server
+away, keeps it out. The rest of the message is still sent. The same server and
+URI twice is read once; two servers with one URI are two mentions. A message
+with mentions is read and admitted on the server's own time, so a client that
+goes away meanwhile does not lose it, and a retry with the same `requestId`
+finds it. A published chat's request with `resources` is refused (`403`), and
+its `/v1/info` leaves the capability out. Servers advertise
 `mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
-resources only when it is there.
+resources only when it is there. `GET /v1/mcp?threadId=<id>` (or `?agent=` for a
+chat not yet made) marks each server that chat's rules take away with
+`turnedOff: true`, so an `@` list can leave its resources out.
 That POST returns a tagged `turn`, `workflow_run`, or `text` result and leaves
 the stable `POST /turns` contract unchanged. A workflow hidden by a configured
 direct command remains explicitly available as `/workflow run <name>`.

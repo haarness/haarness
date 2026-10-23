@@ -3786,6 +3786,13 @@
           },
           "transport": {
             "type": "string"
+          },
+          "turnedOff": {
+            "description": "`true` when the chat (or agent) the list was asked for takes every\ntool of this server away by a rule or tool setting, and with them its\nresources: an `@` list leaves it out. Absent otherwise, and from\nolder servers.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3793,6 +3800,18 @@
           "transport",
           "status"
         ],
+        "type": "object"
+      },
+      "McpServersQuery": {
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [],
         "type": "object"
       },
       "Metrics": {
@@ -8095,7 +8114,24 @@
     "/v1/mcp": {
       "get": {
         "operationId": "mcp_servers",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {

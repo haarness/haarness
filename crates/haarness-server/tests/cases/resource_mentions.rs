@@ -1,13 +1,17 @@
 //! A message's `@` mentions of MCP resources are read when it arrives: the
 //! stored message and the model both get what was read, a resource that
-//! cannot be read is named with the reason while the message still goes, a
-//! queued message holds what was read when it was queued, and a published
-//! chat cannot read the owner's servers.
+//! cannot be read, that the chat's rules keep from it or that does not
+//! answer in time is named with the reason while the message still goes, a
+//! queued message holds what was read when it was queued, a client that
+//! leaves mid-read does not lose its message, and a published chat cannot
+//! read the owner's servers.
 use super::*;
+use haarness_core::{PermissionDecision, PermissionRule};
 use haarness_protocol::{Item, ItemData, RESOURCE_MENTIONS_CAPABILITY};
 use serde_json::json;
 
-/// Two servers that expose the same URI, and nothing else.
+/// Two servers that expose the same URI (`docs` and `wiki`), and a third
+/// (`hidden`) whose tools a rule takes away. Reading `slow://` never answers.
 struct Docs;
 #[async_trait]
 impl McpRegistry for Docs {
@@ -15,10 +19,22 @@ impl McpRegistry for Docs {
         vec![]
     }
     fn resource_servers(&self) -> Vec<String> {
-        vec!["docs".into(), "wiki".into()]
+        vec!["docs".into(), "wiki".into(), "hidden".into()]
     }
     async fn list(&self) -> CoreResult<Vec<McpServerInfo>> {
-        Ok(vec![])
+        Ok(["docs", "wiki", "hidden"]
+            .into_iter()
+            .map(|name| McpServerInfo {
+                name: name.into(),
+                transport: "stdio".into(),
+                status: "connected".into(),
+                detail: None,
+                scope: None,
+                apps: None,
+                app_tools: None,
+                turned_off: None,
+            })
+            .collect())
     }
     async fn configure(&self, _: &str, _: McpConfigureRequest) -> CoreResult<McpServerInfo> {
         Err(CoreError::NotFound("fixture".into()))
@@ -43,7 +59,8 @@ impl McpRegistry for Docs {
     }
     async fn read_resource(&self, server: &str, uri: &str) -> CoreResult<Value> {
         match uri {
-            "docs://setup" => Ok(
+            "slow://" => std::future::pending().await,
+            "docs://setup" | "docs://private" => Ok(
                 json!({"contents": [{"uri": uri, "mimeType": "text/markdown", "text": format!("# {server} setup")}]}),
             ),
             _ => Err(CoreError::Tool(
@@ -66,14 +83,34 @@ struct Fixture {
     handle: haarness_server::ServerHandle,
 }
 
+/// The echo provider, and rules that keep `docs://private` and every tool
+/// (so every resource) of `hidden` from the model.
 async fn fixture() -> Fixture {
-    let runtime = Arc::new(AgentRuntime::new(
+    let mut config = RuntimeConfig::default();
+    for (pattern, decision) in [
+        // Rules match last first: the ask is the default, the denies win.
+        ("mcp_resource_read:*", PermissionDecision::Ask),
+        (
+            "mcp_resource_read:docs:docs://private",
+            PermissionDecision::Deny,
+        ),
+        ("mcp__hidden__*", PermissionDecision::Deny),
+    ] {
+        config.base_rules.push(PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        });
+    }
+    let runtime = Arc::new(AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(Echo) as Arc<dyn ModelProvider>
         ])),
         Arc::new(EmptyToolRegistry),
         EventBus::new(64),
+        std::env::temp_dir(),
+        String::new(),
+        config,
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let handle = serve(
@@ -211,7 +248,7 @@ async fn a_mentioned_resource_is_read_into_the_message_and_reaches_the_model() {
             "Compare these",
             "<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n```\n# docs setup\n```\n\n</details>",
             "<details>\n<summary>MCP resource: setup · wiki:docs://setup</summary>\n\n```\n# wiki setup\n```\n\n</details>",
-            "<details>\n<summary>MCP resource: docs:docs://gone (not read)</summary>\n\n```\nCould not read MCP resource docs:docs://gone: MCP error -32002: Resource not found\n```\n\n</details>",
+            "<details>\n<summary>MCP resource: docs:docs://gone (not read)</summary>\n\n```\nMCP error -32002: Resource not found\n```\n\n</details>",
         ]
         .join("\n\n")]
     );
@@ -296,6 +333,27 @@ async fn a_published_chat_cannot_mention_resources_and_is_not_offered_them() {
     .await
     .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    for (path, body) in [
+        (
+            "input",
+            json!({"requestId": RequestId::new(), "text": "Read it", "resources": [{"server": "docs", "uri": "docs://setup"}]}),
+        ),
+        (
+            "commands",
+            json!({"name": "review", "arguments": "it", "resources": [{"server": "docs", "uri": "docs://setup"}]}),
+        ),
+    ] {
+        let response = shared(
+            fixture
+                .client
+                .post(format!("{}/v1/threads/{}/{path}", fixture.base, thread.id)),
+        )
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN, "{path}");
+    }
     // A command's typed (non-string) arguments cannot take a mention.
     let response = fixture
         .client
@@ -313,5 +371,145 @@ async fn a_published_chat_cannot_mention_resources_and_is_not_offered_them() {
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
     assert!(user_messages(&fixture.items(&thread).await).is_empty());
+    fixture.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_chats_rules_keep_a_mention_from_it_without_asking_and_its_lists_say_so() {
+    let fixture = fixture().await;
+    let thread = fixture.thread().await;
+    // The list asked for this chat says which server it cannot reach.
+    let servers: Vec<McpServerInfo> = fixture
+        .client
+        .get(format!("{}/v1/mcp?threadId={}", fixture.base, thread.id))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let off: Vec<_> = servers
+        .iter()
+        .map(|server| (server.name.as_str(), server.turned_off))
+        .collect();
+    assert_eq!(
+        off,
+        [("docs", None), ("wiki", None), ("hidden", Some(true))]
+    );
+    let plain: Vec<McpServerInfo> = fixture
+        .client
+        .get(format!("{}/v1/mcp", fixture.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(plain.iter().all(|server| server.turned_off.is_none()));
+    fixture
+        .client
+        .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
+        .json(&json!({
+            "requestId": RequestId::new(),
+            "text": "Read these",
+            "resources": [
+                {"server": "docs", "uri": "docs://private", "name": "private"},
+                {"server": "hidden", "uri": "docs://setup", "name": "setup"},
+                // Asked of the model by a rule; the person's pick is not.
+                {"server": "wiki", "uri": "docs://setup", "name": "setup"},
+            ],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let sent = user_messages(&fixture.items(&thread).await);
+    let refused = "(not read)</summary>\n\n```\na rule keeps this resource from the model\n```";
+    assert!(
+        sent[0].contains(&format!("private · docs:docs://private {refused}")),
+        "{sent:?}"
+    );
+    assert!(
+        sent[0].contains(&format!("setup · hidden:docs://setup {refused}")),
+        "{sent:?}"
+    );
+    assert!(sent[0].contains("```\n# wiki setup\n```"), "{sent:?}");
+    assert!(fixture.runtime.pending_permissions().is_empty());
+    fixture.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_server_has_ten_seconds_and_a_client_that_leaves_keeps_its_message() {
+    let fixture = fixture().await;
+    let thread = fixture.thread().await;
+    let request = RequestId::new();
+    let body = json!({
+        "requestId": request,
+        "text": "Wait for it",
+        "resources": [
+            {"server": "docs", "uri": "slow://", "name": "slow"},
+            {"server": "docs", "uri": "docs://setup", "name": "setup"},
+        ],
+    });
+    // The client gives up after a second; the message is still admitted.
+    let started = std::time::Instant::now();
+    let gave_up = fixture
+        .client
+        .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
+        .timeout(Duration::from_secs(1))
+        .json(&body)
+        .send()
+        .await;
+    assert!(gave_up.is_err(), "{gave_up:?}");
+    let sent = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let sent = user_messages(
+                &fixture
+                    .client
+                    .get(format!("{}/v1/threads/{}/items", fixture.base, thread.id))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Vec<Item>>()
+                    .await
+                    .unwrap(),
+            );
+            if !sent.is_empty() {
+                return sent;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the message is admitted after its client left");
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(9) && waited < Duration::from_secs(15),
+        "{waited:?}"
+    );
+    assert!(
+        sent[0].contains(
+            "slow · docs:slow:// (not read)</summary>\n\n```\ndid not answer within 10 s\n```"
+        ),
+        "{sent:?}"
+    );
+    assert!(sent[0].contains("# docs setup"), "{sent:?}");
+    wait_idle(&fixture.runtime, thread.id).await;
+    // Its retry finds the turn the first request started, and adds nothing.
+    let turn: Turn = fixture
+        .client
+        .post(format!("{}/v1/threads/{}/turns", fixture.base, thread.id))
+        .json(&json!({"requestId": request, "text": "Wait for it"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(turn.request_id, request);
+    assert_eq!(user_messages(&fixture.items(&thread).await).len(), 1);
     fixture.handle.shutdown().await.unwrap();
 }

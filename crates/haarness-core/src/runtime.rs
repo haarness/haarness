@@ -465,6 +465,56 @@ pub struct DirectToolResult {
     pub is_error: bool,
 }
 
+/// What a person's own `@` mention of an MCP resource may reach in one chat
+/// (see [`AgentRuntime::resource_mention_policy`]). The chat's rules decide
+/// as they do for the model's `mcp_resource_read`, except that an ask is not
+/// asked: the person picked the resource, as they would attach a file.
+pub struct ResourceMentionPolicy {
+    engine: PermissionEngine,
+    configured: HashMap<String, bool>,
+    live: HashMap<String, bool>,
+    agent_tools: Option<HashMap<String, bool>>,
+    workspace: PathBuf,
+}
+
+impl ResourceMentionPolicy {
+    /// Whether a rule or setting takes every tool of `server` away for the
+    /// chat (`"mcp__docs__*": "deny"`, or `false` under `tools`), which keeps
+    /// its resources from the chat too.
+    #[must_use]
+    pub fn turned_off(&self, server: &str) -> bool {
+        let tools = mcp_server_tools(server);
+        !self
+            .live
+            .get(&tools)
+            .or_else(|| self.configured.get(&tools))
+            .copied()
+            .unwrap_or(true)
+            || self.agent_tools.as_ref().is_some_and(|agent_tools| {
+                crate::definitions::tool_override(agent_tools, &tools) == Some(false)
+            })
+            || self.engine.disables_tool(&tools)
+    }
+
+    /// Whether the chat's rules keep `uri` of `server` from it: its server is
+    /// turned off, or an `mcp_resource_read` rule denies `<server>:<uri>`.
+    #[must_use]
+    pub fn denies(&self, server: &str, uri: &str) -> bool {
+        self.turned_off(server)
+            || ask_plans(
+                "mcp_resource_read",
+                &json!({"server": server, "uri": uri}),
+                &self.workspace,
+            )
+            .iter()
+            .any(|plan| {
+                plan.patterns.iter().any(|pattern| {
+                    plan.evaluate(&self.engine, pattern).decision == PermissionDecision::Deny
+                })
+            })
+    }
+}
+
 fn plain_tool_output(text: String) -> ToolOutput {
     ToolOutput {
         text,
@@ -1535,6 +1585,67 @@ impl AgentRuntime {
     #[must_use]
     pub fn agent_default(&self) -> Option<String> {
         self.components().config.default_agent.clone()
+    }
+
+    /// The rules a person's `@` mentions of MCP resources follow in chat
+    /// `thread_id`, or, before a chat exists, for `agent` (the default agent
+    /// when none is named). They are built as a direct tool call's are: the
+    /// configured and remembered rules, the agent's own permissions and tool
+    /// settings, and a parent chat's ceilings.
+    pub async fn resource_mention_policy(
+        &self,
+        thread_id: Option<ThreadId>,
+        agent: Option<&str>,
+    ) -> CoreResult<ResourceMentionPolicy> {
+        let components = self.components();
+        let thread = match thread_id {
+            Some(id) => Some(self.repository.get_thread(id).await?),
+            None => None,
+        };
+        let agent = thread
+            .as_ref()
+            .map(|thread| thread.agent.clone())
+            .or_else(|| agent.map(str::to_owned))
+            .or_else(|| components.config.default_agent.clone())
+            .unwrap_or_else(|| "build".into());
+        if let Some(store) = &self.repository_approvals {
+            *self.repository_rules.lock() = store.load()?;
+        }
+        let mut engine = components
+            .config
+            .permission_defaults(&agent, "mcp_resource_read");
+        engine.set_workspace(&self.workspace);
+        for rule in self.repository_rules.lock().iter().cloned() {
+            engine.add_repository_grant(rule);
+        }
+        for rule in components.config.base_rules.iter().cloned() {
+            engine.add_rule(rule);
+        }
+        for rule in components
+            .config
+            .granted_rules
+            .iter()
+            .chain(self.session_rules.lock().iter())
+            .cloned()
+        {
+            engine.add_grant(rule);
+        }
+        let custom = self.custom_agent(&agent);
+        if let Some(custom) = &custom {
+            for rule in custom.permissions.iter().cloned() {
+                engine.add_rule(rule);
+            }
+        }
+        if let Some(parent_id) = thread.and_then(|thread| thread.parent_id) {
+            engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
+        }
+        Ok(ResourceMentionPolicy {
+            engine,
+            configured: components.config.tool_availability.clone(),
+            live: self.tool_availability.read().clone(),
+            agent_tools: custom.map(|custom| custom.tools),
+            workspace: self.workspace.clone(),
+        })
     }
 
     #[must_use]

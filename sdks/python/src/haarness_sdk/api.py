@@ -187,9 +187,9 @@ class Api(Transport):
         """POST /v1/plugins."""
         return cast("list[T.PluginInfo]", self.request('POST', f'/v1/plugins', body=body, binary_body=False, binary_response=False, options=options))
 
-    def mcp_servers(self, *, options: RequestOptions | None = None) -> list[T.McpServerInfo]:
+    def mcp_servers(self, query: T.McpServersQuery | None = None, *, options: RequestOptions | None = None) -> list[T.McpServerInfo]:
         """GET /v1/mcp."""
-        return cast("list[T.McpServerInfo]", self.request('GET', f'/v1/mcp', binary_body=False, binary_response=False, options=options))
+        return cast("list[T.McpServerInfo]", self.request('GET', f'/v1/mcp', query=query, binary_body=False, binary_response=False, options=options))
 
     def configure_mcp(self, name: str, body: T.McpConfigureRequest, *, options: RequestOptions | None = None) -> T.McpServerInfo:
         """POST /v1/mcp/{name}."""
@@ -692,9 +692,9 @@ class AsyncApi(AsyncTransport):
         """POST /v1/plugins."""
         return cast("list[T.PluginInfo]", await self.request('POST', f'/v1/plugins', body=body, binary_body=False, binary_response=False, options=options))
 
-    async def mcp_servers(self, *, options: RequestOptions | None = None) -> list[T.McpServerInfo]:
+    async def mcp_servers(self, query: T.McpServersQuery | None = None, *, options: RequestOptions | None = None) -> list[T.McpServerInfo]:
         """GET /v1/mcp."""
-        return cast("list[T.McpServerInfo]", await self.request('GET', f'/v1/mcp', binary_body=False, binary_response=False, options=options))
+        return cast("list[T.McpServerInfo]", await self.request('GET', f'/v1/mcp', query=query, binary_body=False, binary_response=False, options=options))
 
     async def configure_mcp(self, name: str, body: T.McpConfigureRequest, *, options: RequestOptions | None = None) -> T.McpServerInfo:
         """POST /v1/mcp/{name}."""
