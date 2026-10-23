@@ -25,11 +25,6 @@ const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 10_000;
 const MAX_MESSAGE_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_DIAGNOSTICS: usize = 100;
 
-/// The chat id an agent's shell command gets (`haarness_core::SESSION_ID_ENV`).
-/// A server started by such a command inherits it; it names none of that
-/// server's chats, so its language servers and formatters do not get it.
-const SESSION_ID_ENV: &str = "HAARNESS_SESSION_ID";
-
 fn true_value() -> bool {
     true
 }
@@ -702,9 +697,14 @@ impl LanguageService {
         if !used_file {
             command.arg(file);
         }
+        // The server's credentials, OpenTelemetry settings and an inherited
+        // chat id stay out (`private_env_names`); the configured
+        // environment can still set them.
+        for name in haarness_core::private_env_names() {
+            command.env_remove(name);
+        }
         command
             .current_dir(dunce::simplified(&self.workspace))
-            .env_remove(SESSION_ID_ENV)
             .envs(&formatter.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -861,10 +861,13 @@ impl Client {
         cancel: &CancellationToken,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(&config.command[0]);
+        // As for a formatter: the configured environment still wins.
+        for name in haarness_core::private_env_names() {
+            command.env_remove(name);
+        }
         command
             .args(config.command.iter().skip(1))
             .current_dir(dunce::simplified(&workspace))
-            .env_remove(SESSION_ID_ENV)
             .envs(&config.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
