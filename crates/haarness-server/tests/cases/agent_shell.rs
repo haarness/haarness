@@ -206,6 +206,31 @@ async fn agent_commands_name_their_chat_and_a_person_s_own_command_is_not_marked
         "no request carried {expected}"
     );
 
+    // A step of the model's batch call.
+    let prompt = format!(
+        "!tool batch {}",
+        json!({ "tool_calls": [{ "tool": "bash", "parameters": { "command": SHOW } }] })
+    );
+    let turn = runtime
+        .start_turn(thread, turn_request(&prompt))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let batch = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            ItemData::ToolResult { name, output, .. } if name == "batch" => Some(output),
+            _ => None,
+        })
+        .expect("the batch result");
+    assert!(batch.contains(&marked(thread)), "{batch}");
+
     // A workflow's `ctx.shell`.
     let result = runtime
         .run_workflow_tool(
