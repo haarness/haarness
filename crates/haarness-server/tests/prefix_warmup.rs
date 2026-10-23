@@ -217,6 +217,7 @@ async fn start(runtime: &AgentRuntime, thread: ThreadId, text: &str) -> Turn {
                 request_id: RequestId::new(),
                 text: text.into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
                 auto_approve: false,
                 agent: None,

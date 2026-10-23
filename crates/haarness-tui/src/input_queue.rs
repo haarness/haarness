@@ -34,6 +34,7 @@ impl App {
                     request_id: RequestId::new(),
                     text,
                     attachments: self.attachments.clone(),
+                    resources: Vec::new(),
                     synthetic: false,
                 },
             )

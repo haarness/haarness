@@ -15649,6 +15649,7 @@ async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
                     request_id: haarness_protocol::RequestId::new(),
                     text: "hi".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,

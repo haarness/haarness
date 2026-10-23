@@ -1,14 +1,17 @@
 //! The model's tools for MCP resources: the documents, records and other data
 //! connected servers expose beside their tools. They are offered only while a
 //! connected server declares the resources capability, so a session whose
-//! servers expose tools only keeps the tool list it had.
+//! servers expose tools only keeps the tool list it had. A person's own `@`
+//! mention of a resource is read here too, into the message it was sent with.
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use haarness_core::{
     CoreError, CoreResult, McpRegistry, Tool, ToolContext, ToolDefinition, ToolOutput,
 };
+use haarness_protocol::{MAX_RESOURCE_MENTIONS, ResourceMention};
 use serde_json::{Value, json};
+use std::path::Path;
 use std::sync::Arc;
 
 pub(crate) const LIST: &str = "mcp_resource_list";
@@ -241,15 +244,19 @@ impl Tool for ReadTool {
                 "Could not read MCP resource {server}:{uri}: {reason}"
             ))
         })?;
-        resource_output(&result, &crate::tools::tool_output_dir()).await
+        resource_output(&result, &crate::tools::tool_output_dir(), &mut 0).await
     }
 }
 
 /// What the model gets for a `resources/read` result: its text, cut with a
 /// note when long (the whole text saved in `directory`); images and PDFs as
-/// attachments; other binary content by its type and size, never as base64
-/// text.
-async fn resource_output(result: &Value, directory: &std::path::Path) -> CoreResult<ToolOutput> {
+/// attachments, while `attached` (the bytes attached so far) stays within
+/// 10 MiB; other binary content by its type and size, never as base64 text.
+async fn resource_output(
+    result: &Value,
+    directory: &std::path::Path,
+    attached: &mut usize,
+) -> CoreResult<ToolOutput> {
     let contents = result
         .get("contents")
         .and_then(Value::as_array)
@@ -258,7 +265,6 @@ async fn resource_output(result: &Value, directory: &std::path::Path) -> CoreRes
     let labelled = contents.len() > 1;
     let mut parts = Vec::new();
     let mut attachments = Vec::new();
-    let mut attached = 0usize;
     for content in contents {
         let uri = content
             .get("uri")
@@ -274,8 +280,8 @@ async fn resource_output(result: &Value, directory: &std::path::Path) -> CoreRes
             match STANDARD.decode(blob) {
                 Err(_) => format!("[{uri}: {mime} content that is not valid base64]"),
                 Ok(bytes) if ATTACHABLE.contains(&mime) => {
-                    attached = attached.saturating_add(bytes.len());
-                    if attached > MAX_ATTACHMENT_BYTES {
+                    *attached = attached.saturating_add(bytes.len());
+                    if *attached > MAX_ATTACHMENT_BYTES {
                         format!(
                             "[{uri}: {mime}, {} bytes, left out: a read attaches at most 10 MiB]",
                             bytes.len()
@@ -307,6 +313,149 @@ async fn resource_output(result: &Value, directory: &std::path::Path) -> CoreRes
         output.metadata["attachments"] = json!(attachments);
     }
     Ok(output)
+}
+
+/// Reads the resources a person mentioned with `@` into their message, as
+/// `mcp_resource_read` reads one for the model: each becomes a block after
+/// the text, under `MCP resource: <name> · <server>:<uri>`, its text fenced
+/// and cut with the usual note when long, and its images and PDFs join
+/// `attachments` (10 MiB together). A resource that cannot be read, or an
+/// image that is not one, is named in its block with the reason and the
+/// message goes on without it. The same server and URI twice is read once;
+/// two servers with one URI are two mentions.
+pub(crate) async fn read_mentions(
+    registry: &dyn McpRegistry,
+    workspace: &Path,
+    mentions: Vec<ResourceMention>,
+    text: &mut String,
+    attachments: &mut Vec<String>,
+) -> CoreResult<()> {
+    if mentions.is_empty() {
+        return Ok(());
+    }
+    if mentions.len() > MAX_RESOURCE_MENTIONS {
+        return Err(CoreError::Invalid(format!(
+            "A message mentions at most {MAX_RESOURCE_MENTIONS} MCP resources"
+        )));
+    }
+    let mut unique: Vec<ResourceMention> = Vec::new();
+    for mention in mentions {
+        if mention.server.is_empty() || mention.uri.is_empty() {
+            return Err(CoreError::Invalid(
+                "An MCP resource mention needs a server and a URI".into(),
+            ));
+        }
+        if !unique
+            .iter()
+            .any(|seen| seen.server == mention.server && seen.uri == mention.uri)
+        {
+            unique.push(mention);
+        }
+    }
+    let reads = futures::future::join_all(
+        unique
+            .iter()
+            .map(|mention| registry.read_resource(&mention.server, &mention.uri)),
+    )
+    .await;
+    let directory = crate::tools::tool_output_dir();
+    let mut attached = 0usize;
+    let mut blocks = Vec::new();
+    for (mention, read) in unique.iter().zip(reads) {
+        let read = match read {
+            Ok(result) => resource_output(&result, &directory, &mut attached).await,
+            Err(error) => Err(error),
+        };
+        let output = match read {
+            Ok(output) => admitted(output, workspace).await,
+            Err(error) => Err(error),
+        };
+        blocks.push(match output {
+            Ok((body, media)) => {
+                attachments.extend(media);
+                mention_block(mention, &body, false)
+            }
+            Err(error) => {
+                let reason = sentence(error);
+                tracing::info!(
+                    server = %mention.server,
+                    uri = %mention.uri,
+                    "a mentioned MCP resource could not be read: {reason}"
+                );
+                mention_block(
+                    mention,
+                    &format!(
+                        "Could not read MCP resource {}:{}: {reason}",
+                        mention.server, mention.uri
+                    ),
+                    true,
+                )
+            }
+        });
+    }
+    let typed = text.trim_end();
+    *text = std::iter::once(typed)
+        .filter(|typed| !typed.is_empty())
+        .chain(blocks.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(())
+}
+
+/// A read's text and its attachments, each checked as a message's own
+/// attachments are, so one a model cannot take fails this mention only
+/// rather than the whole message.
+async fn admitted(output: ToolOutput, workspace: &Path) -> CoreResult<(String, Vec<String>)> {
+    let media: Vec<String> = output
+        .metadata
+        .get("attachments")
+        .and_then(Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let media = haarness_core::attachments::admit_off_executor(media, workspace.to_owned()).await?;
+    Ok((output.text, media))
+}
+
+/// Why a read failed, as a sentence without the category the error type
+/// adds ("conflict: …").
+fn sentence(error: CoreError) -> String {
+    match error {
+        CoreError::Tool(message)
+        | CoreError::Conflict(message)
+        | CoreError::NotFound(message)
+        | CoreError::Invalid(message)
+        | CoreError::PermissionDenied(message) => message,
+        other => other.to_string(),
+    }
+}
+
+/// One mention as the message carries it: a fenced block under its label,
+/// which every client folds the way it folds an attached file. The label is
+/// escaped as Desktop escapes a file context's.
+fn mention_block(mention: &ResourceMention, body: &str, failed: bool) -> String {
+    let address = format!("{}:{}", mention.server, mention.uri);
+    let label = match mention.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() && name != mention.uri => format!("{name} · {address}"),
+        _ => address,
+    };
+    let label = label
+        .replace(['\n', '\r'], " ")
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    let note = if failed { " (not read)" } else { "" };
+    format!(
+        "<details>\n<summary>MCP resource: {label}{note}</summary>\n\n{fence}\n{body}\n{fence}\n\n</details>"
+    )
 }
 
 #[cfg(test)]
@@ -378,6 +527,12 @@ mod tests {
                 "docs://logo" => {
                     Ok(json!({"contents": [{"uri": uri, "mimeType": "image/png", "blob": png}]}))
                 }
+                "docs://pixel" => {
+                    Ok(json!({"contents": [{"uri": uri, "mimeType": "image/png", "blob": PIXEL}]}))
+                }
+                "docs://fenced" => Ok(
+                    json!({"contents": [{"uri": uri, "mimeType": "text/markdown", "text": "```sh\nrun\n```"}]}),
+                ),
                 "docs://archive" => Ok(
                     json!({"contents": [{"uri": uri, "mimeType": "application/zip", "blob": STANDARD.encode([0u8; 300])}]}),
                 ),
@@ -396,6 +551,9 @@ mod tests {
             unreachable!()
         }
     }
+
+    /// A 1×1 PNG, which a message takes as an image.
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/AAAAFAAIB5Sc96QAAAABJRU5ErkJggg==";
 
     fn context() -> ToolContext {
         ToolContext {
@@ -494,6 +652,7 @@ mod tests {
         let big = resource_output(
             &registry.read_resource("docs", "docs://big").await.unwrap(),
             &saved,
+            &mut 0,
         )
         .await
         .unwrap();
@@ -539,5 +698,129 @@ mod tests {
         .await
         .expect("Stop must end the read");
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+    }
+
+    fn mention(server: &str, uri: &str, name: Option<&str>) -> ResourceMention {
+        ResourceMention {
+            server: server.into(),
+            uri: uri.into(),
+            name: name.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn mentions_are_read_into_the_message_each_in_its_own_block() {
+        let registry = Resources::default();
+        let mut text = "Compare these \n".to_owned();
+        let mut attachments = vec!["data:image/png;base64,earlier".to_owned()];
+        read_mentions(
+            &registry,
+            &std::env::temp_dir(),
+            vec![
+                mention("docs", "docs://setup", Some("setup")),
+                // Another server with the same URI is its own mention…
+                mention("notes", "docs://setup", None),
+                // …and the same one twice is read once.
+                mention("docs", "docs://setup", Some("setup")),
+                mention("docs", "docs://pixel", Some("docs://pixel")),
+                mention("docs", "docs://fenced", Some("<b>fenced</b>")),
+            ],
+            &mut text,
+            &mut attachments,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            [
+                "Compare these",
+                "<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n```\n# Setup\nRun it.\n```\n\n</details>",
+                "<details>\n<summary>MCP resource: notes:docs://setup</summary>\n\n```\n# Setup\nRun it.\n```\n\n</details>",
+                "<details>\n<summary>MCP resource: docs:docs://pixel</summary>\n\n```\n[image/png attachment: docs://pixel]\n```\n\n</details>",
+                // The label is escaped, and the fence outgrows the resource's own.
+                "<details>\n<summary>MCP resource: &lt;b&gt;fenced&lt;/b&gt; · docs:docs://fenced</summary>\n\n````\n```sh\nrun\n```\n````\n\n</details>",
+            ]
+            .join("\n\n")
+        );
+        assert_eq!(
+            *registry.reads.lock().unwrap(),
+            [
+                "docs:docs://setup",
+                "notes:docs://setup",
+                "docs:docs://pixel",
+                "docs:docs://fenced"
+            ]
+        );
+        assert_eq!(attachments.len(), 2, "{attachments:?}");
+        assert!(
+            attachments[1].starts_with("data:image/png"),
+            "{attachments:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mention_that_cannot_be_read_says_why_and_the_message_still_goes() {
+        let registry = Resources::default();
+        let mut text = String::new();
+        let mut attachments = Vec::new();
+        read_mentions(
+            &registry,
+            &std::env::temp_dir(),
+            vec![
+                mention("docs", "docs://gone", Some("gone")),
+                // An image a model could not take fails its own mention only.
+                mention("docs", "docs://logo", Some("logo")),
+                mention("docs", "docs://setup", None),
+            ],
+            &mut text,
+            &mut attachments,
+        )
+        .await
+        .unwrap();
+        let blocks: Vec<&str> = text.split("\n\n<details>").collect();
+        assert_eq!(blocks.len(), 3, "{text}");
+        assert!(
+            text.starts_with(
+                "<details>\n<summary>MCP resource: gone · docs:docs://gone (not read)</summary>\n\n```\nCould not read MCP resource docs:docs://gone: MCP error -32002: Resource not found\n```"
+            ),
+            "{text}"
+        );
+        assert!(
+            blocks[1].contains("MCP resource: logo · docs:docs://logo (not read)"),
+            "{text}"
+        );
+        assert!(blocks[2].contains("# Setup"), "{text}");
+        assert!(attachments.is_empty(), "{attachments:?}");
+    }
+
+    #[tokio::test]
+    async fn a_message_names_at_most_fifty_resources_each_with_a_server_and_a_uri() {
+        let registry = Resources::default();
+        let many = (0..=MAX_RESOURCE_MENTIONS)
+            .map(|index| mention("docs", &format!("docs://{index}"), None))
+            .collect();
+        let (mut text, mut attachments) = (String::from("hi"), Vec::new());
+        let error = read_mentions(
+            &registry,
+            &std::env::temp_dir(),
+            many,
+            &mut text,
+            &mut attachments,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("at most 50"), "{error}");
+        let error = read_mentions(
+            &registry,
+            &std::env::temp_dir(),
+            vec![mention("", "docs://setup", None)],
+            &mut text,
+            &mut attachments,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("a server and a URI"), "{error}");
+        assert_eq!(text, "hi");
+        assert!(registry.reads.lock().unwrap().is_empty());
     }
 }

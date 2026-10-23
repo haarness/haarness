@@ -152,6 +152,7 @@ async fn turn(
                 request_id: RequestId::new(),
                 text: text.into(),
                 attachments,
+                resources: Vec::new(),
                 synthetic: false,
                 auto_approve: false,
                 agent: None,
