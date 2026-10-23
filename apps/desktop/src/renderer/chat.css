@@ -351,11 +351,11 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 .bubble .markdown img {
   max-height: 120px;
 }
-/* An image the conversation shows opens full size (ImageViewer.tsx). */
-.markdown img[data-image-open] {
+/* An image the conversation shows smaller than it is opens full size (ImageViewer.tsx). */
+:is(.markdown, .tool-image) img[data-image-open] {
   cursor: zoom-in;
 }
-:root:not([data-pointer-focus]) .markdown img[data-image-open]:focus-visible {
+:root:not([data-pointer-focus]) :is(.markdown, .tool-image) img[data-image-open]:focus-visible {
   outline: 1px solid var(--muted);
   outline-offset: 2px;
 }
@@ -719,19 +719,7 @@ html[dir="rtl"] .tool-target {
 .tool-image {
   padding: 0 var(--s3) var(--s3);
 }
-.tool-image-open {
-  display: block;
-  max-width: 100%;
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-md);
-  cursor: zoom-in;
-}
-.tool-image-open:hover:not(:disabled) {
-  background: transparent;
-}
-.tool-image-open img {
+.tool-image img {
   display: block;
   max-width: 100%;
   max-height: 320px;

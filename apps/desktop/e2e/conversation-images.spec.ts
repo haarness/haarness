@@ -354,6 +354,8 @@ test("a read that returned an image shows it once its row is open", async () => 
   const preview = await openPreview(row);
   await expect(preview).toHaveAttribute("src", /^data:image\/png;base64,/);
   expect((await size(preview)).natural).toEqual([360, 200]);
+  // At its own size it is plain; it opens only when shown smaller (below).
+  await expect(preview).not.toHaveAttribute("data-image-open");
   await pictures(row, "read-image");
 
   // A large one comes back smaller, carried in the result: shown as it is, not read.
@@ -370,40 +372,73 @@ test("a read that returned an image shows it once its row is open", async () => 
   expect(errors).toEqual([]);
 });
 
-test("any image of the conversation opens full size; Esc, a click outside or Close shut it", async () => {
+/** The room the viewer leaves for its image: the window inside the dialog's padding. */
+const room = (viewer: Locator) =>
+  viewer.evaluate((dialog) => {
+    const style = getComputedStyle(dialog);
+    return [
+      Math.floor(dialog.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)),
+      Math.floor(dialog.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)),
+    ];
+  });
+
+/** Whether `shown` fills `space` along one side, its ratio kept. */
+const fills = (shown: number[], natural: number[], space: number[]) => {
+  const scale = Math.min(space[0] / natural[0], space[1] / natural[1]);
+  return Math.abs(shown[0] - natural[0] * scale) <= 1 && Math.abs(shown[1] - natural[1] * scale) <= 1;
+};
+
+test("an image shown smaller than it is opens to fill the window; Esc, a click outside or Close shut it", async () => {
   const attached = `data:image/png;base64,${png(64, 48, (x) => [x * 4, 120, 200]).toString("base64")}`;
-  const message = await reply("With an attachment: ![Weekly chart](out/chart.png)", [attached]);
+  const message = await reply("With an attachment: ![Wide](out/wide.png)\n\nAt its own size: ![Weekly chart](out/chart.png)", [attached]);
   const viewer = page.locator("dialog.image-viewer");
-  const picture = message.locator("img.project-image-loaded");
-  await picture.click();
+  const wide = message.locator("img.project-image-loaded[data-project-path='out/wide.png']");
+  const own = message.locator("img.project-image-loaded[data-project-path='out/chart.png']");
+  // Shown smaller than it is, an image is a button that opens it; at its own size it is plain.
+  await expect(wide).toHaveAttribute("data-image-open", "");
+  await expect(wide).toHaveAttribute("role", "button");
+  await expect(own).toHaveJSProperty("naturalWidth", 360);
+  await expect(own).not.toHaveAttribute("data-image-open");
+  await expect(own).not.toHaveAttribute("role");
+  expect(await own.evaluate((image) => getComputedStyle(image).cursor)).toBe("auto");
+  expect(await wide.evaluate((image) => getComputedStyle(image).cursor)).toBe("zoom-in");
+
+  await wide.click();
   await expect(viewer).toBeVisible();
   const full = viewer.locator("img.image-viewer-image");
-  await expect(full).toHaveAttribute("src", (await picture.getAttribute("src"))!);
-  expect(await size(full)).toEqual({ natural: [360, 200], shown: [360, 200] });
+  await expect(full).toHaveAttribute("src", (await wide.getAttribute("src"))!);
+  const space = await room(viewer);
+  await expect.poll(async () => fills((await size(full)).shown, [2400, 320], space)).toBe(true);
   await pictures(page, "image-viewer");
 
   // The arrow keys step through the conversation's images: before it, the attachment of its message.
   await page.keyboard.press("ArrowLeft");
   await expect(full).toHaveAttribute("src", attached);
+  // A small attachment is scaled up to fill the window too.
+  await expect.poll(async () => fills((await size(full)).shown, [64, 48], space)).toBe(true);
   await page.keyboard.press("ArrowRight");
-  await expect(full).toHaveAttribute("src", (await picture.getAttribute("src"))!);
+  await expect(full).toHaveAttribute("src", (await wide.getAttribute("src"))!);
   // Esc closes it, and the keyboard is back on the image that opened it.
   await page.keyboard.press("Escape");
   await expect(viewer).toHaveCount(0);
-  await expect(picture).toBeFocused();
+  await expect(wide).toBeFocused();
   // From the keyboard: Enter opens it, a click outside the image closes it.
   await page.keyboard.press("Enter");
   await expect(viewer).toBeVisible();
   await page.mouse.click(20, 20);
   await expect(viewer).toHaveCount(0);
+  // An image at its own size does not open.
+  await own.click();
+  await expect(viewer).toHaveCount(0);
 
-  // An attachment and a read's preview open the same way; Close shuts it.
+  // An attachment always opens, and a read's preview shown smaller does too; Close shuts it.
   await page.locator(".message.user").last().locator(".attachment-image").click();
   await expect(full).toHaveAttribute("src", attached);
   await viewer.getByRole("button", { name: "Close", exact: true }).click();
   await expect(viewer).toHaveCount(0);
-  await openPreview(page.locator(".tool-call").filter({ hasText: "chart.png" }).last());
-  await page.locator(".tool-call").filter({ hasText: "chart.png" }).last().locator(".tool-image-open").click();
+  const preview = await openPreview(page.locator(".tool-call").filter({ hasText: "wide.png" }).last());
+  await expect(preview).toHaveAttribute("data-image-open", "");
+  await preview.click();
   await expect(full).toHaveAttribute("src", /^data:image\/png;base64,/);
   await page.keyboard.press("Escape");
   await expect(viewer).toHaveCount(0);
