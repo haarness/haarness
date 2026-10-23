@@ -1733,6 +1733,7 @@
   "Hide script": "스크립트 숨기기",
   "Only the start of the file is shown.": "파일의 앞부분만 표시됩니다.",
   "This command writes {path} before running it, so its contents can't be shown.": "이 명령은 실행하기 전에 {path}에 쓰므로 내용을 표시할 수 없습니다.",
+  "An earlier step of this command can change {path}, so its contents aren't shown.": "이 명령의 앞 단계에서 {path}이(가) 바뀔 수 있으므로 내용을 표시하지 않습니다.",
   "every file edit": "모든 파일 편집",
   "every shell command": "모든 셸 명령",
   "every file read": "모든 파일 읽기",

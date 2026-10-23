@@ -720,11 +720,15 @@ async fn a_script_the_command_writes_before_it_runs_it_is_named_not_shown() {
         let pending = runtime.pending_permissions().remove(0);
         let script = pending.script.clone().unwrap();
         // Named, with nothing of what is on disk now.
-        assert!(script.rewritten, "{command}");
+        assert_eq!(
+            script.withheld,
+            Some(haarness_protocol::ScriptWithheld::Written),
+            "{command}"
+        );
         assert_eq!(script.content, "", "{command}");
         assert_eq!(
-            requested(&runtime)["script"]["rewritten"],
-            true,
+            requested(&runtime)["script"]["withheld"],
+            "written",
             "{command}"
         );
         match ran {
@@ -752,4 +756,41 @@ async fn a_script_the_command_writes_before_it_runs_it_is_named_not_shown() {
             .iter()
             .all(|error| !error.starts_with("The command did not run"))
     );
+}
+
+#[tokio::test]
+async fn a_script_after_a_step_that_may_change_it_is_named_not_shown() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("run.sh"), "printf old > old.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    for command in [
+        "bash -c 'printf \"printf new > new.txt\" > run.sh' && sh run.sh",
+        "true; sh -c 'printf \"printf new > new.txt\" > run.sh'; sh run.sh",
+    ] {
+        std::fs::write(fixture.0.join("run.sh"), "printf old > old.txt\n").unwrap();
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&bash(json!({ "command": command }))),
+            )
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        let script = pending.script.clone().unwrap();
+        assert_eq!(
+            script.withheld,
+            Some(haarness_protocol::ScriptWithheld::Changeable),
+            "{command}"
+        );
+        assert_eq!(script.content, "", "{command}");
+        assert_eq!(requested(&runtime)["script"]["withheld"], "changeable");
+        // No seal: allowed once, it runs what the earlier step wrote.
+        answer(&runtime, &pending.permission_id, Reply::Once).await;
+        wait_done(&runtime, &turn).await;
+        assert!(fixture.0.join("new.txt").exists(), "{command}");
+        std::fs::remove_file(fixture.0.join("new.txt")).unwrap();
+    }
+    assert!(!fixture.0.join("old.txt").exists());
 }

@@ -462,13 +462,15 @@ test("a shell permission shows the script its command runs, and nothing when the
     path: "scripts/x.sh",
     lines: ["echo hi", "echo there"],
     truncated: false,
-    rewritten: false,
+    withheld: undefined,
   });
-  // A script the command writes first is named, with no text.
-  assert.deepEqual(
-    permissionScript({ script: { path: "/work/app/gen.sh", content: "", rewritten: true } }, "/work/app"),
-    { path: "gen.sh", lines: [], truncated: false, rewritten: true },
-  );
+  // A script whose text may not be what runs is named, with no text.
+  for (const withheld of ["written", "changeable"])
+    assert.deepEqual(
+      permissionScript({ script: { path: "/work/app/gen.sh", content: "", withheld } }, "/work/app"),
+      { path: "gen.sh", lines: [], truncated: false, withheld },
+    );
+  assert.equal(permissionScript({ script: { ...script, withheld: "other" } })?.withheld, undefined);
   // Outside the project, the path stays whole.
   assert.equal(permissionScript({ permission: "bash", script }, "/work/other")?.path, "/work/app/scripts/x.sh");
   assert.equal(permissionScript({ permission: "bash", script: { ...script, truncated: true } })?.truncated, true);

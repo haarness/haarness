@@ -5559,11 +5559,20 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
 fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
     const LINES: usize = 6;
     let script = script?;
-    if script.rewritten {
-        return Some(format!(
-            "It writes {} before running it, so its contents can't be shown.\n",
-            script.path
-        ));
+    match script.withheld {
+        Some(haarness_protocol::ScriptWithheld::Written) => {
+            return Some(format!(
+                "It writes {} before running it, so its contents can't be shown.\n",
+                script.path
+            ));
+        }
+        Some(haarness_protocol::ScriptWithheld::Changeable) => {
+            return Some(format!(
+                "An earlier step of it can change {}, so its contents aren't shown.\n",
+                script.path
+            ));
+        }
+        None => {}
     }
     let lines: Vec<&str> = script.content.lines().collect();
     let mut text = format!("It runs {}:\n", script.path);
@@ -11679,26 +11688,33 @@ fn random_token() -> String {
 mod tests {
     #[test]
     fn the_terminal_prompt_shows_the_start_of_the_script_a_command_runs() {
-        let script = |content: &str, truncated, rewritten| haarness_protocol::PermissionScript {
+        use haarness_protocol::ScriptWithheld;
+        let script = |content: &str, truncated, withheld| haarness_protocol::PermissionScript {
             path: "/work/run.sh".into(),
             content: content.into(),
             truncated,
-            rewritten,
+            withheld,
         };
         assert_eq!(super::script_preview(None), None);
         assert_eq!(
-            super::script_preview(Some(&script("echo a\necho b\n", false, false))).as_deref(),
+            super::script_preview(Some(&script("echo a\necho b\n", false, None))).as_deref(),
             Some("It runs /work/run.sh:\n    echo a\n    echo b\n")
         );
         let long = (1..=8)
             .map(|line| format!("echo {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let preview = super::script_preview(Some(&script(&long, false, false))).unwrap();
+        let preview = super::script_preview(Some(&script(&long, false, None))).unwrap();
         assert!(preview.ends_with("    echo 6\n    …\n"), "{preview}");
         assert_eq!(
-            super::script_preview(Some(&script("", false, true))).as_deref(),
+            super::script_preview(Some(&script("", false, Some(ScriptWithheld::Written))))
+                .as_deref(),
             Some("It writes /work/run.sh before running it, so its contents can't be shown.\n")
+        );
+        assert_eq!(
+            super::script_preview(Some(&script("", false, Some(ScriptWithheld::Changeable))))
+                .as_deref(),
+            Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
         );
     }
 

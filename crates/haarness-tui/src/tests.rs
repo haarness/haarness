@@ -9187,7 +9187,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: "/work/app/run.sh".into(),
         content: "echo one\n".into(),
         truncated: false,
-        rewritten: false,
+        withheld: None,
     });
     let text = frame_text(&app, (100, 40));
     assert!(text.contains("Script: run.sh · 1 line"), "{text}");
@@ -9206,7 +9206,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: format!("/elsewhere/{}/tools/run.sh", "deep/".repeat(30)),
         content: "echo one\n".into(),
         truncated: false,
-        rewritten: false,
+        withheld: None,
     });
     let text = frame_text(&app, (100, 40));
     assert!(text.contains("Script: …"), "{text}");
@@ -9218,7 +9218,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: format!("/elsewhere/{}{name}", "deep/".repeat(10)),
         content: "echo one\n".into(),
         truncated: false,
-        rewritten: false,
+        withheld: None,
     });
     let text = frame_text(&app, (60, 40));
     assert!(text.contains("Script: …"), "{text}");
@@ -9229,7 +9229,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: format!("/elsewhere/{long}"),
         content: "echo one\n".into(),
         truncated: false,
-        rewritten: false,
+        withheld: None,
     });
     let text = frame_text(&app, (60, 40));
     assert!(text.contains("Script · 1 line"), "{text}");
@@ -9240,7 +9240,7 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         path: "/work/app/gen.sh".into(),
         content: String::new(),
         truncated: false,
-        rewritten: true,
+        withheld: Some(haarness_protocol::ScriptWithheld::Written),
     });
     let text = frame_text(&app, (100, 40));
     assert!(
@@ -9250,6 +9250,17 @@ async fn the_script_a_command_runs_is_read_on_the_card() {
         "{text}"
     );
     assert!(!text.contains("Script:") && !text.contains("│ "), "{text}");
+    // After a step that may change it, a line of its own.
+    if let Some(script) = app.pending_permissions[0].script.as_mut() {
+        script.withheld = Some(haarness_protocol::ScriptWithheld::Changeable);
+    }
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains(
+            "An earlier step of this command can change gen.sh, so its contents aren't shown."
+        ),
+        "{text}"
+    );
     // A request without one keeps the card it had.
     app.pending_permissions[0].script = None;
     assert!(!frame_text(&app, (100, 40)).contains("Script:"));

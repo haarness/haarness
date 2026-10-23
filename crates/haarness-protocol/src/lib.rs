@@ -1094,11 +1094,22 @@ pub struct PermissionScript {
     /// The file goes on past `content`.
     #[serde(default)]
     pub truncated: bool,
-    /// The command writes this file before it runs it (`curl -o x.sh … &&
-    /// bash x.sh`, `cat > x.sh <<EOF`), so what runs is not on disk yet:
-    /// `content` is empty, and a card says so instead of showing it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub rewritten: bool,
+    /// Why the text is not shown (`content` is empty, and a card names the
+    /// file instead): what runs may not be what is on disk now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<ScriptWithheld>,
+}
+
+/// Why a script's text is not shown on its card.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptWithheld {
+    /// The command writes the file before it runs it (`curl -o x.sh … &&
+    /// bash x.sh`, `cat > x.sh <<EOF`).
+    Written,
+    /// An earlier step of the command could change it: a program not known
+    /// to leave files alone (`make`, `git`, `bash -c …`, `eval`, a function).
+    Changeable,
 }
 
 /// One unanswered model question, listable so clients can hydrate every
@@ -1257,6 +1268,7 @@ pub struct ApiError {
         LoopConfig,
         PendingPermissionInfo,
         PermissionScript,
+        ScriptWithheld,
         PendingQuestionInfo,
         BackgroundTaskInfo,
         ThreadActivity,
