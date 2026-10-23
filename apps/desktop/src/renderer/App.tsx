@@ -719,7 +719,6 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected||!browserHere(),action:()=>openDock("browser")},
-      {key:"export-logs",group:"Commands",name:t("Export logs…"),keywords:"logs diagnostics zip support bug report share",icon:"download",action:()=>void app.run(exportLogs)},
       {key:"pick",group:"Project panels",name:t("Pick an element in the browser"),keywords:"inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected||!browserHere(),action:pickElement},
       {key:"conversation:side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
       {key:"side-chat-new",group:"Project panels",name:t("New side chat"),keywords:"btw side question aside ask thread another",icon:"side-chat",disabled:!connected||!state.selected,action:()=>openSide(true)},
@@ -902,6 +901,8 @@ export function App() {
           }
         },
       },
+      // A support tool: listed after the everyday commands.
+      {key:"export-logs",group:"Commands",name:t("Export logs…"),keywords:"logs diagnostics zip support bug report share",icon:"download",action:()=>void app.run(exportLogs)},
       ...[
         ["new", "New window", "Mod+Shift+N"],
         ["zoom-in", "Zoom in", "Mod+Plus"],
