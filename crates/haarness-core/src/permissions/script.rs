@@ -108,7 +108,7 @@ pub async fn for_prompt(
 /// rules), a credential file ([`is_credential`]), a binary, a folder, a
 /// device, a missing file, one a link leads into `/proc` or `/dev`, or one
 /// run by its path whose `#!` line runs another file
-/// ([`runs_another_file`]).
+/// ([`plain_shebang`]).
 #[must_use]
 pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Option<Shown> {
     super::bash::script_files(command, cwd)
@@ -192,7 +192,7 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
     let mut bytes = read_bytes(&real)?;
     let another = match script.shebang {
         Shebang::Comment => false,
-        Shebang::Followed => runs_another_file(&bytes),
+        Shebang::Followed => !plain_shebang(&bytes),
         Shebang::Perl => perl_runs_another_program(&bytes),
     };
     if another || declares_another_encoding(&bytes) {
@@ -277,84 +277,57 @@ fn perl_runs_another_program(bytes: &[u8]) -> bool {
     !line.contains("perl") && !line.contains("indir")
 }
 
-/// Whether a script's `#!` line, followed, runs another file too: an
-/// interpreter that is not a rooted path, is under `/proc` or `/dev`, or is
-/// itself a script (Linux follows its `#!` line in turn), or an argument
-/// that is not an option or has a `/` (`#!/bin/sh /x/evil.sh`,
-/// `#!/bin/sh evil.sh`, `#!/usr/bin/perl -I/x`), the script's own path
-/// coming after them. `#!/usr/bin/env NAME` looks the program up by name.
-/// Under `#!/usr/bin/env -S …`, a known shell's or interpreter's arguments
-/// are read the same way (`-S sh /x/evil.sh`); another program may have a
-/// subcommand and options, a path only as an option's value (`-S deno run
-/// --allow-read=/tmp`, not `-S awk -f evil.awk`).
-fn runs_another_file(bytes: &[u8]) -> bool {
+/// Whether a script run by its path runs as its text reads: it has no
+/// `#!` line, or one of the shapes people write, the system running only
+/// that interpreter with the script.
+///
+/// - `#!` and the rooted path of a shell (`sh`, `bash`, `zsh`, `dash`,
+///   `ksh`), with nothing more than `-e`, `-u` and `-x` options;
+/// - `#!` and the rooted path of an interpreter (`python`, `python3`,
+///   `python3.N`, `node`, `perl`, `ruby`), with nothing after it;
+/// - `#!/usr/bin/env` and one of those names, with nothing after it.
+///
+/// Any other line may run another file (`#!/bin/sh evil.sh`,
+/// `#!/usr/bin/env -S …`, `#!/usr/bin/python3 -mevil`), and so may an
+/// interpreter under `/proc` or `/dev` or one that is a script itself
+/// (Linux follows its `#!` line in turn).
+fn plain_shebang(bytes: &[u8]) -> bool {
     let Some(line) = shebang_line(bytes) else {
-        return false;
-    };
-    let mut words = line.split([' ', '\t']).filter(|word| !word.is_empty());
-    let Some(interpreter) = words.next() else {
-        return false;
-    };
-    let mut arguments: Vec<&str> = words.collect();
-    if !interpreter.starts_with('/')
-        || super::bash::in_system_folder(Path::new(interpreter))
-        || is_script(Path::new(interpreter))
-    {
         return true;
-    }
-    if Path::new(interpreter).file_name() == Some("env".as_ref()) {
-        let split = arguments.first().and_then(|first| {
-            first
-                .strip_prefix("--split-string")
-                .map(|rest| rest.trim_start_matches('='))
-                .or_else(|| first.strip_prefix("-S"))
-        });
-        match (split, arguments.first()) {
-            (Some(attached), _) => {
-                // The words `-S` splits: assignments, the program, its
-                // arguments. Quotes, escapes and `${NAME}`, which it reads
-                // its own way, and options before the program are not read.
-                let words: Vec<&str> = std::iter::once(attached)
-                    .filter(|word| !word.is_empty())
-                    .chain(arguments[1..].iter().copied())
-                    .collect();
-                if words
-                    .iter()
-                    .any(|word| word.contains(['\'', '"', '\\', '$']))
-                {
-                    return true;
-                }
-                let Some(at) = words.iter().position(|word| !word.contains('=')) else {
-                    return false;
-                };
-                let (program, rest) = (words[at], &words[at + 1..]);
-                if program.starts_with('-') || program.contains('/') {
-                    return true;
-                }
-                if super::bash::interpreter(&super::bash::program_name(program)).is_none() {
-                    // Another program's own arguments: a subcommand first
-                    // (`deno run`, `uv run`), then options, a path only as
-                    // an option's value (`--allow-read=/tmp`).
-                    return rest.iter().enumerate().any(|(index, word)| {
-                        index > 0 && !word.starts_with('-')
-                            || word
-                                .split_once('=')
-                                .map_or(*word, |(name, _)| name)
-                                .contains('/')
-                    });
-                }
-                arguments = rest.to_vec();
-            }
-            // The program it looks up by name.
-            (None, Some(name)) if !name.starts_with('-') && !name.contains('/') => {
-                arguments.remove(0);
-            }
-            _ => {}
-        }
-    }
-    arguments
-        .iter()
-        .any(|argument| !argument.starts_with('-') || argument.contains('/'))
+    };
+    let words: Vec<&str> = line
+        .split([' ', '\t'])
+        .filter(|word| !word.is_empty())
+        .collect();
+    let shell = |name: &str| matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh");
+    let interpreter = |name: &str| {
+        matches!(name, "python" | "python3" | "node" | "perl" | "ruby")
+            || name
+                .strip_prefix("python3.")
+                .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let options = |words: &[&str]| {
+        words.iter().all(|word| {
+            word.strip_prefix('-').is_some_and(|flags| {
+                !flags.is_empty() && flags.chars().all(|c| matches!(c, 'e' | 'u' | 'x'))
+            })
+        })
+    };
+    let Some((path, rest)) = words.split_first() else {
+        return false;
+    };
+    let path = Path::new(path);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let shape = match rest {
+        [program] if path == Path::new("/usr/bin/env") => shell(program) || interpreter(program),
+        _ if shell(name) => options(rest),
+        [] => interpreter(name),
+        _ => false,
+    };
+    shape && path.is_absolute() && !super::bash::in_system_folder(path) && !is_script(path)
 }
 
 /// Whether the interpreter a `#!` line names is a script itself (its own
@@ -854,12 +827,14 @@ mod tests {
         assert_eq!(shown.content, "echo old\n");
     }
 
-    /// `#!/bin/sh /x/evil.sh` runs `evil.sh` with the script after it: a
-    /// script run by its path whose `#!` line names another file is not
-    /// shown. Run by an interpreter, its `#!` line is a comment.
+    /// Run by its path, a script runs through the program its `#!` line
+    /// names, with the line's own words before the script's path
+    /// (`#!/bin/sh /x/evil.sh` runs `evil.sh`). Only the shapes people write
+    /// show; any other line shows nothing. Run by an interpreter, the line
+    /// is a comment.
     #[cfg(unix)]
     #[test]
-    fn a_shebang_that_runs_another_file_shows_nothing() {
+    fn only_the_shebangs_people_write_show_a_script_run_by_its_path() {
         use std::os::unix::fs::PermissionsExt as _;
         let fixture = Fixture::new();
         let evil = fixture.write("evil.sh", "echo evil\n");
@@ -873,23 +848,53 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&ran.stdout), "evil\n");
-        for first in [
+        // A shell that is a script itself is followed in turn (Linux).
+        let nested = fixture.write("bin/sh", "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        let hidden = [
             format!("#!/bin/sh {}", evil.display()),
+            format!("#!{}", nested.display()),
             "#!/bin/sh evil.sh".into(),
+            "#!/bin/bash -c evil".into(),
+            "#!/usr/bin/python3 -mevilmod".into(),
+            "#!/usr/bin/node --eval=evil()".into(),
             "#!/usr/bin/perl -I/opt/lib".into(),
             "#!/usr/bin/env /opt/evil".into(),
             "#!/usr/bin/env node /opt/evil.js".into(),
+            "#!/usr/bin/env tcsh".into(),
+            "#!/usr/local/bin/tcsh".into(),
+            "#!/proc/self/root/bin/sh".into(),
+            "#!sh".into(),
             "#!evil".into(),
-        ] {
+            "#!/usr/bin/env -S sh /opt/evil.sh".into(),
+            "#!/usr/bin/env -S node /opt/evil.js".into(),
+            "#!/usr/bin/env -S /opt/evil".into(),
+            "#!/usr/bin/env -Ssh evil.sh".into(),
+            "#!/usr/bin/env -S awk -f evil.awk".into(),
+            "#!/usr/bin/env -S deno run /opt/evil.ts".into(),
+            "#!/usr/bin/env -S deno -I/opt run".into(),
+            "#!/usr/bin/env -S -i bash".into(),
+            "#!/usr/bin/env -S X=1 -C /opt bash".into(),
+            "#!/usr/bin/env -S 'sh' evil.sh".into(),
+            "#!/usr/bin/env -S bash \"$X\"".into(),
+            "#!/usr/bin/env -S osascript evil.applescript".into(),
+            "#!/usr/bin/env -S tcsh evil.csh".into(),
+            "#!/usr/bin/env -S bun evil.ts".into(),
+            // The safe side: real lines outside the shapes.
+            "#!/usr/bin/env -S uv run --script".into(),
+            "#!/usr/bin/env -S deno run --allow-read=/tmp".into(),
+            "#!/usr/bin/env -S bash -e".into(),
+            "#!/usr/bin/env perl -w".into(),
+            "#!/bin/bash -euo pipefail".into(),
+            "#!/usr/bin/awk -f".into(),
+        ];
+        for first in hidden {
             write(&first);
             for command in ["./run.sh", "sudo ./run.sh"] {
                 assert!(
                     bash_script(command, &fixture.0, |_| true).is_none(),
-                    "{first}"
+                    "{first}: {command}"
                 );
             }
-            // Most interpreters read that line as a comment, also run by
-            // their own path.
             for command in ["sh run.sh", "bash run.sh", "/bin/bash run.sh"] {
                 let shown = bash_script(command, &fixture.0, |_| true).unwrap();
                 assert!(shown.content.ends_with("echo body\n"), "{first}: {command}");
@@ -897,13 +902,17 @@ mod tests {
         }
         for first in [
             "#!/bin/sh",
-            "#! /bin/bash -eu",
+            "#! /bin/sh",
+            "#!/bin/bash -e",
+            "#!/bin/bash -eux",
+            "#!/bin/zsh -x -u",
             "#!/usr/bin/env bash",
-            "#!/usr/bin/env -S bash -e",
-            "#!/usr/bin/env -S deno run --allow-read=/tmp",
-            "#!/usr/bin/env -S uv run --script",
-            "#!/usr/bin/env -S NODE_ENV=production node",
-            "#!/usr/bin/awk -f",
+            "#!/usr/bin/env python3",
+            "#!/usr/bin/env node",
+            "#!/usr/bin/perl",
+            "#!/usr/bin/env perl",
+            "#!/opt/homebrew/bin/python3",
+            "#!/usr/bin/python3.12",
             "echo no shebang",
         ] {
             write(first);
@@ -913,35 +922,6 @@ mod tests {
                 "{first}"
             );
         }
-        // Under `env -S`, a known shell's or interpreter's arguments count;
-        // another program may have a subcommand and options, a path only
-        // as an option's value. What `-S` reads its own way (quotes,
-        // escapes, `$`) and options before the program are not read.
-        for first in [
-            "#!/usr/bin/env -S sh /opt/evil.sh",
-            "#!/usr/bin/env -S node /opt/evil.js",
-            "#!/usr/bin/env -S /opt/evil",
-            "#!/usr/bin/env -Ssh evil.sh",
-            "#!/usr/bin/env -S awk -f evil.awk",
-            "#!/usr/bin/env -S deno run /opt/evil.ts",
-            "#!/usr/bin/env -S deno -I/opt run",
-            "#!/usr/bin/env -S -i bash",
-            "#!/usr/bin/env -S X=1 -C /opt bash",
-            "#!/usr/bin/env -S 'sh' evil.sh",
-            "#!/usr/bin/env -S bash \"$X\"",
-            "#!/usr/bin/env -S sh\\ evil.sh",
-            "#!/usr/bin/env -S bash ${X}",
-        ] {
-            write(first);
-            assert!(
-                bash_script("./run.sh", &fixture.0, |_| true).is_none(),
-                "{first}"
-            );
-        }
-        // An interpreter that is a script itself is followed in turn.
-        let nested = fixture.write("interpreter", "#!/bin/sh\nexec sh \"$@\"\n");
-        write(&format!("#!{}", nested.display()));
-        assert!(bash_script("./run.sh", &fixture.0, |_| true).is_none());
     }
 
     /// `perl` runs the program a `#!` line names instead of the script,

@@ -895,7 +895,7 @@ fn after_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
 
 /// A program's name as wrappers and shells are recognized: its last path
 /// segment in lower case, without `.exe`.
-pub(super) fn program_name(value: &str) -> String {
+fn program_name(value: &str) -> String {
     let name = value
         .rsplit(['/', '\\'])
         .next()
@@ -2577,7 +2577,7 @@ fn redirect_targets(redirects: &[tree_sitter::Node<'_>], source: &str) -> Vec<Pa
 /// any other option (`-c`, `-e`, `-m`, `-W`, `--require`, `-o name` …) the
 /// next word may be the option's value or the code itself, so no script is
 /// claimed. fish's options differ, and are not read.
-pub(super) fn interpreter(name: &str) -> Option<fn(&str) -> bool> {
+fn interpreter(name: &str) -> Option<fn(&str) -> bool> {
     fn cluster(option: &str, letters: &str) -> bool {
         option
             .strip_prefix('-')
