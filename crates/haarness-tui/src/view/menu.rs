@@ -21,18 +21,22 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 .map(|entry| (format!("/{}", entry.name), entry.description))
                 .collect(),
         ),
-        Overlay::Threads => (
-            "threads",
-            app.filtered_threads()
-                .into_iter()
-                .map(|thread| {
-                    (
-                        thread.title.clone(),
-                        short_id(&thread.id.to_string()).into(),
-                    )
-                })
-                .collect(),
-        ),
+        Overlay::Threads => {
+            let waiting = app.waiting_chats();
+            (
+                "threads",
+                app.filtered_threads()
+                    .into_iter()
+                    .map(|thread| {
+                        let title = match waiting.get(&thread.id).copied().map(waiting_sign) {
+                            Some(sign) => format!("{sign} {}", thread.title),
+                            None => thread.title.clone(),
+                        };
+                        (title, short_id(&thread.id.to_string()).into())
+                    })
+                    .collect(),
+            )
+        }
         Overlay::Models => (
             "models",
             app.filtered_models()
@@ -374,16 +378,14 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                 app.filtered_threads()
                     .into_iter()
                     .map(|thread| {
+                        let waits = waiting.get(&thread.id).copied();
                         let row = SelectorRow::new(
                             thread.title.clone(),
-                            app.session_detail(thread),
+                            app.session_detail(thread, waits),
                             thread.id == app.thread.id,
                         );
-                        // The card's sign for an approval, Upstream's for a
-                        // question; the words come first in the detail.
-                        match waiting.get(&thread.id) {
-                            Some(crate::state::Waiting::Approval) => row.with_alert("⚠"),
-                            Some(crate::state::Waiting::Answer) => row.with_alert("?"),
+                        match waits.map(waiting_sign) {
+                            Some(sign) => row.with_alert(sign),
                             None => row,
                         }
                     })
@@ -621,6 +623,15 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
 
 /// One choice in a picker: what it is, what it means, whether it is the
 /// current one, and — for the theme picker — the palette it stands for.
+/// A waiting chat's sign: the approval card's ⚠ for an approval, Upstream's
+/// `?` for a question.
+const fn waiting_sign(waiting: crate::state::Waiting) -> &'static str {
+    match waiting {
+        crate::state::Waiting::Approval => "⚠",
+        crate::state::Waiting::Answer => "?",
+    }
+}
+
 struct SelectorRow {
     label: String,
     detail: String,
