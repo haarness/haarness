@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "Bu sohbet hakkında ona bir şey eklemeden sorun",
   "Hide side chat": "Yan sohbeti gizle",
   "Resize side chat": "Yan sohbeti yeniden boyutlandır",
-  "This server answers each question on its own": "Bu sunucu her soruyu ayrı yanıtlar"
+  "This server answers each question on its own": "Bu sunucu her soruyu ayrı yanıtlar",
+  "Auto review": "Otomatik inceleme",
+  "Auto review unavailable": "Otomatik inceleme kullanılamıyor",
+  "Auto review paused": "Otomatik inceleme duraklatıldı",
+  "Blocked by Auto review": "Otomatik inceleme engelledi",
+  "reviewing…": "inceleniyor…",
+  "Reviewing…": "İnceleniyor…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Otomatik: bir inceleme modeli bu sohbetteki ve aracılarındaki olağan izin isteklerini bir kez onaylar, gerisini size sorar. İncelemeye geçmek için tıklayın.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Otomatik: bir inceleme modeli buradaki yeni sohbetlerdeki olağan izin isteklerini bir kez onaylar, gerisini size sorar. İncelemeye geçmek için tıklayın."
 }

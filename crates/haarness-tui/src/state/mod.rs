@@ -353,8 +353,8 @@ pub type BatchOutcomes = std::rc::Rc<[(String, bool)]>;
 /// events — the status line renders this instead of a stale free-text notice.
 #[derive(Clone, Default)]
 pub struct PhaseInfo {
-    /// thinking | responding | tool | waiting_permission | waiting_question |
-    /// child_tasks | compacting | done
+    /// thinking | responding | tool | reviewing (Auto's reviewer) |
+    /// waiting_permission | waiting_question | child_tasks | compacting | done
     pub state: String,
     pub tool: Option<String>,
     pub call_id: Option<String>,
@@ -390,6 +390,12 @@ impl PhaseInfo {
     pub fn elapsed_seconds(&self) -> i64 {
         self.since
             .map_or(0, |since| (chrono::Utc::now() - since).num_seconds().max(0))
+    }
+
+    pub fn elapsed_millis(&self) -> i64 {
+        self.since.map_or(0, |since| {
+            (chrono::Utc::now() - since).num_milliseconds().max(0)
+        })
     }
 }
 

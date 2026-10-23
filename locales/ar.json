@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "اسأل عن هذه المحادثة دون الإضافة إليها",
   "Hide side chat": "إخفاء الدردشة الجانبية",
   "Resize side chat": "تغيير حجم الدردشة الجانبية",
-  "This server answers each question on its own": "يجيب هذا الخادم عن كل سؤال على حدة"
+  "This server answers each question on its own": "يجيب هذا الخادم عن كل سؤال على حدة",
+  "Auto review": "المراجعة التلقائية",
+  "Auto review unavailable": "المراجعة التلقائية غير متاحة",
+  "Auto review paused": "المراجعة التلقائية متوقفة مؤقتًا",
+  "Blocked by Auto review": "حظرته المراجعة التلقائية",
+  "reviewing…": "جارٍ المراجعة…",
+  "Reviewing…": "جارٍ المراجعة…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "تلقائي: يوافق نموذج مراجعة مرة واحدة على طلبات الأذونات الروتينية في هذه المحادثة ووكلائها، ويسألك عن الباقي. انقر للتبديل إلى المراجعة.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "تلقائي: يوافق نموذج مراجعة مرة واحدة على طلبات الأذونات الروتينية في المحادثات الجديدة هنا، ويسألك عن الباقي. انقر للتبديل إلى المراجعة."
 }

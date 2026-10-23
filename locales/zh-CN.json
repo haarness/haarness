@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "询问此对话，但不向其中添加内容",
   "Hide side chat": "隐藏侧边对话",
   "Resize side chat": "调整侧边对话大小",
-  "This server answers each question on its own": "此服务器会单独回答每个问题"
+  "This server answers each question on its own": "此服务器会单独回答每个问题",
+  "Auto review": "自动审查",
+  "Auto review unavailable": "自动审查不可用",
+  "Auto review paused": "自动审查已暂停",
+  "Blocked by Auto review": "已被自动审查拦截",
+  "reviewing…": "审查中…",
+  "Reviewing…": "审查中…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "自动：审查模型会将此对话及其智能体的常规权限请求允许一次，其余的会询问你。点击切换为审查。",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自动：审查模型会将此处新对话的常规权限请求允许一次，其余的会询问你。点击切换为审查。"
 }

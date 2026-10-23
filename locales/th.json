@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "ถามเกี่ยวกับแชทนี้โดยไม่เพิ่มอะไรลงไป",
   "Hide side chat": "ซ่อนแชทข้างเคียง",
   "Resize side chat": "ปรับขนาดแชทข้างเคียง",
-  "This server answers each question on its own": "เซิร์ฟเวอร์นี้ตอบแต่ละคำถามแยกกัน"
+  "This server answers each question on its own": "เซิร์ฟเวอร์นี้ตอบแต่ละคำถามแยกกัน",
+  "Auto review": "การตรวจสอบอัตโนมัติ",
+  "Auto review unavailable": "การตรวจสอบอัตโนมัติไม่พร้อมใช้งาน",
+  "Auto review paused": "การตรวจสอบอัตโนมัติหยุดชั่วคราว",
+  "Blocked by Auto review": "ถูกบล็อกโดยการตรวจสอบอัตโนมัติ",
+  "reviewing…": "กำลังตรวจสอบ…",
+  "Reviewing…": "กำลังตรวจสอบ…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "อัตโนมัติ: โมเดลตรวจสอบจะอนุญาตคำขอสิทธิ์ทั่วไปในแชทนี้และเอเจนต์ของแชทหนึ่งครั้ง และถามคุณเกี่ยวกับส่วนที่เหลือ คลิกเพื่อสลับเป็นตรวจสอบ",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "อัตโนมัติ: โมเดลตรวจสอบจะอนุญาตคำขอสิทธิ์ทั่วไปในแชทใหม่ที่นี่หนึ่งครั้ง และถามคุณเกี่ยวกับส่วนที่เหลือ คลิกเพื่อสลับเป็นตรวจสอบ"
 }

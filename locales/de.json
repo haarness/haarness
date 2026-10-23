@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "Fragen zu diesem Chat stellen, ohne ihn zu ergänzen",
   "Hide side chat": "Nebenchat ausblenden",
   "Resize side chat": "Größe des Nebenchats ändern",
-  "This server answers each question on its own": "Dieser Server beantwortet jede Frage für sich"
+  "This server answers each question on its own": "Dieser Server beantwortet jede Frage für sich",
+  "Auto review": "Auto-Überprüfung",
+  "Auto review unavailable": "Auto-Überprüfung nicht verfügbar",
+  "Auto review paused": "Auto-Überprüfung pausiert",
+  "Blocked by Auto review": "Von der Auto-Überprüfung blockiert",
+  "reviewing…": "wird überprüft…",
+  "Reviewing…": "Wird überprüft…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: Ein Prüfmodell erlaubt routinemäßige Berechtigungsanfragen in diesem Chat und seinen Agenten einmal und fragt dich beim Rest. Klicke, um zu Überprüfung zu wechseln.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: Ein Prüfmodell erlaubt routinemäßige Berechtigungsanfragen in neuen Chats hier einmal und fragt dich beim Rest. Klicke, um zu Überprüfung zu wechseln."
 }

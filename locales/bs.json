@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "Pitajte o ovom razgovoru bez dodavanja u njega",
   "Hide side chat": "Sakrij usputni razgovor",
   "Resize side chat": "Promijeni veličinu usputnog razgovora",
-  "This server answers each question on its own": "Ovaj server odgovara na svako pitanje zasebno"
+  "This server answers each question on its own": "Ovaj server odgovara na svako pitanje zasebno",
+  "Auto review": "Auto pregled",
+  "Auto review unavailable": "Auto pregled nije dostupan",
+  "Auto review paused": "Auto pregled je pauziran",
+  "Blocked by Auto review": "Blokirao Auto pregled",
+  "reviewing…": "pregledava…",
+  "Reviewing…": "Pregledava…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: model za pregled jednom odobrava rutinske zahtjeve za dozvole u ovom razgovoru i njegovim agentima, a za ostalo pita vas. Kliknite za prelazak na Pregled.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: model za pregled jednom odobrava rutinske zahtjeve za dozvole u novim razgovorima ovdje, a za ostalo pita vas. Kliknite za prelazak na Pregled."
 }
