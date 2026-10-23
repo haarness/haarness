@@ -3036,7 +3036,13 @@ function Permission(props: {
                 </span>
               </button>
               <Show when={isOpen(scriptKey())}>
-                <div class="change-preview approval-script-body" id={scriptBody}>
+                {/* Inside the card's alert, opening it is not news: a screen
+                    reader reads it when asked, not 30 KB at once. */}
+                <div
+                  class="change-preview approval-script-body"
+                  id={scriptBody}
+                  aria-live="off"
+                >
                   <div class="change-path" title={item().path}>
                     {item().path}
                   </div>

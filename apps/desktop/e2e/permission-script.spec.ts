@@ -35,10 +35,11 @@ async function api(method: string, ...args: unknown[]): Promise<any> {
     args,
   });
 }
+/** Sends `!tool bash` with `command`, by the composer's own markers, so it
+ * works in any interface language. */
 async function send(command: string) {
-  const box = page.getByRole("textbox", { name: "Message", exact: true });
-  await box.fill(" !tool bash " + JSON.stringify({ command }));
-  await page.getByRole("button", { name: /Send message|Send guidance/ }).click();
+  await page.locator("[data-composer-input]").fill(" !tool bash " + JSON.stringify({ command }));
+  await page.locator(".send-button").click();
 }
 async function idle() {
   await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
@@ -119,12 +120,17 @@ test("the card offers the script a command runs, closed until asked for, by mous
   expect((await card().boundingBox())!.height).toBeCloseTo(closed, 0);
   await pictures(card(), "card-closed");
 
-  // Keyboard: Tab reaches the toggle, Enter opens it.
-  await toggle().focus();
+  // Keyboard: from the card's title, Tab reaches the toggle and Enter
+  // opens it.
+  await card().locator(".prompt-title").click();
+  await page.keyboard.press("Tab");
+  await expect(toggle()).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(toggle()).toHaveText("Hide script");
   await expect(toggle()).toHaveAttribute("aria-expanded", "true");
   const body = card().locator(".approval-script-body");
+  // Inside the card's alert, its text is read on request, not announced.
+  await expect(body).toHaveAttribute("aria-live", "off");
   await expect(body.locator(".change-path")).toHaveText("scripts/deploy.sh");
   const lines = body.locator(".change-lines .diff-line");
   await expect(lines).toHaveCount(12);
@@ -170,6 +176,27 @@ test("a long script scrolls in its box and says only its start is shown", async 
   await pictures(card(), "card-open-long");
   await card().getByRole("button", { name: "Deny", exact: true }).click();
   await idle();
+});
+
+test("in Arabic the card reads right to left while the script keeps left to right", async () => {
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe("rtl");
+  await send("cd scripts && sh deploy.sh");
+  await expect(toggle()).toHaveText("عرض النص البرمجي · عدد الأسطر: 12");
+  await toggle().click();
+  await expect(toggle()).toHaveText("إخفاء النص البرمجي");
+  const body = card().locator(".approval-script-body");
+  expect(
+    await body
+      .locator(".change-path, .change-lines")
+      .evaluateAll((parts) => parts.map((part) => getComputedStyle(part).direction)),
+  ).toEqual(["ltr", "ltr"]);
+  await expect(body.locator(".diff-line").first()).toHaveText("#!/bin/sh");
+  await pictures(card(), "card-open-ar");
+  await card().getByRole("button", { name: "رفض", exact: true }).click();
+  await idle();
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe("ltr");
 });
 
 test("a secret-named file, or a command that runs no script, shows no toggle", async () => {
