@@ -70,6 +70,18 @@ pub fn reminder(
     (!blocks.is_empty()).then(|| blocks.join(SEPARATOR))
 }
 
+/// How a message another chat's agent sends (`session_message`) starts. It
+/// is stored as an ordinary message of the chat it reaches, so this is what
+/// tells it apart from the person's words; a person who types it only makes
+/// Auto's review of their request stricter.
+pub const SESSION_MESSAGE_PREFIX: &str = "Message from session #";
+
+/// Whether `text` is a message another chat's agent sent, not the person's.
+#[must_use]
+pub fn is_session_message(text: &str) -> bool {
+    text.trim_start().starts_with(SESSION_MESSAGE_PREFIX)
+}
+
 /// Whether `text` is a hidden message made by [`reminder`]: it only tells the
 /// model about the date, the memory index or hook context, and asks for
 /// nothing, so a scripted test provider answers the prompt before it.

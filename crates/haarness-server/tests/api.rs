@@ -247,6 +247,11 @@ impl ModelProvider for Capturing {
         let scripted_prompt = prompt
             .rsplit_once("</goal-harness>\n\n")
             .map_or(prompt.as_str(), |(_, suffix)| suffix);
+        // Another chat's agent (`session_message`) scripts after its header.
+        let scripted_prompt = scripted_prompt
+            .strip_prefix(haarness_core::SESSION_MESSAGE_PREFIX)
+            .and_then(|rest| rest.split_once('\n'))
+            .map_or(scripted_prompt, |(_, rest)| rest);
         let events = if let Some(script) = scripted_prompt.trim_start().strip_prefix("!preface ") {
             if last_tool_result > last_user_index {
                 vec![Ok(ProviderEvent::TextDelta("Tool finished".into()))]

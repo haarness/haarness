@@ -1356,7 +1356,8 @@ impl ManagementService {
         let runtime = self.runtime()?;
         let message = required_string(input, "message")?;
         let payload = format!(
-            "Message from session #{}:\n{message}",
+            "{}{}:\n{message}",
+            haarness_core::SESSION_MESSAGE_PREFIX,
             short_id(context.thread_id)
         );
         let active = runtime.active_turn(target.id).await.map_err(core_error)?;
