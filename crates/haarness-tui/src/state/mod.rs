@@ -813,8 +813,10 @@ pub struct App {
     pub(crate) mention_resources: crate::resource_mentions::Listing,
     /// Where a resource listing read off the event loop goes (see
     /// `App::resources_arrived`); without it, none is asked for.
-    pub(crate) resources_tx:
-        Option<tokio::sync::mpsc::Sender<Option<Vec<crate::resource_mentions::Resource>>>>,
+    pub(crate) resources_tx: Option<tokio::sync::mpsc::Sender<crate::resource_mentions::Update>>,
+    /// Where a message sent with mentions off the event loop reports back
+    /// (see `App::mentions_sent`); without it, the send waits in place.
+    pub(crate) sends_tx: Option<tokio::sync::mpsc::Sender<crate::resource_mentions::Sent>>,
     /// Escape dismisses autocomplete without deleting the typed query. The
     /// next edit makes suggestions eligible again.
     pub autocomplete_hidden: bool,
@@ -1097,6 +1099,7 @@ impl App {
             mention_suggestions: Vec::new(),
             mention_resources: crate::resource_mentions::Listing::default(),
             resources_tx: None,
+            sends_tx: None,
             autocomplete_hidden: false,
             viewport_offset: 0,
             max_viewport_offset: std::cell::Cell::new(0),
