@@ -59,11 +59,11 @@ export function Schedules(props: {
       <p class="muted">
         {t("Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.", { project: app.project()?.label ?? t("this project") })}
       </p>
-      <div class="toolbar">
+      <div class="toolbar" data-setting="Create schedule">
         <button
           class="primary"
           disabled={busy()}
-          data-setting="Create schedule" onClick={() => setEditing({})}
+          onClick={() => setEditing({})}
         >
           {t("Create schedule")}
         </button>

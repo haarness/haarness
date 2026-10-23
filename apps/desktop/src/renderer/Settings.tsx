@@ -815,8 +815,8 @@ function Servers() {
           </Row>
         )}
       </For>
-      <div class="settings-after-list">
-        <button data-setting="Add remote server" class="primary" onClick={openServerConnection}>
+      <div class="settings-after-list" data-setting="Add remote server">
+        <button class="primary" onClick={openServerConnection}>
           {t("Add remote server")}
         </button>
       </div>
@@ -1019,7 +1019,7 @@ function Providers() {
   };
   return (
     <>
-      <div class="setting-block providers-hero">
+      <div class="setting-block providers-hero" data-setting="Connect a provider">
         <header>
           <div>
             <h3>
@@ -1037,7 +1037,6 @@ function Providers() {
           </div>
           <button
             class="primary"
-            data-setting="Connect a provider"
             onClick={() => app.openConnect({ onboarding: !connected().length })}
           >
             {t("Connect a provider")}
@@ -1832,8 +1831,8 @@ function Extensions(props: { cli: Cli }) {
           }
         />
       </Row>
-      <div class="toolbar">
-        <button data-setting="Install extension" class="primary" onClick={() => setInstalling(true)}>
+      <div class="toolbar" data-setting="Install extension">
+        <button class="primary" onClick={() => setInstalling(true)}>
           {t("Install extension")}
         </button>
       </div>

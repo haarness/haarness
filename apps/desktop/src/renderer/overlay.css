@@ -1583,15 +1583,24 @@ dialog .notifications {
   text-align: center;
   padding: 0 3px;
 }
-/* The reveal marks a whole row, so the tint runs the full width of the page
-   rather than boxing the text in. Inline padding and an equal negative margin
-   cancel out, so the row's content box is untouched and nothing moves; every
-   wrapper a row can sit in (.setting-block, .browser-settings) has zero inline
-   padding, so the band lines up with the page gutter wherever it lands. */
+/* The reveal marks the row, block or card Search opened, never a control in
+   it, so a primary button keeps its own colours. The tint runs a little past
+   the box as a shadow, which takes no space: nothing in the row moves or
+   changes size while it shows or fades. */
+[data-setting]:not(button) {
+  transition:
+    background-color var(--slow) var(--ease),
+    box-shadow var(--slow) var(--ease);
+}
 .setting-search-target {
-  background: var(--primary-soft);
-  padding-inline: var(--s6);
-  margin-inline: calc(var(--s6) * -1);
+  /* Opaque over the page, so the band covers the ring under it but its
+     outer pixel. */
+  --search-tint: color-mix(in srgb, var(--primary) 7%, var(--page));
+  border-radius: var(--r-md);
+  background-color: var(--search-tint);
+  box-shadow:
+    0 0 0 var(--s2) var(--search-tint),
+    0 0 0 calc(var(--s2) + 1px) var(--primary-edge);
 }
 @media (max-width: 600px) {
   .palette-footer > span {
