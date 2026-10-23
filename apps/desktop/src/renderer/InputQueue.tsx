@@ -1,5 +1,5 @@
 import { t } from "./i18n";
-import { For, Show, createEffect, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import type { EventEnvelope, InputQueue as Queue, InputQueueAction, PendingInput } from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon } from "./ui";
@@ -200,24 +200,33 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
     const timer = setTimeout(() => setIdle(true), 600);
     onCleanup(() => clearTimeout(timer));
   }));
-  const items = () => q.queue().items;
+  // A message unchanged by an update keeps its row (and the keyboard on
+  // it): each update brings every message as a new object.
+  const items = createMemo<PendingInput[]>((previous = []) =>
+    q.queue().items.map((item) => {
+      const kept = previous.find((value) => value.id === item.id);
+      return kept && JSON.stringify(kept) === JSON.stringify(item) ? kept : item;
+    }),
+  );
   /* Removing a message from the keyboard hands it to the row that takes
      its place, or to the message box when none does, rather than dropping
      it with the button. */
   let list: HTMLOListElement | undefined;
-  // The row to take it (none: the message box), held while the tray
-  // settles: every update draws the rows again.
-  const [refocus, setRefocus] = createSignal<{ id?: string; until: number }>();
+  /** The message removed, and the one whose row takes the keyboard. */
+  const [refocus, setRefocus] = createSignal<{ removed: string; next?: string }>();
   createEffect(() => {
     const target = refocus();
     if (!target || q.busy()) return;
     const ids = items().map((item) => item.id);
+    // Still there: the removal is on its way, or failed and says so.
+    if (ids.includes(target.removed) && !q.error()) return;
+    setRefocus(undefined);
     queueMicrotask(() => {
       const active = document.activeElement;
-      if (performance.now() > target.until || (active && active !== document.body && !list?.contains(active)))
-        return void setRefocus(undefined);
-      const row = target.id && ids.includes(target.id)
-        ? list?.querySelector<HTMLButtonElement>(`[data-input-id="${CSS.escape(target.id)}"] .input-queue-remove`)
+      if (active && active !== document.body && !list?.contains(active)) return;
+      const keep = ids.includes(target.removed) ? target.removed : target.next;
+      const row = keep && ids.includes(keep)
+        ? list?.querySelector<HTMLButtonElement>(`[data-input-id="${CSS.escape(keep)}"] .input-queue-remove`)
         : undefined;
       (row ?? document.querySelector<HTMLTextAreaElement>("[data-composer-input]"))?.focus({ preventScroll: true });
     });
@@ -277,7 +286,7 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
                 disabled={q.busy()}
                 onClick={() => {
                   if (document.activeElement?.closest(".input-queue-remove"))
-                    setRefocus({ id: items()[index() + 1]?.id, until: performance.now() + 1500 });
+                    setRefocus({ removed: item.id, next: items()[index() + 1]?.id });
                   q.remove(item);
                 }}
               />

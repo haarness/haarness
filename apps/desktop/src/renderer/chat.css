@@ -1330,6 +1330,7 @@ html[dir="rtl"] .tool-target {
 .conversation-empty .heading-project-picker {
   display: inline-flex;
   align-items: baseline;
+  gap: 0;
   max-width: calc(100% - 1.5ch);
   vertical-align: bottom;
 }
@@ -1339,9 +1340,11 @@ html[dir="rtl"] .tool-target {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Right after the ellipsis: the chevron's own inset is the space. */
 .conversation-empty .heading-project-picker .picker-caret {
   flex: none;
   align-self: center;
+  margin-inline-start: 0;
 }
 .conversation-empty .picker-caret {
   width: 18px;

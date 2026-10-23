@@ -48,7 +48,8 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
    **Settings → Browser** sets it to **Requires approval**. A request card offers **Deny**,
    **Always allow** and **Allow once** on one line, even in a narrow chat; the **Always allow**
    menu holds **Always for this folder**, **Always for this repository** in a Git repository,
-   and **Allow once + Auto** while the chat is in Review. In Auto, a reviewer model answers those
+   and, set apart with a line on what it does, **Allow once + Auto** while the chat is in Review
+   (with one of these only, it is a button of its own in that place). In Auto, a reviewer model answers those
    requests for the chat and its agents: it approves routine ones once, blocks risky ones with a
    reason, and leaves the rest to you with a quiet note on the card; an ask you configured for a
    specific command still comes to you. Cloud actions that spend money or delete something still
