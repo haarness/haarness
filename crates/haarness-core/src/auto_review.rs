@@ -332,6 +332,21 @@ fn salvage(text: &str) -> Option<Verdict> {
     read_verdict(&serde_json::from_str(&text[start..=end]).ok()?)
 }
 
+/// What Haarness's own note says of a path the deletion check found: its
+/// effect and whether it could be placed decide the wording; the path is on
+/// one line, without marks that could turn the sentence around it.
+fn deletion_reason(target: &crate::permissions::bash::OutsideDeletion) -> ReviewReason {
+    let path = clip(&plain_path(&target.path), 120);
+    match (target.effect, target.placed) {
+        (Effect::Inline, _) => ReviewReason::InlineCode { program: path },
+        (Effect::Script, _) => ReviewReason::UnreadScript { program: path },
+        (Effect::Replaces | Effect::Empties, true) => ReviewReason::UnnamedOverwrite { path },
+        (Effect::Replaces | Effect::Empties, false) => ReviewReason::UnplacedOverwrite { path },
+        (Effect::Deletes, true) => ReviewReason::UnnamedDeletion { path },
+        (Effect::Deletes, false) => ReviewReason::UnplacedDeletion { path },
+    }
+}
+
 /// A note written for the person, as the agent reads it: Haarness's own
 /// notes say "your messages" to the person, which to the agent are the
 /// person's.
@@ -1263,21 +1278,7 @@ impl Reviewer {
         // Haarness's own words when it decided, or the reviewer gave none.
         let (rationale, reason) = match (&target, verdict.rationale.as_deref()) {
             (Some(target), _) => {
-                // Haarness's own note names the path on one line, without
-                // marks that could turn the sentence around it.
-                let path = clip(&plain_path(&target.path), 120);
-                let reason = match (target.effect, target.placed) {
-                    (Effect::Inline, _) => ReviewReason::InlineCode { program: path },
-                    (Effect::Script, _) => ReviewReason::UnreadScript { program: path },
-                    (Effect::Replaces | Effect::Empties, true) => {
-                        ReviewReason::UnnamedOverwrite { path }
-                    }
-                    (Effect::Replaces | Effect::Empties, false) => {
-                        ReviewReason::UnplacedOverwrite { path }
-                    }
-                    (Effect::Deletes, true) => ReviewReason::UnnamedDeletion { path },
-                    (Effect::Deletes, false) => ReviewReason::UnplacedDeletion { path },
-                };
+                let reason = deletion_reason(target);
                 (
                     note(PermissionReviewStatus::Asked, reason.clone()).rationale,
                     Some(reason),
@@ -1959,6 +1960,83 @@ mod tests {
         ));
         assert!(!named("rebuild-cache now", "/tmp/build-cache"));
         assert!(!named("x marks", "/tmp/x.bin"));
+    }
+
+    #[test]
+    fn each_effect_the_deletion_check_finds_has_its_own_note() {
+        use crate::permissions::bash::OutsideDeletion;
+        let found = |path: &str, placed: bool, effect: Effect| OutsideDeletion {
+            path: path.into(),
+            placed,
+            effect,
+        };
+        let cases = [
+            (
+                found("/tmp/x", true, Effect::Deletes),
+                ReviewReason::UnnamedDeletion {
+                    path: "/tmp/x".into(),
+                },
+            ),
+            (
+                found("\"$T\"", false, Effect::Deletes),
+                ReviewReason::UnplacedDeletion {
+                    path: "\"$T\"".into(),
+                },
+            ),
+            (
+                found("/etc/hosts", true, Effect::Replaces),
+                ReviewReason::UnnamedOverwrite {
+                    path: "/etc/hosts".into(),
+                },
+            ),
+            (
+                found("/etc/motd", true, Effect::Empties),
+                ReviewReason::UnnamedOverwrite {
+                    path: "/etc/motd".into(),
+                },
+            ),
+            (
+                found("/etc/\"$F\"", false, Effect::Replaces),
+                ReviewReason::UnplacedOverwrite {
+                    path: "/etc/\"$F\"".into(),
+                },
+            ),
+            (
+                found("python3 -c", false, Effect::Inline),
+                ReviewReason::InlineCode {
+                    program: "python3 -c".into(),
+                },
+            ),
+            (
+                found("bash", false, Effect::Script),
+                ReviewReason::UnreadScript {
+                    program: "bash".into(),
+                },
+            ),
+            // A path with marks and a line break is one clean line.
+            (
+                found("/tmp/a\u{202e}b\nc", true, Effect::Deletes),
+                ReviewReason::UnnamedDeletion {
+                    path: "/tmp/ab c".into(),
+                },
+            ),
+        ];
+        for (target, reason) in cases {
+            assert_eq!(deletion_reason(&target), reason, "{target:?}");
+        }
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                ReviewReason::UnnamedOverwrite {
+                    path: "/etc/hosts".into()
+                }
+            )
+            .rationale
+            .as_deref(),
+            Some(
+                "This overwrites /etc/hosts, outside the project, and your messages do not name it."
+            )
+        );
     }
 
     #[test]
