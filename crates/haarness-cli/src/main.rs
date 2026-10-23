@@ -14945,6 +14945,7 @@ request_timeout = 0
                 risk: None,
                 rule: rule.map(str::to_owned),
                 rationale: rationale.map(str::to_owned),
+                reason: None,
             })
         };
         assert_eq!(

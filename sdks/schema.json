@@ -3854,10 +3854,21 @@
         "description": "Auto's reviewer's note: on a permission request it left to a person, and\nin the metadata (`review`) of a tool result it blocked.",
         "properties": {
           "rationale": {
-            "description": "One or two sentences for the person.",
+            "description": "One or two sentences for the person: the reviewer's own words, or\nHaarness's in English when `reason` is set.",
             "type": [
               "string",
               "null"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReviewReason",
+                "description": "Set when Haarness wrote the note itself."
+              }
             ]
           },
           "risk": {
@@ -3892,7 +3903,8 @@
           "asked",
           "failed",
           "paused",
-          "blocked"
+          "blocked",
+          "unknown"
         ],
         "type": "string"
       },
@@ -4614,13 +4626,180 @@
         ],
         "type": "object"
       },
+      "ReviewReason": {
+        "description": "What a note Haarness wrote itself says, so a client can word it in the\nperson's language; `rationale` carries the same in English for clients\nthat do not know the code.",
+        "oneOf": [
+          {
+            "description": "The review took longer than its deadline.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "timeout"
+                ],
+                "type": "string"
+              },
+              "seconds": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "seconds",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The action is too long to review whole.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "too_long"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No model was available to review it.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "no_model"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The reviewer's calls failed; `detail` is the last error.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "error"
+                ],
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "detail",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reviewing paused after `count` blocks in a row this turn.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "streak"
+                ],
+                "type": "string"
+              },
+              "count": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "count",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reviewing paused after `count` blocks this turn.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "turn_limit"
+                ],
+                "type": "string"
+              },
+              "count": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "count",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command deletes `path`, outside the project, which the person's\nmessages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unnamed_deletion"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The reviewer rated the action's risk (see `risk`) and gave no reason.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "rated"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A code a newer server sends: show `rationale`.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ReviewRisk": {
         "description": "The risk the reviewer rated an action.",
         "enum": [
           "low",
           "medium",
           "high",
-          "critical"
+          "critical",
+          "unknown"
         ],
         "type": "string"
       },

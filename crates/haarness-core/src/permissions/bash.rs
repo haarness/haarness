@@ -42,14 +42,29 @@ pub struct BashAnalysis {
     /// [`MAX_PATTERN_BYTES`], or it is longer than [`MAX_COMMAND_BYTES`]):
     /// its written patterns may be clipped, and no rule allows it.
     pub unreadable: bool,
-    /// What `rm`, `rmdir` and `unlink` are given to delete, wherever the line
-    /// runs them (behind a wrapper, in text run again): each word as written,
-    /// its value after quotes, and whether that value is all literal. Auto's
-    /// reviewer places them (see [`outside_deletions`]).
-    pub deletions: Vec<(String, String, bool)>,
+    /// What the line deletes or overwrites, wherever it runs the program
+    /// (behind a wrapper, in text run again): `rm`, `rmdir`, `unlink`,
+    /// `shred` and `truncate` arguments, `dd of=`, the roots of `find …
+    /// -delete`, what `git clean -f` cleans, and files a `>` redirect
+    /// empties. Auto's reviewer places them (see [`outside_deletions`]).
+    pub deletions: Vec<Deletion>,
     /// The line changes directory (`cd`, `pushd`), so a relative path after
     /// it may land somewhere else.
     pub changes_directory: bool,
+}
+
+/// A path a command deletes or overwrites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deletion {
+    /// The word as written.
+    pub raw: String,
+    /// Its value after quotes.
+    pub value: String,
+    /// The value is all literal.
+    pub complete: bool,
+    /// It destroys only a file that already exists: a `>` redirect empties
+    /// one, and makes a new one harmlessly.
+    pub existing: bool,
 }
 
 /// One command as written in the line.
@@ -80,7 +95,7 @@ const PATH_COMMANDS: &[&str] = &[
 ];
 
 /// Commands whose non-flag arguments are paths they delete.
-const DELETERS: &[&str] = &["rm", "rmdir", "unlink"];
+const DELETERS: &[&str] = &["rm", "rmdir", "unlink", "shred"];
 
 /// How many strings deep commands are read: `bash -c "eval 'sh -c …'"`.
 const MAX_NESTING: u8 = 4;
@@ -404,6 +419,18 @@ impl Reader<'_> {
             }
             if value.starts_with("/dev/") {
                 continue;
+            }
+            // `>` (not `>>`) empties a file that is there already.
+            let truncates = (0..redirect.child_count())
+                .filter_map(|i| redirect.child(i))
+                .any(|child| matches!(node_text(child, command).as_str(), ">" | ">|" | "&>"));
+            if truncates && !descriptor {
+                self.analysis.deletions.push(Deletion {
+                    raw: node_text(dest, command),
+                    value: value.clone(),
+                    complete,
+                    existing: true,
+                });
             }
             if let Some(dir) =
                 external_dir(self.workspace, &node_text(dest, command), &value, complete)
@@ -840,6 +867,137 @@ impl Reader<'_> {
         }
     }
 
+    /// What `name` deletes or overwrites among `arguments`: see
+    /// [`BashAnalysis::deletions`]. Only what is cheap to read for certain;
+    /// a program's options with values are skipped by their usual spelling.
+    fn check_deletions(&mut self, name: &str, arguments: &[Word<'_>], source: &str) {
+        let mut push = |raw: String, value: String, complete: bool| {
+            self.analysis.deletions.push(Deletion {
+                raw,
+                value,
+                complete,
+                existing: false,
+            });
+        };
+        // The words that are not options, the value of an option that takes
+        // one (`-s 0`) left out too.
+        let operands = |takes_value: &[&str]| {
+            let mut skip = false;
+            arguments
+                .iter()
+                .filter(|word| {
+                    if std::mem::take(&mut skip) {
+                        return false;
+                    }
+                    if word.value.starts_with('-') {
+                        skip = takes_value.contains(&word.value.as_str());
+                        return false;
+                    }
+                    // `find -exec rm {} +` names what find found.
+                    word.value != "{}"
+                })
+                .collect::<Vec<_>>()
+        };
+        match name {
+            "rm" | "rmdir" | "unlink" => {
+                for word in operands(&[]) {
+                    let (value, complete) = path_literal(word.node, source);
+                    push(word.raw.clone(), value, complete);
+                }
+            }
+            "shred" | "truncate" => {
+                for word in operands(&["-n", "-s", "-r", "--iterations", "--size", "--reference"]) {
+                    let (value, complete) = path_literal(word.node, source);
+                    push(word.raw.clone(), value, complete);
+                }
+            }
+            "dd" => {
+                for word in arguments {
+                    let (value, complete) = path_literal(word.node, source);
+                    if let Some(target) = value.strip_prefix("of=") {
+                        push(word.raw.clone(), target.to_owned(), complete);
+                    }
+                }
+            }
+            "find" => {
+                // The paths before the first expression, `.` when there are
+                // none; they go when find deletes what it finds.
+                let roots: Vec<&Word<'_>> = arguments
+                    .iter()
+                    .take_while(|word| {
+                        !word.value.starts_with('-') && !matches!(word.value.as_str(), "(" | "!")
+                    })
+                    .collect();
+                let deletes = arguments.iter().enumerate().any(|(index, word)| {
+                    word.value == "-delete"
+                        || (matches!(word.value.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")
+                            && arguments.get(index + 1).is_some_and(|next| {
+                                DELETERS.contains(&program_name(&next.value).as_str())
+                            }))
+                });
+                if deletes {
+                    for word in roots {
+                        let (value, complete) = path_literal(word.node, source);
+                        push(word.raw.clone(), value, complete);
+                    }
+                    if arguments
+                        .first()
+                        .is_none_or(|word| word.value.starts_with('-'))
+                    {
+                        push(".".into(), ".".into(), true);
+                    }
+                }
+            }
+            "git" => {
+                // `git [-C dir] clean -f …`: what it cleans, the folder it runs
+                // in unless paths are given.
+                let mut rest = arguments.iter();
+                let mut folder = None;
+                let clean = loop {
+                    let Some(word) = rest.next() else {
+                        break false;
+                    };
+                    match word.value.as_str() {
+                        "-C" => folder = rest.next(),
+                        "-c" | "--git-dir" | "--work-tree" | "--namespace" => {
+                            rest.next();
+                        }
+                        "clean" => break true,
+                        other if other.starts_with('-') => {}
+                        _ => break false,
+                    }
+                };
+                let rest: Vec<&Word<'_>> = rest.collect();
+                let forced = rest.iter().any(|word| {
+                    word.value == "--force"
+                        || (word.value.starts_with('-')
+                            && !word.value.starts_with("--")
+                            && word.value.contains('f'))
+                });
+                if clean && forced {
+                    let paths: Vec<&&Word<'_>> = rest
+                        .iter()
+                        .filter(|word| !word.value.starts_with('-'))
+                        .collect();
+                    if paths.is_empty() {
+                        match folder {
+                            Some(word) => {
+                                let (value, complete) = path_literal(word.node, source);
+                                push(word.raw.clone(), value, complete);
+                            }
+                            None => push(".".into(), ".".into(), true),
+                        }
+                    }
+                    for word in paths {
+                        let (value, complete) = path_literal(word.node, source);
+                        push(word.raw.clone(), value, complete);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The outside-the-project check for one command's words: the paths
     /// that the commands in [`PATH_COMMANDS`] take, by the program's name
     /// wherever it is installed.
@@ -852,15 +1010,8 @@ impl Reader<'_> {
         if complete && matches!(name.as_str(), "cd" | "pushd") {
             self.analysis.changes_directory = true;
         }
-        if complete && DELETERS.contains(&name.as_str()) {
-            for word in arguments {
-                let (argument, literal) = path_literal(word.node, source);
-                if !argument.starts_with('-') {
-                    self.analysis
-                        .deletions
-                        .push((word.raw.clone(), argument, literal));
-                }
-            }
+        if complete {
+            self.check_deletions(&name, arguments, source);
         }
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
@@ -1529,22 +1680,32 @@ pub fn outside_deletions(command: &str, workspace: &Path, workdir: Option<&Path>
     let analysis = analyze(command, workspace);
     let base = workdir.unwrap_or(workspace);
     let project = resolve(workspace, Path::new(""));
-    analysis
-        .deletions
-        .iter()
-        .filter_map(|(raw, value, complete)| {
-            let home = home_expansion(raw, value);
-            let relative = home.is_none() && !Path::new(value).is_absolute();
-            if !complete || (relative && analysis.changes_directory) {
-                return Some(raw.clone());
+    let mut found: Vec<String> = Vec::new();
+    for deletion in &analysis.deletions {
+        let home = home_expansion(&deletion.raw, &deletion.value);
+        let relative = home.is_none() && !Path::new(&deletion.value).is_absolute();
+        let target = if !deletion.complete || (relative && analysis.changes_directory) {
+            // A `>` into a place nobody can tell may make a new file: not
+            // counted. Anything else is.
+            if deletion.existing {
+                continue;
             }
+            deletion.raw.clone()
+        } else {
             let resolved = match home {
                 Some(expanded) => resolve(base, &expanded),
-                None => resolve(base, Path::new(value)),
+                None => resolve(base, Path::new(&deletion.value)),
             };
-            (!resolved.starts_with(&project)).then(|| resolved.display().to_string())
-        })
-        .collect()
+            if resolved.starts_with(&project) || (deletion.existing && !resolved.is_file()) {
+                continue;
+            }
+            resolved.display().to_string()
+        };
+        if !found.contains(&target) {
+            found.push(target);
+        }
+    }
+    found
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -2693,6 +2854,59 @@ mod readings {
             outside_deletions("cd /tmp && rm -rf build", &workspace, None),
             vec!["build".to_owned()]
         );
+        // Other programs that delete or overwrite.
+        let file = outside_real.join("cache").join("data.bin");
+        std::fs::write(&file, "x").unwrap();
+        let file_text = file.display().to_string();
+        for (command, expected) in [
+            (
+                format!("find {}/cache -name '*.o' -delete", outside.display()),
+                cache.clone(),
+            ),
+            (
+                format!("find {}/cache -exec rm {{}} +", outside.display()),
+                cache.clone(),
+            ),
+            (
+                format!("git -C {}/cache clean -fdx", outside.display()),
+                cache.clone(),
+            ),
+            (
+                format!("truncate -s 0 {}", file.display()),
+                file_text.clone(),
+            ),
+            (
+                format!("shred -n 3 -u {}", file.display()),
+                file_text.clone(),
+            ),
+            (
+                format!("dd if=/dev/zero of={} bs=1 count=1", file.display()),
+                file_text.clone(),
+            ),
+            // `>` empties a file that is there.
+            (format!("printf x > {}", file.display()), file_text.clone()),
+        ] {
+            assert_eq!(
+                outside_deletions(&command, &workspace, None),
+                vec![expected],
+                "{command}"
+            );
+        }
+        // A new file, an append, a find that deletes nothing and a clean
+        // without -f delete nothing outside.
+        for command in [
+            format!("printf x > {}/new.txt", outside.display()),
+            format!("printf x >> {}", file.display()),
+            format!("find {}/cache -name '*.o'", outside.display()),
+            format!("git -C {}/cache clean -n", outside.display()),
+            "find . -name '*.o' -delete".to_owned(),
+            "git clean -fdx".to_owned(),
+        ] {
+            assert!(
+                outside_deletions(&command, &workspace, None).is_empty(),
+                "{command}"
+            );
+        }
         // Other programs' arguments are not deletions.
         assert!(
             outside_deletions(&format!("ls {}", outside.display()), &workspace, None).is_empty()

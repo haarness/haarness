@@ -895,6 +895,25 @@ impl ThreadRepository for SqliteStore {
             .collect()
     }
 
+    async fn recent_items(&self, id: ThreadId, limit: usize) -> CoreResult<Vec<Item>> {
+        let connection = self.connection.lock();
+        let mut statement = connection
+            .prepare(
+                "SELECT id,thread_id,turn_id,sequence,data_json,created_at FROM items
+             WHERE thread_id=?1 AND deleted=0 ORDER BY sequence DESC LIMIT ?2",
+            )
+            .map_err(storage)?;
+        let limit = i64::try_from(limit).map_err(storage)?;
+        let rows = statement
+            .query_map(params![id.to_string(), limit], raw_item)
+            .map_err(storage)?;
+        let mut items: Vec<Item> = rows
+            .map(|row| row.map_err(storage).and_then(decode_item))
+            .collect::<CoreResult<_>>()?;
+        items.reverse();
+        Ok(items)
+    }
+
     async fn has_input_admission(&self, id: ThreadId, request: RequestId) -> CoreResult<bool> {
         let owner: Option<String> = self
             .connection

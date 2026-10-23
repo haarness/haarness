@@ -175,6 +175,13 @@ pub trait ThreadRepository: Send + Sync {
         Ok(None)
     }
     async fn list_items(&self, id: ThreadId, after: Option<u64>) -> CoreResult<Vec<Item>>;
+    /// The newest `limit` items of a thread, oldest first. Stores that can
+    /// read only that many override it; the default reads them all.
+    async fn recent_items(&self, id: ThreadId, limit: usize) -> CoreResult<Vec<Item>> {
+        let mut items = self.list_items(id, None).await?;
+        let start = items.len().saturating_sub(limit);
+        Ok(items.split_off(start))
+    }
     async fn start_turn(
         &self,
         id: ThreadId,

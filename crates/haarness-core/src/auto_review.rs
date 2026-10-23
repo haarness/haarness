@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use haarness_protocol::{
-    Item, ItemData, PermissionReview, PermissionReviewStatus, ReviewRisk, ThreadId, TurnId,
+    Item, ItemData, PermissionReview, PermissionReviewStatus, ReviewReason, ReviewRisk, ThreadId,
+    TurnId,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -101,6 +102,12 @@ const BUDGET: usize = 24_000;
 /// The longest action reviewed. A longer one goes to a person: no part of it
 /// may hide outside the reviewer's view.
 const WHOLE: usize = 16_000;
+/// The newest items of a chat a review reads.
+const SCAN: usize = 400;
+/// The longest category kept of the reviewer's `rule`.
+const RULE: usize = 80;
+/// Root chats whose blocks are counted at once; the oldest goes first.
+const TALLIES: usize = 1000;
 /// Marks the verdict schema, so a test provider can tell a review request.
 pub const VERDICT_SCHEMA_DESCRIPTION: &str = "Auto review verdict";
 
@@ -168,11 +175,13 @@ impl Drop for Running<'_> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Tally {
     turn: String,
     streak: u32,
     total: u32,
+    /// When it was last read, so the oldest goes first when there are many.
+    touched: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -206,7 +215,8 @@ fn derive(risk: ReviewRisk, authorization: Authorization) -> Decision {
     match risk {
         ReviewRisk::Critical => Decision::Deny,
         ReviewRisk::High if authorization == Authorization::High => Decision::Allow,
-        ReviewRisk::High => Decision::Ask,
+        // A rating Haarness does not know counts as high.
+        ReviewRisk::High | ReviewRisk::Unknown => Decision::Ask,
         ReviewRisk::Medium if authorization == Authorization::Unknown => Decision::Ask,
         ReviewRisk::Medium | ReviewRisk::Low => Decision::Allow,
     }
@@ -532,6 +542,13 @@ fn render(list: &[Entry], budget: usize) -> String {
         for entry in kept.iter_mut().take(keep) {
             entry.text = clip(&entry.text, 300);
         }
+        // Still over: the oldest of the person's messages go too, the
+        // newest stay.
+        let mut total: usize = kept.iter().map(cost).sum();
+        while total > budget && kept.len() > 1 {
+            total -= cost(&kept[0]);
+            kept.remove(0);
+        }
     }
     let dropped = list.len() - kept.len();
     let mut lines = Vec::new();
@@ -687,48 +704,96 @@ fn explain(risk: ReviewRisk) -> String {
     let name = match risk {
         ReviewRisk::Low => "low",
         ReviewRisk::Medium => "medium",
-        ReviewRisk::High => "high",
-        ReviewRisk::Critical => return "Auto review rated this action critical risk.".into(),
+        ReviewRisk::High | ReviewRisk::Unknown => "high",
+        ReviewRisk::Critical => return "It rated this action critical risk.".into(),
     };
-    format!(
-        "Auto review rated this action {name} risk, and your messages do not clearly ask for it."
-    )
+    format!("It rated this action {name} risk, and your messages do not clearly ask for it.")
 }
 
-fn note(status: PermissionReviewStatus, rationale: impl Into<String>) -> PermissionReview {
+/// A note Haarness writes itself: its `reason` for clients to word in the
+/// person's language, and the same in English.
+fn note(status: PermissionReviewStatus, reason: ReviewReason) -> PermissionReview {
+    let rationale = match &reason {
+        ReviewReason::Timeout { seconds } => format!(
+            "It took longer than {seconds} second{}.",
+            if *seconds == 1 { "" } else { "s" }
+        ),
+        ReviewReason::TooLong => "The action is too long to review whole.".into(),
+        ReviewReason::NoModel => "No model was available to review this request.".into(),
+        ReviewReason::Error { detail } => format!("It could not decide ({detail})."),
+        ReviewReason::Streak { count } => format!(
+            "It blocked {count} actions in a row, so the rest of this turn is yours to approve."
+        ),
+        ReviewReason::TurnLimit { count } => {
+            format!("It blocked {count} actions this turn, so the rest of it is yours to approve.")
+        }
+        ReviewReason::UnnamedDeletion { path } => {
+            format!("This deletes {path}, outside the project, and your messages do not name it.")
+        }
+        ReviewReason::Rated | ReviewReason::Unknown => explain(ReviewRisk::High),
+    };
     PermissionReview {
         status,
         risk: None,
         rule: None,
-        rationale: Some(rationale.into()),
+        rationale: Some(rationale),
+        reason: Some(reason),
     }
 }
 
-/// The first path outside the project that a shell command behind an
-/// outside-the-project request deletes (`rm`, `rmdir`, `unlink`) while no
-/// message of the person names it.
+/// The first path outside the project that a shell command deletes or
+/// overwrites (see `bash::outside_deletions`) while no message of the person
+/// names it, whatever kind of request the command raised.
 fn unnamed_deletion(request: &ReviewRequest, workspace: &Path, said: &str) -> Option<String> {
-    if request.permission != "external_directory" {
-        return None;
-    }
     let command = request.detail.get("command")?.as_str()?;
     let workdir = request
         .detail
         .get("workdir")
         .and_then(Value::as_str)
         .map(|dir| workspace.join(dir));
-    let said = said.to_lowercase();
+    let home = haarness_protocol::home_dir();
     crate::permissions::bash::outside_deletions(command, workspace, workdir.as_deref())
         .into_iter()
-        .find(|target| {
-            let name = Path::new(target.trim_end_matches('/'))
-                .file_name()
-                .map_or_else(
-                    || target.clone(),
-                    |name| name.to_string_lossy().into_owned(),
-                );
-            !said.contains(&name.to_lowercase())
-        })
+        .find(|target| !named(said, target, home.as_deref()))
+}
+
+/// Whether the person's words `said` name `target`: the whole path, its
+/// `~/` spelling, or its last component as a word of its own. The root, the
+/// home folder and `~` are never named: a message about them is not a
+/// request to delete them.
+fn named(said: &str, target: &str, home: Option<&Path>) -> bool {
+    let target = target
+        .trim()
+        .trim_matches(['"', '\''])
+        .trim_end_matches('/');
+    let at_home = home.is_some_and(|home| Path::new(target) == home);
+    if target.is_empty() || matches!(target, "/" | "~" | "." | "..") || at_home {
+        return false;
+    }
+    let said = said.to_lowercase();
+    let lower = target.to_lowercase();
+    let tilde = home
+        .and_then(|home| Path::new(target).strip_prefix(home).ok())
+        .map(|rest| format!("~/{}", rest.display()).to_lowercase());
+    if said.contains(&lower) || tilde.is_some_and(|tilde| said.contains(&tilde)) {
+        return true;
+    }
+    let Some(name) = Path::new(&lower)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    else {
+        return false;
+    };
+    if matches!(name.as_str(), "" | "." | "..") {
+        return false;
+    }
+    // The component as a word: what is around it is not part of a name.
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-');
+    said.match_indices(&name).any(|(start, _)| {
+        let before = said[..start].chars().next_back();
+        let after = said[start + name.len()..].chars().next();
+        !before.is_some_and(part) && !after.is_some_and(part)
+    })
 }
 
 impl ReviewState {
@@ -739,16 +804,31 @@ impl ReviewState {
 
     fn tally(&self, root: ThreadId, turn: &str) -> Tally {
         let mut turns = self.turns.lock();
-        if turns.len() >= 1000 && !turns.contains_key(&root) {
-            turns.clear();
+        if turns.len() >= TALLIES
+            && !turns.contains_key(&root)
+            && let Some(oldest) = turns
+                .iter()
+                .min_by_key(|(_, tally)| tally.touched)
+                .map(|(root, _)| *root)
+        {
+            turns.remove(&oldest);
         }
-        let tally = turns.entry(root).or_default();
+        let now = Instant::now();
+        let tally = turns.entry(root).or_insert_with(|| Tally {
+            turn: turn.to_owned(),
+            streak: 0,
+            total: 0,
+            touched: now,
+        });
         if tally.turn != turn {
             *tally = Tally {
                 turn: turn.to_owned(),
-                ..Tally::default()
+                streak: 0,
+                total: 0,
+                touched: now,
             };
         }
+        tally.touched = now;
         tally.clone()
     }
 
@@ -888,16 +968,12 @@ impl Reviewer {
             Ok(outcome) => outcome,
             // The deadline runs from the start: a slow history or git read
             // counts too, and still settles the request.
-            Err(_) => {
-                let seconds = timeout.as_secs().max(1);
-                Outcome::Ask(note(
-                    PermissionReviewStatus::Failed,
-                    format!(
-                        "It took longer than {seconds} second{}.",
-                        if seconds == 1 { "" } else { "s" }
-                    ),
-                ))
-            }
+            Err(_) => Outcome::Ask(note(
+                PermissionReviewStatus::Failed,
+                ReviewReason::Timeout {
+                    seconds: timeout.as_secs().max(1),
+                },
+            )),
         };
         let (status, risk, rule) = match &outcome {
             Outcome::Allow => ("allow", None, None),
@@ -926,21 +1002,24 @@ impl Reviewer {
 
     async fn decide(&self, started: Instant) -> Outcome {
         let request = &self.request;
+        // The newest items only: a long chat costs no more to review.
         let own = self
             .repository
-            .list_items(request.thread_id, None)
+            .recent_items(request.thread_id, SCAN)
             .await
             .unwrap_or_default();
         let child = request.root_thread_id != request.thread_id;
-        let top = if child {
+        let parent = if child {
             self.repository
-                .list_items(request.root_thread_id, None)
+                .recent_items(request.root_thread_id, SCAN)
                 .await
                 .unwrap_or_default()
         } else {
-            own.clone()
+            Vec::new()
         };
-        // A turn starts with a message the person wrote.
+        let top: &[Item] = if child { &parent } else { &own };
+        // A turn starts with a message the person wrote; a chat with none
+        // (a workflow's) counts by the turn that asks, else as one.
         let turn = top
             .iter()
             .rev()
@@ -948,21 +1027,18 @@ impl Reviewer {
                 matches!(&item.data, ItemData::UserMessage { synthetic: false, text, .. } if !crate::is_turn_reminder(text))
             })
             .map(|item| item.id.to_string())
-            .unwrap_or_default();
+            .or_else(|| request.turn_id.map(|turn| format!("turn:{turn}")))
+            .unwrap_or_else(|| format!("thread:{}", request.thread_id));
         let tally = self.state.tally(request.root_thread_id, &turn);
         if tally.streak >= STREAK || tally.total >= TOTAL {
             return Outcome::Ask(note(
                 PermissionReviewStatus::Paused,
                 if tally.streak >= STREAK {
-                    format!(
-                        "It blocked {} actions in a row, so the rest of this turn is yours to approve.",
-                        tally.streak
-                    )
+                    ReviewReason::Streak {
+                        count: tally.streak,
+                    }
                 } else {
-                    format!(
-                        "It blocked {} actions this turn, so the rest of it is yours to approve.",
-                        tally.total
-                    )
+                    ReviewReason::TurnLimit { count: tally.total }
                 },
             ));
         }
@@ -971,14 +1047,11 @@ impl Reviewer {
             return Outcome::Allow;
         }
         let Some(shown) = action(request, &self.workspace) else {
-            return Outcome::Ask(note(
-                PermissionReviewStatus::Failed,
-                "The action is too long to review whole.",
-            ));
+            return Outcome::Ask(note(PermissionReviewStatus::Failed, ReviewReason::TooLong));
         };
         let skip = request.tool.as_ref().map(|(_, call_id)| call_id.as_str());
         let transcript = render(
-            &entries(&top, false, if child { None } else { skip }),
+            &entries(top, false, if child { None } else { skip }),
             if child { BUDGET / 2 } else { BUDGET },
         );
         let task = child.then(|| render(&entries(&own, true, skip), BUDGET / 2));
@@ -986,10 +1059,7 @@ impl Reviewer {
         let system = instructions(&self.policy, &self.settings);
         let candidates = self.candidates();
         if candidates.is_empty() {
-            return Outcome::Ask(note(
-                PermissionReviewStatus::Failed,
-                "No model was available to review this request.",
-            ));
+            return Outcome::Ask(note(PermissionReviewStatus::Failed, ReviewReason::NoModel));
         }
         // Each reviewer in turn until one answers; on each, at most one more
         // call when the first fails or stalls past the hedge. A small model
@@ -1020,13 +1090,13 @@ impl Reviewer {
             }
         }
         let Some(verdict) = verdict else {
-            let reason = last_error.map_or_else(
+            let detail = last_error.map_or_else(
                 || "no answer".to_owned(),
                 |error| clip(&crate::refusal_reason(&error), 160),
             );
             return Outcome::Ask(note(
                 PermissionReviewStatus::Failed,
-                format!("It could not decide: {reason}"),
+                ReviewReason::Error { detail },
             ));
         };
         let derived = derive(verdict.risk, verdict.authorization);
@@ -1035,14 +1105,16 @@ impl Reviewer {
         // person names comes to them, whatever the ratings: some small
         // models rate deleting a folder that tool output points to as
         // routine cleanup.
+        // What the person typed: a slash command's line, not its template.
         let said: String = top
             .iter()
             .filter_map(|item| match &item.data {
                 ItemData::UserMessage {
                     text,
                     synthetic: false,
+                    command_line,
                     ..
-                } => Some(spoken_text(text)),
+                } => Some(command_line.as_deref().unwrap_or_else(|| spoken_text(text))),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1050,15 +1122,20 @@ impl Reviewer {
         let target = (stricter == Decision::Allow)
             .then(|| unnamed_deletion(request, &self.workspace, &said))
             .flatten();
-        let rationale = match &target {
-            Some(target) => format!(
-                "This deletes {}, outside the project, and your messages do not name it.",
-                clip(target, 120)
-            ),
-            None => verdict
-                .rationale
-                .as_deref()
-                .map_or_else(|| explain(verdict.risk), |reason| clip(reason, 400)),
+        let rule = verdict.rule.as_deref().map(|rule| clip(rule, RULE));
+        // Haarness's own words when it decided, or the reviewer gave none.
+        let (rationale, reason) = match (&target, verdict.rationale.as_deref()) {
+            (Some(target), _) => {
+                let reason = ReviewReason::UnnamedDeletion {
+                    path: clip(target, 120),
+                };
+                (
+                    note(PermissionReviewStatus::Asked, reason.clone()).rationale,
+                    Some(reason),
+                )
+            }
+            (None, Some(said)) => (Some(clip(said, 400)), None),
+            (None, None) => (Some(explain(verdict.risk)), Some(ReviewReason::Rated)),
         };
         let outcome = match (target.is_some(), stricter) {
             (false, Decision::Allow) => {
@@ -1070,8 +1147,9 @@ impl Reviewer {
             (false, Decision::Deny) => Outcome::Deny(PermissionReview {
                 status: PermissionReviewStatus::Blocked,
                 risk: Some(verdict.risk),
-                rule: verdict.rule.clone(),
-                rationale: Some(rationale),
+                rule,
+                rationale,
+                reason,
             }),
             _ => Outcome::Ask(PermissionReview {
                 status: PermissionReviewStatus::Asked,
@@ -1079,9 +1157,10 @@ impl Reviewer {
                 rule: if target.is_some() {
                     Some("Destructive action".into())
                 } else {
-                    verdict.rule.clone()
+                    rule
                 },
-                rationale: Some(rationale),
+                rationale,
+                reason,
             }),
         };
         self.state.count(request.root_thread_id, &turn, &outcome);
@@ -1511,6 +1590,46 @@ mod tests {
     }
 
     #[test]
+    fn the_breaker_forgets_the_oldest_chats_first_and_a_new_turn_starts_over() {
+        let state = ReviewState::default();
+        let first = ThreadId::new();
+        state.tally(first, "turn-1");
+        state.count(
+            first,
+            "turn-1",
+            &Outcome::Deny(note(PermissionReviewStatus::Blocked, ReviewReason::Rated)),
+        );
+        let roots: Vec<ThreadId> = (1..TALLIES).map(|_| ThreadId::new()).collect();
+        for root in &roots {
+            state.tally(*root, "turn");
+        }
+        // Read again, the first chat is the newest: another one goes.
+        assert_eq!(state.tally(first, "turn-1").total, 1);
+        state.tally(ThreadId::new(), "turn");
+        assert_eq!(state.turns.lock().len(), TALLIES);
+        assert!(state.turns.lock().contains_key(&first));
+        assert!(!state.turns.lock().contains_key(&roots[0]));
+        // A new turn of the same chat counts from zero.
+        assert_eq!(state.tally(first, "turn-2").total, 0);
+    }
+
+    #[test]
+    fn the_budget_holds_even_for_many_long_messages_and_keeps_the_newest() {
+        let items: Vec<Item> = (0..100)
+            .map(|index| {
+                item(
+                    index,
+                    user(&format!("message-{index} {}", "x".repeat(1_000))),
+                )
+            })
+            .collect();
+        let text = render(&entries(&items, false, None), 2_000);
+        assert!(text.chars().count() < 2_600, "{}", text.chars().count());
+        assert!(text.contains("message-99"), "{text}");
+        assert!(!text.contains("message-0 "), "{text}");
+    }
+
+    #[test]
     fn the_budget_drops_old_calls_before_the_persons_words() {
         let mut items = vec![item(0, user("first request"))];
         for index in 0..60 {
@@ -1602,13 +1721,37 @@ mod tests {
         let outside = request("external_directory", "rm -rf ../shared-cache");
         let found = unnamed_deletion(&outside, &workspace, "Please run the tests").unwrap();
         assert!(found.ends_with("shared-cache"), "{found}");
-        // Named by the person: their call.
+        // Named by the person, as a whole component or the whole path.
         assert!(unnamed_deletion(&outside, &workspace, "Delete the Shared-Cache folder").is_none());
-        // Only an outside-the-project request is checked.
-        assert!(
-            unnamed_deletion(&request("bash", "rm -rf ../shared-cache"), &workspace, "").is_none()
+        assert!(unnamed_deletion(&outside, &workspace, "remove ../shared-cache please").is_none());
+        // Never a bare substring of another word.
+        assert!(unnamed_deletion(&outside, &workspace, "the shared-cache-v2 one").is_some());
+        // Any request a command raises is checked, and a variable target
+        // cannot be placed, so nobody named it.
+        let variable = unnamed_deletion(
+            &request("bash", "rm -rf \"$TARGET\""),
+            &workspace,
+            "clean up",
         );
+        assert_eq!(variable.as_deref(), Some("\"$TARGET\""));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_root_and_the_home_folder_are_never_named() {
+        let home = Path::new("/home/ana");
+        assert!(!named("delete everything in / and ~", "/", Some(home)));
+        assert!(!named("clean my home folder ~", "~", Some(home)));
+        assert!(!named("rm /home/ana", "/home/ana", Some(home)));
+        assert!(named("remove ~/scratch", "/home/ana/scratch", Some(home)));
+        assert!(named(
+            "remove /tmp/build-cache",
+            "/tmp/build-cache",
+            Some(home)
+        ));
+        assert!(named("remove build-cache", "/tmp/build-cache/", Some(home)));
+        assert!(!named("rebuild-cache now", "/tmp/build-cache", Some(home)));
+        assert!(!named("x marks", "/tmp/x.bin", Some(home)));
     }
 
     #[test]
@@ -1657,6 +1800,7 @@ mod tests {
             risk: Some(ReviewRisk::Critical),
             rule: Some("Data exfiltration".into()),
             rationale: Some("It uploads your SSH key.".into()),
+            reason: None,
         });
         assert_eq!(
             message,
