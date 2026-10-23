@@ -4,7 +4,7 @@
 //! changes a pattern or decides a request.
 
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use haarness_protocol::{PermissionScript, ScriptWithheld};
@@ -123,7 +123,7 @@ pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Opti
 fn withheld(file: &Path, reason: ScriptWithheld) -> Shown {
     Shown {
         script: PermissionScript {
-            path: shown_path(&super::normalize_absolute(file)),
+            path: shown_path(&named(file)),
             content: String::new(),
             truncated: false,
             withheld: Some(reason),
@@ -158,7 +158,7 @@ pub fn is_credential(path: &Path) -> bool {
 /// `file` (absolute, as the command names it) read where it really is,
 /// links followed.
 fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
-    let shown = super::normalize_absolute(file);
+    let shown = named(file);
     let real = file.canonicalize().ok()?;
     if [&shown, &real]
         .iter()
@@ -195,6 +195,21 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
         },
         seal: Some(seal),
     })
+}
+
+/// The file a command names, as the card names it: with its `..` taken
+/// where the folder before it really is, as the system takes it when it
+/// opens the file (`lnk/../run.sh` is `run.sh` beside the folder `lnk`
+/// leads to), and its own name as written.
+fn named(file: &Path) -> PathBuf {
+    let lexical = super::normalize_absolute(file);
+    if !file.components().any(|part| part == Component::ParentDir) {
+        return lexical;
+    }
+    file.parent()
+        .and_then(|folder| folder.canonicalize().ok())
+        .zip(file.file_name())
+        .map_or(lexical, |(folder, name)| folder.join(name))
 }
 
 /// A path as the card shows it: [`displayed`], with its tabs and line
@@ -469,6 +484,37 @@ mod tests {
         assert!(bash_script(command, &project, |_| true).is_none());
         let script = bash_script("cd realdir && sh run.sh", &project, |_| true).unwrap();
         assert_eq!(script.content, "echo project\n");
+    }
+
+    /// `bash lnk/../run.sh` runs `run.sh` beside the folder `lnk` leads to,
+    /// as the system takes a path's `..`: the card names that file.
+    #[cfg(unix)]
+    #[test]
+    fn a_script_path_through_a_link_and_dot_dot_is_named_where_it_leads() {
+        let fixture = Fixture::new();
+        let project = fixture.0.join("project");
+        fixture.write("project/run.sh", "echo project\n");
+        let elsewhere = fixture.write("elsewhere/run.sh", "echo elsewhere\n");
+        std::fs::create_dir_all(fixture.0.join("elsewhere/inner")).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("elsewhere/inner"), project.join("lnk")).unwrap();
+        for command in ["sh lnk/../run.sh", "cd lnk && sh ../run.sh"] {
+            let ran = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&ran.stdout), "elsewhere\n");
+            let script = bash_script(command, &project, |_| true).unwrap();
+            assert_eq!(Path::new(&script.path), elsewhere, "{command}");
+            assert_eq!(script.content, "echo elsewhere\n", "{command}");
+        }
+        // Withheld, it is named there too.
+        let script = bash_script("make; sh lnk/../run.sh", &project, |_| true).unwrap();
+        assert_eq!(Path::new(&script.path), elsewhere);
+        assert!(script.withheld.is_some());
+        // Without a link, `..` is what it always was.
+        let script = bash_script("sh ../project/run.sh", &project, |_| true).unwrap();
+        assert_eq!(Path::new(&script.path), project.join("run.sh"));
     }
 
     #[test]
