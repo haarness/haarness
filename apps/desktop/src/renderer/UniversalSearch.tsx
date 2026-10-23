@@ -13,7 +13,7 @@ import {
 import { useApp } from "./state";
 import { dismissOnBackdrop, Icon } from "./ui";
 import { isWorktree, locationName, primaryLocation, projectKey } from "../projects";
-import { searchEntries, type SearchEntry } from "./search";
+import { asksForKeys, searchEntries, type SearchEntry } from "./search";
 import { chatTitle } from "./chat-title";
 
 
@@ -172,9 +172,20 @@ export function UniversalSearch(props: {
     );
     // Providers are a long, brand-heavy list. Keep them findable by name, but
     // out of the default list — the same rule file results already follow.
-    const configuration = settings().filter((entry) => q || !entry.provider);
+    // A "Shortcut: …" entry repeats the action it belongs to, whose row shows
+    // the key anyway, so it comes only when the search is about keys.
+    const aboutKeys = asksForKeys(q, [t("Shortcuts"), t("Keyboard shortcuts")]);
+    const configuration = settings().filter(
+      (entry) => (q || !entry.provider) && (aboutKeys || entry.group !== "Shortcuts"),
+    );
+    // With nothing typed, the list leads with the two ways to start.
+    const leading = q ? [] : ["new", "open"];
+    const ordered = [
+      ...leading.flatMap((key) => commands.filter((entry) => entry.key === key)),
+      ...commands.filter((entry) => !leading.includes(entry.key)),
+    ];
     const ranked = searchEntries(
-      [...commands, ...configuration, ...projects, ...threads, ...paths].map(
+      [...ordered, ...configuration, ...projects, ...threads, ...paths].map(
         (entry) => ({
           ...entry,
           keywords: [entry.keywords, t(entry.group)].filter(Boolean).join(" "),

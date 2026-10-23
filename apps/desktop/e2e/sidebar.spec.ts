@@ -961,6 +961,33 @@ test("sidebar the toggle keeps its place, and a side panel without room takes th
   }
 });
 
+test("sidebar Search leads with New chat and Open project, ranks word starts first and lists shortcuts only for key searches", async () => {
+  await open("alpha");
+  const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
+  const options = page.getByRole("dialog", { name: "Universal search" }).getByRole("option");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(options.first()).toHaveAccessibleName("New chat");
+  await expect(options.nth(1)).toHaveAccessibleName("Open project");
+  // "term" is about the terminal, not "Deterministic test provider".
+  await search.fill("term");
+  const names = async () => (await options.evaluateAll(items => items.map(item => item.getAttribute("aria-label"))));
+  await expect.poll(async () => (await names()).indexOf("Toggle terminal")).toBeGreaterThanOrEqual(0);
+  // A match inside a word comes last in its group, after "Terminal text size".
+  const terms = await names();
+  expect(terms.indexOf("Terminal text size")).toBeLessThan(terms.indexOf("Deterministic test provider"));
+  expect(await page.getByRole("option", { name: "Deterministic test provider", exact: true })
+    .evaluate(option => !option.nextElementSibling || option.nextElementSibling.matches(".palette-group"))).toBe(true);
+  expect(terms.some(name => name?.startsWith("Shortcut:"))).toBe(false);
+  // The action, which shows its key, without a "Shortcut: New chat" beside it…
+  await search.fill("new chat");
+  await expect(page.getByRole("option", { name: "New chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "Shortcut: New chat", exact: true })).toHaveCount(0);
+  // …until the search is about keys.
+  await search.fill("shortcut new chat");
+  await expect(page.getByRole("option", { name: "Shortcut: New chat", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+});
+
 test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {
   const alpha = await open("alpha");
   const thread = await alpha.createThread({ title: "Long talk", provider: "echo", model: "echo-1" });

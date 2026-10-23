@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  asksForKeys,
   matchesShortcut,
   physicalKey,
   searchEntries,
@@ -77,6 +78,39 @@ test("search does not cut off conversations at eight and excludes nonmatching na
   );
   assert.equal(searchEntries(entries, "conversation").length, 30);
   assert.equal(searchEntries(entries, "Conversation 29")[0].key, "29");
+});
+
+test("a match inside a word ranks far below one at a word's start", () => {
+  const entries = [
+    entry("provider", "Deterministic test provider", { group: "Settings" }),
+    entry("toggle", "Toggle terminal"),
+    entry("size", "Terminal text size", { group: "Settings" }),
+  ];
+  assert.deepEqual(searchEntries(entries, "term").map((item) => item.key), ["size", "toggle", "provider"]);
+  // Still found, but far behind: below even a match in an entry's keywords.
+  const withAlias = [...entries, entry("alias", "Console", { keywords: "terminal shell" })];
+  assert.deepEqual(searchEntries(withAlias, "term").slice(-2).map((item) => item.key), ["alias", "provider"]);
+});
+
+test("an action outranks a setting or shortcut that matches as well", () => {
+  const entries = [
+    entry("setting", "Open project", { group: "Settings" }),
+    entry("shortcut", "Open project", { group: "Shortcuts" }),
+    entry("command", "Open project"),
+  ];
+  assert.deepEqual(searchEntries(entries, "open").map((item) => item.key), ["command", "setting", "shortcut"]);
+  // A command that cannot run still gives way to one that can.
+  const disabled = [entry("setting", "Open project", { group: "Settings" }), entry("command", "Open project", { disabled: true })];
+  assert.deepEqual(searchEntries(disabled, "open").map((item) => item.key), ["setting", "command"]);
+});
+
+test("a search is about keys when it names them, a modifier, or the interface's word for shortcuts", () => {
+  for (const query of ["shortcut new", "short", "keyboard", "key", "Ctrl+N", "⌘ ⇧ L", "cmd", "alt", "hotk"])
+    assert.equal(asksForKeys(query), true, query);
+  for (const query of ["", "new chat", "terminal", "model", "keep", "theme"])
+    assert.equal(asksForKeys(query), false, query);
+  assert.equal(asksForKeys("tasten", ["Tastenkombinationen"]), true);
+  assert.equal(asksForKeys("ta", ["Tastenkombinationen"]), false);
 });
 
 test("shortcut matching requires every modifier to agree", () => {
