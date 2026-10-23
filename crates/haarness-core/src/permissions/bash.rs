@@ -889,20 +889,11 @@ impl Reader<'_> {
     }
 
     /// The file `source` or `.` reads, for [`script_files`]. A name without
-    /// a slash is looked up on `PATH` first (by `sh`, and by `bash` unless
-    /// told otherwise), so one that is found there is not claimed: the file
-    /// shown could be the other one.
+    /// a slash is not claimed: the shell looks it up on its own `PATH` first
+    /// (a login shell's, which the server does not know), so the file shown
+    /// could be another one.
     fn note_sourced(&mut self, word: Option<&Word<'_>>, depth: Depth) {
-        if self.scripts.is_none() {
-            return;
-        }
-        let on_path = |name: &str| {
-            std::env::var_os("PATH").is_some_and(|paths| {
-                std::env::split_paths(&paths).any(|folder| folder.join(name).is_file())
-            })
-        };
-        let word = word.filter(|word| word.value.contains('/') || !on_path(&word.value));
-        self.note_script(word, depth);
+        self.note_script(word.filter(|word| word.value.contains('/')), depth);
     }
 
     /// A wrapper that runs its command in another folder (`env -C`,
@@ -1220,7 +1211,9 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|(at, file)| {
             let mut folder = cwd.to_path_buf();
-            if !file.is_absolute() {
+            // Rooted is where it says on every system (`/tmp/x.sh` has no
+            // drive on Windows).
+            if !file.has_root() {
                 for step in moves
                     .iter()
                     .filter(|step| step.at < at && step.until.is_none_or(|until| at < until))
@@ -2948,15 +2941,18 @@ mod scripts {
         PathBuf::from("/project")
     }
 
-    /// The script files `command` runs from `/project`.
-    fn found(command: &str) -> Vec<String> {
-        script_files(command, &cwd())
-            .into_iter()
-            .map(|file| file.to_string_lossy().into_owned())
-            .collect()
+    /// `path` in `/project`, compared as paths (by their parts), so the
+    /// tests read the same on Windows.
+    fn at(path: &str) -> PathBuf {
+        cwd().join(path)
     }
 
-    fn first(command: &str) -> Option<String> {
+    /// The script files `command` runs from `/project`.
+    fn found(command: &str) -> Vec<PathBuf> {
+        script_files(command, &cwd())
+    }
+
+    fn first(command: &str) -> Option<PathBuf> {
         found(command).into_iter().next()
     }
 
@@ -2964,32 +2960,32 @@ mod scripts {
     fn finds_the_file_an_interpreter_runs() {
         for (command, file) in [
             ("bash /tmp/x.sh", "/tmp/x.sh"),
-            ("sh -e x.sh arg", "/project/x.sh"),
-            ("zsh -- x.sh", "/project/x.sh"),
-            ("bash --norc -x x.sh", "/project/x.sh"),
-            ("/bin/bash x.sh", "/project/x.sh"),
-            ("dash x.sh", "/project/x.sh"),
-            ("python3 -u x.py", "/project/x.py"),
-            ("python3.12 x.py", "/project/x.py"),
-            ("python x.py", "/project/x.py"),
-            ("node x.js", "/project/x.js"),
-            ("node --no-warnings x.js", "/project/x.js"),
-            ("perl -w x.pl", "/project/x.pl"),
-            ("ruby x.rb", "/project/x.rb"),
-            ("source env.sh", "/project/env.sh"),
-            (". ./env.sh", "/project/./env.sh"),
-            ("\"bash\" 'my script.sh'", "/project/my script.sh"),
+            ("sh -e x.sh arg", "x.sh"),
+            ("zsh -- x.sh", "x.sh"),
+            ("bash --norc -x x.sh", "x.sh"),
+            ("/bin/bash x.sh", "x.sh"),
+            ("dash x.sh", "x.sh"),
+            ("python3 -u x.py", "x.py"),
+            ("python3.12 x.py", "x.py"),
+            ("python x.py", "x.py"),
+            ("node x.js", "x.js"),
+            ("node --no-warnings x.js", "x.js"),
+            ("perl -w x.pl", "x.pl"),
+            ("ruby x.rb", "x.rb"),
+            ("source ./env.sh", "./env.sh"),
+            (". ./env.sh", "./env.sh"),
+            ("\"bash\" 'my script.sh'", "my script.sh"),
         ] {
-            assert_eq!(first(command).as_deref(), Some(file), "{command}");
+            assert_eq!(first(command), Some(at(file)), "{command}");
         }
     }
 
     #[test]
     fn finds_a_script_run_directly_by_its_path() {
-        assert_eq!(first("./x.sh a").as_deref(), Some("/project/./x.sh"));
-        assert_eq!(first("/tmp/x.sh").as_deref(), Some("/tmp/x.sh"));
-        assert_eq!(first("../bin/x").as_deref(), Some("/project/../bin/x"));
-        assert_eq!(first("FOO=1 ./x.sh").as_deref(), Some("/project/./x.sh"));
+        assert_eq!(first("./x.sh a"), Some(at("./x.sh")));
+        assert_eq!(first("/tmp/x.sh"), Some(at("/tmp/x.sh")));
+        assert_eq!(first("../bin/x"), Some(at("../bin/x")));
+        assert_eq!(first("FOO=1 ./x.sh"), Some(at("./x.sh")));
     }
 
     #[test]
@@ -3007,13 +3003,10 @@ mod scripts {
             "stdbuf -o0 ./x.sh",
         ] {
             let file = first(command).unwrap_or_default();
-            assert!(file.ends_with("x.sh"), "{command}: {file}");
+            assert!(file.ends_with("x.sh"), "{command}: {}", file.display());
         }
         // A wrapper run by its path is a wrapper, not a script.
-        assert_eq!(
-            first("/usr/bin/sudo ./x.sh").as_deref(),
-            Some("/project/./x.sh")
-        );
+        assert_eq!(first("/usr/bin/sudo ./x.sh"), Some(at("./x.sh")));
     }
 
     #[test]
@@ -3055,69 +3048,35 @@ mod scripts {
     fn takes_each_script_in_order() {
         assert_eq!(
             found("bash a.sh && ./b.sh; python3 c.py"),
-            ["/project/a.sh", "/project/./b.sh", "/project/c.py"]
+            [at("a.sh"), at("./b.sh"), at("c.py")]
         );
         // A script in a substitution runs too.
-        assert_eq!(found("echo $(./x.sh)"), ["/project/./x.sh"]);
+        assert_eq!(found("echo $(./x.sh)"), [at("./x.sh")]);
     }
 
     #[test]
     fn follows_a_cd_earlier_in_the_line() {
+        assert_eq!(first("cd sub && bash x.sh"), Some(at("sub/x.sh")));
+        assert_eq!(first("cd sub; ./x.sh"), Some(at("sub/./x.sh")));
         assert_eq!(
-            first("cd sub && bash x.sh").as_deref(),
-            Some("/project/sub/x.sh")
+            first("cd /opt/tools && ./x.sh"),
+            Some(at("/opt/tools/./x.sh"))
         );
-        assert_eq!(
-            first("cd sub; ./x.sh").as_deref(),
-            Some("/project/sub/./x.sh")
-        );
-        assert_eq!(
-            first("cd /opt/tools && ./x.sh").as_deref(),
-            Some("/opt/tools/./x.sh")
-        );
-        assert_eq!(
-            first("cd a && cd b && ./x.sh").as_deref(),
-            Some("/project/a/b/./x.sh")
-        );
-        assert_eq!(
-            first("cd -P sub && ./x.sh").as_deref(),
-            Some("/project/sub/./x.sh")
-        );
-        assert_eq!(
-            first("{ cd sub; }; ./x.sh").as_deref(),
-            Some("/project/sub/./x.sh")
-        );
-        assert_eq!(
-            first("pushd sub && ./x.sh").as_deref(),
-            Some("/project/sub/./x.sh")
-        );
+        assert_eq!(first("cd a && cd b && ./x.sh"), Some(at("a/b/./x.sh")));
+        assert_eq!(first("cd -P sub && ./x.sh"), Some(at("sub/./x.sh")));
+        assert_eq!(first("{ cd sub; }; ./x.sh"), Some(at("sub/./x.sh")));
+        assert_eq!(first("pushd sub && ./x.sh"), Some(at("sub/./x.sh")));
         // In a subshell it moves only the rest of that subshell.
-        assert_eq!(
-            first("(cd sub && ./x.sh)").as_deref(),
-            Some("/project/sub/./x.sh")
-        );
-        assert_eq!(
-            first("(cd sub); ./x.sh").as_deref(),
-            Some("/project/./x.sh")
-        );
-        assert_eq!(
-            first("echo $(cd sub); ./x.sh").as_deref(),
-            Some("/project/./x.sh")
-        );
+        assert_eq!(first("(cd sub && ./x.sh)"), Some(at("sub/./x.sh")));
+        assert_eq!(first("(cd sub); ./x.sh"), Some(at("./x.sh")));
+        assert_eq!(first("echo $(cd sub); ./x.sh"), Some(at("./x.sh")));
         // A cd after the script, or an absolute script, changes nothing.
-        assert_eq!(first("./x.sh; cd sub").as_deref(), Some("/project/./x.sh"));
-        assert_eq!(
-            first("cd \"$X\" && /tmp/x.sh").as_deref(),
-            Some("/tmp/x.sh")
-        );
+        assert_eq!(first("./x.sh; cd sub"), Some(at("./x.sh")));
+        assert_eq!(first("cd \"$X\" && /tmp/x.sh"), Some(at("/tmp/x.sh")));
         if let Some(home) = haarness_protocol::home_dir() {
-            let home = home.to_string_lossy().into_owned();
-            assert_eq!(first("cd && ./x.sh"), Some(format!("{home}/./x.sh")));
-            assert_eq!(
-                first("cd ~/tools && ./x.sh"),
-                Some(format!("{home}/tools/./x.sh"))
-            );
-            assert_eq!(first("bash ~/x.sh"), Some(format!("{home}/x.sh")));
+            assert_eq!(first("cd && ./x.sh"), Some(home.join("x.sh")));
+            assert_eq!(first("cd ~/tools && ./x.sh"), Some(home.join("tools/x.sh")));
+            assert_eq!(first("bash ~/x.sh"), Some(home.join("x.sh")));
         }
     }
 
@@ -3140,8 +3099,8 @@ mod scripts {
         }
         // Outside the subshell it was in, an unknown cd moves nothing.
         assert_eq!(
-            first("(if true; then cd sub; fi); ./x.sh").as_deref(),
-            Some("/project/./x.sh")
+            first("(if true; then cd sub; fi); ./x.sh"),
+            Some(at("./x.sh"))
         );
     }
 
@@ -3160,25 +3119,19 @@ mod scripts {
         }
         // An absolute one is where it says, and the rest of the line is
         // where it was.
-        assert_eq!(first("env -C sub /tmp/x.sh").as_deref(), Some("/tmp/x.sh"));
-        assert_eq!(found("sudo -i ./a.sh; ./b.sh"), ["/project/./b.sh"]);
-        assert_eq!(
-            first("env FOO=1 ./x.sh").as_deref(),
-            Some("/project/./x.sh")
-        );
+        assert_eq!(first("env -C sub /tmp/x.sh"), Some(at("/tmp/x.sh")));
+        assert_eq!(found("sudo -i ./a.sh; ./b.sh"), [at("./b.sh")]);
+        assert_eq!(first("env FOO=1 ./x.sh"), Some(at("./x.sh")));
     }
 
     #[test]
-    fn a_sourced_name_without_a_slash_that_path_finds_is_not_claimed() {
-        // `sh` is on every PATH; a file named so in the project would not be
-        // the one `source sh` reads.
-        assert_eq!(first("source sh"), None);
-        assert_eq!(first(". sh"), None);
-        assert_eq!(first("source ./sh").as_deref(), Some("/project/./sh"));
-        assert_eq!(
-            first("source haarness-not-on-path.sh").as_deref(),
-            Some("/project/haarness-not-on-path.sh")
-        );
+    fn a_sourced_name_without_a_slash_is_not_claimed() {
+        // The shell looks it up on its own PATH first, which may hold
+        // another file of that name.
+        assert_eq!(first("source env.sh"), None);
+        assert_eq!(first(". env.sh"), None);
+        assert_eq!(first("source ./env.sh"), Some(at("env.sh")));
+        assert_eq!(first(". scripts/env.sh"), Some(at("scripts/env.sh")));
     }
 
     #[test]
