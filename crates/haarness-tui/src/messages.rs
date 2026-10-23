@@ -13,6 +13,40 @@ pub struct BrowserPosition {
     selected: Option<String>,
 }
 
+/// Where a message key takes the transcript. Upstream's set: by message, by
+/// prompt (the person's own messages), the first message and the last prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageStep {
+    Previous,
+    Next,
+    PreviousPrompt,
+    NextPrompt,
+    First,
+    LastPrompt,
+}
+
+impl MessageStep {
+    /// The step a `[tui.keybinds]` action names.
+    pub(crate) fn of(action: &str) -> Option<Self> {
+        Some(match action {
+            "messages_previous" => Self::Previous,
+            "messages_next" => Self::Next,
+            "messages_previous_user" => Self::PreviousPrompt,
+            "messages_next_user" => Self::NextPrompt,
+            "messages_first" => Self::First,
+            "messages_last_user" => Self::LastPrompt,
+            _ => return None,
+        })
+    }
+
+    const fn prompts(self) -> bool {
+        matches!(
+            self,
+            Self::PreviousPrompt | Self::NextPrompt | Self::LastPrompt
+        )
+    }
+}
+
 pub(crate) fn message_text(item: &Item) -> Option<(&str, &str)> {
     match &item.data {
         // A slash command is the line typed, as the transcript shows it.
@@ -67,6 +101,55 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    /// Move the transcript by message. The nearest message (or prompt) that
+    /// starts above the top row, or below it, becomes the top row, as the
+    /// browser's Jump does; with none that way the view moves a page. A message
+    /// counts when it has text of its own, so a reply that is only tool calls
+    /// or a prompt that is only attachments is passed over.
+    pub(crate) fn step_messages(&mut self, step: MessageStep) {
+        self.selection_range = None;
+        if step == MessageStep::First {
+            self.scroll(1_000_000);
+            return;
+        }
+        let top = self
+            .last_transcript_len
+            .get()
+            .saturating_sub(self.effective_viewport_offset() + self.transcript_rows.get());
+        let items = self
+            .items
+            .iter()
+            .map(|item| (item.id, item))
+            .collect::<std::collections::HashMap<_, _>>();
+        let target = {
+            let rows = self.transcript_messages.borrow();
+            let mut targets = rows.iter().filter(|(id, _)| {
+                items.get(id).is_some_and(|item| {
+                    (!step.prompts() || matches!(item.data, ItemData::UserMessage { .. }))
+                        && message_text(item).is_some_and(|(_, text)| !text.trim().is_empty())
+                })
+            });
+            match step {
+                MessageStep::Previous | MessageStep::PreviousPrompt => {
+                    targets.rfind(|(_, row)| *row < top)
+                }
+                MessageStep::Next | MessageStep::NextPrompt => targets.find(|(_, row)| *row > top),
+                MessageStep::LastPrompt | MessageStep::First => targets.next_back(),
+            }
+            .map(|(id, _)| *id)
+        };
+        match (target, step) {
+            (Some(id), _) => self.pending_message_jump.set(Some((self.thread.id, id))),
+            (None, MessageStep::Previous | MessageStep::PreviousPrompt) => {
+                self.scroll(self.page_rows());
+            }
+            (None, MessageStep::Next | MessageStep::NextPrompt) => {
+                self.scroll(-self.page_rows());
+            }
+            (None, _) => {}
+        }
     }
 
     pub(crate) fn remember_message_browser(&mut self) {

@@ -1,6 +1,7 @@
 //! Keyboard handling.
 
 pub mod composer;
+pub(crate) mod meta;
 pub mod mouse;
 
 use anyhow::Result;
@@ -8,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use haarness_protocol::{PermissionReply, PermissionReplyDecision, QuestionReply};
 
 use crate::api::ApiClient;
+use crate::messages::MessageStep;
 use crate::state::{App, InterruptTarget, Overlay, PermissionChoice, PhaseInfo, selected};
 
 const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
@@ -190,6 +192,17 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
         app.permission_typed = None;
     }
     Ok(true)
+}
+
+/// A message key bound to a named key (an arrow, Home, End, Page Up/Down).
+/// Those move the transcript even while an approval card or a question holds
+/// the keyboard: reading back is how the answer gets decided, and such a key
+/// can never be an answer.
+fn message_key(app: &App, key: KeyEvent) -> Option<MessageStep> {
+    if matches!(key.code, KeyCode::Char(_)) {
+        return None;
+    }
+    crate::keybindings::resolve(&app.keybindings, key).and_then(MessageStep::of)
 }
 
 /// Move the approval panel's chip selection, wrapping both directions.
@@ -394,6 +407,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     // a message started while the card waits never answers it by accident.
     if app.permission_focus {
         if app.first_pending_permission().is_some() {
+            if let Some(step) = message_key(app, key) {
+                app.step_messages(step);
+                return Ok(AppAction::Continue);
+            }
             let plain = key.modifiers.is_empty();
             if let KeyCode::Char(letter) = key.code
                 && (plain || key.modifiers == KeyModifiers::SHIFT)
@@ -500,8 +517,13 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     // above remain actionable because they control the running task tree,
     // while ordinary text input must be answered from the parent session.
     if app.is_child_view() {
-        if crate::keybindings::resolve(&app.keybindings, key) == Some("messages") {
+        let action = crate::keybindings::resolve(&app.keybindings, key);
+        if action == Some("messages") {
             app.open_messages(None);
+            return Ok(AppAction::Continue);
+        }
+        if let Some(step) = action.and_then(MessageStep::of) {
+            app.step_messages(step);
             return Ok(AppAction::Continue);
         }
         app.composer.clear();
@@ -547,6 +569,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         return Ok(AppAction::Continue);
     }
     if let Some(question) = app.first_pending_question().cloned() {
+        if let Some(step) = message_key(app, key) {
+            app.step_messages(step);
+            return Ok(AppAction::Continue);
+        }
         let id = question.question_id;
         let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
         // `custom` is an explicit protocol contract, independent of whether
@@ -758,6 +784,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         return Ok(AppAction::Continue);
     }
     if let Some(action) = crate::keybindings::resolve(&app.keybindings, key).map(str::to_owned) {
+        if let Some(step) = MessageStep::of(&action) {
+            app.step_messages(step);
+            return Ok(AppAction::Continue);
+        }
         match action.as_str() {
             "commands" => app.open_overlay(Overlay::Commands),
             "stash_save" => {

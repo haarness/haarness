@@ -44,12 +44,55 @@ so a stale selection cannot affect a different conversation.
 The same browser works in a local TUI and a TUI attached to a server. Alt+M uses
 the configurable `messages` shortcut under `[tui.keybinds]`.
 
+## Move between messages
+
+**Alt+Up** and **Alt+Down** move the transcript to the previous or next
+message: the nearest prompt or reply that starts above, or below, the top row
+of the view becomes the top row, as **Jump to message** places it.
+**Alt+Shift+Up** and **Alt+Shift+Down** do the same for your prompts only,
+**Alt+Home** goes to the start of the conversation (as Ctrl+Home does) and
+**Alt+End** to your last prompt. A message counts when it has text of its own:
+a reply that is only tool calls, a prompt that is only attachments and internal
+prompts are passed over. With no message that way, the view moves a page.
+Moving pauses following like any scroll; End or Ctrl+End returns to the latest
+output.
+
+The keys work with a draft in the prompt (Alt+Left/Right still move by word),
+in child-agent views, and while an approval card or a question waits: those
+keep every other key, and a message key never answers them. They are the
+configurable shortcuts `messages_previous`, `messages_next`,
+`messages_previous_user`, `messages_next_user`, `messages_first` and
+`messages_last_user` under `[tui.keybinds]` or in `/keybinds`; a shortcut
+may name `up`, `down`, `left`, `right`, `home`, `end`, `pageup` or `pagedown`
+with ctrl, alt or shift.
+
+A shortcut you chose wins over a default on the same key, quietly:
+`sessions = "alt+up"` keeps Alt+Up for the session list and leaves
+`messages_previous` without one. A setting that cannot apply (an unknown action
+or a key that cannot be bound in config.toml, or a key two of your own
+shortcuts share) is left out on its own while the rest apply, and the status
+line names it once at launch, by its label; setting that shortcut in
+`/keybinds` settles it. `/keybinds` saves only the shortcuts that differ from
+config.toml and the defaults, plus any it was told to settle, and keeps what a
+newer Haarness wrote there, so a TUI from before these keys still reads the
+file unless you changed one of the message keys.
+
+Alt with an arrow reaches the TUI wherever Option or Alt reaches the terminal
+at all. iTerm2 and other xterm-style terminals send Alt+Up as `ESC [1;3A`;
+macOS Terminal sends Option+Up as `ESC ESC [A` (Escape, then the arrow), which
+the TUI reads as the same key rather than as Escape, several in one read too;
+tmux usually re-encodes it as `ESC [1;3A`, and either form arrives as one key.
+An Escape followed by an arrow within the same read is likewise taken as Alt
+with that arrow. Ctrl with an arrow was not used because macOS keeps Ctrl+Up and
+Ctrl+Down for Mission Control.
+
 ## Verification
 
 ```sh
 cargo test -p haarness-tui
 cargo build -p haarness-cli
 HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-message-browser-tmux.py
+HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-tui-navigation-tmux.py
 ```
 
 The terminal test creates a private Git repository and server data directory. It

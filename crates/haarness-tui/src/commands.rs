@@ -279,7 +279,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "messages",
         &["message", "browse"],
-        "Search prompts and replies · jump, read, copy or fork · Alt+M",
+        "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages",
     ),
     command(
         "rename",
@@ -4818,12 +4818,15 @@ impl App {
         include_archived: bool,
         client: &ApiClient,
     ) -> Result<()> {
-        self.threads = if include_archived {
+        let threads = if include_archived {
             client.threads_including_archived().await?
         } else {
             client.threads().await?
         };
+        let anchor = self.session_list_anchor();
+        self.threads = threads;
         self.session_include_archived = include_archived;
+        self.keep_session_list_anchor(anchor);
         Ok(())
     }
 
