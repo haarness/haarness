@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "归档对话 {title}",
   "Restore chat {title}": "恢复对话 {title}",
   "Close chat tab": "关闭对话标签页",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "预览标签页。你打开的下一个对话会替换它。双击可保持打开。",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "预览标签页。你打开的下一个对话会替换它。按 Enter 键或双击可保持打开。",
   "Import chat archive": "导入对话存档",
   "Chat archive": "对话存档",
   "Chat archive imported": "对话存档已导入",

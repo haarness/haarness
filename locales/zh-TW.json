@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "封存對話 {title}",
   "Restore chat {title}": "還原對話 {title}",
   "Close chat tab": "關閉對話分頁",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "預覽分頁。你開啟的下一個對話會取代它。按兩下可保持開啟。",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "預覽分頁。你開啟的下一個對話會取代它。按 Enter 鍵或按兩下可保持開啟。",
   "Import chat archive": "匯入對話封存檔",
   "Chat archive": "對話封存檔",
   "Chat archive imported": "已匯入對話封存檔",

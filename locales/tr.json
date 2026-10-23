@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "{title} sohbetini arşivle",
   "Restore chat {title}": "{title} sohbetini geri yükle",
   "Close chat tab": "Sohbet sekmesini kapat",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Önizleme sekmesi. Açtığınız sonraki sohbet bunun yerini alır. Açık tutmak için çift tıklayın.",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "Önizleme sekmesi. Açtığınız sonraki sohbet bunun yerini alır. Açık tutmak için Enter tuşuna basın veya çift tıklayın.",
   "Import chat archive": "Sohbet arşivini içe aktar",
   "Chat archive": "Sohbet arşivi",
   "Chat archive imported": "Sohbet arşivi içe aktarıldı",

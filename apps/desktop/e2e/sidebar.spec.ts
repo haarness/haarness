@@ -865,6 +865,8 @@ test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the 
   await expect(row).toHaveAttribute("aria-current", "true");
   await page.keyboard.press("Enter");
   await expect(other).toHaveAttribute("aria-current", "true");
+  // Opened with Enter, the row keeps the keyboard.
+  await expect(other).toBeFocused();
   await other.focus();
   await page.keyboard.press("ArrowDown");
   await expect(row).toBeFocused();
@@ -881,6 +883,13 @@ test("sidebar chat rows are one tab stop, and Delete on a row archives it as its
   await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
   await row("Keep two").click();
   await expect(row("Keep two")).toHaveAttribute("aria-current", "true");
+  // A click puts the keyboard in the chat's message box, so the next key
+  // edits the message and never archives the row.
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await expect(composer).toBeFocused();
+  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Delete");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
   // Tab reaches the open chat's row and then leaves the list: no other row
   // and no archive button is a stop of its own.
   await expect(project("alpha").locator(".session-row > button[tabindex='0']")).toHaveCount(1);
@@ -890,6 +899,13 @@ test("sidebar chat rows are one tab stop, and Delete on a row archives it as its
   await expect(row("Keep two")).toBeFocused();
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => !!document.activeElement?.closest(".session-row"))).toBe(false);
+  // Nor does Delete on a row that holds the focus only from a press.
+  await row("Archive me").evaluate(element => {
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    element.focus();
+  });
+  await page.keyboard.press("Delete");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
   // The row last walked to is the stop from then on.
   await row("Keep two").focus();
   await page.keyboard.press("ArrowDown");
@@ -903,10 +919,13 @@ test("sidebar chat rows are one tab stop, and Delete on a row archives it as its
   await expect(row("Keep one")).toBeFocused();
   await expect(row("Keep two")).toHaveAttribute("aria-current", "true");
   await expect.poll(async () => (await alpha.listThreads({ archived: true })).find(thread => thread.title === "Archive me")?.archived).toBe(true);
-  // Backspace on the open chat's row archives it too; the chat stays on
-  // screen with its Restore line.
+  // Command+Backspace (Control+Backspace elsewhere) on the open chat's row
+  // archives it too; the chat stays on screen with its Restore line. A bare
+  // Backspace does not.
   await row("Keep two").focus();
   await page.keyboard.press("Backspace");
+  await expect(row("Keep two")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+Backspace");
   await expect(row("Keep two")).toHaveCount(0);
   await expect(page.locator(".archived-notice")).toContainText("This chat is archived.");
   await expect(row("Keep one")).toBeFocused();

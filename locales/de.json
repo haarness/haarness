@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "Chat {title} archivieren",
   "Restore chat {title}": "Chat {title} wiederherstellen",
   "Close chat tab": "Chat-Tab schließen",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Vorschau-Tab. Der nächste Chat, den du öffnest, ersetzt ihn. Doppelklicken, um ihn offen zu halten.",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "Vorschau-Tab. Der nächste Chat, den du öffnest, ersetzt ihn. Drücke die Eingabetaste oder doppelklicke, um ihn offen zu halten.",
   "Import chat archive": "Chat-Archiv importieren",
   "Chat archive": "Chat-Archiv",
   "Chat archive imported": "Chat-Archiv importiert",

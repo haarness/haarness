@@ -1846,7 +1846,7 @@
   "Archive chat {title}": "Arkivér chatten {title}",
   "Restore chat {title}": "Gendan chatten {title}",
   "Close chat tab": "Luk chatfanen",
-  "Preview tab. The next chat you open replaces it. Double-click to keep it open.": "Forhåndsvisningsfane. Den næste chat, du åbner, erstatter den. Dobbeltklik for at holde den åben.",
+  "Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.": "Forhåndsvisningsfane. Den næste chat, du åbner, erstatter den. Tryk på Enter eller dobbeltklik for at holde den åben.",
   "Import chat archive": "Importér chatarkiv",
   "Chat archive": "Chatarkiv",
   "Chat archive imported": "Chatarkiv importeret",

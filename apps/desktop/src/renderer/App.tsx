@@ -607,15 +607,24 @@ export function App() {
     row?.focus({ focusVisible: true } as FocusOptions);
     row?.scrollIntoView({ block: "nearest" });
   }
-  /** Delete or Backspace on a chat row archives it, as its archive button
-   * does (an open chat stays on screen with its Restore line), and leaves the
-   * keyboard on the row below. Select chats has its own Archive. */
+  /** Whether a chat row has the focus only from a click (`rovingRows`). */
+  let rowClicked: (row: Element) => boolean = () => false;
+  /** Delete, or Command+Backspace (Control+Backspace elsewhere), on a chat
+   * row the keyboard is on archives it, as its archive button does (an open
+   * chat stays on screen with its Restore line), and leaves the keyboard on
+   * the row below. A row that only took the focus from a click is not on
+   * the keyboard, so a key meant for a message never archives it. Select
+   * chats has its own Archive. */
   function archiveRow(event: KeyboardEvent) {
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
-    if ((event.key !== "Delete" && event.key !== "Backspace") || selection()) return false;
+    if (event.altKey || event.shiftKey || selection()) return false;
+    const mod = state.platform === "darwin" ? event.metaKey : event.ctrlKey;
+    const other = state.platform === "darwin" ? event.ctrlKey : event.metaKey;
+    const key =
+      (event.key === "Delete" && !mod) || (event.key === "Backspace" && mod);
+    if (!key || other) return false;
     const rows = chatRows();
     const row = document.activeElement as HTMLButtonElement;
-    const archive = rows.includes(row)
+    const archive = rows.includes(row) && !rowClicked(row)
       ? row.parentElement?.querySelector<HTMLButtonElement>(":scope > .icon-button")
       : undefined;
     if (!archive) return false;
@@ -1303,7 +1312,13 @@ export function App() {
           </div>
           <div
             class="sidebar-lists"
-            ref={(element) => onMount(() => onCleanup(rovingRows(element)))}
+            ref={(element) =>
+              onMount(() => {
+                const rows = rovingRows(element);
+                rowClicked = rows.clicked;
+                onCleanup(rows.dispose);
+              })
+            }
             classList={{ "is-scrolling": sidebarScrolling() }}
             onScroll={showSidebarScrollbar}
           >
@@ -1455,7 +1470,7 @@ export function App() {
                               aria-selected={id === state.selected}
                               aria-description={
                                 id === state.preview
-                                  ? t("Preview tab. The next chat you open replaces it. Double-click to keep it open.")
+                                  ? t("Preview tab. The next chat you open replaces it. Press Enter or double-click to keep it open.")
                                   : undefined
                               }
                               title={tabTitle(id)}
@@ -1465,7 +1480,11 @@ export function App() {
                                     revealInStrip(element.parentElement!);
                                 })
                               }
-                              onClick={() => app.run(() => app.choose(id))}
+                              onClick={(event) => {
+                                // Enter or Space on the preview's own tab keeps it.
+                                if (event.detail === 0 && id === state.selected) app.keepTab(id);
+                                void app.run(() => app.choose(id));
+                              }}
                               onDblClick={() => app.keepTab(id)}
                             >
                               <Show when={running(id)}>
