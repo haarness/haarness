@@ -10,7 +10,8 @@ chip it was picked as. Prompt history brings the chip back, and sending it again
 resource whose server is gone by then is named in the message as not read. A resource that never answers holds
 the message 10 s at most, while the prompt stays live and a second message waits. The same marker text piped to
 `haarness run` reads nothing: only a pick this TUI made is a mention. After a restart (`-c`), a chip recalled
-from history is still read.
+from history is still read; once its pick is forgotten, it comes back as plain `@setup` with its `@` list open
+on that resource, below a project file of the same name, so one Enter picks it again.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-resource-mentions-tmux.py
 Pane captures, with their colours, go to RESOURCE_TMUX_EVIDENCE; HAARNESS_E2E_DIR holds the run's state.
@@ -258,6 +259,46 @@ try:
     assert len(recalled) == 3 and sum(read in item["text"] for item in recalled) == 2, recalled
     assert listings("resources/read") == before + 1, requests.read_text()
     checks.append("after a restart, a chip recalled from history is still read")
+
+    # Its pick forgotten (as on another computer), it comes back as plain text with its resource highlighted,
+    # even below a file of the same name, and one Enter picks it again.
+    keys("C-c")
+    keys("C-c")
+    until(lambda: subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode != 0,
+          "the TUI did not exit", 15)
+    kept = list(root.rglob("tui-resource-picks.json"))
+    assert kept, "the picks were not kept beside the history"
+    for path in kept:
+        path.unlink()
+    (project / "setup.md").write_text("A file named like the resource.\n")
+    launch("-c")
+    time.sleep(1)
+    before = listings("resources/read")
+    count = len(everywhere())
+    for _ in range(4):
+        if "[@setup] compare" in pane():
+            break
+        keys("Up")
+        time.sleep(0.2)
+    until(lambda: "[@setup] compare" in pane(), "history after forgetting the pick did not bring the chip back")
+    keys("Enter")
+    until(lambda: "Pick @setup again to include it" in pane(), "the forgotten pick did not come back")
+    until(lambda: "· wiki" in selected(), "its resource was not highlighted")
+    rows = pane()
+    assert "setup.md" in rows and rows.index("setup.md") < rows.index("Setup guide · wiki"), rows
+    assert len(everywhere()) == count, everywhere()
+    screen("tui-resource-returned")
+    keys("Enter")
+    until(lambda: "[@setup] compare" in pane(), "Enter did not pick it again")
+    keys("Enter")
+    until(lambda: len(everywhere()) == count + 1, "the picked-again prompt was not sent")
+    idle()
+    again = [item for item in everywhere() if item["text"].startswith("@setup compare\n\n<details>")]
+    assert len(again) == 4, again
+    again = again[-1]
+    assert read in again["text"], again
+    assert listings("resources/read") == before + 1, requests.read_text()
+    checks.append("a forgotten pick comes back as plain @setup with its resource highlighted below a same-named file; one Enter picks it again")
     for check in checks:
         print("ok -", check)
     print(f"evidence: {EVIDENCE}")
