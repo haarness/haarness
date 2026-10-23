@@ -45,7 +45,7 @@ use std::{path::PathBuf, time::Duration};
 const PROVIDERS_FIRST_FRAME: Duration = Duration::from_secs(1);
 
 use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
-use crate::input::{AppAction, handle_key};
+use crate::input::{AppAction, handle_key_at};
 /// The model a new chat starts on when none is configured; `haarness run`
 /// picks the same way.
 pub use crate::state::default_connected_model;
@@ -413,6 +413,8 @@ async fn run_with_client(
     }
     app.yolo = client.auto_approves();
     app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
+    // The prompt says what Enter does while work runs; the project decides.
+    app.input_delivery = client.input_delivery().await.ok();
     app.original_client = Some(client.clone());
     app.workspace_local_switching = client.supports_local_workspace_switch();
     if let Ok(todos) = client.todos(app.thread.id).await {
@@ -476,6 +478,7 @@ async fn run_with_client(
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
     app.thinking = config::load_thinking();
+    app.sidebar_open = config::load_sidebar();
     if !app.keybindings_skipped.is_empty() {
         app.notice = app.language.format(
             "Shortcuts not applied: {names} · /keybinds",
@@ -572,6 +575,8 @@ async fn run_with_client(
     // First frame paints everything; afterwards the native renderer's cell
     // diffing suppresses unchanged output. Resize forces a full repaint.
     let mut force_redraw = true;
+    // The deadline of the settling approval answer the tick is set to wake at.
+    let mut settle_armed: Option<std::time::Instant> = None;
     let mut last_title = String::new();
     let mut selected_workspace = None;
     let (workspace_mutation_tx, mut workspace_mutation_rx) = tokio::sync::mpsc::channel(1);
@@ -681,13 +686,23 @@ async fn run_with_client(
                 crate::terminal::notify(&message);
             }
         }
+        // A one-key approval answer is sent when its window ends unless a
+        // key comes first: the tick wakes the loop then rather than on its
+        // own beat.
+        let due = crate::input::settle_deadline(&app);
+        if due != settle_armed {
+            if let Some(due) = due {
+                tick.reset_at(tokio::time::Instant::from_std(due));
+            }
+            settle_armed = due;
+        }
         tokio::select! {
             terminal = input.next() => if let Some(Ok(event)) = terminal {
                 match event {
                     TerminalEvent::Key(key) => {
                         // A failed request behind a keystroke becomes a
                         // notice; it must never take the whole TUI down.
-                        match handle_key(&mut app, key, &client).await {
+                        match handle_key_at(&mut app, key, input.read_at(), &client).await {
                             Ok(AppAction::Quit) => {
                                 quit = true;
                                 break;
@@ -1063,6 +1078,16 @@ async fn run_with_client(
                     (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
                 }
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
+                // A key, paste or click already here came before the
+                // deadline: it is handled first, and the tick comes back for
+                // the answer after it.
+                let input_waiting = input.input_waiting();
+                if let Err(error) = crate::input::settle_answer(&mut app, &client, input_waiting).await {
+                    app.notice = format!("Could not answer permission: {error}");
+                }
+                if input_waiting {
+                    settle_armed = None;
+                }
                 app.expire_notification();
                 app.expire_notice(std::time::Instant::now());
                 app.release_completions(std::time::Instant::now());

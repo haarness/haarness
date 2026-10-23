@@ -238,6 +238,7 @@ impl App {
         }
         self.hydrate_waiting(Waiting::Approval, waiting);
         self.pending_permissions = pending;
+        self.follow_permission_head();
     }
 
     pub async fn reduce(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
@@ -439,6 +440,13 @@ impl App {
                     self.live_threads.entry(thread_id).or_default().phase = Some(phase.clone());
                 }
                 if on_current {
+                    // The call the turn ran last: a batch waiting on a
+                    // person names its step only here.
+                    if matches!(phase.state.as_str(), "tool" | "reviewing")
+                        && phase.call_id.is_some()
+                    {
+                        self.last_tool_call.clone_from(&phase.call_id);
+                    }
                     self.phase = Some(phase);
                 }
             }
@@ -577,15 +585,11 @@ impl App {
                     if again {
                         return Ok(());
                     }
-                    if self.pending_permissions.len() == 1 {
-                        // A fresh head prompt starts at the first chip, with
-                        // nothing staged or typed for one that went away
-                        // unanswered (its turn ended): a bare Enter must not
-                        // confirm an old Always or Once + Auto here.
-                        self.permission_selection = 0;
-                        self.confirm_always = None;
-                        self.permission_typed = None;
-                    }
+                    // A fresh head prompt starts at the first chip, with
+                    // nothing staged or typed for one that went away
+                    // unanswered (its turn ended): a bare Enter must not
+                    // confirm an old Always or Once + Auto here.
+                    self.follow_permission_head();
                     if self.composer.is_empty() && self.pending_questions.is_empty() {
                         self.permission_focus = true;
                     }
@@ -632,13 +636,11 @@ impl App {
                         .is_some_and(|pending| pending.permission_id == id);
                     self.pending_permissions
                         .retain(|pending| pending.permission_id != id);
+                    // The panel now fronts a different prompt: a staged
+                    // "always" confirmation or chip selection for the old one
+                    // must not carry over.
                     if was_first {
-                        // The panel now fronts a different prompt: a staged
-                        // "always" confirmation or chip selection for the old
-                        // one must not carry over.
-                        self.confirm_always = None;
-                        self.permission_typed = None;
-                        self.permission_selection = 0;
+                        self.follow_permission_head();
                     }
                     if let Some(message) = resolved_notification {
                         self.dismiss_notification(&message);
@@ -675,12 +677,16 @@ impl App {
                     }
                     let message = format!("Haarness needs your answer: {prompt}");
                     self.pending_notification = Some(message.clone());
+                    // Drawn only where the question itself is out of view.
                     self.show_toast(
                         None,
                         message,
                         ToastVariant::Warning,
                         std::time::Duration::from_secs(8),
                     );
+                    if let Some(toast) = &mut self.notification_toast {
+                        toast.question = true;
+                    }
                 }
             }
             "question.resolved" => {
@@ -1094,6 +1100,7 @@ impl App {
                     // links remain navigable for the life of the session.
                     self.pending_permissions.clear();
                     self.permission_focus = false;
+                    self.follow_permission_head();
                 }
                 let end = TurnEnd::from_payload(&event.payload);
                 if on_current {
@@ -1232,6 +1239,23 @@ impl App {
         Some(notice)
     }
 
+    /// Start the card afresh whenever a different request comes to its head
+    /// (a session switch, a reconnect, another client's answer): letters
+    /// typed, an answer staged or settling and the chip selection all belong
+    /// to the request they were made at, never to the next one.
+    pub fn follow_permission_head(&mut self) {
+        let head = self
+            .first_pending_permission()
+            .map(|pending| pending.permission_id.clone());
+        if head != self.permission_head {
+            self.permission_head = head;
+            self.permission_typed = None;
+            self.permission_settling = None;
+            self.confirm_always = None;
+            self.permission_selection = 0;
+        }
+    }
+
     /// Give the keyboard back to the composer while an approval waits. With
     /// `keep_typed`, letters the card took as hotkeys before it was clear the
     /// user was typing a message go to the composer; otherwise they are
@@ -1241,6 +1265,7 @@ impl App {
         if self.confirm_always.take().is_some() {
             self.permission_selection = 0;
         }
+        self.permission_settling = None;
         if let Some((typed, selection, _)) = self.permission_typed.take() {
             self.permission_selection = selection;
             if keep_typed {
@@ -1266,7 +1291,11 @@ impl App {
         self.waiting.remove(id);
         self.confirm_always = None;
         self.permission_typed = None;
+        self.permission_settling = None;
         self.permission_selection = 0;
+        self.permission_head = self
+            .first_pending_permission()
+            .map(|pending| pending.permission_id.clone());
         if let Some((message, _)) = &answered {
             self.dismiss_notification(message);
         }

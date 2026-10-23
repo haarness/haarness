@@ -10,13 +10,18 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures::{FutureExt as _, StreamExt};
 
 /// The longest sequence after the doubled Escape: `[1;16A`.
 const LONGEST: usize = 6;
+
+/// How many events [`TerminalInput::input_waiting`] reads ahead to look.
+const READ_AHEAD: usize = 64;
 
 /// Where events come from: the terminal, or a test's reads.
 pub(crate) trait Source {
@@ -41,12 +46,30 @@ impl Source for EventStream {
     }
 }
 
-/// The terminal's events, with an Escape-prefixed key joined into one.
+/// The terminal's events, with an Escape-prefixed key joined into one, each
+/// stamped with when it was read: a key that waited behind slow work keeps
+/// the moment it came in.
 pub(crate) struct TerminalInput<S = EventStream> {
     source: S,
-    /// Events already read and decoded, not handed out yet.
-    ready: VecDeque<io::Result<Event>>,
+    /// Events already read and decoded, not handed out yet: each with when
+    /// it was taken from the terminal and the number of the read that
+    /// brought it.
+    ready: VecDeque<Queued>,
+    /// When the event `next` handed out last was read.
+    read_at: Instant,
+    /// The read whose decoded events are still coming from the source, if
+    /// it was not taken to its end: what the source hands over next came
+    /// with it. Once the source has nothing more, the next event is a read
+    /// of its own.
+    batch: Option<u64>,
+    /// How many reads there have been, which numbers them.
+    reads: u64,
 }
+
+/// An event taken from the terminal, when, and the number of its read. The
+/// time is the event's own (a read numbered earlier can still be handing
+/// over events); the number only tells which events came together.
+type Queued = (io::Result<Event>, Instant, u64);
 
 impl TerminalInput {
     pub(crate) fn new() -> Self {
@@ -59,15 +82,64 @@ impl<S: Source> TerminalInput<S> {
         Self {
             source,
             ready: VecDeque::new(),
+            read_at: Instant::now(),
+            batch: None,
+            reads: 0,
         }
+    }
+
+    /// The number of the read the source is handing over, a new one when
+    /// the last was taken to its end.
+    fn read_number(&mut self) -> u64 {
+        if let Some(read) = self.batch {
+            return read;
+        }
+        self.reads += 1;
+        self.batch = Some(self.reads);
+        self.reads
+    }
+
+    /// An event the source already has, stamped now and with its read.
+    fn take_ready(&mut self) -> Option<Queued> {
+        let Some(event) = self.source.ready() else {
+            self.batch = None;
+            return None;
+        };
+        Some((event, Instant::now(), self.read_number()))
+    }
+
+    /// When the event [`Self::next`] handed out last was read.
+    pub(crate) const fn read_at(&self) -> Instant {
+        self.read_at
+    }
+
+    /// Whether a key, a paste or a click is already here, read or not: it
+    /// came before now. What the terminal sent is read (and stamped) to
+    /// tell; pointer motion, scrolling, focus and resizes do not count.
+    pub(crate) fn input_waiting(&mut self) -> bool {
+        while self.ready.len() < READ_AHEAD
+            && let Some(entry) = self.take_ready()
+        {
+            self.ready.push_back(entry);
+        }
+        self.ready.iter().any(|(event, _, _)| match event {
+            Ok(Event::Key(key)) => key.kind != KeyEventKind::Release,
+            Ok(Event::Paste(_)) => true,
+            Ok(Event::Mouse(mouse)) => matches!(mouse.kind, MouseEventKind::Down(_)),
+            _ => false,
+        })
     }
 
     /// The next event. Cancel safe: it only waits before taking anything.
     pub(crate) async fn next(&mut self) -> Option<io::Result<Event>> {
-        let event = match self.ready.pop_front() {
-            Some(event) => event,
-            None => self.source.next().await?,
+        let (event, read_at, read) = match self.ready.pop_front() {
+            Some(entry) => entry,
+            None => {
+                let event = self.source.next().await?;
+                (event, Instant::now(), self.read_number())
+            }
         };
+        self.read_at = read_at;
         if !escape(&event) {
             return Some(event);
         }
@@ -75,16 +147,16 @@ impl<S: Source> TerminalInput<S> {
         // SSH packets, a slow frame), so this runs for every Escape, queued
         // or new: what else that read brought tops the queue up.
         while self.ready.len() < LONGEST {
-            let Some(next) = self.source.ready() else {
+            let Some(entry) = self.take_ready() else {
                 break;
             };
-            let key = matches!(next, Ok(Event::Key(_)));
-            self.ready.push_back(next);
+            let key = matches!(entry.0, Ok(Event::Key(_)));
+            self.ready.push_back(entry);
             if !key {
                 break;
             }
         }
-        Some(join(event, &mut self.ready))
+        Some(join(event, read, &mut self.ready))
     }
 }
 
@@ -92,17 +164,18 @@ fn escape(event: &io::Result<Event>) -> bool {
     matches!(event, Ok(Event::Key(key)) if bare_escape(key))
 }
 
-/// `event` as it is, or, when it is an Escape and the keys at the front of
-/// `ready` (what came with it) spell a cursor key, that key with Alt, which
-/// takes them out of `ready`.
-fn join(event: io::Result<Event>, ready: &mut VecDeque<io::Result<Event>>) -> io::Result<Event> {
+/// `event` as it is, or, when it is an Escape of read `read` and the keys at
+/// the front of `ready` that came with it (in the same read) spell a cursor
+/// key, that key with Alt, which takes them out of `ready`. An Escape read
+/// ahead, before the keys after it were sent, stays an Escape.
+fn join(event: io::Result<Event>, read: u64, ready: &mut VecDeque<Queued>) -> io::Result<Event> {
     if !escape(&event) {
         return event;
     }
     let keys = ready
         .iter()
-        .map_while(|event| match event {
-            Ok(Event::Key(key)) => Some(*key),
+        .map_while(|(event, _, from)| match event {
+            Ok(Event::Key(key)) if *from == read => Some(*key),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -254,11 +327,11 @@ mod tests {
     fn read(events: Vec<KeyEvent>) -> Vec<KeyEvent> {
         let mut ready = events
             .into_iter()
-            .map(|key| Ok(Event::Key(key)))
+            .map(|key| (Ok(Event::Key(key)), Instant::now(), 1))
             .collect::<VecDeque<_>>();
         let mut out = Vec::new();
-        while let Some(event) = ready.pop_front() {
-            let Ok(Event::Key(key)) = join(event, &mut ready) else {
+        while let Some((event, _, read)) = ready.pop_front() {
+            let Ok(Event::Key(key)) = join(event, read, &mut ready) else {
                 panic!("not a key");
             };
             out.push(key);
@@ -316,6 +389,79 @@ mod tests {
         fn ready(&mut self) -> Option<io::Result<Event>> {
             Some(Ok(Event::Key(self.0.front_mut()?.pop_front()?)))
         }
+    }
+
+    /// A terminal whose source hands over what was sent since the last look,
+    /// as a live terminal does, so a test can send more between reads.
+    struct Live(VecDeque<KeyEvent>);
+
+    impl Source for Live {
+        fn next(&mut self) -> impl Future<Output = Option<io::Result<Event>>> {
+            std::future::ready(self.ready())
+        }
+
+        fn ready(&mut self) -> Option<io::Result<Event>> {
+            Some(Ok(Event::Key(self.0.pop_front()?)))
+        }
+    }
+
+    /// An Escape read ahead (by `input_waiting`, at an approval's deadline)
+    /// stays an Escape when the arrow keys come in a later read: joined into
+    /// Alt+↑ it would send a settling answer that the Escape takes back. Keys
+    /// read with it still join.
+    #[tokio::test]
+    async fn an_escape_read_ahead_never_joins_keys_from_a_later_read() {
+        let mut input = TerminalInput::reading(Live(VecDeque::from([escape()])));
+        assert!(input.input_waiting());
+        input.source.0.extend(typed("[A"));
+        let mut out = Vec::new();
+        while let Some(Ok(Event::Key(key))) = input.next().await {
+            out.push(key);
+        }
+        assert_eq!(out, [vec![escape()], typed("[A")].concat());
+
+        let mut input = TerminalInput::reading(Live([vec![escape()], typed("[A")].concat().into()));
+        assert!(input.input_waiting());
+        let Some(Ok(Event::Key(key))) = input.next().await else {
+            panic!("no key");
+        };
+        assert_eq!(key, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    }
+
+    /// A key is stamped when it is taken from the terminal, not when the read
+    /// before it began: the settling window of an approval counts from it.
+    #[tokio::test]
+    async fn each_key_is_stamped_when_it_is_taken() {
+        let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+        let mut input = TerminalInput::reading(Live(VecDeque::from([key('a')])));
+        let Some(Ok(Event::Key(_))) = input.next().await else {
+            panic!("no key");
+        };
+        let first = input.read_at();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        input.source.0.push_back(key('y'));
+        let Some(Ok(Event::Key(_))) = input.next().await else {
+            panic!("no key");
+        };
+        assert!(input.read_at() >= first + std::time::Duration::from_millis(20));
+    }
+
+    /// Keys waiting count as input that came first, and are still handed
+    /// out in order, stamped when they were read.
+    #[tokio::test]
+    async fn waiting_keys_are_read_ahead_and_handed_out_in_order() {
+        let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+        let mut input = TerminalInput::reading(Reads(VecDeque::from([VecDeque::from([
+            key('y'),
+            key('e'),
+        ])])));
+        assert!(input.input_waiting());
+        let mut out = Vec::new();
+        while let Some(Ok(Event::Key(key))) = input.next().await {
+            out.push(key.code);
+        }
+        assert_eq!(out, [KeyCode::Char('y'), KeyCode::Char('e')]);
+        assert!(!input.input_waiting());
     }
 
     async fn handed_out(reads: Vec<Vec<KeyEvent>>) -> Vec<KeyEvent> {
