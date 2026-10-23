@@ -3314,7 +3314,7 @@ fn compact_thinking_ticks_on_one_row_and_settles_as_a_thought_a_click_opens() {
     ));
     let id = app.items[0].id;
     let settled = text(&app);
-    assert!(settled.contains("  ▸ Thought for 2s"), "{settled}");
+    assert!(settled.contains("  ▹ Thought for 2s"), "{settled}");
     assert!(!settled.contains("thought-1"), "{settled}");
     assert!(
         app.hit_rows
@@ -3324,7 +3324,7 @@ fn compact_thinking_ticks_on_one_row_and_settles_as_a_thought_a_click_opens() {
     );
     app.expanded.insert(id);
     let open = text(&app);
-    assert!(open.contains("  ▾ Thought for 2s"), "{open}");
+    assert!(open.contains("  ▿ Thought for 2s"), "{open}");
     assert!(open.contains("thought-2"), "{open}");
 
     // Hide shows none of it, live or settled, and says so on the band.
@@ -3948,10 +3948,18 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
     // The composer sits exactly where it will stay once the session starts.
     let band = lines.last().unwrap();
     assert!(line_text(band).contains("build"), "{}", line_text(band));
+    // Beside a notice, the approval mode keeps its place before the folder,
+    // which the masthead already names; with the room, both show.
     assert!(
-        line_text(band).contains("haarness  main"),
+        line_text(band).contains("approvals: review"),
         "{}",
         line_text(band)
+    );
+    let wide = app.lines((140, 30));
+    assert!(
+        line_text(wide.last().unwrap()).contains("haarness  main"),
+        "{}",
+        line_text(wide.last().unwrap())
     );
     let rule = &lines[lines.len() - 2];
     assert_eq!(rule.width(), 100);
@@ -4239,7 +4247,8 @@ fn masthead_names_the_session_without_repeating_its_id() {
     assert_ne!(title.spans[1].attributes & attr::BOLD, 0);
 
     // Place lives in the band, once, instead of being repeated in a top bar.
-    assert!(line_text(lines.last().unwrap()).contains("haarness  main"));
+    let wide = app.lines((140, 24));
+    assert!(line_text(wide.last().unwrap()).contains("haarness  main"));
 }
 
 /// The quiet row at the top belongs to the frame, not the document, so a
@@ -17943,10 +17952,13 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
         editing.contains("▎ Editing — Enter saves it in place"),
         "{editing}"
     );
+    // The header says what Enter does; the line under the queue, how to back
+    // out, Esc included.
     assert!(
-        editing.contains("▎ Editing queued message · Enter saves · Click to cancel"),
+        editing.contains("▎ Esc or click cancels and restores your draft"),
         "{editing}"
     );
+    assert_eq!(editing.matches("Enter saves").count(), 1, "{editing}");
     assert!(!editing.contains("half-written thought"), "{editing}");
     // Only the message being edited is raised.
     let (_, edited) = strip_row(&app, "▎ 2. second");
@@ -18736,7 +18748,7 @@ async fn at_mentions_complete_subagents_and_attach_a_delegation() {
         .join("\n");
     assert!(text.contains("@explore"), "{text}");
     assert!(text.contains("Delegate to agent"), "{text}");
-    assert!(text.contains("agents · files"), "{text}");
+    assert!(text.contains("files · agents"), "{text}");
 
     assert!(
         crate::prompt_context::apply(&mut app, &client)
@@ -20122,6 +20134,110 @@ fn a_filtered_dialog_keeps_its_top_edge() {
     app.close_overlay();
     app.open_overlay(crate::state::Overlay::Commands);
     assert_eq!(top(&app), opened);
+}
+
+/// Small wording: the band says "1 child agent", /status names a language
+/// server that is not installed as one, and /usage never calls a cost both
+/// unavailable and a subtotal.
+#[test]
+fn report_wording_is_precise() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.active_turn = Some(TurnId::new());
+    app.phase = Some(crate::state::PhaseInfo {
+        state: "child_tasks".into(),
+        tool: None,
+        call_id: None,
+        since: Some(Utc::now()),
+        received: Some(std::time::Instant::now()),
+    });
+    let (call, task) = (
+        "call-1".to_owned(),
+        crate::state::ChildTask {
+            child_thread_id: ThreadId::new(),
+            child_turn_id: None,
+            invoked_turn_id: None,
+            state: "running".into(),
+            tool_calls: 0,
+            last_tool: None,
+            started_at: None,
+        },
+    );
+    app.children.insert(call, task);
+    let text = frame_text(&app, (120, 30));
+    assert!(text.contains("1 child agent "), "{text}");
+    assert!(!text.contains("1 child agents"), "{text}");
+
+    let server = |id: &str, status: &str, extensions: &[&str]| crate::api::LspStatus {
+        id: id.into(),
+        status: status.into(),
+        error: None,
+        extensions: extensions.iter().map(|value| (*value).to_owned()).collect(),
+    };
+    let rows = crate::commands::language_tool_rows(
+        vec![
+            server("bash", "missing", &[".sh", ".bash"]),
+            server("rust", "idle", &[".rs"]),
+        ],
+        vec![crate::api::FormatterStatus {
+            id: "prettier".into(),
+            status: "missing".into(),
+        }],
+    );
+    assert!(
+        rows.contains(&"  bash  language server not installed · .sh .bash".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(rows.contains(&"  rust  idle".to_owned()), "{rows:#?}");
+    assert!(
+        rows.contains(&"  prettier  not installed".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.ends_with("missing")),
+        "{rows:#?}"
+    );
+
+    let cost = |value| crate::commands::usage_cost(&value);
+    assert_eq!(
+        cost(serde_json::json!({"costUsd": null, "costIncomplete": true})),
+        "not priced"
+    );
+    assert_eq!(
+        cost(serde_json::json!({"costUsd": 0.5, "costIncomplete": true})),
+        "$0.500000 so far · some turns have no price"
+    );
+    assert_eq!(cost(serde_json::json!({"costUsd": 0.5})), "$0.500000");
+}
+
+/// The band keeps how approvals are answered beside a long passing notice:
+/// the notice's detail and the folder give way first.
+#[test]
+fn the_approval_mode_outlasts_a_passing_notice() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.notice = "Unknown command /frobnicate · start with a space to send it as text".into();
+    for width in [100, 120] {
+        let lines = app.lines((width, 30));
+        let band = line_text(lines.last().unwrap());
+        assert!(band.contains("approvals: review"), "{width}: {band}");
+        assert!(
+            band.contains("Unknown command /frobnicate"),
+            "{width}: {band}"
+        );
+    }
+}
+
+/// Typing in a child agent's read-only view says so instead of vanishing.
+#[tokio::test]
+async fn typing_in_a_child_view_says_it_is_read_only() {
+    let (mut child, _, _, _) = child_navigation_fixture();
+    type_text(&mut child, "hi", &offline_client()).await;
+    assert!(child.composer.is_empty());
+    assert_eq!(
+        child.notice,
+        "A child agent's conversation is read-only · ↑ returns to its parent"
+    );
 }
 
 fn undo_fixture() -> (App, Thread) {

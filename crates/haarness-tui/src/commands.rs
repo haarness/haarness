@@ -2518,9 +2518,7 @@ impl App {
             "usage" => {
                 let usage = client.thread_usage(self.thread.id).await?;
                 let number = |key: &str| usage[key].as_u64().unwrap_or(0);
-                let cost = usage["costUsd"]
-                    .as_f64()
-                    .map_or_else(|| "Unavailable".into(), |v| format!("${v:.6}"));
+                let cost = usage_cost(&usage);
                 let mut lines = vec![
                     format!("Session: {}", self.thread.title),
                     format!("Model: {}/{}", self.thread.provider, self.thread.model),
@@ -2539,9 +2537,6 @@ impl App {
                 {
                     lines.push(format!("Context window: {window} tokens"));
                 }
-                if usage["costIncomplete"] == true {
-                    lines.push("Some turns have no price; shown cost is a known subtotal.".into());
-                }
                 if let Some(latest) = usage["latestInputTokens"].as_u64() {
                     lines.push(format!(
                         "Last request input: {latest} tokens (includes provider context)"
@@ -2556,16 +2551,18 @@ impl App {
                 lines.push(format!("Conversation items: {}", self.items.len()));
                 if let Some(descendants) = usage.get("descendants") {
                     lines.push(format!("Descendant sessions: {}", descendants["count"]));
-                    lines.push(format!(
-                        "Descendant input/output tokens: {} / {}",
-                        descendants["inputTokens"], descendants["outputTokens"]
-                    ));
-                    lines.push(format!(
-                        "Descendant known cost: {}",
-                        descendants["costUsd"]
-                            .as_f64()
-                            .map_or_else(|| "Unavailable".into(), |v| format!("${v:.6}"))
-                    ));
+                    if descendants["count"].as_u64().unwrap_or(0) > 0 {
+                        lines.push(format!(
+                            "Descendant input/output tokens: {} / {}",
+                            descendants["inputTokens"], descendants["outputTokens"]
+                        ));
+                        lines.push(format!(
+                            "Descendant cost: {}",
+                            descendants["costUsd"]
+                                .as_f64()
+                                .map_or_else(|| "not priced".into(), |v| format!("${v:.6}"))
+                        ));
+                    }
                 }
                 lines.push("Reasoning tokens are not reported separately by this server. Reopen /usage to refresh.".into());
                 self.open_overlay(Overlay::Panel {
@@ -3051,19 +3048,7 @@ impl App {
                         crate::chrome::status_line(&chrome, self.language)
                     ),
                 ];
-                lines.push(format!("LSP      {} configured", lsp.len()));
-                lines.extend(lsp.into_iter().map(|server| {
-                    let detail = server
-                        .error
-                        .map_or_else(String::new, |error| format!(" · {error}"));
-                    format!("  {}  {}{detail}", server.id, server.status)
-                }));
-                lines.push(format!("format   {} configured", formatters.len()));
-                lines.extend(
-                    formatters
-                        .into_iter()
-                        .map(|formatter| format!("  {}  {}", formatter.id, formatter.status)),
-                );
+                lines.extend(language_tool_rows(lsp, formatters));
                 self.open_overlay(Overlay::Panel {
                     title: "Status".into(),
                     lines,
@@ -4968,6 +4953,52 @@ impl App {
 }
 
 /// `30s` / `5m` / `2h` → seconds.
+/// `/status`'s language servers and formatters. One that is not installed
+/// says so as a server, with the files it would serve: "bash missing" read
+/// as if the shell were.
+pub(crate) fn language_tool_rows(
+    lsp: Vec<crate::api::LspStatus>,
+    formatters: Vec<crate::api::FormatterStatus>,
+) -> Vec<String> {
+    let mut lines = vec![format!("LSP      {} configured", lsp.len())];
+    lines.extend(lsp.into_iter().map(|server| {
+        let detail = server
+            .error
+            .map_or_else(String::new, |error| format!(" · {error}"));
+        let status = if server.status == "missing" {
+            let files = server.extensions.join(" ");
+            if files.is_empty() {
+                "language server not installed".to_owned()
+            } else {
+                format!("language server not installed · {files}")
+            }
+        } else {
+            server.status
+        };
+        format!("  {}  {status}{detail}", server.id)
+    }));
+    lines.push(format!("format   {} configured", formatters.len()));
+    lines.extend(formatters.into_iter().map(|formatter| {
+        let status = if formatter.status == "missing" {
+            "not installed"
+        } else {
+            formatter.status.as_str()
+        };
+        format!("  {}  {status}", formatter.id)
+    }));
+    lines
+}
+
+/// `/usage`'s cost: unpriced turns make a total a subtotal, and none priced
+/// is no total at all rather than an unavailable one.
+pub(crate) fn usage_cost(usage: &serde_json::Value) -> String {
+    match (usage["costUsd"].as_f64(), usage["costIncomplete"] == true) {
+        (Some(cost), true) => format!("${cost:.6} so far · some turns have no price"),
+        (Some(cost), false) => format!("${cost:.6}"),
+        (None, _) => "not priced".to_owned(),
+    }
+}
+
 fn parse_interval(value: &str) -> Option<u64> {
     let (number, unit) = value.split_at(value.len().checked_sub(1)?);
     let number: u64 = number.parse().ok()?;

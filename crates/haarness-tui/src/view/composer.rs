@@ -145,7 +145,7 @@ pub fn queued_strip(app: &App, width: usize) -> TaggedLines {
         // has no room for notices, so this line is where the reason lands.
         let (text, color) = edit.conflict.as_deref().map_or(
             (
-                language.text("Editing queued message · Enter saves · Click to cancel"),
+                language.text("Esc or click cancels and restores your draft"),
                 theme.accent,
             ),
             |reason| (language.text(reason), theme.danger),
@@ -348,8 +348,38 @@ fn status_band(app: &App, width: usize) -> Line {
     // that will not fit does identity start giving way — and then state wins,
     // because on a 40-column terminal "how do I stop this" outranks "on what
     // model".
+    // Permission mode names what it is: an agent can be called "review" too.
+    // `--yolo` answers this TUI's requests whatever the chat's own mode is.
+    let mode = format!(
+        "  {}",
+        app.language.text(if app.yolo {
+            "approvals: --yolo"
+        } else if app.auto_permissions {
+            "approvals: auto"
+        } else {
+            "approvals: review"
+        })
+    );
+    let mode_width = mode.width();
+    // How approvals are answered outranks a passing notice's detail and the
+    // session's badges: those give way first, while the model stays named.
+    // Only when even that cannot fit does the mode go.
     let mut chosen = None;
+    let mut keep_mode = false;
+    let named = identity.len().saturating_sub(1).max(1);
+    'mode: for (left_index, left) in identity.iter().enumerate().take(named) {
+        for (right_index, right) in state.iter().enumerate().take(essential + 1) {
+            if measure(left) + measure(right) + mode_width + 3 <= width {
+                chosen = Some((left_index, right_index));
+                keep_mode = true;
+                break 'mode;
+            }
+        }
+    }
     'detail: for (left_index, left) in identity.iter().enumerate() {
+        if chosen.is_some() {
+            break;
+        }
         for (right_index, right) in state.iter().enumerate().take(essential + 1) {
             if measure(left) + measure(right) + 3 <= width {
                 chosen = Some((left_index, right_index));
@@ -372,27 +402,15 @@ fn status_band(app: &App, width: usize) -> Line {
     let right = state.into_iter().nth(right_index).unwrap_or_default();
     let mut left_width = measure(&left);
     let right_width = measure(&right);
+    // Where the session works takes the room left once the mode has its own.
+    let reserved = if keep_mode { mode_width } else { 0 };
     if let Some(place) = place_segment(app) {
         let place_width = place.width() + 2;
-        if left_width + place_width + right_width + 5 <= width {
+        if left_width + place_width + right_width + reserved + 5 <= width {
             left.push(Span::new(format!("  {place}"), theme.muted).on(theme.surface));
             left_width += place_width;
         }
     }
-    // Permission mode uses spare space without displacing location, queue or
-    // stop hints. It names what it is: an agent can be called "review" too.
-    // `--yolo` answers this TUI's requests whatever the chat's own mode is.
-    let mode = format!(
-        "  {}",
-        app.language.text(if app.yolo {
-            "approvals: --yolo"
-        } else if app.auto_permissions {
-            "approvals: auto"
-        } else {
-            "approvals: review"
-        })
-    );
-    let mode_width = mode.width();
     if left_width + right_width + mode_width + 3 <= width {
         left.push(
             Span::new(
@@ -956,7 +974,9 @@ fn phase_text(app: &App) -> String {
         "waiting_question" => app.language.text("waiting for your answer").into(),
         "child_tasks" => {
             let running = app.running_children();
-            if running > 0 {
+            if running == 1 {
+                format!("1 child agent   {elapsed}s   ctrl+o opens")
+            } else if running > 0 {
                 format!("{running} child agents   {elapsed}s   ctrl+o opens")
             } else {
                 format!("child agents   {elapsed}s")
