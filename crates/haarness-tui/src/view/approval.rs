@@ -406,6 +406,21 @@ fn review_reason(
             "path",
             path,
         ),
+        ReviewReason::UnnamedOverwrite { path } => text(
+            "This overwrites {path}, outside the project, and your messages do not name it.",
+            "path",
+            path,
+        ),
+        ReviewReason::UnplacedOverwrite { path } => text(
+            "This overwrites {path}, a path Haarness can't place, and your messages do not name it.",
+            "path",
+            path,
+        ),
+        ReviewReason::UnreadScript { program } => text(
+            "This runs a here-document Haarness could not read with {program}, and your messages do not ask for it.",
+            "program",
+            program,
+        ),
         ReviewReason::InlineCode { program } => text(
             "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.",
             "program",
@@ -502,7 +517,10 @@ pub fn review_note_within(
     }
     let review = pending.review.as_ref()?;
     let path = match review.reason.as_ref()? {
-        ReviewReason::UnnamedDeletion { path } | ReviewReason::UnplacedDeletion { path } => path,
+        ReviewReason::UnnamedDeletion { path }
+        | ReviewReason::UnplacedDeletion { path }
+        | ReviewReason::UnnamedOverwrite { path }
+        | ReviewReason::UnplacedOverwrite { path } => path,
         _ => return Some(note),
     };
     // The path gives way first, down to a readable stub; then the rule,
@@ -519,6 +537,12 @@ pub fn review_note_within(
                 review.reason = Some(match review.reason.as_ref() {
                     Some(ReviewReason::UnplacedDeletion { .. }) => {
                         ReviewReason::UnplacedDeletion { path: short }
+                    }
+                    Some(ReviewReason::UnnamedOverwrite { .. }) => {
+                        ReviewReason::UnnamedOverwrite { path: short }
+                    }
+                    Some(ReviewReason::UnplacedOverwrite { .. }) => {
+                        ReviewReason::UnplacedOverwrite { path: short }
                     }
                     _ => ReviewReason::UnnamedDeletion { path: short },
                 });

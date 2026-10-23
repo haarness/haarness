@@ -6839,8 +6839,7 @@ impl PendingPermission {
 /// line and cut to [`REFUSAL_REASON_CHARS`], so it cannot pose as anything
 /// else.
 fn refusal_message(feedback: Option<&str>) -> String {
-    let reason = feedback
-        .unwrap_or_default()
+    let reason = crate::auto_review::for_agent(feedback.unwrap_or_default())
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");

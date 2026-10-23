@@ -4784,6 +4784,63 @@
             "type": "object"
           },
           {
+            "description": "The command overwrites or empties the file at `path`, outside the\nproject, which the person's messages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unnamed_overwrite"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command overwrites the file at `path` (as written), which\nHaarness cannot place and the person's messages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unplaced_overwrite"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A shell (`program`) runs a here-document Haarness could not read.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unread_script"
+                ],
+                "type": "string"
+              },
+              "program": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "program",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
             "description": "The command runs `program`'s inline code (`python3 -c`, `perl -e`),\nwhich plainly deletes or names a path outside the project, and the\nperson's messages do not ask for it.",
             "properties": {
               "code": {

@@ -9,6 +9,7 @@
 //! host keeps the stricter of the outcome the model states and the one its
 //! ratings call for, and never lets a salvaged or failed review approve.
 
+use crate::permissions::bash::Effect;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -235,9 +236,9 @@ pub fn blocked_message(review: &PermissionReview) -> String {
     let reason = review
         .rationale
         .as_deref()
-        .map(|reason| reason.trim().trim_end_matches('.'))
+        .map(|reason| for_agent(reason.trim().trim_end_matches('.')))
         .filter(|reason| !reason.is_empty())
-        .unwrap_or("it rated this action too risky to run");
+        .unwrap_or_else(|| "it rated this action too risky to run".into());
     format!(
         "Auto review blocked this action{rule}: {reason}. Do not try to reach the same result another way; ask the user if it is needed."
     )
@@ -329,6 +330,28 @@ fn salvage(text: &str) -> Option<Verdict> {
         return None;
     }
     read_verdict(&serde_json::from_str(&text[start..=end]).ok()?)
+}
+
+/// A note written for the person, as the agent reads it: Haarness's own
+/// notes say "your messages" to the person, which to the agent are the
+/// person's.
+pub(crate) fn for_agent(text: &str) -> String {
+    text.replace("your messages", "the person's messages")
+}
+
+/// A path for Haarness's own note: on one line, without the bidi marks and
+/// isolates (U+061C, U+200E/F, U+202A–E, U+2066–9) that could turn the
+/// sentence around it.
+fn plain_path(path: &str) -> String {
+    one_line(path)
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+        })
+        .collect()
 }
 
 /// `text` on one line, as every client shows a note: runs of whitespace
@@ -792,6 +815,15 @@ fn note(status: PermissionReviewStatus, reason: ReviewReason) -> PermissionRevie
         ReviewReason::UnplacedDeletion { path } => format!(
             "This deletes {path}, a path Haarness can't place, and your messages do not name it."
         ),
+        ReviewReason::UnnamedOverwrite { path } => format!(
+            "This overwrites {path}, outside the project, and your messages do not name it."
+        ),
+        ReviewReason::UnplacedOverwrite { path } => format!(
+            "This overwrites {path}, a path Haarness can't place, and your messages do not name it."
+        ),
+        ReviewReason::UnreadScript { program } => format!(
+            "This runs a here-document Haarness could not read with {program}, and your messages do not ask for it."
+        ),
         ReviewReason::InlineCode { program } => format!(
             "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it."
         ),
@@ -1231,13 +1263,20 @@ impl Reviewer {
         // Haarness's own words when it decided, or the reviewer gave none.
         let (rationale, reason) = match (&target, verdict.rationale.as_deref()) {
             (Some(target), _) => {
-                let path = clip(&target.path, 120);
-                let reason = if target.inline {
-                    ReviewReason::InlineCode { program: path }
-                } else if target.placed {
-                    ReviewReason::UnnamedDeletion { path }
-                } else {
-                    ReviewReason::UnplacedDeletion { path }
+                // Haarness's own note names the path on one line, without
+                // marks that could turn the sentence around it.
+                let path = clip(&plain_path(&target.path), 120);
+                let reason = match (target.effect, target.placed) {
+                    (Effect::Inline, _) => ReviewReason::InlineCode { program: path },
+                    (Effect::Script, _) => ReviewReason::UnreadScript { program: path },
+                    (Effect::Replaces | Effect::Empties, true) => {
+                        ReviewReason::UnnamedOverwrite { path }
+                    }
+                    (Effect::Replaces | Effect::Empties, false) => {
+                        ReviewReason::UnplacedOverwrite { path }
+                    }
+                    (Effect::Deletes, true) => ReviewReason::UnnamedDeletion { path },
+                    (Effect::Deletes, false) => ReviewReason::UnplacedDeletion { path },
                 };
                 (
                     note(PermissionReviewStatus::Asked, reason.clone()).rationale,
@@ -2042,6 +2081,14 @@ mod tests {
             message,
             "Auto review blocked this action (Data exfiltration): It uploads your SSH key. Do not try to reach the same result another way; ask the user if it is needed."
         );
+        // Haarness's own words to the person read as the person's to the
+        // agent.
+        let message = blocked_message(&note(PermissionReviewStatus::Blocked, ReviewReason::Rated));
+        assert!(
+            message.contains("the person's messages do not clearly ask for it"),
+            "{message}"
+        );
+        assert!(!message.contains("your messages"), "{message}");
     }
 
     #[tokio::test]
