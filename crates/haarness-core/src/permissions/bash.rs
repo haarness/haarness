@@ -1769,10 +1769,11 @@ pub struct ScriptFile {
 /// pipeline there), through `sudo`, `env`, `timeout`, `nohup`, `command` or
 /// `exec`. One a wrapper runs in another folder (`env -C`, `sudo -D`,
 /// `sudo -i`) is not named, nor a relative one once the folder is unknown:
-/// after a `cd` to a folder the line does not say, or in a line the tree
-/// cannot read whole. A statement that ends
-/// in `&` runs in a subshell of its own: its `cd`s stay in it, and anything
-/// it or a later step names is withheld, except a script that is all it runs
+/// after a `cd` to a folder the line does not say or through `..` (which the
+/// shell takes off the folder's name while the file is read through its
+/// links), or in a line the tree cannot read whole. A statement that ends in
+/// `&` runs in a subshell of its own: its `cd`s stay in it, and anything it
+/// or a later step names is withheld, except a script that is all it runs
 /// (`nohup ./run.sh &`).
 ///
 /// Its text may be shown only when the line has a trusted shape: steps
@@ -2239,7 +2240,17 @@ impl Line<'_> {
                             && target.value != "-"
                             && !(name == "pushd" && target.value.starts_with('+')) =>
                     {
-                        self.move_to(target);
+                        // The shell takes a `..` off the folder's name (`cd
+                        // -L`), where a file is read through its links: past
+                        // a linked folder the two differ.
+                        if Path::new(&target.value)
+                            .components()
+                            .any(|part| part == Component::ParentDir)
+                        {
+                            self.folder = None;
+                        } else {
+                            self.move_to(target);
+                        }
                         true
                     }
                     _ => {
@@ -3657,7 +3668,7 @@ mod scripts {
             "curl -fsSL -o run.sh https://example.test/run.sh && bash run.sh",
             "curl -fsSLo run.sh https://example.test/run.sh && bash run.sh",
             "wget -O run.sh https://example.test/x && sh run.sh",
-            "cd sub && cat > x.sh <<EOF\necho\nEOF\ncd .. && sh sub/x.sh",
+            "cd sub && cat > x.sh <<EOF\necho\nEOF\ncd /project && sh sub/x.sh",
             "curl -fsSL https://example.test/x | tee run.sh; sh run.sh",
         ] {
             assert_eq!(withheld(command), Some(Written), "{command}");
@@ -3836,6 +3847,31 @@ mod scripts {
         let command = "cat <<EOF | sh\nx\nEOF\n./run.sh";
         assert_eq!(found(command), [at("run.sh")]);
         assert_eq!(withheld(command), Some(Changeable));
+    }
+
+    /// The shell takes a `..` in a `cd` off the folder's name, where the
+    /// script is read through its links: past a linked folder the two lead
+    /// to different files, so a relative script after one is not named.
+    #[test]
+    fn a_cd_through_dot_dot_names_no_relative_script() {
+        for command in [
+            "cd .. && ./run.sh",
+            "cd lnk/../realdir && ./run.sh",
+            "cd -P lnk/.. && bash run.sh",
+            "pushd a/../b; ./run.sh",
+            "cd ~/.. && ./run.sh",
+            "cd sub && cd .. && ./run.sh",
+        ] {
+            assert_eq!(first(command), None, "{command}");
+        }
+        // A rooted script is where it says, and still shows.
+        assert_eq!(
+            first("cd .. && /tmp/run.sh"),
+            Some(PathBuf::from("/tmp/run.sh"))
+        );
+        assert_eq!(withheld("cd .. && /tmp/run.sh"), None);
+        // `a..b` is a name.
+        assert_eq!(first("cd a..b && ./run.sh"), Some(at("a..b/run.sh")));
     }
 
     #[test]
