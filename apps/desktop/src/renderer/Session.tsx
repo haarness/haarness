@@ -128,6 +128,8 @@ import {
 /* The plan already has a home above the composer, so its bookkeeping calls do
    not also belong in the transcript. */
 const PLAN_TOOLS = ["todo", "todowrite", "todoread"];
+/** How much of a step opened at the bottom of the view is brought into it. */
+const OPENED_IN_SIGHT = 80;
 /** How long Auto's reviewer runs before the activity line says so. */
 const REVIEW_NOTICE_MS = 800;
 
@@ -596,14 +598,15 @@ export function Session() {
   /* A step or thought the reader opens or closes stays where it was clicked:
      following pins streamed output to the bottom, not the row's own growth.
      When opening it pushes the latest output out of view, following pauses,
-     as scrolling up would, and Jump to latest offers the way back. */
+     as scrolling up would, and Jump to latest offers the way back; when
+     closing it brings the end of the chat into view, following resumes. */
   let toggled:
     | { control: Element; row: HTMLElement; top: number; height: number; until: number }
     | undefined;
   function holdToggled(event: MouseEvent) {
     const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
     const row = control?.closest<HTMLElement>("[data-index]");
-    if (!control || !row || !follow() || !scrolling.contains(row)) return;
+    if (!control || !row || !scrolling.contains(row)) return;
     toggled = {
       control,
       row,
@@ -632,10 +635,21 @@ export function Session() {
     if (!held.row.isConnected) return followLatest();
     const moved = held.control.getBoundingClientRect().top - held.top;
     if (Math.abs(moved) >= 1) scrolling.scrollTop += moved;
+    // What opened out of sight below the view comes up just enough for its
+    // first lines to show, never taking the row itself off the top.
+    if (grown > 0) {
+      const view = scrolling.getBoundingClientRect();
+      const summary = held.control.getBoundingClientRect();
+      const opened = (held.control.closest("details") ?? held.row).getBoundingClientRect();
+      const wanted = Math.min(opened.bottom - summary.bottom, OPENED_IN_SIGHT);
+      const lift = Math.min(wanted - (view.bottom - summary.bottom), summary.top - view.top - 8);
+      if (lift > 0) scrolling.scrollTop += lift;
+    }
     lastTop = scrolling.scrollTop;
     const below = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
     if (grown > 0 && below > 4) setFollow(false);
-    else followLatest();
+    else if (below <= 4) setFollow(true);
+    followLatest();
   }
   function followLatest() {
     if (!follow() || scrollFrame || toggled) return;

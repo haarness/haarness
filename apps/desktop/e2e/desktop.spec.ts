@@ -2246,6 +2246,8 @@ test("a dropped text file of the project is mentioned, any other goes into the m
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(input).toHaveValue(before + after);
   await input.fill("");
+  // Later tests review the project's changes; this one leaves none.
+  await rm(join(workspace, "docs"), { recursive: true, force: true });
   expect(errors).toEqual([]);
 });
 
@@ -4810,11 +4812,12 @@ test("an open-ended question opens in its answer field unless a draft is being t
   await expect(composer).toHaveValue("half-written follow-up");
   await composer.fill("");
 
-  // With choices to pick, the dock waits for one; typed text still replies with Enter.
+  // With choices to pick, the dock opens on its first choice, as the message
+  // box was idle; typed text still replies with Enter.
   await composer.focus();
   await ask({ prompt: "Pick a fixture color", choices: ["Green", "Blue"] });
   await expect(question).toContainText("Pick a fixture color");
-  await expect(composer).toBeFocused();
+  await expect(question.getByRole("button", { name: "Green", exact: true })).toBeFocused();
   await answer.fill("Teal");
   await answer.press("Enter");
   await settled();
@@ -11541,7 +11544,8 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   await page.screenshot({ path: test.info().outputPath("conversation-find-light.png") });
   await find.press("Escape");
   await expect(find).toHaveCount(0);
-  await expect(page.locator(".transcript")).toBeFocused();
+  // The keyboard goes back to where Find was opened from, the message box.
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Chat actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Find in chat", exact: true }).click();
   await expect(find).toBeFocused();
