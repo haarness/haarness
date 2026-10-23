@@ -5,11 +5,13 @@
  * or on a project switch: the first `@` in a project asks, and a later `@`
  * within a minute reuses that answer, in every composer (a chat switch or a
  * remount asks nothing). Each server is asked on its own and its rows join
- * the list as they come, below the rows already there, so a slow or failing
- * server holds nothing up and the highlighted row never moves. A failed
- * listing is forgotten and the next `@` asks again; each ask drops the
- * answers of other connections older than a minute, so the projects visited
- * do not pile up. Which servers a chat's rules take away entirely is asked
+ * the list as they come, below the rows already there; the composer shows
+ * them only once the files a query finds have come (`PromptContext.tsx`), so
+ * they always join below the files too. A slow or failing server holds
+ * nothing up, and the highlighted row never moves. A failed listing is
+ * forgotten and the next `@` asks again; each ask drops the answers of
+ * other connections older than a minute, so the projects visited do not
+ * pile up. Which servers a chat's rules take away entirely is asked
  * each time the list opens (a cheap local question) and those are left out.
  */
 import { createSignal, type Accessor } from "solid-js";
