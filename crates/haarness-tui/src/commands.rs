@@ -2281,7 +2281,10 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     pub async fn execute_command(&mut self, raw: &str, client: &ApiClient) -> Result<AppAction> {
-        self.command_refused = false;
+        // What the last refused command said no longer applies.
+        if std::mem::take(&mut self.command_refused) {
+            self.notice.clear();
+        }
         let command = raw.trim().trim_start_matches('/');
         let (name, arguments) = command
             .split_once(char::is_whitespace)

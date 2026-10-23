@@ -750,6 +750,9 @@ pub struct App {
     /// The last command run would not run as typed; see
     /// [`App::refuse_command`].
     pub command_refused: bool,
+    /// A notice true only while the conversation is scrolled back ("Viewing …
+    /// Ctrl+End returns to latest"): it goes when the view returns.
+    pub scrolled_notice: Option<String>,
     /// What Enter does with a message while work runs, as last read from
     /// the project (`/input-mode`): steer it in, or queue it.
     pub input_delivery: Option<haarness_protocol::InputDelivery>,
@@ -860,6 +863,10 @@ pub struct App {
     /// separate from transcript scrollback.
     pub overlay_scroll: usize,
     pub max_overlay_scroll: std::cell::Cell<usize>,
+    /// The open filterable dialog (by title, at a screen height) and the
+    /// tallest it has been: its top edge stays there while a filter shortens
+    /// the list.
+    pub dialog_anchor: std::cell::RefCell<Option<(String, usize, usize)>>,
     /// `!` shell passthrough: Enter runs the composer as a command.
     pub shell_mode: bool,
     /// Full-screen terminal tabs. Dropping this view detaches the client but
@@ -1117,6 +1124,7 @@ impl App {
             notice_shown: None,
             undo_draft: None,
             command_refused: false,
+            scrolled_notice: None,
             input_delivery: None,
             custom_status_line: None,
             billing: haarness_account::billing::State::default(),
@@ -1162,6 +1170,7 @@ impl App {
             pending_message_jump: std::cell::Cell::new(None),
             overlay_scroll: 0,
             max_overlay_scroll: std::cell::Cell::new(0),
+            dialog_anchor: std::cell::RefCell::new(None),
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
@@ -1485,6 +1494,16 @@ impl App {
     /// still in force stays: an approval waiting, shell mode, a queued
     /// message being edited, a folder operation in flight.
     pub fn expire_notice(&mut self, now: std::time::Instant) {
+        // A notice about reading back stops being true at the latest message.
+        if let Some(text) = self.scrolled_notice.take()
+            && text == self.notice
+        {
+            if self.effective_viewport_offset() == 0 && self.pending_message_jump.get().is_none() {
+                self.notice.clear();
+            } else {
+                self.scrolled_notice = Some(text);
+            }
+        }
         if self.notice.is_empty() {
             self.notice_shown = None;
             return;
@@ -2425,6 +2444,11 @@ impl App {
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay) {
+        // A refused command's notice is done with once a dialog takes over.
+        if std::mem::take(&mut self.command_refused) {
+            self.notice.clear();
+        }
+        *self.dialog_anchor.get_mut() = None;
         self.overlay = overlay;
         self.overlay_filter.clear();
         self.overlay_scroll = 0;
@@ -2512,6 +2536,7 @@ impl App {
             self.apply_theme(&name, &variant);
         }
         self.overlay = Overlay::None;
+        *self.dialog_anchor.get_mut() = None;
         self.overlay_filter.clear();
         self.overlay_scroll = 0;
         self.max_overlay_scroll.set(0);
