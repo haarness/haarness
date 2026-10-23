@@ -308,7 +308,7 @@ async fn tool_errors(runtime: &AgentRuntime, thread: &Thread) -> Vec<String> {
 }
 
 /// What the model is told when the script changed after the card showed it.
-const CHANGED: &str = "The command did not run: x.sh changed after the user saw it. Run it again so they see the new version.";
+const CHANGED: &str = "The command did not run: x.sh is not what it was when approval was asked (changed, moved or unreadable). Run it again to ask with the file as it is now.";
 
 #[tokio::test]
 async fn a_script_that_changed_after_it_was_allowed_once_does_not_run() {

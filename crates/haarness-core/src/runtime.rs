@@ -6160,8 +6160,10 @@ async fn script_for_person(
     crate::permissions::script::for_prompt(command, cwd, readable).await
 }
 
-/// Why a command whose script changed after its card showed it did not run,
-/// for the model.
+/// Why a command whose script is not what it was when its card was shown
+/// did not run, for the model. Neutral: who answered may not have read it
+/// (`haarness run` at a terminal, Allow once + Auto), and a slow re-read
+/// counts too.
 fn script_changed(path: &str, workspace: &Path) -> String {
     let path = Path::new(path);
     let canonical = workspace.canonicalize().ok();
@@ -6171,7 +6173,7 @@ fn script_changed(path: &str, workspace: &Path) -> String {
         .or_else(|| path.strip_prefix(canonical.as_ref()?).ok())
         .unwrap_or(path);
     format!(
-        "The command did not run: {} changed after the user saw it. Run it again so they see the new version.",
+        "The command did not run: {} is not what it was when approval was asked (changed, moved or unreadable). Run it again to ask with the file as it is now.",
         shown.display()
     )
 }
