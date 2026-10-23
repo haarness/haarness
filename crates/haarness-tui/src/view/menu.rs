@@ -621,8 +621,6 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     Some(out)
 }
 
-/// One choice in a picker: what it is, what it means, whether it is the
-/// current one, and — for the theme picker — the palette it stands for.
 /// A waiting chat's sign: the approval card's ⚠ for an approval, Upstream's
 /// `?` for a question.
 const fn waiting_sign(waiting: crate::state::Waiting) -> &'static str {
@@ -632,6 +630,8 @@ const fn waiting_sign(waiting: crate::state::Waiting) -> &'static str {
     }
 }
 
+/// One choice in a picker: what it is, what it means, whether it is the
+/// current one, and — for the theme picker — the palette it stands for.
 struct SelectorRow {
     label: String,
     detail: String,
