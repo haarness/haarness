@@ -377,21 +377,76 @@ fn is_script(interpreter: &Path) -> bool {
 }
 
 /// Whether one of the file's first two lines declares a source encoding
-/// (PEP 263, `# -*- coding: … -*-`) other than UTF-8, ASCII or Latin-1:
+/// (PEP 263, `# -*- coding: … -*-`) that may turn bytes into other text:
 /// Python decodes the file by it, so it may run lines the card cannot show
-/// (`# coding: utf-7` makes `+AAo-` a line break).
+/// (`# coding: utf-7` makes `+AAo-` a line break). UTF-8, ASCII and the
+/// ASCII-compatible single-byte encodings ([`keeps_lines`]) cannot.
 fn declares_another_encoding(bytes: &[u8]) -> bool {
-    let start = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).replace("\r\n", "\n");
-    start
-        .split(['\n', '\r'])
-        .take(2)
-        .filter_map(coding)
-        .any(|encoding| {
-            !matches!(
-                encoding.to_ascii_lowercase().replace('_', "-").as_str(),
-                "utf-8" | "utf8" | "ascii" | "latin-1" | "iso-8859-1" | "cp1252"
-            )
-        })
+    let mut rest = bytes;
+    for _ in 0..2 {
+        let end = rest
+            .iter()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .unwrap_or(rest.len());
+        let line = String::from_utf8_lossy(&rest[..end]);
+        if coding(&line).is_some_and(|encoding| !keeps_lines(encoding)) {
+            return true;
+        }
+        rest = &rest[end..];
+        rest = rest
+            .strip_prefix(b"\r\n")
+            .or_else(|| rest.get(1..))
+            .unwrap_or_default();
+    }
+    false
+}
+
+/// Whether an encoding, by Python's names for it, reads ASCII as ASCII and
+/// every other byte as one character: UTF-8 (`utf-8-…` too), ASCII
+/// (`us-ascii`), Latin-1 (`latin1`, `iso8859-1`, `iso-latin-1`, `l1`), and
+/// the other ISO 8859 and Windows code pages (`iso-8859-15`, `cp1250`,
+/// `windows-1252`, `latin-2`). Not UTF-7, UTF-16 or UTF-32, the escape
+/// codecs or the multi-byte ones (`shift_jis`).
+fn keeps_lines(encoding: &str) -> bool {
+    let name = encoding.to_ascii_lowercase().replace('_', "-");
+    let number = |text: Option<&str>, low: u32, high: u32| {
+        text.and_then(|text| text.parse::<u32>().ok())
+            .is_some_and(|number| (low..=high).contains(&number))
+    };
+    matches!(
+        name.as_str(),
+        "utf-8"
+            | "utf8"
+            | "ascii"
+            | "us-ascii"
+            | "latin-1"
+            | "latin1"
+            | "iso-8859-1"
+            | "iso8859-1"
+            | "iso-latin-1"
+            | "l1"
+    ) || ["utf-8-", "latin-1-", "iso-8859-1-", "iso-latin-1-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || number(
+            name.strip_prefix("iso-8859-")
+                .or_else(|| name.strip_prefix("iso8859-"))
+                .filter(|number| *number != "12"),
+            1,
+            16,
+        )
+        || number(
+            name.strip_prefix("cp")
+                .or_else(|| name.strip_prefix("windows-")),
+            1250,
+            1258,
+        )
+        || number(
+            name.strip_prefix("latin-")
+                .or_else(|| name.strip_prefix("latin")),
+            1,
+            10,
+        )
 }
 
 /// The encoding a line declares: `^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`.
@@ -963,6 +1018,11 @@ mod tests {
             "# vim: set fileencoding=unicode_escape :\n",
             "\x0c# coding=UTF-16\n",
             "\r\n# coding: shift_jis\r\n",
+            "# coding: raw_unicode_escape\n",
+            "# coding: utf-32\n",
+            "# coding: euc-jp\n",
+            "# coding: cp932\n",
+            "# coding: utf8-weird\n",
         ] {
             fixture.write("x.py", format!("{start}print(1) +AAo-print(2)\n"));
             assert!(
@@ -970,8 +1030,27 @@ mod tests {
                 "{start:?}"
             );
         }
+        // Past the first kilobyte, still on the first two lines.
+        let long = format!("#{}\n# coding: utf-7\n", "x".repeat(4000));
+        let late = format!("# {} coding: utf-7\n", " ".repeat(4000));
+        for start in [long, late] {
+            fixture.write("x.py", format!("{start}print(1)\n"));
+            assert!(bash_script("python3 x.py", &fixture.0, |_| true).is_none());
+        }
         for start in [
             "# -*- coding: utf-8 -*-\n",
+            "# -*- coding: utf-8-sig -*-\n",
+            "# coding: latin1\n",
+            "# coding: iso8859-1\n",
+            "# coding: iso-latin-1\n",
+            "# coding: l1\n",
+            "# coding: us-ascii\n",
+            "# coding: iso-8859-15\n",
+            "# coding: iso8859_2\n",
+            "# coding: cp1250\n",
+            "# coding: windows-1252\n",
+            "# coding: latin-2\n",
+            "# coding: Latin9\n",
             "# coding: UTF8\n",
             "# coding: latin-1\n",
             "# coding=iso-8859-1\n",
@@ -1013,6 +1092,24 @@ mod tests {
         let shown = bash_script("sh run.sh > out.log", &fixture.0, |_| true).unwrap();
         assert_eq!(shown.withheld, Some(ScriptWithheld::Changeable));
         assert_eq!(shown.content, "");
+    }
+
+    /// A vim modeline names an encoding the way PEP 263 does; a harmless
+    /// one keeps a shell script shown.
+    #[test]
+    fn a_modeline_with_a_single_byte_encoding_keeps_a_shell_script_shown() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "run.sh",
+            "#!/bin/sh\n# vim: set fileencoding=latin1 :\necho hi\n",
+        );
+        let shown = bash_script("sh run.sh", &fixture.0, |_| true).unwrap();
+        assert!(shown.content.ends_with("echo hi\n"));
+        fixture.write(
+            "run.sh",
+            "#!/bin/sh\n# vim: set fileencoding=utf-16 :\necho hi\n",
+        );
+        assert!(bash_script("sh run.sh", &fixture.0, |_| true).is_none());
     }
 
     #[test]
