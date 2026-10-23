@@ -1100,9 +1100,15 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.scroll_to_bottom();
                 }
             } else if let Some(raw) = selected_slash_command(app) {
-                app.composer.clear();
+                // The line leaves the prompt while the command runs, and
+                // comes back when the command refuses it or fails, so a
+                // mistyped interval or argument is fixed in place.
+                let line = app.composer.set_aside();
                 app.selection = 0;
                 let action = app.execute_command(&raw, client).await;
+                if (action.is_err() || app.command_refused) && app.composer.is_empty() {
+                    app.composer.restore(line);
+                }
                 app.return_undo_draft();
                 return action;
             } else if let Some(name) = unknown_slash_command(app) {

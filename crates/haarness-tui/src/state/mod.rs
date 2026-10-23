@@ -744,6 +744,9 @@ pub struct App {
     /// session list leads with the chats they wait in.
     pub waiting: std::collections::HashMap<String, WaitingRequest>,
     pub notice: String,
+    /// The last command run would not run as typed; see
+    /// [`App::refuse_command`].
+    pub command_refused: bool,
     /// The notice last seen by the render tick and when it appeared, so an
     /// answer to something the user did fades instead of describing the past.
     pub(crate) notice_shown: Option<(String, std::time::Instant)>,
@@ -1107,6 +1110,7 @@ impl App {
             notice,
             notice_shown: None,
             undo_draft: None,
+            command_refused: false,
             custom_status_line: None,
             billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
