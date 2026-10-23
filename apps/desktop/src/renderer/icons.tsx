@@ -46,6 +46,7 @@ import ClipboardPaste from "lucide-solid/icons/clipboard-paste";
 import Cloud from "lucide-solid/icons/cloud";
 import Code from "lucide-solid/icons/code";
 import Copy from "lucide-solid/icons/copy";
+import CornerDownRight from "lucide-solid/icons/corner-down-right";
 import Download from "lucide-solid/icons/download";
 import Ellipsis from "lucide-solid/icons/ellipsis";
 import Eye from "lucide-solid/icons/eye";
@@ -187,6 +188,8 @@ const catalog = {
 
   // Turn state
   send: ArrowUp,
+  /** Guidance sent into the work under way. */
+  steer: CornerDownRight,
   stop: Square,
   shield: Shield,
   mic: Mic,

@@ -201,6 +201,27 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
     onCleanup(() => clearTimeout(timer));
   }));
   const items = () => q.queue().items;
+  /* Removing a message from the keyboard hands it to the row that takes
+     its place, or to the message box when none does, rather than dropping
+     it with the button. */
+  let list: HTMLOListElement | undefined;
+  // The row to take it (none: the message box), held while the tray
+  // settles: every update draws the rows again.
+  const [refocus, setRefocus] = createSignal<{ id?: string; until: number }>();
+  createEffect(() => {
+    const target = refocus();
+    if (!target || q.busy()) return;
+    const ids = items().map((item) => item.id);
+    queueMicrotask(() => {
+      const active = document.activeElement;
+      if (performance.now() > target.until || (active && active !== document.body && !list?.contains(active)))
+        return void setRefocus(undefined);
+      const row = target.id && ids.includes(target.id)
+        ? list?.querySelector<HTMLButtonElement>(`[data-input-id="${CSS.escape(target.id)}"] .input-queue-remove`)
+        : undefined;
+      (row ?? document.querySelector<HTMLTextAreaElement>("[data-composer-input]"))?.focus({ preventScroll: true });
+    });
+  });
   const header = () =>
     q.editing()
       ? t("Editing — sending saves it in place")
@@ -223,7 +244,7 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
         </Show>
       </header>
       <Show when={q.error()}><p class="input-queue-error" role="alert">{q.error()}</p></Show>
-      <ol>
+      <ol ref={list}>
         <For each={items()}>{(item, index) => {
           const active = () => q.editing()?.id === item.id;
           const attached = () => item.attachments?.length ?? 0;
@@ -244,9 +265,22 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
                   <Button icon="move-down" size="sm" class="input-queue-reorder" label={t("Move queued message down")} disabled={q.busy() || index() === items().length - 1} onClick={() => q.move(index(), 1)} />
                 </Show>
                 <Button icon="edit" size="sm" label={t("Edit queued message")} disabled={q.busy()} onClick={() => q.edit(item)} />
-                <Button icon="send" size="sm" label={props.working ? t("Steer now") : t("Send now")} disabled={q.busy()} onClick={() => q.send(item)} />
+                {/* Steering goes into the work under way, which Send's arrow
+                    (and the reorder chevrons) would not say. */}
+                <Button icon={props.working ? "steer" : "send"} size="sm" label={props.working ? t("Steer now") : t("Send now")} disabled={q.busy()} onClick={() => q.send(item)} />
               </Show>
-              <Button icon="trash" size="sm" label={t("Remove queued message")} disabled={q.busy()} onClick={() => q.remove(item)} />
+              <Button
+                icon="trash"
+                size="sm"
+                class="input-queue-remove"
+                label={t("Remove queued message")}
+                disabled={q.busy()}
+                onClick={() => {
+                  if (document.activeElement?.closest(".input-queue-remove"))
+                    setRefocus({ id: items()[index() + 1]?.id, until: performance.now() + 1500 });
+                  q.remove(item);
+                }}
+              />
             </div>
           </li>;
         }}</For>
