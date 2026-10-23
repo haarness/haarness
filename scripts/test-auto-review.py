@@ -270,6 +270,20 @@ try:
     assert not (workspace / 'run-asked-2.txt').exists() and not (workspace / 'run-mine.txt').exists()
     check('run --auto without a terminal refuses each request that needs a person, with its reason, goes on and exits 3')
 
+    # Refusals between calls that succeed never stop the run.
+    calls = []
+    for index in range(6):
+        calls.append({'name': 'bash', 'arguments': {'command': f'printf ok > ok-{index}.txt'}})
+        calls.append({'name': 'bash', 'arguments': {'command': f'printf mine > mine-{index}.txt'}})
+    interleaved = headless_run('Run goes on', calls, 'allow')
+    finished()
+    assert interleaved.returncode == 3, (interleaved.returncode, interleaved.stderr)
+    assert 'Stopped:' not in interleaved.stderr, interleaved.stderr
+    assert len([line for line in interleaved.stderr.splitlines() if line.startswith('Refused: ')]) == 6, interleaved.stderr
+    assert all((workspace / f'ok-{index}.txt').exists() for index in range(6))
+    assert not any((workspace / f'mine-{index}.txt').exists() for index in range(6))
+    check('run --auto without a terminal goes on past refusals while other calls succeed')
+
     stuck = headless_run('Run stops', [
         {'name': 'bash', 'arguments': {'command': f'printf stuck > stuck-{index}.txt'}} for index in range(6)
     ], 'ask')

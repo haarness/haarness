@@ -5147,6 +5147,11 @@ async fn set_goal_for_run_client(
 /// Why Auto's reviewer left a request to a person, as a run prints it: one
 /// sentence, ending with its stop.
 fn review_note(review: &haarness_protocol::PermissionReview) -> String {
+    // On one line and safe to print, whatever the reviewer wrote.
+    terminal_safe(&review_sentence(review), false)
+}
+
+fn review_sentence(review: &haarness_protocol::PermissionReview) -> String {
     let reason = review
         .rationale
         .as_deref()
@@ -5267,33 +5272,98 @@ impl Drop for Progress {
 }
 
 /// What a `--auto` run with nobody to ask refused.
-#[derive(Default)]
 struct Refusals {
     /// Refused since a call last succeeded anywhere in the run.
     in_a_row: u32,
     total: u32,
-    /// Calls that had succeeded in the run's chats (its own and its agents')
-    /// at the last refusal.
-    succeeded: Option<usize>,
+    /// Calls the event stream had seen succeed at the last refusal; it
+    /// starts at none, and is dropped when the stream may have missed some.
+    stream: Option<usize>,
+    /// Calls the run's transcripts held at the last refusal read from them.
+    transcripts: Option<usize>,
+}
+
+impl Default for Refusals {
+    fn default() -> Self {
+        Self {
+            in_a_row: 0,
+            total: 0,
+            stream: Some(0),
+            transcripts: None,
+        }
+    }
 }
 
 impl Refusals {
-    /// Count a refusal, `succeeded` calls having succeeded in the whole run
-    /// so far; true once [`REFUSALS_IN_A_ROW`] came with no call succeeding
-    /// anywhere in between. A count that may have missed some (`None`) never
-    /// moves the run toward a stop.
-    fn count(&mut self, succeeded: Option<usize>) -> bool {
+    /// Count a refusal, given the calls that succeeded in the whole run so
+    /// far by the event stream, or (when the stream may have missed some) by
+    /// the run's transcripts; true once [`REFUSALS_IN_A_ROW`] came with no
+    /// call succeeding anywhere in between. A count with nothing to compare
+    /// with never moves the run toward a stop, nor starts the streak over.
+    fn count(&mut self, stream: Option<usize>, transcripts: Option<usize>) -> bool {
         self.total += 1;
-        let Some(now) = succeeded else {
-            self.succeeded = None;
-            self.in_a_row = 0;
-            return false;
+        let progressed = match (stream, transcripts) {
+            (Some(now), _) => self.stream.replace(now).map(|before| now > before),
+            (None, Some(now)) => {
+                self.stream = None;
+                self.transcripts.replace(now).map(|before| now > before)
+            }
+            (None, None) => {
+                self.stream = None;
+                None
+            }
         };
-        let progressed = self.succeeded.is_some_and(|before| now > before);
-        self.succeeded = Some(now);
-        self.in_a_row = if progressed { 1 } else { self.in_a_row + 1 };
+        match progressed {
+            Some(true) => self.in_a_row = 1,
+            Some(false) => self.in_a_row += 1,
+            None => {}
+        }
         self.in_a_row >= REFUSALS_IN_A_ROW
     }
+}
+
+/// `root` and every chat under it (its agents, theirs, …).
+fn run_tree(root: ThreadId, threads: &[haarness_protocol::Thread]) -> Vec<ThreadId> {
+    let mut tree = vec![root];
+    let mut index = 0;
+    while let Some(&parent) = tree.get(index) {
+        let children: Vec<ThreadId> = threads
+            .iter()
+            .filter(|thread| thread.parent_id == Some(parent) && !tree.contains(&thread.id))
+            .map(|thread| thread.id)
+            .collect();
+        tree.extend(children);
+        index += 1;
+    }
+    tree
+}
+
+/// Calls that succeeded in the run under `root`, read from its chats'
+/// transcripts: what a refusal counts on when the event stream failed.
+async fn transcript_successes(
+    client: &haarness_tui::api::ApiClient,
+    root: ThreadId,
+) -> Option<usize> {
+    let threads = client.threads_including_archived().await.ok()?;
+    let mut count = 0;
+    for thread in run_tree(root, &threads) {
+        count += client
+            .items(thread)
+            .await
+            .ok()?
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.data,
+                    ItemData::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+    }
+    Some(count)
 }
 
 /// A `--auto` run with nobody to ask stops after this many refusals with no
@@ -5397,12 +5467,18 @@ impl RunWatch {
     /// Count a refusal; true once [`REFUSALS_IN_A_ROW`] were refused with
     /// no call succeeding anywhere in the run in between, so agents working
     /// side by side never stop it.
-    fn tally_refusal(&self) -> bool {
-        let succeeded = self.progress.get().and_then(Progress::read);
+    async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> bool {
+        let stream = self.progress.get().and_then(Progress::read);
+        // A stream that failed (a proxy that buffers it, say) counts on the
+        // transcripts for this one refusal, so it cannot hold the streak off.
+        let transcripts = match stream {
+            Some(_) => None,
+            None => transcript_successes(client, root).await,
+        };
         self.refusals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .count(succeeded)
+            .count(stream, transcripts)
     }
 
     /// A scheduled run: nobody watches. Its turn approves its own requests
@@ -5557,7 +5633,7 @@ impl RunWatch {
                         })
                     );
                 }
-                if self.tally_refusal() {
+                if self.tally_refusal(client, root).await {
                     let _ = client.interrupt_session(root, false).await;
                     anyhow::bail!(
                         "Stopped: {REFUSALS_IN_A_ROW} requests in a row needed a person, and nobody can answer in this run. Allow what the agent needs with permission rules, or run it at a terminal."
@@ -5756,23 +5832,31 @@ fn chrome_sites(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<Strin
 /// it (`url`, `script`, `text`, `paths`, …) without the server's own
 /// preparation. Control and direction characters are escaped, so a page
 /// cannot redraw the prompt, and a long value says how much is not shown.
+/// `text` safe to print: control and direction characters escaped
+/// (`\u{202e}`), so nothing in it can redraw the terminal or turn a line
+/// around; line breaks kept only where `lines` says so.
+fn terminal_safe(text: &str, lines: bool) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if (c.is_control() && !(lines && c == '\n'))
+            || matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+        {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn permission_arguments(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<String> {
     use std::fmt::Write as _;
     const LIMIT: usize = 2_000;
     let shown = |text: &str| -> String {
-        let mut out = String::new();
-        for c in text.chars() {
-            if (c.is_control() && c != '\n')
-                || matches!(
-                    c,
-                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-                )
-            {
-                out.extend(c.escape_unicode());
-            } else {
-                out.push(c);
-            }
-        }
+        let out = terminal_safe(text, true);
         let total = out.chars().count();
         if total > LIMIT {
             let mut cut: String = out.chars().take(LIMIT).collect();
@@ -12522,7 +12606,8 @@ mod tests {
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
         auto_review_line, default_run_model_client, describe_permission, discard_refused_chat,
-        refusal_feedback, requested_run_model, review_note, run_attachments, wait_for_turn_client,
+        refusal_feedback, requested_run_model, review_note, run_attachments, run_tree,
+        wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -15421,27 +15506,69 @@ request_timeout = 0
         // again.
         let mut refusals = Refusals::default();
         for _ in 0..4 {
-            assert!(!refusals.count(Some(3)));
+            assert!(!refusals.count(Some(3), None));
         }
-        assert!(!refusals.count(Some(4)), "progress somewhere in the run");
+        assert!(
+            !refusals.count(Some(4), None),
+            "progress somewhere in the run"
+        );
         assert_eq!(refusals.in_a_row, 1);
-        // A count that may have missed some never moves the run toward a
-        // stop: the streak starts over from the next one.
-        assert!(!refusals.count(None));
-        assert_eq!(refusals.in_a_row, 0);
-        for _ in 0..4 {
-            assert!(!refusals.count(Some(4)));
+        // With nothing to compare with, a refusal neither moves the run
+        // toward a stop nor starts the streak over.
+        assert!(!refusals.count(None, None));
+        assert_eq!(refusals.in_a_row, 1);
+        // A stream that keeps failing counts on the transcripts instead.
+        assert!(!refusals.count(None, Some(10)));
+        assert_eq!(refusals.in_a_row, 1);
+        assert!(!refusals.count(None, Some(10)));
+        assert_eq!(refusals.in_a_row, 2);
+        assert!(
+            !refusals.count(None, Some(11)),
+            "progress in the transcripts"
+        );
+        assert_eq!(refusals.in_a_row, 1);
+        for _ in 0..3 {
+            assert!(!refusals.count(None, Some(11)));
         }
-        assert!(refusals.count(Some(4)));
-        assert_eq!(refusals.total, 11);
+        assert!(refusals.count(None, Some(11)));
 
         // Five agents side by side, each refused once while the others get
         // work done: never five in a row.
         let mut refusals = Refusals::default();
         for done in 1..=5 {
-            assert!(!refusals.count(Some(done)));
+            assert!(!refusals.count(Some(done), None));
         }
         assert_eq!(refusals.in_a_row, 1);
+
+        // The run's chats: the root, its agents and theirs, not another run's.
+        let thread = |id: ThreadId, parent: Option<ThreadId>| {
+            let mut thread: haarness_protocol::Thread = serde_json::from_value(json!({
+                "id": id, "title": "t", "parentId": parent, "archived": false,
+                "agent": "build", "provider": "echo", "model": "echo-1",
+                "createdAt": "2026-10-23T12:00:00Z", "updatedAt": "2026-10-23T12:00:00Z",
+            }))
+            .unwrap();
+            thread.parent_id = parent;
+            thread
+        };
+        let (root, child, grandchild, other) = (
+            ThreadId::new(),
+            ThreadId::new(),
+            ThreadId::new(),
+            ThreadId::new(),
+        );
+        let threads = [
+            thread(other, None),
+            thread(grandchild, Some(child)),
+            thread(child, Some(root)),
+            thread(root, None),
+        ];
+        let tree = run_tree(root, &threads);
+        assert_eq!(tree.len(), 3, "{tree:?}");
+        for chat in [root, child, grandchild] {
+            assert!(tree.contains(&chat));
+        }
+        assert!(!tree.contains(&other));
     }
 
     #[test]
@@ -15510,6 +15637,15 @@ request_timeout = 0
         assert_eq!(
             auto_review_line(&layers),
             "auto review: off (Auto approves eligible requests once)"
+        );
+        // Whatever the reviewer wrote, the note is one line and safe to print.
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                Some("Shared\u{202e}state"),
+                Some("It deletes\n~/x\u{061c}\u{1b}[2J.")
+            ),
+            "Auto review left it to a person (Shared\\u{202e}state): It deletes\\u{a}~/x\\u{61c}\\u{1b}[2J."
         );
     }
 
