@@ -157,11 +157,18 @@ async function reply(text: string, attachments?: string[]) {
   return message;
 }
 
-/** Opens a tool row and returns its preview. */
+/**
+ * Opens a tool row and returns its preview. A tool row just after a turn is
+ * now and then drawn anew closed, on the base build too ("tool activity shows
+ * readable commands" in desktop.spec.ts fails the same way there); it is
+ * opened again then, while a preview that never comes still fails.
+ */
 async function openPreview(row: Locator) {
-  if ((await row.getAttribute("open")) === null) await row.locator("summary").click();
   const preview = row.locator(".tool-image img");
-  await expect(preview).toBeVisible();
+  await expect(async () => {
+    if ((await row.getAttribute("open")) === null) await row.locator("summary").click();
+    await expect(preview).toBeVisible({ timeout: 2000 });
+  }).toPass({ timeout: 15_000 });
   return preview;
 }
 
