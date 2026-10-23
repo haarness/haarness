@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "Hold kommandoer og værktøjsoutput foldet sammen, indtil du åbner dem.",
   "Keep long lines within the editor width.": "Hold lange linjer inden for editorens bredde.",
   "Keyboard shortcuts": "Tastaturgenveje",
+  "Shortcuts not applied: {names} · /keybinds": "Genveje, der ikke blev anvendt: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "Sprog",
   "Language changes the interface only. English is the default.": "Ændrer kun grænsefladen. Engelsk er standardsproget.",

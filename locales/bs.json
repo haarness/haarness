@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "Drži naredbe i izlaz alata sažetim dok ih ne otvorite.",
   "Keep long lines within the editor width.": "Zadrži duge redove unutar širine editora.",
   "Keyboard shortcuts": "Prečice na tastaturi",
+  "Shortcuts not applied: {names} · /keybinds": "Prečice koje nisu primijenjene: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "Jezik",
   "Language changes the interface only. English is the default.": "Mijenja samo interfejs. Zadani jezik je engleski.",

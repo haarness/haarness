@@ -475,6 +475,12 @@ async fn run_with_client(
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
     app.thinking = config::load_thinking();
+    if !app.keybindings_skipped.is_empty() {
+        app.notice = app.language.format(
+            "Shortcuts not applied: {names} · /keybinds",
+            &[("names", &app.keybindings_skipped.join(", "))],
+        );
+    }
     // A waiting prompt takes the keyboard unless a restored draft is being
     // written, as one arriving live does; ctrl+g reaches it either way.
     if !app.pending_permissions.is_empty() {

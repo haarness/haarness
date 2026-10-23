@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "Keep commands and tool output folded until you open them.",
   "Keep long lines within the editor width.": "Keep long lines within the editor width.",
   "Keyboard shortcuts": "Keyboard shortcuts",
+  "Shortcuts not applied: {names} · /keybinds": "Shortcuts not applied: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "Language",
   "Language changes the interface only. English is the default.": "Language changes the interface only. English is the default.",

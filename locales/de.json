@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "Befehle und Werkzeugausgabe bleiben eingeklappt, bis du sie öffnest.",
   "Keep long lines within the editor width.": "Lange Zeilen auf die Editorbreite umbrechen.",
   "Keyboard shortcuts": "Tastenkombinationen",
+  "Shortcuts not applied: {names} · /keybinds": "Nicht angewendete Tastenkürzel: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "Sprache",
   "Language changes the interface only. English is the default.": "Ändert nur die Oberfläche. Englisch ist die Standardsprache.",

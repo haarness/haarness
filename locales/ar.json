@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "إبقاء الأوامر ومخرجات الأدوات مطوية حتى تفتحها.",
   "Keep long lines within the editor width.": "إبقاء الأسطر الطويلة ضمن عرض المحرر.",
   "Keyboard shortcuts": "اختصارات لوحة المفاتيح",
+  "Shortcuts not applied: {names} · /keybinds": "اختصارات لم تُطبَّق: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "اللغة",
   "Language changes the interface only. English is the default.": "يغير الواجهة فقط. اللغة الافتراضية هي الإنجليزية.",
