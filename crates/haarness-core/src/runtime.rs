@@ -4684,9 +4684,7 @@ impl AgentRuntime {
             PermissionReplyDecision::Reject => false,
         };
         // A person's answer ends a review that turning Auto on started.
-        if let Some(abort) = &pending.review_abort {
-            abort.cancel();
-        }
+        pending.end_review();
         if !allowed {
             // Rejecting one prompt rejects every other prompt in the same
             // root conversation: the model is being told to stop, and
@@ -4699,6 +4697,7 @@ impl AgentRuntime {
                 .collect();
             for other in siblings {
                 if let Some((_, other_pending)) = self.permissions.remove(&other) {
+                    other_pending.end_review();
                     self.publish_permission_resolved(&other, &other_pending, false);
                     let _ = other_pending
                         .sender
@@ -4713,6 +4712,12 @@ impl AgentRuntime {
             review: None,
         });
         Ok(())
+    }
+
+    /// How many of Auto's reviews are deciding a request now.
+    #[must_use]
+    pub fn auto_reviews_running(&self) -> usize {
+        self.approval_modes.reviews.running()
     }
 
     /// Whether Auto asks its reviewer model (`auto_review.enabled`).
@@ -4806,6 +4811,7 @@ impl AgentRuntime {
                     continue;
                 }
                 if let Some((_, pending)) = self.permissions.remove(&permission_id) {
+                    pending.end_review();
                     self.publish_permission_resolved(&permission_id, &pending, true);
                     let _ = pending.sender.send(PermissionResolution::allowed());
                     released.push(permission_id);
@@ -6282,7 +6288,9 @@ struct PendingPermissionCleanup {
 
 impl Drop for PendingPermissionCleanup {
     fn drop(&mut self) {
-        self.permissions.remove(&self.id);
+        if let Some((_, pending)) = self.permissions.remove(&self.id) {
+            pending.end_review();
+        }
     }
 }
 
@@ -6461,43 +6469,53 @@ async fn review_waiting(
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     id: String,
     reviewer: Arc<crate::auto_review::Reviewer>,
-    abort: CancellationToken,
+    mut abort: CancellationToken,
 ) {
-    let outcome = tokio::select! {
-        () = reviewer.cancel.cancelled() => None,
-        () = abort.cancelled() => None,
-        outcome = reviewer.review() => Some(outcome),
-    };
-    let _gate = approval_modes.gate.lock().await;
-    let Some(mut entry) = permissions.get_mut(&id) else {
-        return;
-    };
-    entry.stage = ReviewStage::Unreviewed;
-    let thread_id = entry.thread_id;
-    drop(entry);
-    let Some(outcome) = outcome else {
-        return;
-    };
-    if !approval_modes.is_auto(thread_id).await {
-        return;
-    }
-    let resolution = match outcome {
-        crate::auto_review::Outcome::Allow => PermissionResolution::allowed(),
-        crate::auto_review::Outcome::Deny(review) => PermissionResolution {
-            allowed: false,
-            feedback: None,
-            review: Some(review),
-        },
-        crate::auto_review::Outcome::Ask(_) => {
-            if let Some(mut entry) = permissions.get_mut(&id) {
-                entry.stage = ReviewStage::Reviewed;
-            }
+    loop {
+        let outcome = tokio::select! {
+            () = reviewer.cancel.cancelled() => return,
+            () = abort.cancelled() => None,
+            outcome = reviewer.review() => Some(outcome),
+        };
+        let _gate = approval_modes.gate.lock().await;
+        // Answered or gone meanwhile: nothing to settle.
+        let Some(thread_id) = permissions.get(&id).map(|entry| entry.thread_id) else {
             return;
+        };
+        let auto = approval_modes.is_auto(thread_id).await;
+        let Some(mut entry) = permissions.get_mut(&id) else {
+            return;
+        };
+        let resolution = match outcome {
+            // Out of Auto and back before this review saw it, so the switch
+            // back found it still reviewing: review again.
+            None if auto => {
+                abort = CancellationToken::new();
+                entry.review_abort = Some(abort.clone());
+                continue;
+            }
+            Some(crate::auto_review::Outcome::Allow) if auto => PermissionResolution::allowed(),
+            Some(crate::auto_review::Outcome::Deny(review)) if auto => PermissionResolution {
+                allowed: false,
+                feedback: None,
+                review: Some(review),
+            },
+            Some(crate::auto_review::Outcome::Ask(_)) if auto => {
+                entry.stage = ReviewStage::Reviewed;
+                return;
+            }
+            // The chat left Auto: the request stays the person's.
+            _ => {
+                entry.stage = ReviewStage::Unreviewed;
+                return;
+            }
+        };
+        drop(entry);
+        if let Some((_, pending)) = permissions.remove(&id) {
+            publish_permission_resolved(&events, &id, &pending, resolution.allowed);
+            let _ = pending.sender.send(resolution);
         }
-    };
-    if let Some((_, pending)) = permissions.remove(&id) {
-        publish_permission_resolved(&events, &id, &pending, resolution.allowed);
-        let _ = pending.sender.send(resolution);
+        return;
     }
 }
 
@@ -6526,6 +6544,7 @@ fn release_covered_permissions(
         .collect();
     for other in covered {
         if let Some((_, pending)) = permissions.remove(&other) {
+            pending.end_review();
             publish_permission_resolved(events, &other, &pending, true);
             let _ = pending.sender.send(PermissionResolution::allowed());
         }
@@ -6644,6 +6663,14 @@ fn question_request(arguments: &serde_json::Value) -> CoreResult<QuestionRequest
 }
 
 impl PendingPermission {
+    /// Ends a review still deciding this request: it was answered,
+    /// released or dropped, so the review's verdict could only be wasted.
+    fn end_review(&self) {
+        if let Some(abort) = &self.review_abort {
+            abort.cancel();
+        }
+    }
+
     fn info(&self, id: &str) -> PendingPermissionInfo {
         PendingPermissionInfo {
             permission_id: id.to_owned(),
@@ -9997,6 +10024,7 @@ impl RunnerTask {
         let resolution = tokio::select! {
             () = self.cancel.cancelled() => {
                 if let Some((_, pending)) = self.permissions.remove(&id) {
+                    pending.end_review();
                     self.events.publish_scoped(
                         "permission.resolved",
                         Some(pending.thread_id),

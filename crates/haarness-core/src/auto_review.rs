@@ -155,6 +155,17 @@ pub(crate) struct ReviewState {
     /// Per root chat: the turn (its newest person's message) and the blocks
     /// counted in it.
     turns: Mutex<HashMap<ThreadId, Tally>>,
+    /// Reviews deciding now.
+    running: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts a review as running until it ends or is dropped.
+struct Running<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -721,6 +732,11 @@ fn unnamed_deletion(request: &ReviewRequest, workspace: &Path, said: &str) -> Op
 }
 
 impl ReviewState {
+    /// How many reviews are deciding now.
+    pub(crate) fn running(&self) -> usize {
+        self.running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn tally(&self, root: ThreadId, turn: &str) -> Tally {
         let mut turns = self.turns.lock();
         if turns.len() >= 1000 && !turns.contains_key(&root) {
@@ -861,6 +877,10 @@ impl Reviewer {
     /// status `failed`. Stop is the caller's to watch: dropping the future
     /// cancels its calls.
     pub(crate) async fn review(&self) -> Outcome {
+        self.state
+            .running
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _running = Running(&self.state.running);
         let started = Instant::now();
         let timeout = self.settings.timeout;
         let review = self.decide(started);
