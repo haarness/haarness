@@ -29,11 +29,21 @@ function normalizeSearch(text: string) {
     .trim();
 }
 
+/** Scripts written without spaces between words: in them any letter can
+ * begin one, as 浏览器 does in 智能体浏览器控制. */
+const unspaced =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
 /** Where `phrase` starts a word of `title`, as "term" does in "Toggle
- * terminal" (and not in "Deterministic"). */
+ * terminal" (and not in "Deterministic"). Next to a script written without
+ * spaces, every position counts as a word's start. */
 function atWordStart(title: string, phrase: string) {
-  for (let at = title.indexOf(phrase); at >= 0; at = title.indexOf(phrase, at + 1))
-    if (at === 0 || !/[\p{L}\p{N}]/u.test(title[at - 1])) return true;
+  const first = [...phrase][0] ?? "";
+  for (let at = title.indexOf(phrase); at >= 0; at = title.indexOf(phrase, at + 1)) {
+    const before = [...title.slice(0, at)].at(-1);
+    if (!before || !/[\p{L}\p{N}]/u.test(before) || unspaced.test(before) || unspaced.test(first))
+      return true;
+  }
   return false;
 }
 
@@ -53,8 +63,7 @@ function searchScore(entry: SearchEntry, query: string) {
   );
   let score = title.startsWith(phrase) ? 500 : atWordStart(title, phrase) ? 350 : 0;
   for (const word of words) {
-    if (title.split(/[^\p{L}\p{N}]+/u).some((part) => part.startsWith(word)))
-      score += 100;
+    if (atWordStart(title, word)) score += 100;
     else if (title.includes(word)) score += 10;
     else if (content.includes(word)) score += 20;
     else {

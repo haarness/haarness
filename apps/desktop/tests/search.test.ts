@@ -92,6 +92,31 @@ test("a match inside a word ranks far below one at a word's start", () => {
   assert.deepEqual(searchEntries(withAlias, "term").slice(-2).map((item) => item.key), ["alias", "provider"]);
 });
 
+test("in scripts written without spaces a match anywhere in a title starts a word", () => {
+  const settings = (names: string[]) => names.map((name, index) => entry(String(index), name, { group: "Settings" }));
+  // Chinese: 浏览器 in 智能体浏览器控制 ranks with the titles that begin
+  // with it, above a setting found only by its keywords.
+  const zh = [
+    entry("alias", "显示完整网址", { group: "Settings", keywords: "浏览器 网址" }),
+    ...settings(["智能体浏览器控制", "浏览器设置范围", "浏览器"]),
+  ];
+  assert.deepEqual(searchEntries(zh, "浏览器").map((item) => item.name), ["浏览器", "浏览器设置范围", "智能体浏览器控制", "显示完整网址"]);
+  // Japanese, after a particle: エージェントのブラウザ制御.
+  const ja = [
+    entry("alias", "完全な URL を表示", { group: "Settings", keywords: "ブラウザ" }),
+    ...settings(["エージェントのブラウザ制御", "ブラウザ設定の適用範囲", "ブラウザ"]),
+  ];
+  assert.deepEqual(searchEntries(ja, "ブラウザ").map((item) => item.name), ["ブラウザ", "ブラウザ設定の適用範囲", "エージェントのブラウザ制御", "完全な URL を表示"]);
+  // Thai: กิจกรรมเครื่องมือแบบย่อ ranks above a tool found by its description.
+  const th = [
+    entry("tool", "web_fetch", { group: "Settings", keywords: "เครื่องมือ" }),
+    ...settings(["กิจกรรมเครื่องมือแบบย่อ", "เครื่องมือ"]),
+  ];
+  assert.deepEqual(searchEntries(th, "เครื่องมือ").map((item) => item.name), ["เครื่องมือ", "กิจกรรมเครื่องมือแบบย่อ", "web_fetch"]);
+  // A Latin word still has to begin where the query does.
+  assert.deepEqual(searchEntries(settings(["Deterministic", "Terminal"]), "term").map((item) => item.name), ["Terminal", "Deterministic"]);
+});
+
 test("an action outranks a setting or shortcut that matches as well", () => {
   const entries = [
     entry("setting", "Open project", { group: "Settings" }),
