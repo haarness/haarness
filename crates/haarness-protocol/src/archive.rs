@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    GoalState, Item, ItemData, ItemId, LoopConfig, Thread, ThreadId, TodoCheckpoint, TodoEntry,
-    Turn, TurnId,
+    GoalState, Item, ItemData, ItemId, LoopConfig, PermissionReview, ReviewReason, Thread,
+    ThreadId, TodoCheckpoint, TodoEntry, Turn, TurnId,
 };
 
 pub const SESSION_ARCHIVE_CAPABILITY: &str = "session-archive.v1";
@@ -332,6 +332,23 @@ fn redacted_value(kind: &str, id: impl std::fmt::Display, value: &Value) -> Valu
     }
 }
 
+/// The reviewer's note, its rule and the path or error a reason names all
+/// describe the action the note is about. What kind of note it is (status,
+/// risk, reason code, counts and seconds) stays.
+fn sanitize_review(review: &mut PermissionReview, id: ItemId) {
+    review.rule = redact_option("permission-review-rule", id, review.rule.as_deref());
+    review.rationale = redact_option("permission-review", id, review.rationale.as_deref());
+    match &mut review.reason {
+        Some(ReviewReason::UnnamedDeletion { path }) => {
+            *path = redact(path, "permission-review-path", id);
+        }
+        Some(ReviewReason::Error { detail }) => {
+            *detail = redact(detail, "permission-review-error", id);
+        }
+        _ => {}
+    }
+}
+
 fn sanitize_todos(items: &mut [TodoEntry], id: ItemId) {
     for (index, item) in items.iter_mut().enumerate() {
         item.content = redact(&item.content, "todo", format!("{id}-{index}"));
@@ -392,9 +409,8 @@ fn sanitize_item(item: &mut Item) {
             review,
             ..
         } => {
-            // The reviewer's note describes the action it is about.
-            if let Some(rationale) = review.as_mut().and_then(|review| review.rationale.as_mut()) {
-                *rationale = redact(rationale, "permission-review", item.id);
+            if let Some(review) = review {
+                sanitize_review(review, item.id);
             }
             *operation = redact(operation, "permission-operation", item.id);
             *detail = redacted_value("permission-detail", item.id, detail);
@@ -587,5 +603,76 @@ mod tests {
         assert!(!json.contains("\"command\":\"secret\""));
         assert!(json.contains("\"name\":\"bash\""));
         assert!(json.contains("redacted"));
+    }
+
+    #[test]
+    fn sanitization_redacts_what_a_review_note_names_and_keeps_its_code() {
+        use crate::{PermissionReviewStatus, ReviewRisk};
+        let mut original = archive();
+        let root = &mut original.threads[1];
+        let template = root.items[0].clone();
+        for (index, reason) in [
+            ReviewReason::UnnamedDeletion {
+                path: "/Users/someone/secret-project".into(),
+            },
+            ReviewReason::Error {
+                detail: "401 from https://internal.example/secret-endpoint".into(),
+            },
+            ReviewReason::Timeout { seconds: 60 },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut item = template.clone();
+            item.id = ItemId::new();
+            item.sequence = 2 + u64::try_from(index).unwrap();
+            item.data = ItemData::PermissionRequest {
+                permission_id: format!("p{index}"),
+                operation: "bash:rm -rf /Users/someone/secret-project".into(),
+                detail: json!({"command": "rm -rf /Users/someone/secret-project"}),
+                permission: "bash".into(),
+                patterns: Vec::new(),
+                always_patterns: Vec::new(),
+                review: Some(PermissionReview {
+                    status: PermissionReviewStatus::Asked,
+                    risk: Some(ReviewRisk::High),
+                    rule: Some("Deletes secret-project".into()),
+                    rationale: Some("It deletes secret-project.".into()),
+                    reason: Some(reason),
+                }),
+            };
+            root.items.push(item);
+        }
+        let archive = original.sanitize();
+        archive.validate().unwrap();
+        let json = serde_json::to_string(&archive).unwrap();
+        assert!(!json.contains("secret-project"), "{json}");
+        assert!(!json.contains("secret-endpoint"), "{json}");
+        let reviews: Vec<_> = archive.threads[1]
+            .items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::PermissionRequest { review, .. } => review.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reviews.len(), 3);
+        for review in &reviews {
+            assert_eq!(review.status, PermissionReviewStatus::Asked);
+            assert_eq!(review.risk, Some(ReviewRisk::High));
+            assert!(review.rule.as_deref().unwrap().starts_with("[redacted:"));
+        }
+        assert!(matches!(
+            &reviews[0].reason,
+            Some(ReviewReason::UnnamedDeletion { path }) if path.starts_with("[redacted:")
+        ));
+        assert!(matches!(
+            &reviews[1].reason,
+            Some(ReviewReason::Error { detail }) if detail.starts_with("[redacted:")
+        ));
+        assert_eq!(
+            reviews[2].reason,
+            Some(ReviewReason::Timeout { seconds: 60 })
+        );
     }
 }
