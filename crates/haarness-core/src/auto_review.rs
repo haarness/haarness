@@ -47,8 +47,12 @@ pub struct AutoReviewSettings {
     /// Off: Auto approves every eligible request once, as before the
     /// reviewer existed, configured asks included.
     pub enabled: bool,
-    /// `provider/model`; when set, the only reviewer tried.
+    /// `provider/model`; when set, the only reviewer tried. Only the base
+    /// and global layers set it.
     pub model: Option<String>,
+    /// `small_model` as the base and global layers set it, never a
+    /// project's: tried first when it is on the chat's own provider.
+    pub small_model: Option<String>,
     /// Facts about the person's environment, in plain language.
     pub environment: Vec<String>,
     /// Actions the reviewer may approve without an explicit request.
@@ -65,6 +69,7 @@ impl Default for AutoReviewSettings {
         Self {
             enabled: true,
             model: None,
+            small_model: None,
             environment: Vec::new(),
             allow: Vec::new(),
             block: Vec::new(),
@@ -132,7 +137,6 @@ pub(crate) struct Reviewer {
     pub providers: Arc<dyn ProviderRegistry>,
     pub settings: AutoReviewSettings,
     pub policy: String,
-    pub small_model: Option<String>,
     /// The provider and model of the turn (or chat) that asks.
     pub model: (String, String),
     pub workspace: PathBuf,
@@ -754,6 +758,51 @@ struct Candidate {
     fast: bool,
 }
 
+/// The reviewers to try, in order: the configured model alone; else the
+/// person's small model when it is on the chat's own provider (unless
+/// benched), then the chat's own model. What a review sends (the
+/// person's messages, the calls, the action) goes to no other provider
+/// unless the person named one in `auto_review.model`.
+fn candidates(
+    settings: &AutoReviewSettings,
+    chat: &(String, String),
+    state: &ReviewState,
+) -> Vec<Candidate> {
+    if let Some((provider, model)) = settings
+        .model
+        .as_deref()
+        .and_then(|model| model.split_once('/'))
+    {
+        return vec![Candidate {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            fast: false,
+        }];
+    }
+    let mut list = Vec::new();
+    if let Some((provider, model)) = settings
+        .small_model
+        .as_deref()
+        .and_then(|model| model.split_once('/'))
+        .filter(|(provider, model)| *provider == chat.0 && *model != chat.1)
+        .filter(|(provider, model)| !state.is_benched(&format!("{provider}/{model}")))
+    {
+        list.push(Candidate {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            fast: true,
+        });
+    }
+    if !chat.0.is_empty() && !chat.1.is_empty() {
+        list.push(Candidate {
+            provider: chat.0.clone(),
+            model: chat.1.clone(),
+            fast: false,
+        });
+    }
+    list
+}
+
 impl Reviewer {
     /// The tool call an approval covers: each of its requests (a command's
     /// folder outside the project, then the command) shows the same call.
@@ -776,46 +825,8 @@ impl Reviewer {
         ))
     }
 
-    /// The reviewers to try, in order: the configured model alone; else the
-    /// configured small model (unless benched), then the turn's own model.
-    /// Never another provider's model unless configured.
     fn candidates(&self) -> Vec<Candidate> {
-        if let Some((provider, model)) = self
-            .settings
-            .model
-            .as_deref()
-            .and_then(|model| model.split_once('/'))
-        {
-            return vec![Candidate {
-                provider: provider.to_owned(),
-                model: model.to_owned(),
-                fast: false,
-            }];
-        }
-        let mut list = Vec::new();
-        if let Some((provider, model)) = self
-            .small_model
-            .as_deref()
-            .and_then(|model| model.split_once('/'))
-            .filter(|(provider, model)| {
-                (*provider, *model) != (self.model.0.as_str(), self.model.1.as_str())
-            })
-            .filter(|(provider, model)| !self.state.is_benched(&format!("{provider}/{model}")))
-        {
-            list.push(Candidate {
-                provider: provider.to_owned(),
-                model: model.to_owned(),
-                fast: true,
-            });
-        }
-        if !self.model.0.is_empty() && !self.model.1.is_empty() {
-            list.push(Candidate {
-                provider: self.model.0.clone(),
-                model: self.model.1.clone(),
-                fast: false,
-            });
-        }
-        list
+        candidates(&self.settings, &self.model, &self.state)
     }
 
     /// Reviews the request. Never fails: a failure becomes an ask with
@@ -1482,6 +1493,45 @@ mod tests {
             unnamed_deletion(&request("bash", "rm -rf ../shared-cache"), &workspace, "").is_none()
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reviews_stay_on_the_chats_provider_unless_the_person_names_a_model() {
+        let state = ReviewState::default();
+        let chat = ("anthropic".to_owned(), "claude-sonnet".to_owned());
+        let names = |list: Vec<Candidate>| {
+            list.into_iter()
+                .map(|candidate| format!("{}/{}", candidate.provider, candidate.model))
+                .collect::<Vec<_>>()
+        };
+        let mut settings = AutoReviewSettings::default();
+        assert_eq!(
+            names(candidates(&settings, &chat, &state)),
+            ["anthropic/claude-sonnet"]
+        );
+        // A small model on another provider never gets the person's messages.
+        settings.small_model = Some("openai/gpt-mini".into());
+        assert_eq!(
+            names(candidates(&settings, &chat, &state)),
+            ["anthropic/claude-sonnet"]
+        );
+        settings.small_model = Some("anthropic/claude-haiku".into());
+        assert_eq!(
+            names(candidates(&settings, &chat, &state)),
+            ["anthropic/claude-haiku", "anthropic/claude-sonnet"]
+        );
+        // Benched, it is skipped.
+        state.bench("anthropic/claude-haiku");
+        assert_eq!(
+            names(candidates(&settings, &chat, &state)),
+            ["anthropic/claude-sonnet"]
+        );
+        // A model the person names is the only one tried, on any provider.
+        settings.model = Some("openai/gpt-mini".into());
+        assert_eq!(
+            names(candidates(&settings, &chat, &state)),
+            ["openai/gpt-mini"]
+        );
     }
 
     #[test]
