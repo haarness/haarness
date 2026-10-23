@@ -1878,6 +1878,7 @@
   "Loop stopped": "Løkken er stoppet",
   "Shell finished": "Shell-kommandoen er ferdig",
   "Allow this request once and enable Auto for this chat and its agents": "Tillat denne forespørselen én gang og slå på Auto for denne chatten og agentene",
+  "Then Auto decides for this chat": "Deretter avgjør Auto i denne chatten",
   "Back to parent chat": "Tilbake til overordnet chat",
   "Close find in chat": "Lukk søket i chatten",
   "Chat history": "Chatlogg",

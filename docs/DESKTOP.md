@@ -45,9 +45,10 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
    and other windows see the same mode. In Review, edits and commands inside the project run
    without asking; Haarness asks before using files outside the project, reading secrets such as
    `.env`, switching agents or generating paid media. The browser asks about a site only when
-   **Settings → Browser** sets it to **Requires approval**. A request card offers **Allow once**,
-   **Allow once + Auto**, **Always for this folder** (in a Git repository, **Always allow**
-   offers the folder or the whole repository) and **Deny**. In Auto, a reviewer model answers those
+   **Settings → Browser** sets it to **Requires approval**. A request card offers **Deny**,
+   **Always allow** and **Allow once** on one line, even in a narrow chat; the **Always allow**
+   menu holds **Always for this folder**, **Always for this repository** in a Git repository,
+   and **Allow once + Auto** while the chat is in Review. In Auto, a reviewer model answers those
    requests for the chat and its agents: it approves routine ones once, blocks risky ones with a
    reason, and leaves the rest to you with a quiet note on the card; an ask you configured for a
    specific command still comes to you. Cloud actions that spend money or delete something still

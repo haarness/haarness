@@ -1878,6 +1878,7 @@
   "Loop stopped": "Цикл остановлен",
   "Shell finished": "Команда оболочки выполнена",
   "Allow this request once and enable Auto for this chat and its agents": "Разрешить этот запрос один раз и включить Авто для этого чата и его агентов",
+  "Then Auto decides for this chat": "Дальше в этом чате решает Авто",
   "Back to parent chat": "Назад к родительскому чату",
   "Close find in chat": "Закрыть поиск в чате",
   "Chat history": "История чата",

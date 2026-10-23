@@ -1878,6 +1878,7 @@
   "Loop stopped": "루프를 중지했습니다",
   "Shell finished": "셸 명령이 완료되었습니다",
   "Allow this request once and enable Auto for this chat and its agents": "이 요청을 한 번 허용하고 이 채팅와 에이전트에 자동 승인을 켭니다",
+  "Then Auto decides for this chat": "이후 이 채팅에서는 자동 승인이 결정합니다",
   "Back to parent chat": "상위 채팅로 돌아가기",
   "Close find in chat": "채팅 찾기 닫기",
   "Chat history": "채팅 기록",

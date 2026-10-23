@@ -1878,6 +1878,7 @@
   "Loop stopped": "循环已停止",
   "Shell finished": "Shell 命令已完成",
   "Allow this request once and enable Auto for this chat and its agents": "允许本次请求，并为此对话及其智能体启用自动批准",
+  "Then Auto decides for this chat": "之后由自动批准为此对话做决定",
   "Back to parent chat": "返回上级对话",
   "Close find in chat": "关闭对话查找",
   "Chat history": "对话历史",

@@ -4004,11 +4004,11 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   const command =
     '!tool bash {"command":"printf auto-once-proof > auto-once.txt"}';
   await start(parent.id, command);
-  await expect(
-    page.getByRole("button", { name: "Allow once + Auto", exact: true }),
-  ).toBeVisible();
+  // Allow once + Auto waits in the Always menu, so the card's answers fit
+  // one line: Deny, Always allow, Allow once.
+  await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("button", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
     .click();
   await finished();
   expect(await readFile(join(workspace, "auto-once.txt"), "utf8")).toBe(
@@ -4312,18 +4312,23 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     });
   await still();
   const rest = await bottom();
-  // Its answers keep their places as Allow once + Auto goes, and a focus on
-  // that button passes to Allow once; the card is the same element, updated.
+  // Its answers keep their places as Allow once + Auto leaves the Always
+  // menu, and the keyboard stays on Allow once; the card is the same
+  // element, updated.
   const deny = card.getByRole("button", { name: "Deny", exact: true });
+  const always = card.getByRole("button", { name: "Always allow", exact: true });
   const once = card.getByRole("button", { name: "Allow once", exact: true });
   const across = async () =>
-    Promise.all([deny, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
+    Promise.all([deny, always, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
   const places = await across();
   await card.screenshot({ path: test.info().outputPath("auto-review-review-card-light.png") });
   await card.evaluate((node) => {
     node.dataset.probe = "kept";
   });
-  await card.getByRole("button", { name: "Allow once + Auto", exact: true }).focus();
+  await always.click();
+  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await once.focus();
   await client.setApprovalMode(thread.id, { mode: "auto" });
   await expect(auto).toBeVisible();
   await expect(card.locator(".approval-review")).toHaveText("Auto review is deciding…");
@@ -4331,6 +4336,9 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
   expect(Math.abs((await bottom()) - rest)).toBeLessThan(2);
   expect(await across()).toEqual(places);
   await expect(once).toBeFocused();
+  await always.click();
+  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await expect(card).toHaveAttribute("data-probe", "kept");
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
@@ -4402,7 +4410,7 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
   // Requests are decided one at a time: the dock shows the oldest and counts
   // the rest, so both children's prompts never stack.
   await expect(
-    page.getByRole("button", { name: "Allow once + Auto", exact: true }),
+    page.getByRole("button", { name: "Always allow", exact: true }),
   ).toHaveCount(1);
   await expect(page.locator(".prompt-count")).toHaveText("1 of 2");
   await page
@@ -4411,8 +4419,9 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
       exact: true,
     })
     .click();
+  await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("button", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
     .click();
   await expect
     .poll(() =>

@@ -1878,6 +1878,7 @@
   "Loop stopped": "Petlja je zaustavljena",
   "Shell finished": "Shell naredba je završena",
   "Allow this request once and enable Auto for this chat and its agents": "Dopusti ovaj zahtjev jednom i uključi Auto za ovaj razgovor i njegove agente",
+  "Then Auto decides for this chat": "Zatim Auto odlučuje u ovom razgovoru",
   "Back to parent chat": "Natrag na nadređeni razgovor",
   "Close find in chat": "Zatvori pretragu razgovora",
   "Chat history": "Povijest razgovora",
