@@ -306,6 +306,7 @@ test("an image that arrives above the view moves nothing being read", async () =
 });
 
 test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
+  await reply("The chart again: ![Weekly chart](out/chart.png)");
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
   // Leaving the chat and coming back draws its replies anew: no placeholder appears in between.
   await page.evaluate(() => {
@@ -469,7 +470,21 @@ test("the model's thinking and a side chat's answer show the project's images th
   expect(errors).toEqual([]);
 });
 
-test("placeholders speak the interface language", async () => {
+test("a local file: URL names a project file through the real sanitizer; one on another host does not", async () => {
+  const message = await reply(
+    `![Local](file://${workspace}/out/tall.png) ![Localhost](file://localhost${workspace}/out/chart.png) ` +
+      "![Share](file://fileserver/share/chart.png) ![System](file:///etc/chart.png)",
+  );
+  await expect(message.locator("img.project-image-loaded")).toHaveCount(2);
+  await expect(message.locator("img.project-image-loaded").first()).toHaveAttribute("data-project-path", "out/tall.png");
+  await expect(message.locator("img.project-image-loaded").last()).toHaveAttribute("data-project-path", "out/chart.png");
+  await expect(message.locator(".project-image .project-image-note")).toHaveText(["Outside this project", "Outside this project"]);
+  // No address the window would load by itself is left in the page.
+  await expect(message.locator('img:not([src^="data:"])')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("placeholders speak the interface language, and the viewer's arrows follow reading order right to left", async () => {
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   try {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
@@ -477,6 +492,20 @@ test("placeholders speak the interface language", async () => {
     await expect(message.locator(".project-image-alt").first()).toHaveText("صورة");
     await expect(message.locator(".project-image-note")).toHaveText(["خارج هذا المشروع", "غير متاح"]);
     if (shots) await shoot(message, join(shots, "reply-image-notes-rtl.png"));
+
+    const both = await reply("![A](out/wide.png)\n\n![B](out/tall.png)");
+    const [first, second] = [both.locator("img.project-image-loaded").first(), both.locator("img.project-image-loaded").last()];
+    await expect(second).toHaveAttribute("data-image-open", "");
+    await first.click();
+    const full = page.locator("dialog.image-viewer img.image-viewer-image");
+    await expect(full).toHaveAttribute("alt", "A");
+    // In Arabic the next image in reading order is to the left.
+    await page.keyboard.press("ArrowLeft");
+    await expect(full).toHaveAttribute("alt", "B");
+    await page.keyboard.press("ArrowRight");
+    await expect(full).toHaveAttribute("alt", "A");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("dialog.image-viewer")).toHaveCount(0);
   } finally {
     await page.evaluate(() => window.haarness.preferences({ language: "en" }));
   }
