@@ -92,16 +92,38 @@ export function Settings() {
         element.querySelector<HTMLElement>(
           ["input", "button", "select", "textarea"].map((name) => name + usable).join(", "),
         );
-      // Controls still disabled while the place loads are waited for.
+      // Controls still disabled while the place loads are waited for, a few
+      // seconds at most and only while the keyboard is still on the place
+      // (or nowhere): once the person has moved it, the jump is over.
+      const waited = landed;
+      const still = () => {
+        const active = document.activeElement;
+        return !active || active === document.body || active === element;
+      };
+      if (waited && !still()) return stop();
+      landed = true;
       if (!control && element.querySelector("input, button, select, textarea")) {
         element.tabIndex = -1;
         if (document.activeElement !== element) element.focus({ preventScroll: true });
+        waiting ??= setTimeout(stop, 4000);
         return;
       }
       if (!control) element.tabIndex = -1;
       (control ?? element).focus({ preventScroll: true });
-      observer.disconnect();
+      stop();
     };
+    let landed = false;
+    let waiting: ReturnType<typeof setTimeout> | undefined;
+    // The keyboard going anywhere else ends the wait at once.
+    const moved = (event: FocusEvent) => {
+      if (landed && marked && !marked.contains(event.target as Node)) stop();
+    };
+    const stop = () => {
+      observer.disconnect();
+      clearTimeout(waiting);
+      document.removeEventListener("focusin", moved);
+    };
+    document.addEventListener("focusin", moved);
     const observer = new MutationObserver(focus);
     queueMicrotask(() => {
       if (!disposed && content?.isConnected) {
@@ -111,7 +133,7 @@ export function Settings() {
     });
     onCleanup(() => {
       disposed = true;
-      observer.disconnect();
+      stop();
       clearTimeout(timer);
       marked?.classList.remove("setting-search-target");
     });
@@ -708,40 +730,44 @@ function Shortcuts() {
       <p class="muted">
         {t("Click a shortcut and press the keys you want. The editor also supports standard search, selection, undo, and save shortcuts.")}
       </p>
-      <For each={Object.entries(app.state.preferences.shortcuts)}>
-        {([name, value]) => (
-          <Row
-            title={shortcutTitles[name] ?? name}
-            target={"shortcut:" + name}
-            description={shortcutDescriptions[name]}
-          >
-            <kbd class="shortcut-preview" dir="ltr" aria-hidden="true">
-              {shortcutLabel(value, app.state.platform)}
-            </kbd>
-            <input
-              class="shortcut-input"
-              aria-label={t("Shortcut {name}", { name })}
-              value={shortcutField(value, app.state.platform)}
-              onKeyDown={(event) => {
-                const chord = recordChord(event, app.state.platform);
-                if (!chord) return;
-                event.preventDefault();
-                event.currentTarget.value = shortcutField(chord, app.state.platform);
-                event.currentTarget.dispatchEvent(new Event("change"));
-              }}
-              onChange={(event) =>
-                app.run(() =>
-                  app.settings({
-                    shortcuts: {
-                      ...app.state.preferences.shortcuts,
-                      [name]: shortcutFromField(event.currentTarget.value, app.state.platform),
-                    },
-                  }),
-                )
-              }
-            />
-          </Row>
-        )}
+      {/* By name, so recording a shortcut keeps its row and the keyboard in it. */}
+      <For each={Object.keys(app.state.preferences.shortcuts)}>
+        {(name) => {
+          const value = () => app.state.preferences.shortcuts[name];
+          return (
+            <Row
+              title={shortcutTitles[name] ?? name}
+              target={"shortcut:" + name}
+              description={shortcutDescriptions[name]}
+            >
+              <kbd class="shortcut-preview" dir="ltr" aria-hidden="true">
+                {shortcutLabel(value(), app.state.platform)}
+              </kbd>
+              <input
+                class="shortcut-input"
+                aria-label={t("Shortcut {name}", { name })}
+                value={shortcutField(value(), app.state.platform)}
+                onKeyDown={(event) => {
+                  const chord = recordChord(event, app.state.platform);
+                  if (!chord) return;
+                  event.preventDefault();
+                  event.currentTarget.value = shortcutField(chord, app.state.platform);
+                  event.currentTarget.dispatchEvent(new Event("change"));
+                }}
+                onChange={(event) =>
+                  app.run(() =>
+                    app.settings({
+                      shortcuts: {
+                        ...app.state.preferences.shortcuts,
+                        [name]: shortcutFromField(event.currentTarget.value, app.state.platform),
+                      },
+                    }),
+                  )
+                }
+              />
+            </Row>
+          );
+        }}
       </For>
       <GlobalShortcutRows />
       <Row title="New line">
