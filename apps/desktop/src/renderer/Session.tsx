@@ -2907,11 +2907,17 @@ function Permission(props: {
   // Settled already (Auto's reviewer, another window): one quiet line takes
   // the buttons' place, at their height, until the card goes. No toast: the
   // person's answer did nothing, and nothing else needs saying.
-  const [settled, setSettled] = createSignal(false);
+  const [settled, setSettled] = createSignal<{ height: number; focused: boolean }>();
   let settledTimer: ReturnType<typeof setTimeout> | undefined;
+  let footer: HTMLElement | undefined;
   onCleanup(() => clearTimeout(settledTimer));
   const showSettled = () => {
-    setSettled(true);
+    // The line holds the buttons' height, a second row of them included,
+    // and keeps the keyboard where it was.
+    setSettled({
+      height: footer?.offsetHeight ?? 0,
+      focused: !!footer?.contains(document.activeElement),
+    });
     settledTimer = setTimeout(() => void app.refresh(), SETTLED_NOTE_MS);
   };
   const decide = (decision: string) => {
@@ -3122,12 +3128,22 @@ function Permission(props: {
         </p>
       </Show>
       <Show when={settled()}>
-        <p class="prompt-actions approval-settled" role="status">
-          {t("Already answered")}
-        </p>
+        {(state) => (
+          <p
+            class="prompt-actions approval-settled"
+            role="status"
+            tabindex={state().focused ? -1 : undefined}
+            style={{ "min-height": state().height ? `${state().height}px` : undefined }}
+            ref={(line) => {
+              if (state().focused) queueMicrotask(() => line.focus());
+            }}
+          >
+            {t("Already answered")}
+          </p>
+        )}
       </Show>
       <Show when={explicit() && !settled()}>
-        <footer class="prompt-actions">
+        <footer class="prompt-actions" ref={footer}>
           <button
             class="ghost"
             disabled={answered()}
@@ -3149,7 +3165,7 @@ function Permission(props: {
         </footer>
       </Show>
       <Show when={!explicit() && !settled()}>
-        <footer class="prompt-actions">
+        <footer class="prompt-actions" ref={footer}>
           {/* At the start, apart from the answers: when Auto turns on and it
               goes, nothing else moves, and its focus passes to Allow once. */}
           <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
