@@ -3248,6 +3248,7 @@ impl Tool for BuiltinTool {
                     &context.cancel,
                     &tool_output_dir(),
                     &context.execution.shell_env,
+                    (!context.execution.person_shell).then_some(context.thread_id),
                 )
                 .await
             }

@@ -66,8 +66,10 @@ pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 /// provider error bodies, approval prompts, paths and client addresses.
 pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 
-/// The variable that names the chat an agent's shell command runs for. No
-/// process the server starts inherits it (see [`private_env_names`]).
+/// The variable that names the chat an agent's shell command runs for. The
+/// shell tool sets it for each command the agent runs (see
+/// [`ExecutionSettings::person_shell`]); no other process the server starts
+/// inherits it (see [`private_env_names`]).
 pub const SESSION_ID_ENV: &str = "HAARNESS_SESSION_ID";
 
 /// Variables a process the server starts for the agent, a terminal, a hook, an
