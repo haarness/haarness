@@ -238,6 +238,30 @@ fn cancel_settling_answer(app: &mut App) -> bool {
     true
 }
 
+/// Keys whose only meaning, while the card has the keyboard, is on the card:
+/// Enter, the arrows, Tab, the page keys and Ctrl+E. The message keys and the
+/// fold key (Alt+arrows, Ctrl+R by default) keep their meaning beyond it, as
+/// do Ctrl+Y and Ctrl+G.
+fn acts_only_on_card(app: &App, key: KeyEvent) -> bool {
+    if message_key(app, key).is_some() || presses_fold_key(app, key) {
+        return false;
+    }
+    matches!(
+        key.code,
+        KeyCode::Enter
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+    ) || (key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL)
+}
+
 /// What a key does to a one-key answer still settling.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettleKey {
@@ -520,7 +544,10 @@ pub async fn handle_key_at(
             }
             SettleKey::Sends => {
                 send_settling_answer(app, client).await?;
-                if key.code == KeyCode::Enter {
+                // A key that only moves on the card is spent with it: once
+                // the card is answered it must not recall a message, switch
+                // the agent or scroll something else instead.
+                if acts_only_on_card(app, key) {
                     return Ok(AppAction::Continue);
                 }
             }

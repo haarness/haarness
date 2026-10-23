@@ -9429,6 +9429,60 @@ async fn a_key_that_is_not_typing_sends_the_settling_answer_first() {
     }
 }
 
+/// A key that only moves on the card is spent with the answer it sends: `n`
+/// then ↑ does not then recall the last message into the prompt, and `y`
+/// then Tab does not then switch the agent.
+#[tokio::test]
+async fn a_key_that_sends_the_answer_does_not_act_again_after_it() {
+    for code in [KeyCode::Up, KeyCode::Tab] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.agents = ["build", "plan"]
+            .into_iter()
+            .map(|id| haarness_protocol::AgentProfile {
+                id: id.into(),
+                name: id.into(),
+                description: format!("{id} agent"),
+                hidden: false,
+                max_subagents: 4,
+                mode: Some("primary".into()),
+                model: None,
+            })
+            .collect();
+        let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+        app.sync_prompt_history(&client);
+        app.composer.set_text("previous message".into());
+        let _ = app.composer.take();
+        app.reduce(
+            outside_write_event(&thread, "perm-spent"),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        let agent = app.agent().to_owned();
+        for key in [
+            KeyEvent::new(
+                KeyCode::Char(if code == KeyCode::Up { 'n' } else { 'y' }),
+                KeyModifiers::NONE,
+            ),
+            KeyEvent::new(code, KeyModifiers::NONE),
+        ] {
+            crate::input::handle_key(&mut app, key, &client)
+                .await
+                .unwrap();
+        }
+        assert!(app.pending_permissions.is_empty(), "{code:?}");
+        assert!(app.composer.is_empty(), "{code:?}: {}", app.composer.text());
+        assert_eq!(app.agent(), agent, "{code:?}");
+        let decision = if code == KeyCode::Up {
+            "reject"
+        } else {
+            "once"
+        };
+        assert!(server.await.unwrap()[0].contains(&format!("\"decision\":\"{decision}\"")));
+    }
+}
+
 /// A key typed within the window counts as typed within it however late the
 /// loop handles it, and input waiting at the deadline is handled first.
 #[tokio::test]
