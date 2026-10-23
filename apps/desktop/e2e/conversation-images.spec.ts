@@ -236,6 +236,16 @@ test("a reply's image from the project shows, fitted no taller than 320px and ne
   expect(errors).toEqual([]);
 });
 
+test("thumbnails side by side in your own message count as one line toward the fold", async () => {
+  // Twelve lines of text and one line of three thumbnails: thirteen lines, which fold.
+  const lines = Array.from({ length: 12 }, (_, index) => `Line ${index + 1}`).join("\n");
+  await reply(`${lines}\n\n![a](out/chart.png) ![b](out/tall.png) ![c](out/wide.png)`);
+  const own = page.locator(".message.user").last();
+  await expect(own.locator("img.project-image-loaded")).toHaveCount(3);
+  await expect(own.getByRole("button", { name: "Show more", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("a path out of the project, through a link or not, is never read and says why", async () => {
   const message = await reply(
     "![Secret](../outside/secret.png) ![Linked](escape.png) ![Folder link](shared/secret.png) " +

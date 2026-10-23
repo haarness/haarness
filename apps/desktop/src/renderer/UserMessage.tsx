@@ -15,6 +15,7 @@ import { Button } from "./ui";
 import { pasteLabel } from "./PromptContext";
 import { commandPrompt, countLines, sentParts } from "./prompt-context";
 import { isOpen, setOpen } from "./disclosure";
+import { pictureLines } from "./picture-lines";
 import "./user-message.css";
 
 /** A prompt taller than this many lines folds to its first eight
@@ -71,10 +72,7 @@ export function UserMessageBody(props: {
     // sits on counts.
     const measure = () => {
       const line = parseFloat(getComputedStyle(body).lineHeight) || 22;
-      let pictures = 0;
-      for (const picture of content.querySelectorAll("img, .project-image"))
-        pictures += Math.max(0, picture.getBoundingClientRect().height - line);
-      setTall(content.scrollHeight - pictures > line * FOLD_LINES + 1);
+      setTall(content.scrollHeight - pictureLines(content, line) > line * FOLD_LINES + 1);
     };
     const observer = new ResizeObserver(measure);
     observer.observe(content);
