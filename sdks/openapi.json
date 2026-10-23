@@ -5246,6 +5246,25 @@
             "type": "object"
           },
           {
+            "description": "The command runs `program`'s inline code (`python3 -c`, `perl -e`),\nwhich plainly deletes or names a path outside the project, and the\nperson's messages do not ask for it.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "inline_code"
+                ],
+                "type": "string"
+              },
+              "program": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "program",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
             "description": "The reviewer rated the action's risk (see `risk`) and gave no reason.",
             "properties": {
               "code": {

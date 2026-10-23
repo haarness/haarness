@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Zablokowane działania w tej turze: {count}, więc resztę zatwierdzasz ty.",
   "This deletes {path}, outside the project, and your messages do not name it.": "To usuwa {path}, poza projektem, a twoje wiadomości tego nie wymieniają.",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "To usuwa {path}, ścieżkę, której Haarness nie potrafi umiejscowić, a twoje wiadomości jej nie wymieniają.",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "To uruchamia kod {program}, który usuwa pliki lub sięga poza projekt, a twoje wiadomości o to nie proszą.",
   "Destructive action": "Działanie niszczące",
   "Already answered": "Już odpowiedziano",
   "It rated this action critical risk.": "Ocenił to działanie jako krytycznie ryzykowne.",

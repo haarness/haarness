@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Заблокировано действий за этот ход: {count}, поэтому остаток одобряете вы.",
   "This deletes {path}, outside the project, and your messages do not name it.": "Это удаляет {path} вне проекта, а ваши сообщения этого не называют.",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "Это удаляет {path} — путь, который Haarness не может определить, и ваши сообщения его не называют.",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "Это запускает код {program}, который удаляет файлы или выходит за пределы проекта, а ваши сообщения об этом не просят.",
   "Destructive action": "Разрушительное действие",
   "Already answered": "Уже отвечено",
   "It rated this action critical risk.": "Действие оценено как критически рискованное.",

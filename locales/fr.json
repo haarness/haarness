@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Elle a bloqué {count} actions pendant ce tour : le reste est à vous d’approuver.",
   "This deletes {path}, outside the project, and your messages do not name it.": "Ceci supprime {path}, hors du projet, et vos messages ne le nomment pas.",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "Ceci supprime {path}, un chemin que Haarness ne peut pas situer, et vos messages ne le nomment pas.",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "Ceci exécute du code {program} qui supprime des fichiers ou sort du projet, et vos messages ne le demandent pas.",
   "Destructive action": "Action destructrice",
   "Already answered": "Déjà répondu",
   "It rated this action critical risk.": "Elle a jugé cette action à risque critique.",

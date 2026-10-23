@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "บล็อกการดำเนินการ {count} รายการในรอบนี้ ส่วนที่เหลือคุณต้องอนุมัติเอง",
   "This deletes {path}, outside the project, and your messages do not name it.": "สิ่งนี้ลบ {path} ซึ่งอยู่นอกโปรเจกต์ และข้อความของคุณไม่ได้ระบุถึง",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "คำสั่งนี้ลบ {path} ซึ่งเป็นพาธที่ Haarness ระบุตำแหน่งไม่ได้ และข้อความของคุณไม่ได้ระบุถึงพาธนี้",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "คำสั่งนี้รันโค้ด {program} ที่ลบไฟล์หรือเข้าถึงนอกโปรเจกต์ และข้อความของคุณไม่ได้ขอให้ทำ",
   "Destructive action": "การดำเนินการที่ทำลายข้อมูล",
   "Already answered": "ตอบแล้ว",
   "It rated this action critical risk.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงร้ายแรง",

@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Bu turda {count} eylemi engelledi; geri kalanını sizin onaylamanız gerekiyor.",
   "This deletes {path}, outside the project, and your messages do not name it.": "Bu, proje dışındaki {path} yolunu siliyor ve mesajlarınız bunu belirtmiyor.",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "Bu, Haarness'ın konumunu belirleyemediği bir yol olan {path} öğesini siliyor ve mesajlarınız onu belirtmiyor.",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "Bu, dosya silen veya projenin dışına uzanan {program} kodunu çalıştırıyor ve mesajlarınız bunu istemiyor.",
   "Destructive action": "Yıkıcı işlem",
   "Already answered": "Zaten yanıtlandı",
   "It rated this action critical risk.": "Bu eylemi kritik risk olarak değerlendirdi.",
