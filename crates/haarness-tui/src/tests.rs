@@ -7600,6 +7600,7 @@ async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_aut
     crate::input::handle_key(&mut app, key(KeyCode::Char('y')), &client)
         .await
         .unwrap();
+    settle(&mut app, &client).await;
     assert!(app.pending_permissions.is_empty());
     assert_eq!(app.notice, "Already answered");
     assert!(!app.auto_permissions);
@@ -7633,6 +7634,7 @@ async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_aut
     crate::input::handle_key(&mut app, key(KeyCode::Char('y')), &client)
         .await
         .unwrap();
+    settle(&mut app, &client).await;
     assert_eq!(app.pending_permissions.len(), 1);
     assert!(
         app.notice.starts_with("Could not answer permission"),
@@ -9020,6 +9022,15 @@ fn outside_write_event(thread: &Thread, id: &str) -> haarness_protocol::EventEnv
     )
 }
 
+/// Let a one-key approval answer's window pass, as the event loop does when
+/// it wakes at the answer's deadline.
+async fn settle(app: &mut App, client: &crate::api::ApiClient) {
+    if let Some((_, _, at)) = &mut app.permission_typed {
+        *at -= crate::input::ANSWER_SETTLE_TIME;
+    }
+    crate::input::settle_answer(app, client).await.unwrap();
+}
+
 async fn type_text(app: &mut App, text: &str, client: &crate::api::ApiClient) {
     for character in text.chars() {
         crate::input::handle_key(
@@ -9046,6 +9057,9 @@ async fn typing_a_message_while_the_card_waits_answers_nothing() {
         "run it again",
         "www.example.com is down",
         "uuid parsing fails",
+        "yes but use printf",
+        "no wait",
+        "n?",
     ] {
         let thread = fixture_thread();
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
@@ -9067,6 +9081,101 @@ async fn typing_a_message_while_the_card_waits_answers_nothing() {
             "the card still says how to answer it: {}",
             app.notice
         );
+    }
+}
+
+/// `y` and `n` light their chip at once and answer only once no other key
+/// follows within a moment, so "yes…" or "no wait" typed at a waiting card
+/// is a message. Enter sends the lit chip at once; Esc takes the letter back
+/// without rejecting anything.
+#[tokio::test]
+async fn a_one_key_answer_settles_before_it_is_sent() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    // Nothing may be sent while a letter settles: this client has no server.
+    let offline = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-once"), &offline)
+        .await
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(app.permission_focus);
+    assert!(app.composer.is_empty());
+    assert!(crate::input::settle_deadline(&app).is_some());
+    // A wake-up before the window ends sends nothing.
+    crate::input::settle_answer(&mut app, &offline)
+        .await
+        .unwrap();
+    assert_eq!(app.pending_permissions.len(), 1);
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    settle(&mut app, &client).await;
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("/permissions/perm-once"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("\"decision\":\"once\""),
+        "{}",
+        requests[0]
+    );
+
+    // `n` lights Reject; Esc puts the card back as it was.
+    app.reduce(outside_write_event(&thread, "perm-reject"), &offline)
+        .await
+        .unwrap();
+    let reject = crate::state::PermissionChoice::available(&app)
+        .iter()
+        .position(|choice| *choice == crate::state::PermissionChoice::Reject)
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('n')).await;
+    assert_eq!(app.permission_selection, reject, "the chip lights at once");
+    press_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(app.pending_permissions.len(), 1, "esc rejected nothing");
+    assert_eq!(app.permission_selection, 0);
+    assert!(crate::input::settle_deadline(&app).is_none());
+    assert!(app.permission_focus);
+
+    // Enter sends the lit chip without waiting.
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    for code in [KeyCode::Char('n'), KeyCode::Enter] {
+        crate::input::handle_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE), &client)
+            .await
+            .unwrap();
+    }
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("\"decision\":\"reject\""),
+        "{}",
+        requests[0]
+    );
+}
+
+/// A reply typed at a waiting card that starts with an answer letter goes to
+/// the prompt whole, however long after the letter its next key came, and
+/// nothing is answered then or later.
+#[tokio::test]
+async fn a_reply_starting_with_y_or_n_answers_nothing() {
+    for message in ["yes but use printf", "no wait"] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let client = offline_client();
+        app.reduce(outside_write_event(&thread, "perm-reply"), &client)
+            .await
+            .unwrap();
+        let (first, rest) = message.split_at(1);
+        type_text(&mut app, first, &client).await;
+        type_text(&mut app, rest, &client).await;
+        // The loop's wake-up long after finds nothing to send.
+        settle(&mut app, &client).await;
+        assert_eq!(app.composer.text(), message);
+        assert_eq!(app.pending_permissions.len(), 1, "{message}");
+        assert_eq!(app.permission_selection, 0, "{message}");
+        assert!(!app.permission_focus, "{message}");
+        assert!(crate::input::settle_deadline(&app).is_none(), "{message}");
     }
 }
 

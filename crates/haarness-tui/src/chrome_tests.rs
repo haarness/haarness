@@ -722,6 +722,10 @@ async fn chrome_approval_offers_this_chat_once_or_deny_and_allows_with_one_press
     )
     .await
     .unwrap();
+    // Its chip lights at once; the answer goes once no key follows.
+    assert_eq!(app.permission_selection, 0);
+    assert_eq!(app.pending_permissions.len(), 1);
+    settle(&mut app, &client).await;
     let requests = server.await.unwrap();
     assert!(
         requests[0].contains("/permissions/chrome"),
