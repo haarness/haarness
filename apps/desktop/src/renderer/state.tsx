@@ -665,8 +665,9 @@ function createApp(saved?: Preferences) {
     set("preview", "");
     if (state.connection) rememberTabs(state.connection.id);
   }
-  // A preview becomes a tab of its own once it is used: a draft typed there,
-  // work running there, or an approval or a question waiting for an answer.
+  // A preview becomes a tab of its own once it is used: a draft there (text,
+  // attachments or context chips such as a folded paste), work running
+  // there, or an approval or a question waiting for an answer.
   createEffect(() => {
     const id = state.preview;
     const connection = state.connection?.id;
@@ -676,6 +677,7 @@ function createApp(saved?: Preferences) {
     if (
       !!state.drafts[key] ||
       !!attachmentDraft(key)?.length ||
+      !!contexts()[key]?.length ||
       state.turns.some((turn) => turn.threadId === id || root(turn.threadId) === id) ||
       [...state.permissions, ...state.questions].some(
         (item) => (item.rootThreadId ?? item.threadId) === id,
