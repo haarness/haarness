@@ -19569,6 +19569,52 @@ fn a_batch_with_a_failed_step_reads_failed_and_marks_that_step() {
     assert!(german.contains("✗ batch  1 fehlgeschlagen"), "{german}");
 }
 
+/// A batch waiting on a person for one of its steps marks that step ⚠, the
+/// steps before it ● and the steps after it ○: the waiting status names no
+/// call, so the step is the one the last tool status named.
+#[tokio::test]
+async fn a_batch_waiting_on_a_step_marks_that_step() {
+    let thread = fixture_thread();
+    let steps = [
+        ("bash", serde_json::json!({"command":"echo first"})),
+        ("bash", serde_json::json!({"command":"echo second"})),
+        ("bash", serde_json::json!({"command":"echo third"})),
+    ];
+    let turn = TurnId::new();
+    let mut items = batch_items(&thread, &steps, None);
+    items[0].turn_id = Some(turn);
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let client = offline_client();
+    let status = |state: &str, call: Option<&str>| {
+        fixture_event(
+            "turn.status",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "state": state,
+                "tool": call.map(|_| "bash"),
+                "callId": call,
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    app.reduce(status("tool", Some("call-batch:2")), &client)
+        .await
+        .unwrap();
+    let mut pending = pending_permission_fixture(&thread, "perm-step");
+    pending.turn_id = Some(turn);
+    app.pending_permissions = vec![pending];
+    app.reduce(status("waiting_permission", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("⚠ batch"), "{text}");
+    assert!(text.contains("● bash echo first"), "{text}");
+    assert!(text.contains("⚠ bash echo second"), "{text}");
+    assert!(text.contains("○ bash echo third"), "{text}");
+}
+
 #[tokio::test]
 async fn completion_toasts_only_reach_an_unfocused_terminal() {
     let thread = fixture_thread();

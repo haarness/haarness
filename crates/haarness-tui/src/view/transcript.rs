@@ -2019,22 +2019,31 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } else {
                         listed.len()
                     };
-                    // The step running now, or waiting for approval: the
-                    // turn's status names it as `<call id>:N`, the batch's
-                    // Nth step.
-                    let running = app
-                        .phase
-                        .as_ref()
-                        .filter(|phase| {
-                            matches!(
-                                phase.state.as_str(),
-                                "tool" | "reviewing" | "waiting_permission" | "waiting_question"
-                            )
-                        })
-                        .and_then(|phase| phase.call_id.as_deref())
-                        .and_then(|active| active.strip_prefix(call_id.as_str()))
-                        .and_then(|rest| rest.strip_prefix(':'))
-                        .and_then(|index| index.parse::<usize>().ok());
+                    // The step running now: the turn's status names it as
+                    // `<call id>:N`, the batch's Nth step. While the batch
+                    // is the call a person is asked about, the waiting
+                    // status names nothing, and the step is the one the last
+                    // tool status named when that was a step of this batch.
+                    let step_of = |active: &str| {
+                        active
+                            .strip_prefix(call_id.as_str())
+                            .and_then(|rest| rest.strip_prefix(':'))
+                            .and_then(|index| index.parse::<usize>().ok())
+                    };
+                    let running = if awaiting {
+                        app.last_tool_call
+                            .as_deref()
+                            .filter(|active| {
+                                crate::state::batch_parent_call(active) == Some(call_id.as_str())
+                            })
+                            .and_then(step_of)
+                    } else {
+                        app.phase
+                            .as_ref()
+                            .filter(|phase| matches!(phase.state.as_str(), "tool" | "reviewing"))
+                            .and_then(|phase| phase.call_id.as_deref())
+                            .and_then(step_of)
+                    };
                     let mut push = |row: Line| match result {
                         Some(result) => block.push_tagged(row, HitTarget::ToolToggle(result.id)),
                         None => block.push(row),
