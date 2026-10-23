@@ -4547,6 +4547,7 @@ impl AgentRuntime {
                 permissions: Arc::clone(&self.permissions),
                 id: id.clone(),
             };
+            let mut listed = true;
             if let Some(reviewer) = reviewer.as_ref().filter(|_| review_now) {
                 match review_registered(
                     &self.permissions,
@@ -4557,6 +4558,7 @@ impl AgentRuntime {
                     &cancel,
                     &mut receiver,
                     &read_script,
+                    script_read.then(|| shown.take()),
                 )
                 .await?
                 {
@@ -4579,79 +4581,85 @@ impl AgentRuntime {
                 }
             } else if script_card && !script_read {
                 // Auto went off before the gate: a card shows at once after
-                // all, listed once its script is read.
+                // all, listed once its script is read, unless the request
+                // was answered meanwhile (a sibling's reject, a covering
+                // Always): then there is no card, only its answer.
                 shown = read_script().await;
                 let gate = self.approval_modes.gate.lock().await;
-                if let Some(entry) = self.permissions.get_mut(&id) {
-                    announce(entry, shown.as_ref());
-                }
+                listed = match self.permissions.get_mut(&id) {
+                    Some(entry) => {
+                        announce(entry, shown.as_ref());
+                        true
+                    }
+                    None => false,
+                };
                 drop(gate);
             }
             let script = shown.as_ref().map(|shown| shown.script.clone());
-            let review = self
-                .permissions
-                .get(&id)
-                .and_then(|entry| entry.review.clone());
-            let prompt = self
-                .repository
-                .append_item(
-                    thread_id,
+            if listed {
+                let review = self
+                    .permissions
+                    .get(&id)
+                    .and_then(|entry| entry.review.clone());
+                let prompt = self
+                    .repository
+                    .append_item(
+                        thread_id,
+                        None,
+                        ItemData::PermissionRequest {
+                            permission_id: id.clone(),
+                            operation: operation.clone(),
+                            detail: card.clone(),
+                            permission: plan.permission.clone(),
+                            patterns: asked.clone(),
+                            always_patterns: always_rules.clone(),
+                            review: review.clone(),
+                        },
+                    )
+                    .await?;
+                self.events.publish_scoped(
+                    "item.created",
+                    Some(thread_id),
+                    Some(root),
                     None,
-                    ItemData::PermissionRequest {
-                        permission_id: id.clone(),
-                        operation: operation.clone(),
-                        detail: card.clone(),
-                        permission: plan.permission.clone(),
-                        patterns: asked.clone(),
-                        always_patterns: always_rules.clone(),
-                        review: review.clone(),
-                    },
-                )
-                .await?;
-            self.events.publish_scoped(
-                "item.created",
-                Some(thread_id),
-                Some(root),
-                None,
-                Some(prompt.id),
-                json!(prompt),
-            );
-            self.events.publish_scoped(
-                "permission.requested",
-                Some(thread_id),
-                Some(root),
-                None,
-                None,
-                {
-                    let mut requested = json!({
-                        "permissionId": id,
-                        "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                        "allowAlways": !forced,
-                        "explicit": explicit,
-                        "operation": operation,
-                        "detail": card,
-                        "script": script,
-                        "permission": plan.permission,
-                        "patterns": asked,
-                        "alwaysPatterns": always_rules,
-                        "threadId": thread_id,
-                        "rootThreadId": root,
-                        "agent": thread.agent,
-                    });
-                    if let Some(review) = &review {
-                        requested["review"] = json!(review);
-                    }
-                    requested
-                },
-            );
-            if let Some(hooks) = &components.hooks {
-                let hooks = Arc::clone(hooks);
-                let message = format!("Permission needed: {operation}");
-                tokio::spawn(async move {
-                    hooks
-                        .notification(thread_id, "permission_prompt", &message)
-                        .await;
+                    Some(prompt.id),
+                    json!(prompt),
+                );
+                let mut requested = json!({
+                    "permissionId": id,
+                    "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
+                    "allowAlways": !forced,
+                    "explicit": explicit,
+                    "operation": operation,
+                    "detail": card,
+                    "script": script,
+                    "permission": plan.permission,
+                    "patterns": asked,
+                    "alwaysPatterns": always_rules,
+                    "threadId": thread_id,
+                    "rootThreadId": root,
+                    "agent": thread.agent,
                 });
+                if let Some(review) = &review {
+                    requested["review"] = json!(review);
+                }
+                self.events.publish_scoped(
+                    "permission.requested",
+                    Some(thread_id),
+                    Some(root),
+                    None,
+                    None,
+                    requested,
+                );
+                if let Some(hooks) = &components.hooks {
+                    let hooks = Arc::clone(hooks);
+                    let message = format!("Permission needed: {operation}");
+                    tokio::spawn(async move {
+                        hooks
+                            .notification(thread_id, "permission_prompt", &message)
+                            .await;
+                    });
+                }
             }
             let resolution = tokio::select! {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
@@ -6833,7 +6841,9 @@ enum Reviewed {
 /// settles it under the approval gate in the mode that holds then: only an
 /// Auto that still answers it acts on the verdict, and a chat that left Auto
 /// meanwhile gets its prompt, never an approval. Stop removes the request.
-#[allow(clippy::too_many_arguments)]
+/// `read` is the card's script when the caller already read it (`Some(None)`
+/// when there is none to show), so a card reads its script once.
+#[allow(clippy::too_many_arguments, clippy::option_option)]
 async fn review_registered<Prepared>(
     permissions: &DashMap<String, PendingPermission>,
     approval_modes: &crate::approval_mode::ApprovalModes,
@@ -6843,10 +6853,14 @@ async fn review_registered<Prepared>(
     cancel: &CancellationToken,
     receiver: &mut oneshot::Receiver<PermissionResolution>,
     script: impl Fn() -> Prepared,
+    read: Option<Option<crate::permissions::script::Shown>>,
 ) -> CoreResult<Reviewed>
 where
     Prepared: std::future::Future<Output = Option<crate::permissions::script::Shown>>,
 {
+    // The script read once: before the gate (`read`), or in a pass of the
+    // loop below, kept across its passes.
+    let mut read = read;
     loop {
         let abort = permissions
             .get(id)
@@ -6868,7 +6882,10 @@ where
         // so it is listed with its script or not at all.
         let mut prepared = match outcome {
             Some(crate::auto_review::Outcome::Allow | crate::auto_review::Outcome::Deny(_)) => None,
-            _ => Some(script().await),
+            _ => Some(match read.take() {
+                Some(kept) => kept,
+                None => script().await,
+            }),
         };
         let gate = approval_modes.gate.lock().await;
         let auto = approval_modes.is_auto(thread_id).await;
@@ -6883,6 +6900,7 @@ where
             // Out of Auto and back before the review saw it: review again.
             None if auto => {
                 entry.review_abort = Some(CancellationToken::new());
+                read = prepared.take();
                 continue;
             }
             Some(crate::auto_review::Outcome::Allow) if auto => {
@@ -6908,7 +6926,10 @@ where
             None => {
                 drop(entry);
                 drop(gate);
-                let shown = script().await;
+                let shown = match read.take() {
+                    Some(kept) => kept,
+                    None => script().await,
+                };
                 let gate = approval_modes.gate.lock().await;
                 let Some(entry) = permissions.get_mut(id) else {
                     drop(gate);
@@ -10537,6 +10558,7 @@ impl RunnerTask {
         drop(approval_gate);
         // The review runs with no lock held: a mode change, a reply to
         // another request or a Stop is never held up by a model call.
+        let mut listed = true;
         if let Some(reviewer) = reviewer.as_ref().filter(|_| review_now) {
             // Several calls of one turn can be reviewed at once (parallel
             // reads, a batch): the turn reads `reviewing` from the first
@@ -10552,6 +10574,7 @@ impl RunnerTask {
                 &self.cancel,
                 &mut receiver,
                 &read_script,
+                script_read.then(|| shown.take()),
             )
             .await;
             // A prompt shown next sets the turn's status itself.
@@ -10574,74 +10597,82 @@ impl RunnerTask {
             }
         } else if script_card && !script_read {
             // Auto went off before the gate: a card shows at once after all,
-            // listed once its script is read.
+            // listed once its script is read, unless the request was
+            // answered meanwhile (a sibling's reject, a covering Always):
+            // then there is no card, only its answer.
             shown = read_script().await;
             let gate = self.approval_modes.gate.lock().await;
-            if let Some(entry) = self.permissions.get_mut(&id) {
-                announce(entry, shown.as_ref());
-            }
+            listed = match self.permissions.get_mut(&id) {
+                Some(entry) => {
+                    announce(entry, shown.as_ref());
+                    true
+                }
+                None => false,
+            };
             drop(gate);
         }
         let script = shown.as_ref().map(|shown| shown.script.clone());
-        let review = self
-            .permissions
-            .get(&id)
-            .and_then(|entry| entry.review.clone());
-        self.publish_item(ItemData::PermissionRequest {
-            permission_id: id.clone(),
-            operation: operation.clone(),
-            detail: detail.clone(),
-            permission: plan.permission.clone(),
-            patterns: plan.patterns.clone(),
-            always_patterns: always_rules.clone(),
-            review: review.clone(),
-        })
-        .await?;
-        let mut requested = json!({
-                "permissionId": id,
-                "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                "allowAlways": !forced,
-                "explicit": explicit,
-                "operation": operation,
-                "detail": detail,
-                "script": script,
-                "permission": plan.permission,
-                "patterns": plan.patterns,
-                "alwaysPatterns": always_rules,
-                "threadId": self.thread.id,
-                "rootThreadId": self.root_thread_id,
-                "turnId": self.turn.id,
-                "agent": self.thread.agent,
-        });
-        if let Some(review) = &review {
-            requested["review"] = json!(review);
-        }
-        self.events.publish_scoped(
-            "permission.requested",
-            Some(self.thread.id),
-            Some(self.root_thread_id),
-            Some(self.turn.id),
-            None,
-            requested,
-        );
-        self.set_status("waiting_permission", None);
-        if let Some(hooks) = &self.hooks {
-            let hooks = Arc::clone(hooks);
-            let thread_id = self.thread.id;
-            let message = format!("Permission needed: {operation}");
-            tokio::spawn(async move {
-                hooks
-                    .notification(thread_id, "permission_prompt", &message)
-                    .await;
+        if listed {
+            let review = self
+                .permissions
+                .get(&id)
+                .and_then(|entry| entry.review.clone());
+            self.publish_item(ItemData::PermissionRequest {
+                permission_id: id.clone(),
+                operation: operation.clone(),
+                detail: detail.clone(),
+                permission: plan.permission.clone(),
+                patterns: plan.patterns.clone(),
+                always_patterns: always_rules.clone(),
+                review: review.clone(),
+            })
+            .await?;
+            let mut requested = json!({
+                    "permissionId": id,
+                    "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
+                    "allowAlways": !forced,
+                    "explicit": explicit,
+                    "operation": operation,
+                    "detail": detail,
+                    "script": script,
+                    "permission": plan.permission,
+                    "patterns": plan.patterns,
+                    "alwaysPatterns": always_rules,
+                    "threadId": self.thread.id,
+                    "rootThreadId": self.root_thread_id,
+                    "turnId": self.turn.id,
+                    "agent": self.thread.agent,
             });
+            if let Some(review) = &review {
+                requested["review"] = json!(review);
+            }
+            self.events.publish_scoped(
+                "permission.requested",
+                Some(self.thread.id),
+                Some(self.root_thread_id),
+                Some(self.turn.id),
+                None,
+                requested,
+            );
+            self.set_status("waiting_permission", None);
+            if let Some(hooks) = &self.hooks {
+                let hooks = Arc::clone(hooks);
+                let thread_id = self.thread.id;
+                let message = format!("Permission needed: {operation}");
+                tokio::spawn(async move {
+                    hooks
+                        .notification(thread_id, "permission_prompt", &message)
+                        .await;
+                });
+            }
+            self.publish_task_update("waiting_permission");
+            tracing::info!(
+                thread = %self.thread.id,
+                permission = id,
+                operation = %operation_for_log(&operation),
+                "permission requested; waiting for a reply"
+            );
         }
-        self.publish_task_update("waiting_permission");
-        tracing::info!(
-            thread = %self.thread.id,
-            permission = id,
-            operation = %operation_for_log(&operation),
-            "permission requested; waiting for a reply"
-        );
         let resolution = tokio::select! {
             () = self.cancel.cancelled() => {
                 if let Some((_, pending)) = self.permissions.remove(&id) {
