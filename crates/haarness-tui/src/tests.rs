@@ -12738,6 +12738,57 @@ fn selector_dialog_bounds_its_viewport_and_reports_the_visible_item_range() {
     );
 }
 
+/// Below 12 rows or 40 columns the chrome goes and the conversation stays:
+/// every row above the prompt reads its newest lines, and PgUp scrolls it.
+/// Every size down to a single cell draws without a panic.
+#[tokio::test]
+async fn a_small_terminal_still_shows_the_conversation() {
+    let thread = fixture_thread();
+    let mut items = Vec::new();
+    for index in 1..=12 {
+        items.push(message_item(
+            index * 2 - 1,
+            &thread,
+            ItemData::UserMessage {
+                text: format!("question {index}"),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ));
+        items.push(message_item(
+            index * 2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: format!("answer {index}"),
+            },
+        ));
+    }
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    for size in [(100, 11), (30, 10), (39, 20), (12, 4)] {
+        let text = frame_text(&app, size);
+        assert!(text.contains("answer 12"), "{size:?}: {text}");
+        assert!(!text.contains("h a a r n e s s"), "{size:?}: {text}");
+    }
+    let text = frame_text(&app, (100, 11));
+    assert!(text.contains("Ask anything…"), "{text}");
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (100, 11));
+    assert!(!text.contains("answer 12"), "{text}");
+    for width in 1..=41 {
+        for height in 1..=13 {
+            let _ = app.lines((width, height));
+        }
+    }
+}
+
 #[test]
 fn compact_terminal_keeps_the_toast_visible() {
     let thread = fixture_thread();

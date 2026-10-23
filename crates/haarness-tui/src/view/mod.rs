@@ -236,19 +236,20 @@ impl App {
             return self.finish_frame(lines, hits, height);
         }
         if width < 40 || height < 12 {
-            self.max_viewport_offset.set(0);
             self.transcript_messages.borrow_mut().clear();
             let mut hits = Vec::new();
             let mut lines = compact_frame(self, width, height, &mut hits);
             apply_dialog(self, &mut lines, &mut hits, width, height);
             // As in the full frame, the approval rows are the attention
-            // surface; a toast repeating them would cover them.
-            let toast_repeats_card = self.first_pending_permission().is_some()
-                && matches!(self.overlay, Overlay::None)
-                && self
-                    .notification_toast
-                    .as_ref()
-                    .is_some_and(|toast| toast.approval);
+            // surface, and a question at the end of the conversation is in
+            // view: a toast repeating either would cover it.
+            let question_shown =
+                self.first_pending_question().is_some() && self.effective_viewport_offset() == 0;
+            let toast_repeats_card = matches!(self.overlay, Overlay::None)
+                && self.notification_toast.as_ref().is_some_and(|toast| {
+                    (toast.approval && self.first_pending_permission().is_some())
+                        || (toast.question && question_shown)
+                });
             if !toast_repeats_card {
                 apply_toast(self, &mut lines, &mut hits, width, height);
             }
@@ -670,13 +671,50 @@ fn compact_frame(
     hits: &mut Vec<frame::HitRegion>,
 ) -> Vec<Line> {
     let mut lines = vec![Line::empty(); height];
+    app.max_viewport_offset.set(0);
     if height == 0 {
         return lines;
     }
-    lines[0] = Line::plain(single_line("haarness", width), app.theme.primary);
     // The keyboard may already answer a waiting request here, so it is never
     // hidden: its subject, its answers, and the hint in the status row.
     let card_owns_keys = app.permission_focus && app.first_pending_permission().is_some();
+    // Chrome goes first, the conversation last: the masthead, sidebar and
+    // band's segments are gone, and every row above the prompt (and the
+    // approval rows) reads the newest of the conversation, scrollable.
+    let card = app.first_pending_permission().is_some();
+    let reserved = match (height >= 3, card) {
+        (false, _) => height,
+        (true, false) => 3,
+        (true, true) if height >= 5 => 5,
+        (true, true) => 4,
+    };
+    let room = height.saturating_sub(reserved);
+    if app.is_home() || room == 0 {
+        lines[0] = Line::plain(single_line("haarness", width), app.theme.primary);
+    } else {
+        let body = transcript::transcript_lines(app, width);
+        let max_offset = body.lines.len().saturating_sub(room);
+        app.max_viewport_offset.set(max_offset);
+        app.transcript_rows.set(room);
+        let offset = app.effective_viewport_offset().min(max_offset);
+        app.set_effective_viewport_offset(offset);
+        let end = body.lines.len() - offset;
+        let start = end.saturating_sub(room);
+        for (row, line) in body.lines[start..end].iter().enumerate() {
+            lines[row] = line.clone();
+        }
+        for (row, target) in body.tags {
+            if row >= start && row < end {
+                hits.push(frame::HitRegion {
+                    row: row - start,
+                    start: 0,
+                    end: width,
+                    target,
+                    paint_hover: false,
+                });
+            }
+        }
+    }
     let notice = app.permission_notice();
     if height >= 3 {
         if !app.is_child_view() {
