@@ -10730,6 +10730,103 @@ async fn background_root_completion_notifies_after_activity_snapshot_race() {
     );
 }
 
+/// While a request waits for approval nothing runs: the call that asked
+/// shows a still ⚠ and the calls after it a quiet ○, never a spinner.
+#[tokio::test]
+async fn calls_waiting_on_an_approval_do_not_spin() {
+    let thread = fixture_thread();
+    let call = |sequence, id: &str, name: &str, arguments| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let items = vec![
+        call(1, "c1", "bash", serde_json::json!({"command": "echo one"})),
+        call(2, "c2", "bash", serde_json::json!({"command": "echo two"})),
+        call(3, "c3", "read", serde_json::json!({"path": "README.md"})),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(haarness_protocol::TurnId::new());
+    let client = offline_client();
+    let status = |state: &str, call: Option<&str>| {
+        fixture_event(
+            "turn.status",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "state": state,
+                "tool": call.map(|_| "bash"),
+                "callId": call,
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    app.reduce(status("tool", Some("c1")), &client)
+        .await
+        .unwrap();
+    app.reduce(status("waiting_permission", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("⚠ bash echo one  waiting for approval"),
+        "{text}"
+    );
+    assert!(text.contains("○ bash echo two  queued"), "{text}");
+    assert!(text.contains("○ read README.md  queued"), "{text}");
+    for frame in ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇'] {
+        assert!(!text.contains(frame), "{text}");
+    }
+    // Answered, the call runs again and so does its spinner.
+    app.reduce(status("tool", Some("c1")), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("waiting for approval"), "{text}");
+    assert!(text.contains("○ bash echo two  queued"), "{text}");
+    // A call waiting for a question's answer waits as still, marked ?.
+    app.reduce(status("waiting_question", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("? bash echo one"), "{text}");
+    assert!(text.contains("○ bash echo two  queued"), "{text}");
+    for frame in ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇'] {
+        assert!(!text.contains(frame), "{text}");
+    }
+    // A question asked with no tool status before it is the question call's.
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![
+            call(1, "c1", "bash", serde_json::json!({"command": "echo one"})),
+            call(
+                2,
+                "q1",
+                "question",
+                serde_json::json!({"prompt": "Which one?"}),
+            ),
+        ],
+        vec![],
+        vec![],
+    );
+    app.active_turn = Some(haarness_protocol::TurnId::new());
+    app.reduce(status("waiting_question", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("? question Which one?"), "{text}");
+    assert!(!text.contains("question Which one?  queued"), "{text}");
+    assert!(text.contains("○ bash echo one  queued"), "{text}");
+}
+
 #[tokio::test]
 async fn turn_status_drives_the_status_line() {
     let thread = fixture_thread();
@@ -19076,7 +19173,10 @@ async fn a_draft_cleared_with_ctrl_c_comes_back() {
             .unwrap();
     }
     assert_eq!(app.composer.text(), "half a thought");
-    assert_eq!(app.notice, "", "back in the prompt, it is not cleared any more");
+    assert_eq!(
+        app.notice, "",
+        "back in the prompt, it is not cleared any more"
+    );
     for key in [
         press(KeyCode::Char('c'), KeyModifiers::CONTROL),
         press(KeyCode::Char('-'), KeyModifiers::CONTROL),
