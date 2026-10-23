@@ -212,6 +212,21 @@ try:
     keys('n')
     finish(started)
 
+    # `cd scripts &` moves a subshell of its own: the shell runs ./deploy.sh
+    # where it is, and the card names that one, its text withheld.
+    started = turn('cd scripts & sh deploy.sh; wait')
+    pending = approval()
+    assert pending['script']['path'] == str(workspace / 'deploy.sh'), pending
+    screen = until(
+        lambda: (text if 'An earlier step' in (text := capture()) else None),
+        'backgrounded cd note',
+    )
+    assert 'An earlier step of this command can change deploy.sh,' in screen, screen
+    assert '│ #!/bin/sh' not in screen and 'Script:' not in screen, screen
+    check('a script after a backgrounded cd is named where the shell stays', 'background')
+    keys('n')
+    finish(started)
+
     for command in ['source .env.local', 'source ./.envrc', 'printf plain']:
         started = turn(command)
         pending = approval()
