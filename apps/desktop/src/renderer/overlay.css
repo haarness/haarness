@@ -1737,6 +1737,105 @@ dialog .notifications {
     gap: var(--s3);
   }
 }
+/* A quiet text action beside a setting's value: no frame, the muted tone,
+   the text colour and an underline on hover. */
+button.settings-link,
+.setting-row button.settings-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+button.settings-link:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+}
+/* A disclosure that opens a list in place: its words, then the shared chevron
+   pointing the way it opens (reversed right to left). */
+.disclosure-toggle {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  gap: var(--s1);
+  color: var(--muted);
+  font-size: inherit;
+}
+.disclosure-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+.disclosure-toggle > .icon {
+  flex: none;
+  transition: transform var(--fast) var(--ease);
+}
+.disclosure-toggle[aria-expanded="true"] > .icon {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .disclosure-toggle[aria-expanded="false"] > .icon {
+  transform: scaleX(-1);
+}
+
+/* Providers: what is connected, each with its own quiet actions. */
+.provider-row > header {
+  margin-bottom: 0;
+}
+.setting-block .provider-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
+  margin: 2px 0 0;
+  font-size: var(--ui);
+}
+.provider-models {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+}
+.provider-models li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s2);
+  color: var(--muted);
+}
+.provider-models strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.provider-models code {
+  font-size: var(--ui-xs);
+}
+
+/* Models and Tools: the search, then a quiet switch or summary at the end. */
+.settings-content > .models-toolbar,
+.settings-content > .tools-toolbar {
+  justify-content: space-between;
+  gap: var(--s3);
+}
+.models-toolbar > input,
+.tools-toolbar > input {
+  flex: 0 1 260px;
+}
+.quiet-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+.models-elsewhere {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+
 
 /* Native modality supplies initial focus, background inertness and restoration. */
  .settings-dialog {

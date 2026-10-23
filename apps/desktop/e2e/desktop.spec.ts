@@ -3849,7 +3849,8 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
   const block = settings.locator(".setting-block").filter({
     has: page.getByRole("heading", { name: "OpenAI", exact: true }),
   });
-  await expect(block).toContainText("Not connected");
+  // Providers lists what is connected; the catalog is in Connect a provider.
+  await expect(block).toHaveCount(0);
   await settings
     .getByRole("button", { name: "Connect a provider", exact: true })
     .click();
@@ -3891,7 +3892,7 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
     .getByRole("dialog", { name: "Disconnect OpenAI?", exact: true })
     .getByRole("button", { name: "Disconnect", exact: true })
     .click();
-  await expect(block).toContainText("Not connected");
+  await expect(block).toHaveCount(0);
   expect(
     (await client.providers()).find((provider) => provider.id === "openai")
       ?.authenticated,
@@ -11142,13 +11143,22 @@ test("provider artwork and combined reasoning follow each model's actual capabil
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await settings.getByRole("button", { name: "Providers", exact: true }).click();
-    for (const id of ["anthropic", "openai", "gemini"])
-      await expect(settings.locator(`[data-setting="provider:${id}"] [data-provider-icon="${id}"]`)).toHaveCount(1);
+    // The connected custom provider is listed with the neutral icon; the
+    // catalog, with each brand's artwork, is in Connect a provider.
     await expect(settings.locator('[data-setting="provider:picker-fixture"] [data-provider-icon="generic"]')).toHaveCount(1);
-    const icon = settings.locator('[data-setting="provider:anthropic"] .provider-icon-mask');
+    await expect(settings.locator('[data-setting="provider:anthropic"]')).toHaveCount(0);
+    await settings.getByRole("button", { name: "Connect a provider", exact: true }).click();
+    const connect = page.getByRole("dialog", { name: "Connect a provider", exact: true });
+    for (const id of ["anthropic", "openai", "gemini"])
+      await expect(connect.locator(`.connect-row[data-provider="${id}"] [data-provider-icon="${id}"]`)).toHaveCount(1);
+    const icon = connect.locator('.connect-row[data-provider="anthropic"] .provider-icon-mask');
     await expect.poll(() => icon.evaluate((element) => getComputedStyle(element).maskImage)).not.toBe("none");
     await page.screenshot({ path: test.info().outputPath("provider-icons-dark.png") });
+    await connect.getByRole("button", { name: "Close dialog", exact: true }).click();
     await settings.getByRole("button", { name: "Models", exact: true }).click();
+    // Models of providers that are not connected wait behind Show all.
+    await expect(settings.locator('tbody [data-provider-icon="anthropic"]')).toHaveCount(0);
+    await settings.getByRole("switch", { name: "Show all", exact: true }).check();
     await expect(settings.locator('tbody [data-provider-icon="anthropic"]').first()).toBeVisible();
     await settings.getByRole("button", { name: "Close settings", exact: true }).click();
     await page.getByRole("button", { name: "Search", exact: true }).click();
