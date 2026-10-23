@@ -14,6 +14,9 @@ use crate::state::{App, InterruptTarget, Overlay, PermissionChoice, PhaseInfo, s
 
 const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// What Ctrl+C on a draft says: the draft is cleared, not lost.
+const DRAFT_CLEARED: &str = "Draft cleared · ↑ brings it back";
+
 fn confirm<T: Copy + PartialEq>(pending: &mut Option<(T, std::time::Instant)>, target: T) -> bool {
     let now = std::time::Instant::now();
     if pending.as_ref().is_some_and(|(candidate, armed)| {
@@ -271,6 +274,21 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
     Ok(true)
 }
 
+/// Undo in a prompt: Ctrl+- (or Ctrl+_) as each terminal sends it. Most,
+/// tmux and macOS Terminal among them, have no code for Ctrl+- and send
+/// 0x1F, Ctrl+_'s, which crossterm reads as Ctrl+7; the kitty keyboard
+/// protocol reports the key itself.
+pub(crate) fn undo_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('-' | '7') => key.modifiers == KeyModifiers::CONTROL,
+        KeyCode::Char('_') => {
+            key.modifiers == KeyModifiers::CONTROL
+                || key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        }
+        _ => false,
+    }
+}
+
 /// A message key bound to a named key (an arrow, Home, End, Page Up/Down).
 /// Those move the transcript even while an approval card or a question holds
 /// the keyboard: reading back is how the answer gets decided, and such a key
@@ -444,7 +462,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         } else if app.cancel_queue_edit() {
             app.notice = "Edit cancelled · draft restored".into();
         } else if !app.composer.is_empty() || !app.attachments.is_empty() || app.shell_mode {
-            app.composer.clear();
+            let kept = app.composer.discard();
             app.attachments.clear();
             app.undo_draft = None;
             app.mention_suggestions.clear();
@@ -452,7 +470,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.shell_mode = false;
             app.autocomplete_hidden = false;
             app.selection = 0;
-            app.notice = "Input cleared".into();
+            app.notice = if kept { DRAFT_CLEARED } else { "Input cleared" }.into();
         } else if let Some(turn) = app.active_turn {
             let target = InterruptTarget::Turn(turn);
             if confirm(&mut app.ctrl_c_action, target) {
@@ -819,6 +837,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             {
                 app.composer.redo();
             }
+            _ if undo_key(key) => app.composer.undo(),
             KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match character {
                     'a' => app.composer.move_home(),
@@ -827,7 +846,6 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     'w' => app.composer.delete_word_back(),
                     'k' => app.composer.kill_to_end(),
                     'u' => app.composer.kill_to_start(),
-                    '-' => app.composer.undo(),
                     '.' => app.composer.redo(),
                     _ => {}
                 }
@@ -897,6 +915,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
+            _ if undo_key(key) => app.composer.undo(),
             KeyCode::Char('p') => app.open_overlay(Overlay::Commands),
             KeyCode::Char('l') => {
                 app.refresh_threads(client).await?;
@@ -927,7 +946,6 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             KeyCode::Char('w') | KeyCode::Backspace => app.composer.delete_word_back(),
             KeyCode::Char('k') => app.composer.kill_to_end(),
             KeyCode::Char('u') => app.composer.kill_to_start(),
-            KeyCode::Char('-') if key.modifiers == KeyModifiers::CONTROL => app.composer.undo(),
             KeyCode::Char('.') if key.modifiers == KeyModifiers::CONTROL => app.composer.redo(),
             KeyCode::Char('j') | KeyCode::Enter => app.composer.insert_char('\n'),
             KeyCode::Left => app.composer.move_word_left(),
@@ -996,6 +1014,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.move_selection(-1);
             } else if !app.composer.move_up() && app.composer.history_prev() {
                 app.selection = 0;
+                // Brought back, the cleared draft needs no more saying so.
+                if app.notice == DRAFT_CLEARED {
+                    app.notice.clear();
+                }
             }
         }
         KeyCode::Down => {
