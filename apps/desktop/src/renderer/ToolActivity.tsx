@@ -12,7 +12,7 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { onProjectImageSettled, readProjectImage, readToolImage, shownProjectImage } from "./project-images";
+import { imageProject, onProjectImageSettled, readProjectImage, readToolImage, shownProjectImage } from "./project-images";
 import { openImage } from "./ImageViewer";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
@@ -346,16 +346,17 @@ export function ToolActivity(props: {
 function ReadImage(props: { image: { data: string } | { path: string }; alt: string }) {
   const store = useApp();
   const image = props.image;
-  const connection = store.state.connection?.id;
+  const project = imageProject(store.state);
+  const connection = project?.connection;
   const [data, setData] = createSignal(
     "data" in image ? image.data : connection ? shownProjectImage(connection, image.path)?.data : undefined,
   );
-  if ("path" in image && connection) {
+  if ("path" in image && project) {
     const reading = new AbortController();
     const off = onProjectImageSettled((scope, path, shown) => {
       if (scope === connection && path === image.path && shown.data !== undefined) setData(shown.data);
     });
-    readProjectImage(connection, image.path, reading.signal);
+    readProjectImage(project, image.path, reading.signal);
     onCleanup(() => {
       reading.abort();
       off();

@@ -2,19 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   PROJECT_IMAGE_LIMITS,
-  changesProject,
+  askOnce,
   fileImage,
   forgetProjectImages,
   holdProjectImages,
   imageType,
+  inViewedTree,
+  localProject,
   onProjectImageSettled,
   projectChanged,
+  projectEvent,
+  projectFileWritten,
   projectImagePath,
   readToolImage,
   relabelProjectImages,
   requestProjectImage,
   shownProjectImage,
   sniffImage,
+  windowFocused,
   type ShownImage,
 } from "../src/renderer/project-images";
 import { madeHere, replyAttribute } from "../src/renderer/remote-images";
@@ -171,17 +176,44 @@ test("a reply's own markup cannot dress as a project image or as one that opens 
   assert.equal(replyAttribute("data-image-opener", "x"), "x");
 });
 
-test("a turn's end, the file API and a tool that writes say the project may have changed", () => {
-  assert.equal(changesProject({ type: "turn.finished" }), true);
-  assert.equal(changesProject({ type: "files.updated" }), true);
-  const result = (name: string, is_error = false) => ({
+test("only the viewed chat's own work, or a write of the file itself, changes what its images show", () => {
+  const threads = [{ id: "child", parentId: "mine" }, { id: "mine" }, { id: "other" }];
+  const viewing = (selected: string) => (thread?: string | null, root?: string | null) =>
+    inViewedTree(selected, threads, thread, root);
+  const viewed = viewing("mine");
+  const result = (name: string, threadId = "mine", rootThreadId: string | null = threadId, is_error = false) => ({
     type: "item.created",
+    threadId,
+    rootThreadId,
     payload: { data: { type: "tool_result", name, is_error } },
   });
-  for (const name of ["write", "edit", "apply_patch", "bash", "shell"]) assert.equal(changesProject(result(name)), true, name);
-  for (const name of ["read", "grep", "webfetch"]) assert.equal(changesProject(result(name)), false, name);
-  assert.equal(changesProject(result("write", true)), false);
-  assert.equal(changesProject({ type: "turn.text_delta" }), false);
+  assert.deepEqual(projectEvent({ type: "files.updated", payload: { path: "out/a.png" } }, viewed), { path: "out/a.png" });
+  assert.equal(projectEvent({ type: "files.updated", payload: {} }, viewed), undefined);
+  assert.equal(projectEvent({ type: "turn.finished", threadId: "mine" }, viewed), "changed");
+  for (const name of ["write", "edit", "apply_patch", "bash", "shell"]) assert.equal(projectEvent(result(name), viewed), "changed", name);
+  // Its subagents' work is its own.
+  assert.equal(projectEvent(result("bash", "grandchild", "mine"), viewed), "changed");
+  // Another chat's, however busy, is not; nor are reads, failures or streamed text.
+  assert.equal(projectEvent({ type: "turn.finished", threadId: "other", rootThreadId: "other" }, viewed), undefined);
+  assert.equal(projectEvent(result("bash", "other"), viewed), undefined);
+  for (const name of ["read", "grep", "webfetch"]) assert.equal(projectEvent(result(name), viewed), undefined, name);
+  assert.equal(projectEvent(result("write", "mine", "mine", true), viewed), undefined);
+  assert.equal(projectEvent({ type: "turn.text_delta", threadId: "mine" }, viewed), undefined);
+  // Viewing a child chat, its whole tree counts.
+  assert.equal(projectEvent(result("bash", "mine", "mine"), viewing("child")), "changed");
+  assert.equal(projectEvent(result("bash", "other"), viewing("child")), undefined);
+  assert.equal(inViewedTree(undefined, threads, "mine", "mine"), false);
+});
+
+test("a reply asks for each of its images once, and for at most its share of paths", () => {
+  const asked = new Set<string>();
+  const requested: string[] = [];
+  const paths = Array.from({ length: PROJECT_IMAGE_LIMITS.paths + 2 }, (_, index) => `${index}.png`);
+  for (let patch = 0; patch < 5; patch++) {
+    const over = askOnce(paths, asked, (path) => requested.push(path));
+    assert.deepEqual([...over], paths.slice(PROJECT_IMAGE_LIMITS.paths));
+  }
+  assert.deepEqual(requested, paths.slice(0, PROJECT_IMAGE_LIMITS.paths));
 });
 
 type File = { content?: string; encoding?: string } | Error | undefined;
@@ -214,7 +246,18 @@ function heard() {
   return { settled, off };
 }
 
-test("an image is read once for its project, shown to every reply, and read again only after a change", async () => {
+/** Runs `body` with a remembered image read again at once after a change. */
+async function rechecking(body: () => Promise<void>) {
+  const recheck = PROJECT_IMAGE_LIMITS.recheck;
+  PROJECT_IMAGE_LIMITS.recheck = 0;
+  try {
+    await body();
+  } finally {
+    PROJECT_IMAGE_LIMITS.recheck = recheck;
+  }
+}
+
+test("an image is read once for its project, shown to every reply, and read again only after a change", () => rechecking(async () => {
   forgetProjectImages();
   const files = { "a.png": png, "b.png": jpeg } as Record<string, File | Uint8Array>;
   const source = reader(files);
@@ -244,7 +287,7 @@ test("an image is read once for its project, shown to every reply, and read agai
 
   // A file that changed is shown anew; one that cannot be read again keeps its picture.
   files["a.png"] = jpeg;
-  projectChanged();
+  projectChanged("project");
   requestProjectImage("project", "a.png", source.read, live.signal);
   await settle();
   assert.deepEqual(settled.at(-1), ["project", "a.png", { data: `data:image/jpeg;base64,${base64(jpeg)}` }]);
@@ -254,7 +297,77 @@ test("an image is read once for its project, shown to every reply, and read agai
   await settle();
   assert.deepEqual(shownProjectImage("project", "a.png"), { data: `data:image/jpeg;base64,${base64(jpeg)}` });
   off();
+}));
+
+test("a live reply reads each image once while other chats, its own tools and the window keep busy", async () => {
+  forgetProjectImages();
+  const source = reader({ "a.png": png, "b.png": jpeg });
+  const viewed = (thread?: string | null, root?: string | null) => inViewedTree("mine", [], thread, root);
+  const event = (value: Parameters<typeof projectEvent>[0]) => {
+    const change = projectEvent(value, viewed);
+    if (change === "changed") projectChanged("project");
+    else if (change) projectFileWritten("project", change.path);
+  };
+  const busy = (threadId: string) =>
+    event({ type: "item.created", threadId, rootThreadId: threadId, payload: { data: { type: "tool_result", name: "bash" } } });
+  // A reply streams in 60 pieces; each is drawn again, as Markdown.tsx does, while
+  // another chat and a subagent of this one run commands and the window comes forward.
+  const live = new AbortController();
+  const asked = new Set<string>();
+  for (let piece = 0; piece < 60; piece++) {
+    askOnce(piece < 30 ? ["a.png"] : ["a.png", "b.png"], asked, (path) =>
+      requestProjectImage("project", path, source.read, live.signal),
+    );
+    busy("other");
+    event({ type: "item.created", threadId: "sub", rootThreadId: "mine", payload: { data: { type: "tool_result", name: "bash" } } });
+    windowFocused();
+    await settle();
+  }
+  assert.deepEqual(source.calls, ["a.png", "b.png"]);
+
+  // Drawn again by a new reply, scrolled back into view, within the recheck time: still no read.
+  for (let draw = 0; draw < 5; draw++) {
+    busy("mine");
+    requestProjectImage("project", "a.png", source.read, new AbortController().signal);
+    await settle();
+  }
+  assert.deepEqual(source.calls, ["a.png", "b.png"]);
+
+  // Another chat's work never makes it stale; the file API writing the file does, at once.
+  event({ type: "files.updated", payload: { path: "out/other.png" } });
+  requestProjectImage("project", "a.png", source.read, live.signal);
+  await settle();
+  assert.deepEqual(source.calls, ["a.png", "b.png"]);
+  event({ type: "files.updated", payload: { path: "a.png" } });
+  requestProjectImage("project", "a.png", source.read, live.signal);
+  requestProjectImage("project", "b.png", source.read, live.signal);
+  await settle();
+  assert.deepEqual(source.calls, ["a.png", "b.png", "a.png"]);
+
+  // Past the recheck time, this chat's own change has it read again, once.
+  await rechecking(async () => {
+    busy("mine");
+    for (let draw = 0; draw < 3; draw++) requestProjectImage("project", "b.png", source.read, live.signal);
+    await settle();
+    requestProjectImage("project", "b.png", source.read, live.signal);
+    await settle();
+  });
+  assert.deepEqual(source.calls, ["a.png", "b.png", "a.png", "b.png"]);
 });
+
+test("the window coming to the front reads a project on this computer again, never a remote host's", () => rechecking(async () => {
+  forgetProjectImages();
+  const source = reader({ "a.png": png });
+  const live = new AbortController();
+  for (const scope of ["here", "remote"]) requestProjectImage(scope, "a.png", source.read, live.signal);
+  await settle();
+  assert.deepEqual(source.calls, ["a.png", "a.png"]);
+  localProject("here");
+  windowFocused();
+  for (const scope of ["here", "remote"]) requestProjectImage(scope, "a.png", source.read, live.signal);
+  await settle();
+  assert.equal(source.calls.length, 3);
+}));
 
 test("a missing file, a refusal, text, bytes the window cannot draw or a file too large say why", async () => {
   forgetProjectImages();

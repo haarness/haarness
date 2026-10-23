@@ -9,13 +9,16 @@
  * an SVG is a document with scripts and links of its own. A path outside the
  * project is never asked for, and its placeholder says so.
  *
- * What was read is remembered for the project in memory, so a reply drawn
- * again (scrolled back into view, or the live reply once it is saved) shows
- * its image at once, with no placeholder in between. Once the project may
- * have changed (a turn ended, a tool wrote files, the window came back to the
- * front) a remembered image still shows at once, is read again behind it, and
- * is replaced only when the file changed. Pure apart from the DOM it is
- * handed, so it is tested without a window.
+ * What was read is remembered in memory, so a reply drawn again (scrolled
+ * back into view, or the live reply once it is saved) shows its image at
+ * once, with no placeholder in between, and a reply asks for each of its
+ * images once. Once the project may have changed (a turn of the chat being
+ * viewed ended or one of its tools wrote files, or the window of a project
+ * on this computer came back to the front) a remembered image still shows at
+ * once and is read again behind it the next time a reply draws it, at most
+ * every `PROJECT_IMAGE_LIMITS.recheck`, unless the file API wrote that very
+ * file. Pure apart from the DOM it is handed, so it is tested without a
+ * window.
  */
 import { linkTarget, parsedAddress } from "./link-target";
 import { madeHere, markMade } from "./remote-images";
@@ -23,11 +26,18 @@ import type { FileContent } from "../shared";
 
 /**
  * The reads that run at once across every reply, how long one may run (in
- * milliseconds) before it ends as unavailable, the paths one reply reads, and
- * the image data remembered across all projects (the oldest goes first). The
- * server reads files of at most 10 MiB.
+ * milliseconds) before it ends as unavailable, the paths one reply reads, the
+ * image data remembered across all projects (the oldest goes first), and how
+ * long a remembered image is shown before a change of the project has it read
+ * again. The server reads files of at most 10 MiB.
  */
-export const PROJECT_IMAGE_LIMITS = { parallel: 3, wait: 30_000, paths: 20, bytes: 64 * 1024 * 1024 };
+export const PROJECT_IMAGE_LIMITS = {
+  parallel: 3,
+  wait: 30_000,
+  paths: 20,
+  bytes: 64 * 1024 * 1024,
+  recheck: 20_000,
+};
 
 // Raster types the window draws. An SVG is a document, so it is not read.
 const RASTER: Record<string, string> = {
@@ -153,15 +163,19 @@ export type ImageReader = (path: string) => Promise<{ content?: string; encoding
 /** What a reply shows for a path: the image, or why there is none. */
 export type ShownImage = { data: string; note?: undefined } | { data?: undefined; note: ImageNote };
 
-type Entry = ShownImage & { epoch: number };
+/** A remembered answer: the project's change it was read after, when, and the file API's writes of it then. */
+type Entry = ShownImage & { epoch: number; at: number; touch: number };
 
 const remembered = new Map<string, Entry>();
 let rememberedBytes = 0;
-/** Each project's changes, and every project's (a window brought back to the front). */
+/** Each project's changes since this window started. */
 const epochs = new Map<string, number>();
-let everywhere = 0;
+/** The file API's writes of each file. */
+const touches = new Map<string, number>();
+/** Projects on this computer, which the window coming to the front marks as changed. */
+const local = new Set<string>();
 const key = (scope: string, path: string) => `${scope}\n${path}`;
-const epoch = (scope: string) => (epochs.get(scope) ?? 0) + everywhere;
+const epoch = (scope: string) => epochs.get(scope) ?? 0;
 
 function remember(entry: string, value: Entry) {
   const limit = PROJECT_IMAGE_LIMITS.bytes;
@@ -190,25 +204,73 @@ export function shownProjectImage(scope: string, path: string): ShownImage | und
 
 /**
  * The project may have changed on disk: what it showed keeps showing, and is
- * read again the next time a reply draws it. Without a scope, every project.
+ * read again the next time a reply draws it, once it has shown for
+ * `PROJECT_IMAGE_LIMITS.recheck`.
  */
-export function projectChanged(scope?: string) {
-  if (scope === undefined) everywhere++;
-  else epochs.set(scope, (epochs.get(scope) ?? 0) + 1);
+export function projectChanged(scope: string) {
+  epochs.set(scope, epoch(scope) + 1);
+}
+
+/** The file API wrote this file: the next reply that draws it reads it again at once. */
+export function projectFileWritten(scope: string, path: string) {
+  const entry = key(scope, path.replace(/\\/g, "/").replace(/^\.\//, ""));
+  touches.set(entry, (touches.get(entry) ?? 0) + 1);
 }
 
 /**
- * Whether a server event means files in its project may have changed: the
- * file API wrote one, a turn ended, or a tool that writes finished (as the
- * Files panel reads them).
+ * The window came back to the front, where the person may have changed files
+ * in another app: projects on this computer may have changed. A remote host's
+ * files did not change by that, so they are not read again for it.
  */
-export function changesProject(event: { type?: string; payload?: unknown }) {
-  if (event.type === "files.updated" || event.type === "turn.finished") return true;
-  if (event.type !== "item.created") return false;
+export function windowFocused() {
+  for (const scope of local) projectChanged(scope);
+}
+
+/** A project on this computer, whose files the window coming to the front may have changed. */
+export function localProject(scope: string) {
+  local.add(scope);
+}
+
+/** Whether `thread`, or the tree `root` heads, is the chat `selected` or the tree it belongs to. */
+export function inViewedTree(
+  selected: string | null | undefined,
+  threads: readonly { id: string; parentId?: string | null }[],
+  thread?: string | null,
+  root?: string | null,
+) {
+  if (!selected) return false;
+  let top = selected;
+  for (let guard = 0; guard < 64; guard++) {
+    const parent = threads.find((item) => item.id === top)?.parentId;
+    if (!parent) break;
+    top = parent;
+  }
+  return [thread, root].some((id) => !!id && (id === selected || id === top));
+}
+
+/**
+ * What a server event means for a project's images: the file API wrote a
+ * file (`{ path }`), or files may have changed because a turn of the chat
+ * being viewed ended or one of its tools that write finished (as the Files
+ * panel reads them). Another chat's work, however busy, is not a change for
+ * the replies on screen; `viewed` says whether an event's chat (or its tree)
+ * is the one being viewed.
+ */
+export function projectEvent(
+  event: { type?: string; payload?: unknown; threadId?: string | null; rootThreadId?: string | null },
+  viewed: (thread?: string | null, root?: string | null) => boolean,
+): { path: string } | "changed" | undefined {
+  if (event.type === "files.updated") {
+    const path = (event.payload as { path?: unknown } | undefined)?.path;
+    return typeof path === "string" && path ? { path } : undefined;
+  }
+  const mine = () => viewed(event.threadId, event.rootThreadId);
+  if (event.type === "turn.finished") return mine() ? "changed" : undefined;
+  if (event.type !== "item.created") return undefined;
   const data = (event.payload as { data?: { type?: string; name?: string; is_error?: boolean } } | undefined)?.data;
-  return (
-    data?.type === "tool_result" && !data.is_error && /write|edit|patch|apply|bash|shell|move|delete/.test(data.name ?? "")
-  );
+  const writes =
+    data?.type === "tool_result" && !data.is_error && /write|edit|patch|apply|bash|shell|move|delete/.test(data.name ?? "");
+  return writes && mine() ? "changed" : undefined;
 }
 
 type Settled = (scope: string, path: string, shown: ShownImage) => void;
@@ -253,11 +315,13 @@ const tooLarge = (error: unknown) => /\bexceeds\b/i.test(error instanceof Error 
 /**
  * Asks for the image at `path` for a reply that shows it until `signal`
  * aborts (the reply unmounts). Nothing is read when this project shows it
- * since its latest change, or a read for it already runs or waits, which the
- * reply then waits on as well. A read starts only while some reply that
- * asked is still there; it ends as unavailable after
- * `PROJECT_IMAGE_LIMITS.wait`, and an answer after that changes nothing.
- * `decode` checks that the window can draw the image before it is shown.
+ * since its latest change, or for `PROJECT_IMAGE_LIMITS.recheck` after it was
+ * read unless the file API wrote the file since, or when a read for it
+ * already runs or waits, which the reply then waits on as well. A read starts
+ * only while some reply that asked is still there; it ends as unavailable
+ * after `PROJECT_IMAGE_LIMITS.wait`, and an answer after that changes
+ * nothing. `decode` checks that the window can draw the image before it is
+ * shown.
  */
 export function requestProjectImage(
   scope: string,
@@ -269,7 +333,10 @@ export function requestProjectImage(
   if (signal.aborted) return;
   const entry = key(scope, path);
   const current = remembered.get(entry);
-  if (current && current.epoch === epoch(scope)) return;
+  if (current && current.touch === (touches.get(entry) ?? 0)) {
+    const changed = current.epoch !== epoch(scope);
+    if (!changed || Date.now() - current.at < PROJECT_IMAGE_LIMITS.recheck) return;
+  }
   const queued = pending.get(entry);
   if (queued) {
     queued.waiters.add(signal);
@@ -283,7 +350,7 @@ export function requestProjectImage(
         return;
       }
       active++;
-      const asked = epoch(scope);
+      const asked = { epoch: epoch(scope), at: Date.now(), touch: touches.get(entry) ?? 0 };
       let timer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<"late">((done) => (timer = setTimeout(() => done("late"), PROJECT_IMAGE_LIMITS.wait)));
       const answer = Promise.resolve()
@@ -304,7 +371,7 @@ export function requestProjectImage(
           const before = remembered.get(entry);
           // A file that cannot be read again keeps the picture it showed.
           const kept = shown.note && before?.data !== undefined ? { data: before.data } : shown;
-          remember(entry, { ...kept, epoch: asked });
+          remember(entry, { ...kept, ...asked });
           if (kept.data !== before?.data || kept.note !== before?.note) settle(scope, path, kept);
         })
         .finally(() => {
@@ -325,7 +392,8 @@ export function forgetProjectImages() {
   remembered.clear();
   rememberedBytes = 0;
   epochs.clear();
-  everywhere = 0;
+  touches.clear();
+  local.clear();
   waiting.length = 0;
   pending.clear();
 }
@@ -429,22 +497,61 @@ export function relabelProjectImages(root: ParentNode, labels: ProjectImageLabel
   }
 }
 
+/**
+ * Asks for each of `paths` that a reply has not asked for yet (`asked`), up to
+ * `PROJECT_IMAGE_LIMITS.paths` in all, and gives back the paths past that.
+ */
+export function askOnce(paths: readonly string[], asked: Set<string>, request: (path: string) => void) {
+  const over = new Set<string>();
+  for (const path of paths) {
+    if (asked.has(path)) continue;
+    if (asked.size >= PROJECT_IMAGE_LIMITS.paths) {
+      over.add(path);
+      continue;
+    }
+    asked.add(path);
+    request(path);
+  }
+  return over;
+}
+
 // The window's side: these use the desktop bridge, so they run only in the app.
 
+/** The project an image is read from, and whether a server event concerns the chat being viewed. */
+export interface ImageProject {
+  connection: string;
+  /** A remote host's project, whose files the window coming to the front does not change. */
+  remote: boolean;
+  viewed: (thread?: string | null, root?: string | null) => boolean;
+}
+
+/** The project of the window's open chat, read from the app's state when an event arrives. */
+export function imageProject(state: {
+  connection?: { id: string; remote: boolean } | null;
+  selected?: string | null;
+  threads: readonly { id: string; parentId?: string | null }[];
+}): ImageProject | undefined {
+  const connection = state.connection;
+  if (!connection) return undefined;
+  return {
+    connection: connection.id,
+    remote: connection.remote,
+    viewed: (thread, root) => inViewedTree(state.selected, state.threads, thread, root),
+  };
+}
+
 let watching = false;
-/**
- * Images read from a project are read again once its files may have changed:
- * a turn ended, a tool wrote files, or the window came back to the front,
- * where the person may have changed them in another app.
- */
-function watchProjects() {
+/** Images read from a project are read again once its files may have changed (see `projectEvent`). */
+function watchProjects(viewed: ImageProject["viewed"]) {
   if (watching) return;
   watching = true;
   window.haarness.onEvent((event) => {
-    if (event.kind === "server" && changesProject(event.data as { type?: string; payload?: unknown }))
-      projectChanged(event.connection);
+    if (event.kind !== "server" || !event.connection) return;
+    const change = projectEvent(event.data as Parameters<typeof projectEvent>[0], viewed);
+    if (change === "changed") projectChanged(event.connection);
+    else if (change) projectFileWritten(event.connection, change.path);
   });
-  window.addEventListener("focus", () => projectChanged());
+  window.addEventListener("focus", windowFocused);
 }
 
 /** Reads a project file for an image through the connection's file API. */
@@ -465,34 +572,38 @@ async function decodeImage(data: string) {
   }
 }
 
-/** Reads one image of the connection's project for a view that shows it until `signal` aborts. */
-export function readProjectImage(connection: string, path: string, signal: AbortSignal) {
-  watchProjects();
-  requestProjectImage(connection, path, reader(connection), signal, decodeImage);
+/** Reads one image of the project for a view that shows it until `signal` aborts. */
+export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
+  watchProjects(project.viewed);
+  if (!project.remote) localProject(project.connection);
+  requestProjectImage(project.connection, path, reader(project.connection), signal, decodeImage);
 }
 
 /**
- * Reads each project image `root` shows that its project has not shown
- * since its files last changed, for as long as `signal` is live. A reply
- * reads at most `PROJECT_IMAGE_LIMITS.paths` paths; past them a placeholder
- * says the image is not available.
+ * Asks once for each project image `root` shows that this reply has not asked
+ * for yet, for as long as `signal` is live: a live reply drawn again on every
+ * piece of its text asks for each image once, and the settled answer reaches
+ * it through `onProjectImageSettled`. A reply reads at most
+ * `PROJECT_IMAGE_LIMITS.paths` paths; past them a placeholder says the image
+ * is not available.
  */
 export function readProjectImages(
   root: ParentNode,
-  connection: string | undefined,
+  project: ImageProject | undefined,
   signal: AbortSignal,
   asked: Set<string>,
   labels: ProjectImageLabels,
 ) {
-  if (!connection) return;
-  for (const element of Array.from(root.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded"))) {
-    const path = element.dataset.projectPath;
-    if (!path || !madeHere(element)) continue;
-    if (!asked.has(path) && asked.size >= PROJECT_IMAGE_LIMITS.paths) {
-      if (!(element instanceof HTMLImageElement)) noteImage(element, "failed", labels, path);
-      continue;
-    }
-    asked.add(path);
-    readProjectImage(connection, path, signal);
-  }
+  if (!project) return;
+  const elements = Array.from(root.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded")).filter(
+    (element) => element.dataset.projectPath && madeHere(element),
+  );
+  const over = askOnce(
+    elements.map((element) => element.dataset.projectPath!),
+    asked,
+    (path) => readProjectImage(project, path, signal),
+  );
+  for (const element of elements)
+    if (over.has(element.dataset.projectPath!) && !(element instanceof HTMLImageElement))
+      noteImage(element, "failed", labels, element.dataset.projectPath);
 }

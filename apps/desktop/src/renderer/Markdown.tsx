@@ -18,6 +18,7 @@ import {
   noteImage,
   onProjectImageSettled,
   projectImageElement,
+  imageProject,
   readProjectImages,
   relabelProjectImages,
   shownProjectImage,
@@ -181,7 +182,7 @@ export function Markdown(props: {
           }
         : undefined,
     }))(update);
-    if (conversation) readProjectImages(host, app.state.connection?.id, reading.signal, asked, projectLabels());
+    if (conversation) readProjectImages(host, imageProject(app.state), reading.signal, asked, projectLabels());
     for (const block of host.querySelectorAll("pre")) {
       const code = block.querySelector("code");
       const language = /language-([\w+#-]+)/.exec(code?.className ?? "")?.[1];
