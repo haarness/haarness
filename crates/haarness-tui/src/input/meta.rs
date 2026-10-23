@@ -12,11 +12,16 @@ use std::future::Future;
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures::{FutureExt as _, StreamExt};
 
 /// The longest sequence after the doubled Escape: `[1;16A`.
 const LONGEST: usize = 6;
+
+/// How many events [`TerminalInput::input_waiting`] reads ahead to look.
+const READ_AHEAD: usize = 64;
 
 /// Where events come from: the terminal, or a test's reads.
 pub(crate) trait Source {
@@ -24,8 +29,6 @@ pub(crate) trait Source {
     fn next(&mut self) -> impl Future<Output = Option<io::Result<Event>>>;
     /// An event that came with the last read, already decoded; never waits.
     fn ready(&mut self) -> Option<io::Result<Event>>;
-    /// Whether the terminal has sent something not read yet; never waits.
-    fn pending(&mut self) -> bool;
 }
 
 impl Source for EventStream {
@@ -40,10 +43,6 @@ impl Source for EventStream {
             return None;
         }
         StreamExt::next(self).now_or_never().flatten()
-    }
-
-    fn pending(&mut self) -> bool {
-        crossterm::event::poll(Duration::ZERO).unwrap_or(false)
     }
 }
 
@@ -78,9 +77,21 @@ impl<S: Source> TerminalInput<S> {
         self.read_at
     }
 
-    /// Whether more input is already here, read or not: it came before now.
-    pub(crate) fn pending(&mut self) -> bool {
-        !self.ready.is_empty() || self.source.pending()
+    /// Whether a key, a paste or a click is already here, read or not: it
+    /// came before now. What the terminal sent is read (and stamped) to
+    /// tell; pointer motion, scrolling, focus and resizes do not count.
+    pub(crate) fn input_waiting(&mut self) -> bool {
+        while self.ready.len() < READ_AHEAD
+            && let Some(event) = self.source.ready()
+        {
+            self.ready.push_back((event, Instant::now()));
+        }
+        self.ready.iter().any(|(event, _)| match event {
+            Ok(Event::Key(key)) => key.kind != KeyEventKind::Release,
+            Ok(Event::Paste(_)) => true,
+            Ok(Event::Mouse(mouse)) => matches!(mouse.kind, MouseEventKind::Down(_)),
+            _ => false,
+        })
     }
 
     /// The next event. Cancel safe: it only waits before taking anything.
@@ -344,10 +355,24 @@ mod tests {
         fn ready(&mut self) -> Option<io::Result<Event>> {
             Some(Ok(Event::Key(self.0.front_mut()?.pop_front()?)))
         }
+    }
 
-        fn pending(&mut self) -> bool {
-            self.0.iter().any(|read| !read.is_empty())
+    /// Keys waiting count as input that came first, and are still handed
+    /// out in order, stamped when they were read.
+    #[tokio::test]
+    async fn waiting_keys_are_read_ahead_and_handed_out_in_order() {
+        let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+        let mut input = TerminalInput::reading(Reads(VecDeque::from([VecDeque::from([
+            key('y'),
+            key('e'),
+        ])])));
+        assert!(input.input_waiting());
+        let mut out = Vec::new();
+        while let Some(Ok(Event::Key(key))) = input.next().await {
+            out.push(key.code);
         }
+        assert_eq!(out, [KeyCode::Char('y'), KeyCode::Char('e')]);
+        assert!(!input.input_waiting());
     }
 
     async fn handed_out(reads: Vec<Vec<KeyEvent>>) -> Vec<KeyEvent> {
