@@ -263,7 +263,9 @@ try:
     chat = next(record['threadID'] for record in records if record['type'] == 'refused')
     said = [item['data']['output'] for item in api('/v1/threads/' + chat + '/items')
             if item['data']['type'] == 'tool_result' and item['data'].get('is_error')]
-    assert len(said) == 2 and all('nobody can answer in this run' in output for output in said), said
+    assert len(said) == 2 and all(output.startswith('Haarness refused this request for an unattended run: ') for output in said), said
+    assert any('unattended run: Auto review left it to a person (Test rule): Test verdict: ask. Do not retry it' in output for output in said), said
+    assert any('unattended run: A permission rule asks a person for it. Do not retry it' in output for output in said), said
     assert not any('The user rejected' in output for output in said), said
     assert not (workspace / 'run-asked-2.txt').exists() and not (workspace / 'run-mine.txt').exists()
     check('run --auto without a terminal refuses each request that needs a person, with its reason, goes on and exits 3')
