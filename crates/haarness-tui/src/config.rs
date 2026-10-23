@@ -487,6 +487,12 @@ pub fn load_state() -> TuiState {
 
 /// Load-modify-write so independent fields never clobber each other.
 pub fn save_state(update: impl FnOnce(&mut TuiState)) {
+    // Each save reads, changes and rewrites the whole file: one at a time,
+    // so two changes made together (a test run's threads) both land.
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _saving = SAVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(directory) = config_dir() else {
         return;
     };
@@ -494,7 +500,13 @@ pub fn save_state(update: impl FnOnce(&mut TuiState)) {
     update(&mut state);
     let _ = std::fs::create_dir_all(&directory);
     if let Ok(body) = toml::to_string(&state) {
-        let _ = std::fs::write(directory.join("tui-state.toml"), body);
+        // Written beside it and moved into place, so a read never finds the
+        // file half written.
+        let path = directory.join("tui-state.toml");
+        let partial = directory.join(format!("tui-state.toml.{}.partial", std::process::id()));
+        if std::fs::write(&partial, body).is_ok() && std::fs::rename(&partial, &path).is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
     }
 }
 
