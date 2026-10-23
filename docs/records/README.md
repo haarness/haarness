@@ -6,6 +6,7 @@ code at its date and is not updated afterwards: for current behaviour, read the
 
 Name new records `YYYY-MM-DD-topic.md` with the date the work was verified, and add a line here.
 
+- [2026-10-24 UX polish](2026-10-24-ux-polish.md): The TUI and Desktop used as a person would and smoothed: approval keys that never answer a typed reply, drafts and the keyboard kept through sends and switches, steps that stay where they were clicked, preview chat tabs, a sidebar and Search that keep their place, Settings that list what is connected, and translations brought up to date.
 - [2026-10-15 Model support audit](2026-10-15-model-support.md): Gemini 4 Argon, with probe results and live runs.
 - [2026-10-10 Model support audit](2026-10-10-model-support.md): Claude 5.5, GPT-6.1 Sol and other new models, with probe results.
 - [2026-09-28 Router profiles verification](2026-09-28-router-profiles-verification.md): multiple named Cloud routers.

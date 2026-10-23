@@ -442,6 +442,7 @@ impl App {
             {
                 composer.redo();
             }
+            _ if crate::input::undo_key(key) => composer.undo(),
             KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match character {
                     'a' => composer.move_home(),
@@ -452,7 +453,6 @@ impl App {
                     'k' => composer.kill_to_end(),
                     'u' => composer.kill_to_start(),
                     'j' => composer.insert_char('\n'),
-                    '-' => composer.undo(),
                     '.' => composer.redo(),
                     _ => {}
                 }

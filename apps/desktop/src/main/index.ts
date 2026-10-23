@@ -711,6 +711,8 @@ function installHandlers() {
     servers: data().servers,
     version: app.getVersion(),
     platform: process.platform,
+    // Settings shows this computer's own paths under it as ~.
+    home: homedir(),
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
   handle("preferences", async (_, input) => {
@@ -1998,6 +2000,12 @@ function menu() {
               "CmdOrCtrl",
             ),
             click: () => action("new"),
+          },
+          {
+            // The window's chat stops what it is doing, as its Stop button does.
+            label: t("Stop response"),
+            accelerator: "CmdOrCtrl+.",
+            click: (_item, win) => action("stop-response", win),
           },
           {
             label: t("Open project") + "…",

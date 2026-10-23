@@ -345,7 +345,8 @@ export function ConnectProvider(props: {
       </Show>
       <Switch>
         <Match when={step().kind === "pick"}>
-          <Show when={local()}><AccountMenu models connected={props.close} /></Show>
+          {/* The filter leads, where typing starts; the account card stays
+              under it as one more way in, so filtering moves nothing above. */}
           <input
             ref={search}
             class="connect-search"
@@ -364,6 +365,7 @@ export function ConnectProvider(props: {
               }
             }}
           />
+          <Show when={local()}><AccountMenu models connected={props.close} /></Show>
           <div class="connect-list">
             <Show when={loading() && !catalog().length}>
               <p class="muted connect-empty">{t("Loading…")}</p>

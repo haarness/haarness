@@ -114,11 +114,11 @@ export function Hooks() {
           </p>
         }
       >
-        <div class="management-actions">
+        <div class="management-actions" data-setting="Create hook">
           <button
             class="primary"
             disabled={busy() || !catalog()}
-            data-setting="Create hook" onClick={() => setEditor({})}
+            onClick={() => setEditor({})}
           >
             {t("Add hook")}
           </button>

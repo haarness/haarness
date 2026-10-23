@@ -2551,6 +2551,218 @@ fn a_question_a_hook_answered_says_so_on_its_row() {
     };
     assert!(row("hooked").contains("·  Answered by hook"), "{text:#?}");
     assert!(!row("asked").contains("Answered by hook"), "{text:#?}");
+    // Once answered, a question's row says what was chosen.
+    assert!(row("asked").contains("·  Unit tests"), "{text:#?}");
+}
+
+/// A single-choice question says how to answer it as a multiple-choice one
+/// does, and its toast stays hidden while the question itself is in view.
+#[tokio::test]
+async fn a_question_in_view_has_a_key_legend_and_no_toast() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        fixture_event(
+            "question.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({"questionId": "q-one", "prompt": "Which database?", "choices": ["Postgres", "SQLite"]}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.notification_toast.is_some());
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("↑↓ move · enter choose · esc cancels"),
+        "{text}"
+    );
+    assert!(!text.contains("Haarness needs your answer"), "{text}");
+    // A dialog over it brings the toast back.
+    app.open_overlay(crate::state::Overlay::Commands);
+    assert!(frame_text(&app, (100, 30)).contains("Haarness needs your answer"));
+}
+
+/// A long question is asked in full, wrapped under its mark, whatever the
+/// terminal's width.
+#[tokio::test]
+async fn a_long_question_wraps_instead_of_losing_its_end() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let prompt = "The migration touches three services and the nightly export job; should I also rewrite the export job to stream rows instead of buffering them, given the TAIL-OF-QUESTION?";
+    app.reduce(
+        fixture_event(
+            "question.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({"questionId": "q-long", "prompt": prompt, "choices": ["Yes", "No"]}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    for width in [80, 120] {
+        let text = frame_text(&app, (width, 30));
+        assert!(text.contains("TAIL-OF-QUESTION?"), "{width}: {text}");
+        let rows: Vec<&str> = text.lines().collect();
+        let first = rows
+            .iter()
+            .position(|row| row.starts_with("  ? The migration"))
+            .expect("question row");
+        assert!(rows[first + 1].starts_with("    "), "{width}: {text}");
+        assert!(!rows[first].contains('…'), "{width}: {text}");
+    }
+}
+
+/// A failure's output wraps under the gutter, so a long compiler line is
+/// readable to its last word; so does output opened to be read, while a
+/// quiet preview keeps one row per line. The caps count rows on screen and
+/// the fold names the lines it hides.
+#[test]
+fn tool_output_wraps_when_it_is_read_and_folds_by_lines() {
+    let thread = fixture_thread();
+    let long = "ERROR-START this is a very long diagnostic line from a compiler that explains exactly what went wrong and where, with a path /very/long/path/to/some/file.rs:123:45 and a hint at the END-OF-LINE";
+    let call = |sequence, id: &str, command: &str| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let result = |sequence, id: &str, output: String, exit: i64| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolResult {
+                call_id: id.into(),
+                name: "bash".into(),
+                output,
+                is_error: false,
+                metadata: serde_json::json!({"exit": exit, "truncated": false}),
+            },
+        )
+    };
+    let items = vec![
+        call(1, "fails", "cargo build"),
+        result(2, "fails", format!("exit: 1\n{long}"), 1),
+    ];
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let text = frame_text(&app, (80, 30));
+    assert!(text.contains("END-OF-LINE"), "{text}");
+    assert!(!text.contains("ex…"), "{text}");
+    let gutter = text.lines().filter(|row| row.starts_with("  ▏ ")).count();
+    assert!(gutter >= 3, "one line, wrapped: {text}");
+
+    // Many long failing lines: the cap counts rows, the fold counts lines.
+    let many = (1..=6)
+        .map(|index| format!("line {index}: {long}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = vec![
+        call(1, "many", "cargo test"),
+        result(2, "many", format!("exit: 1\n{many}"), 1),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let id = app.items[1].id;
+    let text = frame_text(&app, (80, 40));
+    let gutter = text.lines().filter(|row| row.starts_with("  ▏ ")).count();
+    // Eight rows of output and the fold under them; the third line, cut
+    // part way, is one of the four it hides.
+    assert_eq!(gutter, 9, "{text}");
+    assert!(
+        text.contains("… +4 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
+    app.expanded.insert(id);
+    let text = frame_text(&app, (80, 60));
+    assert!(text.contains("line 6: ERROR-START"), "{text}");
+    assert!(text.contains("… ctrl+r or click to collapse"), "{text}");
+
+    // A successful preview stays one row per line.
+    let items = vec![
+        call(1, "ok", "cat notes"),
+        result(2, "ok", format!("exit: 0\n{long}"), 0),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.tool_details = true;
+    let text = frame_text(&app, (80, 30));
+    assert_eq!(
+        text.lines().filter(|row| row.starts_with("  ▏ ")).count(),
+        1,
+        "{text}"
+    );
+    let id = app.items[1].id;
+    app.expanded.insert(id);
+    assert!(frame_text(&app, (80, 30)).contains("END-OF-LINE"));
+}
+
+/// The key bound to folds (Ctrl+R) opens the fold nearest the prompt among
+/// those on screen and closes it again, as a click does.
+#[tokio::test]
+async fn ctrl_r_opens_and_closes_the_nearest_fold() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    let _ = app.lines((100, 30));
+    crate::input::handle_key(&mut app, ctrl_r, &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.notice, "Nothing to expand on screen");
+    let listing = (1..=20)
+        .map(|index| format!("row-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let older = message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: listing.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+    );
+    let call = message_item(
+        2,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "notes.txt"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    );
+    let result = message_item(
+        3,
+        &thread,
+        ItemData::ToolResult {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            output: listing,
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let newest = result.id;
+    app.items = vec![older, call, result];
+    let _ = app.lines((100, 40));
+    crate::input::handle_key(&mut app, ctrl_r, &offline_client())
+        .await
+        .unwrap();
+    assert!(app.expanded.contains(&newest), "the newest fold opened");
+    assert_eq!(app.expanded.len(), 1);
+    assert!(frame_text(&app, (100, 40)).contains("row-20"));
+    crate::input::handle_key(&mut app, ctrl_r, &offline_client())
+        .await
+        .unwrap();
+    assert!(app.expanded.is_empty(), "and closed again");
 }
 
 #[test]
@@ -3105,7 +3317,7 @@ fn compact_thinking_ticks_on_one_row_and_settles_as_a_thought_a_click_opens() {
     ));
     let id = app.items[0].id;
     let settled = text(&app);
-    assert!(settled.contains("  ▸ Thought for 2s"), "{settled}");
+    assert!(settled.contains("  ▹ Thought for 2s"), "{settled}");
     assert!(!settled.contains("thought-1"), "{settled}");
     assert!(
         app.hit_rows
@@ -3115,7 +3327,7 @@ fn compact_thinking_ticks_on_one_row_and_settles_as_a_thought_a_click_opens() {
     );
     app.expanded.insert(id);
     let open = text(&app);
-    assert!(open.contains("  ▾ Thought for 2s"), "{open}");
+    assert!(open.contains("  ▿ Thought for 2s"), "{open}");
     assert!(open.contains("thought-2"), "{open}");
 
     // Hide shows none of it, live or settled, and says so on the band.
@@ -4030,7 +4242,8 @@ fn masthead_names_the_session_without_repeating_its_id() {
     assert_ne!(title.spans[1].attributes & attr::BOLD, 0);
 
     // Place lives in the band, once, instead of being repeated in a top bar.
-    assert!(line_text(lines.last().unwrap()).contains("haarness  main"));
+    let wide = app.lines((140, 24));
+    assert!(line_text(wide.last().unwrap()).contains("haarness  main"));
 }
 
 /// The quiet row at the top belongs to the frame, not the document, so a
@@ -7600,6 +7813,7 @@ async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_aut
     crate::input::handle_key(&mut app, key(KeyCode::Char('y')), &client)
         .await
         .unwrap();
+    settle(&mut app, &client).await;
     assert!(app.pending_permissions.is_empty());
     assert_eq!(app.notice, "Already answered");
     assert!(!app.auto_permissions);
@@ -7633,6 +7847,7 @@ async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_aut
     crate::input::handle_key(&mut app, key(KeyCode::Char('y')), &client)
         .await
         .unwrap();
+    settle(&mut app, &client).await;
     assert_eq!(app.pending_permissions.len(), 1);
     assert!(
         app.notice.starts_with("Could not answer permission"),
@@ -9020,6 +9235,17 @@ fn outside_write_event(thread: &Thread, id: &str) -> haarness_protocol::EventEnv
     )
 }
 
+/// Let a one-key approval answer's window pass, as the event loop does when
+/// it wakes at the answer's deadline with no input waiting.
+async fn settle(app: &mut App, client: &crate::api::ApiClient) {
+    if let Some(settling) = &mut app.permission_settling {
+        settling.typed -= crate::input::ANSWER_SETTLE_TIME;
+    }
+    crate::input::settle_answer(app, client, false)
+        .await
+        .unwrap();
+}
+
 async fn type_text(app: &mut App, text: &str, client: &crate::api::ApiClient) {
     for character in text.chars() {
         crate::input::handle_key(
@@ -9046,6 +9272,9 @@ async fn typing_a_message_while_the_card_waits_answers_nothing() {
         "run it again",
         "www.example.com is down",
         "uuid parsing fails",
+        "yes but use printf",
+        "no wait",
+        "n?",
     ] {
         let thread = fixture_thread();
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
@@ -9068,6 +9297,329 @@ async fn typing_a_message_while_the_card_waits_answers_nothing() {
             app.notice
         );
     }
+}
+
+/// `y` and `n` light their chip at once and answer only once no other key
+/// follows within a moment, so "yes…" or "no wait" typed at a waiting card
+/// is a message. Enter sends the lit chip at once; Esc takes the letter back
+/// without rejecting anything.
+#[tokio::test]
+async fn a_one_key_answer_settles_before_it_is_sent() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    // Nothing may be sent while a letter settles: this client has no server.
+    let offline = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-once"), &offline)
+        .await
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(app.permission_focus);
+    assert!(app.composer.is_empty());
+    assert!(crate::input::settle_deadline(&app).is_some());
+    // A wake-up before the window ends sends nothing.
+    crate::input::settle_answer(&mut app, &offline, false)
+        .await
+        .unwrap();
+    assert_eq!(app.pending_permissions.len(), 1);
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    settle(&mut app, &client).await;
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("/permissions/perm-once"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("\"decision\":\"once\""),
+        "{}",
+        requests[0]
+    );
+
+    // `n` lights Reject; Esc puts the card back as it was.
+    app.reduce(outside_write_event(&thread, "perm-reject"), &offline)
+        .await
+        .unwrap();
+    let reject = crate::state::PermissionChoice::available(&app)
+        .iter()
+        .position(|choice| *choice == crate::state::PermissionChoice::Reject)
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('n')).await;
+    assert_eq!(app.permission_selection, reject, "the chip lights at once");
+    press_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(app.pending_permissions.len(), 1, "esc rejected nothing");
+    assert_eq!(app.permission_selection, 0);
+    assert!(crate::input::settle_deadline(&app).is_none());
+    assert!(app.permission_focus);
+
+    // Enter sends the lit chip without waiting.
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    for code in [KeyCode::Char('n'), KeyCode::Enter] {
+        crate::input::handle_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE), &client)
+            .await
+            .unwrap();
+    }
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("\"decision\":\"reject\""),
+        "{}",
+        requests[0]
+    );
+}
+
+/// A reply typed at a waiting card that starts with an answer letter goes to
+/// the prompt whole when its next key comes within the letter's window, and
+/// nothing is answered then or later.
+#[tokio::test]
+async fn a_reply_starting_with_y_or_n_answers_nothing() {
+    for message in ["yes but use printf", "no wait"] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let client = offline_client();
+        app.reduce(outside_write_event(&thread, "perm-reply"), &client)
+            .await
+            .unwrap();
+        let (first, rest) = message.split_at(1);
+        type_text(&mut app, first, &client).await;
+        type_text(&mut app, rest, &client).await;
+        // The loop's wake-up long after finds nothing to send.
+        settle(&mut app, &client).await;
+        assert_eq!(app.composer.text(), message);
+        assert_eq!(app.pending_permissions.len(), 1, "{message}");
+        assert_eq!(app.permission_selection, 0, "{message}");
+        assert!(!app.permission_focus, "{message}");
+        assert!(crate::input::settle_deadline(&app).is_none(), "{message}");
+    }
+}
+
+/// Keys that are not typing never let a settling letter slip: Ctrl+Y (which
+/// could switch the chat to Auto and settle the card its own way) and ↑
+/// send the answer first and then do their own thing.
+#[tokio::test]
+async fn a_key_that_is_not_typing_sends_the_settling_answer_first() {
+    for (code, modifiers) in [
+        (KeyCode::Char('y'), KeyModifiers::CONTROL),
+        (KeyCode::Up, KeyModifiers::NONE),
+    ] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.reduce(
+            outside_write_event(&thread, "perm-first"),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+        for key in [
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            KeyEvent::new(code, modifiers),
+        ] {
+            let _ = crate::input::handle_key(&mut app, key, &client).await;
+        }
+        assert!(app.pending_permissions.is_empty(), "{code:?}");
+        let requests = server.await.unwrap();
+        assert!(
+            requests[0].contains("/permissions/perm-first")
+                && requests[0].contains("\"decision\":\"reject\""),
+            "{code:?}: {}",
+            requests[0]
+        );
+    }
+}
+
+/// A key that only moves on the card is spent with the answer it sends: `n`
+/// then ↑ does not then recall the last message into the prompt, and `y`
+/// then Tab does not then switch the agent.
+#[tokio::test]
+async fn a_key_that_sends_the_answer_does_not_act_again_after_it() {
+    for code in [KeyCode::Up, KeyCode::Tab] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.agents = ["build", "plan"]
+            .into_iter()
+            .map(|id| haarness_protocol::AgentProfile {
+                id: id.into(),
+                name: id.into(),
+                description: format!("{id} agent"),
+                hidden: false,
+                max_subagents: 4,
+                mode: Some("primary".into()),
+                model: None,
+            })
+            .collect();
+        let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+        app.sync_prompt_history(&client);
+        app.composer.set_text("previous message".into());
+        let _ = app.composer.take();
+        app.reduce(
+            outside_write_event(&thread, "perm-spent"),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        let agent = app.agent().to_owned();
+        for key in [
+            KeyEvent::new(
+                KeyCode::Char(if code == KeyCode::Up { 'n' } else { 'y' }),
+                KeyModifiers::NONE,
+            ),
+            KeyEvent::new(code, KeyModifiers::NONE),
+        ] {
+            crate::input::handle_key(&mut app, key, &client)
+                .await
+                .unwrap();
+        }
+        assert!(app.pending_permissions.is_empty(), "{code:?}");
+        assert!(app.composer.is_empty(), "{code:?}: {}", app.composer.text());
+        assert_eq!(app.agent(), agent, "{code:?}");
+        let decision = if code == KeyCode::Up {
+            "reject"
+        } else {
+            "once"
+        };
+        assert!(server.await.unwrap()[0].contains(&format!("\"decision\":\"{decision}\"")));
+    }
+}
+
+/// A key typed within the window counts as typed within it however late the
+/// loop handles it, and input waiting at the deadline is handled first.
+#[tokio::test]
+async fn a_key_typed_in_the_window_but_handled_late_still_begins_a_message() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    // Any reply would fail against this client; none must be attempted.
+    let client = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-late"), &client)
+        .await
+        .unwrap();
+    let typed = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(2))
+        .unwrap();
+    let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+    crate::input::handle_key_at(&mut app, key('y'), typed, &client)
+        .await
+        .unwrap();
+    // The deadline is long past, but a key waits to be handled: it goes first.
+    crate::input::settle_answer(&mut app, &client, true)
+        .await
+        .unwrap();
+    assert!(crate::input::settle_deadline(&app).is_some());
+    crate::input::handle_key_at(
+        &mut app,
+        key('e'),
+        typed + std::time::Duration::from_millis(80),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.composer.text(), "ye");
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(!app.notice.contains("Could not answer"), "{}", app.notice);
+}
+
+/// `y y` approves at once, rather than putting "yy" in the prompt.
+#[tokio::test]
+async fn a_double_tap_confirms_at_once() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-double"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    type_text(&mut app, "yy", &client).await;
+    assert!(app.pending_permissions.is_empty());
+    assert!(app.composer.is_empty());
+    assert!(server.await.unwrap()[0].contains("\"decision\":\"once\""));
+}
+
+/// A letter answers only the request it was typed at. When another comes to
+/// the head of the card first (another client answered, a session switch),
+/// the letter goes with the old one, and so do a staged answer and the chip
+/// selection.
+#[tokio::test]
+async fn a_letter_never_answers_a_card_it_was_not_typed_at() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    // Any reply would fail against this client; none must be attempted.
+    let client = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-seen"), &client)
+        .await
+        .unwrap();
+    app.reduce(outside_write_event(&thread, "perm-unseen"), &client)
+        .await
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('n')).await;
+    assert!(crate::input::settle_deadline(&app).is_some());
+    app.reduce(
+        fixture_event(
+            "permission.resolved",
+            thread.id,
+            thread.id,
+            serde_json::json!({"permissionId": "perm-seen"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    settle(&mut app, &client).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert_eq!(app.pending_permissions[0].permission_id, "perm-unseen");
+    assert_eq!(app.permission_selection, 0);
+    assert!(!app.notice.contains("Could not answer"), "{}", app.notice);
+
+    // A session switch replaces the list: a letter settling, an answer staged
+    // and the selection all stay with the card they were made at.
+    press_key(&mut app, KeyCode::Char('y')).await;
+    let mut other = pending_permission_fixture(&thread, "perm-other-session");
+    other.thread_id = ThreadId::new();
+    app.hydrate_permissions(vec![other.clone()], &client).await;
+    assert!(crate::input::settle_deadline(&app).is_none());
+    settle(&mut app, &client).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    app.hydrate_permissions(
+        vec![pending_permission_fixture(&thread, "perm-staged")],
+        &client,
+    )
+    .await;
+    app.permission_focus = true;
+    press_key(&mut app, KeyCode::Char('a')).await;
+    assert_eq!(app.confirm_always, Some('a'));
+    app.hydrate_permissions(vec![other], &client).await;
+    assert_eq!(app.confirm_always, None);
+    assert_eq!(app.permission_typed, None);
+    assert_eq!(app.permission_selection, 0);
+    assert!(!app.notice.contains("Could not answer"), "{}", app.notice);
+}
+
+/// While a letter settles, its chip shows it is on its way and the row under
+/// the chips says what is about to happen and that Esc cancels it.
+#[tokio::test]
+async fn a_settling_letter_says_what_is_about_to_happen() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-shown"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press_key(&mut app, KeyCode::Char('n')).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Reject  …"), "{text}");
+    assert!(
+        text.contains("Reject in a moment · enter now · esc cancels"),
+        "{text}"
+    );
+    assert!(!text.contains("esc reject"), "{text}");
+    press_key(&mut app, KeyCode::Esc).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Reject  n"), "{text}");
+    assert!(text.contains("esc reject"), "{text}");
 }
 
 /// A prompt from an older server carries no "always" patterns; its Always
@@ -10438,6 +10990,175 @@ async fn background_root_completion_notifies_after_activity_snapshot_race() {
     );
 }
 
+/// While a request waits for a person nothing runs: the call that asked
+/// shows a still ⚠ (? under a question) and the calls after it a quiet ○,
+/// never a spinner. No status names the asking call, so it is the earliest
+/// call of the asking turn with no result; with that turn unknown, no call is
+/// marked either way.
+#[tokio::test]
+async fn calls_waiting_on_an_approval_do_not_spin() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let call = |sequence, id: &str, name: &str, arguments| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let done = message_item_for_turn(
+        2,
+        &thread,
+        turn,
+        ItemData::ToolResult {
+            call_id: "c0".into(),
+            name: "read".into(),
+            output: "notes".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let items = vec![
+        call(1, "c0", "read", serde_json::json!({"path": "notes.txt"})),
+        done,
+        call(3, "c1", "bash", serde_json::json!({"command": "echo one"})),
+        call(4, "c2", "bash", serde_json::json!({"command": "echo two"})),
+        call(5, "c3", "read", serde_json::json!({"path": "README.md"})),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let client = offline_client();
+    let status = |state: &str, call: Option<&str>| {
+        fixture_event(
+            "turn.status",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "state": state,
+                "tool": call.map(|_| "read"),
+                "callId": call,
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    let spins = |text: &str| {
+        ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇']
+            .iter()
+            .any(|frame| text.contains(*frame))
+    };
+    // The last tool status names another call (a parallel read); the request
+    // belongs to the turn, whose first unfinished call is the one asking.
+    app.reduce(status("tool", Some("c3")), &client)
+        .await
+        .unwrap();
+    let mut pending = pending_permission_fixture(&thread, "perm-asks");
+    pending.turn_id = Some(turn);
+    app.pending_permissions = vec![pending];
+    app.reduce(status("waiting_permission", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("⚠ bash echo one  waiting for approval"),
+        "{text}"
+    );
+    assert!(text.contains("○ bash echo two  queued"), "{text}");
+    assert!(text.contains("○ read README.md  queued"), "{text}");
+    assert!(!spins(&text), "{text}");
+    // Answered, the call runs again and so does its spinner.
+    app.pending_permissions.clear();
+    app.reduce(status("tool", Some("c1")), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("waiting for approval"), "{text}");
+    assert!(text.contains("○ bash echo two  queued"), "{text}");
+    // A question waits on its turn's first unfinished call the same way.
+    app.pending_questions = vec![haarness_protocol::PendingQuestionInfo {
+        question_id: "q1".into(),
+        prompt: "Which one?".into(),
+        choices: vec![],
+        multiple: false,
+        custom: true,
+        thread_id: thread.id,
+        root_thread_id: Some(thread.id),
+        turn_id: Some(turn),
+        created_at: Utc::now(),
+    }];
+    app.reduce(status("waiting_question", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("? bash echo one"), "{text}");
+    assert!(text.contains("○ bash echo two  queued"), "{text}");
+    assert!(!spins(&text), "{text}");
+    // With the asking turn unknown, nothing claims to wait or to be queued.
+    app.pending_questions.clear();
+    let mut unknown = pending_permission_fixture(&thread, "perm-unknown");
+    unknown.turn_id = None;
+    app.pending_permissions = vec![unknown];
+    app.reduce(status("waiting_permission", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("queued"), "{text}");
+    assert!(!text.contains("waiting for approval  "), "{text}");
+}
+
+/// Ctrl+R with no fold on screen leaves the waiting card's summary in the
+/// band rather than a notice in its place.
+#[tokio::test]
+async fn ctrl_r_with_nothing_to_open_keeps_the_cards_summary() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(outside_write_event(&thread, "perm-r"), &offline_client())
+        .await
+        .unwrap();
+    let before = app.notice.clone();
+    let _ = app.lines((100, 30));
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, before);
+    assert!(!frame_text(&app, (100, 30)).contains("Nothing to expand"));
+}
+
+/// Before a first token the band says the turn is working; it says thinking
+/// only while reasoning streams. The empty prompt says what Enter does with
+/// a message meanwhile, as the project's input mode decides.
+#[test]
+fn a_running_turn_says_working_until_it_thinks_and_what_enter_does() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.active_turn = Some(haarness_protocol::TurnId::new());
+    app.turn_started = Some(std::time::Instant::now());
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("working   0s"), "{text}");
+    assert!(!text.contains("thinking"), "{text}");
+    assert!(text.contains("Enter steers · alt+enter queues"), "{text}");
+    app.reasoning_preview = "Looking at the parser first".into();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("thinking   0s"), "{text}");
+    app.input_delivery = Some(haarness_protocol::InputDelivery::Queue);
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("Enter queues until this work is done"),
+        "{text}"
+    );
+    app.active_turn = None;
+    assert!(frame_text(&app, (100, 30)).contains("Ask anything…"));
+}
+
 #[tokio::test]
 async fn turn_status_drives_the_status_line() {
     let thread = fixture_thread();
@@ -11147,6 +11868,14 @@ async fn ctrl_b_toggles_sidebar_silently_in_root_and_child_views() {
         .unwrap();
         assert_eq!(root.sidebar_open, expected);
         assert_eq!(root.notice, "existing status");
+        // Where it docks, the choice is kept for the next launch.
+        assert_eq!(crate::config::load_sidebar(), expected);
+    }
+    // Opening it over a narrow terminal's conversation is a passing look.
+    root.lines((80, 30));
+    for _ in 0..2 {
+        root.toggle_sidebar();
+        assert_eq!(crate::config::load_sidebar(), initial);
     }
 
     let (mut child, _, _, _) = child_navigation_fixture();
@@ -12297,6 +13026,57 @@ fn selector_dialog_bounds_its_viewport_and_reports_the_visible_item_range() {
     );
 }
 
+/// Below 12 rows or 40 columns the chrome goes and the conversation stays:
+/// every row above the prompt reads its newest lines, and PgUp scrolls it.
+/// Every size down to a single cell draws without a panic.
+#[tokio::test]
+async fn a_small_terminal_still_shows_the_conversation() {
+    let thread = fixture_thread();
+    let mut items = Vec::new();
+    for index in 1..=12 {
+        items.push(message_item(
+            index * 2 - 1,
+            &thread,
+            ItemData::UserMessage {
+                text: format!("question {index}"),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ));
+        items.push(message_item(
+            index * 2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: format!("answer {index}"),
+            },
+        ));
+    }
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    for size in [(100, 11), (30, 10), (39, 20), (12, 4)] {
+        let text = frame_text(&app, size);
+        assert!(text.contains("answer 12"), "{size:?}: {text}");
+        assert!(!text.contains("h a a r n e s s"), "{size:?}: {text}");
+    }
+    let text = frame_text(&app, (100, 11));
+    assert!(text.contains("Ask anything…"), "{text}");
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (100, 11));
+    assert!(!text.contains("answer 12"), "{text}");
+    for width in 1..=41 {
+        for height in 1..=13 {
+            let _ = app.lines((width, height));
+        }
+    }
+}
+
 #[test]
 fn compact_terminal_keeps_the_toast_visible() {
     let thread = fixture_thread();
@@ -12759,7 +13539,7 @@ async fn ctrl_c_clears_a_draft_once_and_empty_ctrl_c_requires_confirmation_to_qu
         app.composer.is_empty(),
         "one Ctrl+C clears a non-empty draft"
     );
-    assert_eq!(app.notice, "Input cleared");
+    assert_eq!(app.notice, "Draft cleared · ↑ brings it back");
     assert!(
         app.notification_toast.is_none(),
         "clearing a draft is ambient feedback, not a card"
@@ -13715,7 +14495,10 @@ fn shell_mode_output_shows_under_the_command_and_a_non_zero_exit_reads_as_failed
     assert!(text.contains("file-1.py"), "{text}");
     assert!(text.contains("file-10.py"), "{text}");
     assert!(!text.contains("file-11.py"), "{text}");
-    assert!(text.contains("… +4 more lines · click to expand"), "{text}");
+    assert!(
+        text.contains("… +4 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
     assert!(!text.contains("exit: 0"), "{text}");
     // A non-zero exit fails the row and keeps its stderr in view, whoever ran it.
     assert!(text.contains("✗ bash cat missing.txt  exit 1"), "{text}");
@@ -13928,6 +14711,69 @@ fn unicode_composer_wrap_and_cursor_use_display_cells() {
         "emoji input was lost while wrapping: {rendered}"
     );
     assert!(wrapped.iter().all(|line| line.width() <= 50));
+}
+
+/// The prompt wraps between words like the prose it is, breaks a word only
+/// when it is longer than a row, and marks rows of a long draft that are out
+/// of its window.
+#[test]
+fn the_prompt_wraps_between_words_and_marks_hidden_rows() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let words = "please refactor the configuration loader so that every option is validated";
+    app.composer.set_text(words.into());
+    let rows: Vec<String> = composer_rows(&app, (40, 20));
+    assert!(rows.len() > 1, "{rows:#?}");
+    let joined: String = rows
+        .iter()
+        .map(|row| row.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(joined, words, "no word was split: {rows:#?}");
+    // A word longer than a row still breaks at the edge.
+    let path = "src/very/long/path/that/does/not/fit/on/one/row/of/the/prompt.rs";
+    app.composer.set_text(path.into());
+    let rows = composer_rows(&app, (40, 20));
+    assert!(rows.len() > 1, "{rows:#?}");
+    assert_eq!(rows.iter().map(|row| row.trim()).collect::<String>(), path);
+
+    // Ten lines in a six-row window: the rows above the cursor are marked.
+    app.composer.set_text(
+        (1..=10)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let rows = composer_rows(&app, (40, 20));
+    assert_eq!(rows.len(), 6, "{rows:#?}");
+    assert!(rows[0].starts_with("▴ line 5"), "{rows:#?}");
+    assert!(rows[5].starts_with("  line 10"), "{rows:#?}");
+    // With the cursor at the top, the rows below are marked instead.
+    for _ in 0..9 {
+        app.composer.move_up();
+    }
+    let rows = composer_rows(&app, (40, 20));
+    assert!(rows[0].starts_with("  line 1"), "{rows:#?}");
+    assert!(rows[5].starts_with("▾ line 6"), "{rows:#?}");
+}
+
+/// The prompt's rows as text: the lines between the transcript and the rule
+/// under the prompt.
+fn composer_rows(app: &App, size: (u32, u32)) -> Vec<String> {
+    let lines: Vec<String> = app.lines(size).iter().map(line_text).collect();
+    let rule = lines
+        .iter()
+        .rposition(|row| row.starts_with('─') || row.starts_with('━'))
+        .expect("rule under the prompt");
+    let mut rows = Vec::new();
+    for row in lines[..rule].iter().rev() {
+        if row.trim().is_empty() {
+            break;
+        }
+        rows.push(row.trim_end().to_owned());
+    }
+    rows.reverse();
+    rows
 }
 
 #[test]
@@ -14211,8 +15057,8 @@ async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_cha
     assert_eq!(session_rows(&app)[2], ("Current chat".into(), "●".into()));
 }
 
-#[test]
-fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
+#[tokio::test]
+async fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
     let now = Utc::now();
     let mut current = fixture_thread();
     current.title = "Current work".into();
@@ -14283,6 +15129,41 @@ fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
         labels.iter().all(|label| !label.contains("Delete")),
         "the reversible API must not imply permanent deletion"
     );
+
+    // ← and Esc back out one level: to the list, on the same session, with
+    // the filter it had.
+    for key in [KeyCode::Left, KeyCode::Esc] {
+        app.open_overlay(crate::state::Overlay::Threads);
+        app.overlay_filter = "re".into();
+        app.selection = app
+            .filtered_threads()
+            .iter()
+            .position(|thread| thread.id == recent.id)
+            .unwrap();
+        app.open_selected_session_actions();
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(key, KeyModifiers::NONE),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(app.overlay, crate::state::Overlay::Threads),
+            "{key:?}"
+        );
+        assert_eq!(app.overlay_filter, "re");
+        assert_eq!(app.filtered_threads()[app.selection].id, recent.id);
+    }
+    // Esc in the list itself closes it.
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
 }
 
 #[tokio::test]
@@ -16916,7 +17797,7 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
     );
     assert!(!folded.contains("pasted line 60"), "{folded}");
     assert!(
-        folded.contains("▎ … +53 more lines · click to expand"),
+        folded.contains("▎ … +53 more lines · ctrl+r or click to expand"),
         "{folded}"
     );
     assert!(
@@ -16929,7 +17810,32 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
     app.expanded.insert(id);
     let open = text(&app);
     assert!(open.contains("▎ pasted line 60"), "{open}");
-    assert!(open.contains("▎ … click to collapse"), "{open}");
+    assert!(open.contains("▎ … ctrl+r or click to collapse"), "{open}");
+}
+
+/// A long prompt's fold counts the lines it was written in, not the rows they
+/// wrap to: a line cut part way counts as hidden.
+#[test]
+fn a_folded_prompt_counts_hidden_lines_not_rows() {
+    let thread = fixture_thread();
+    let long = "word ".repeat(200);
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: format!("{long}\nsecond line\nthird line"),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+    )];
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = frame_text(&app, (80, 40));
+    assert!(
+        text.contains("▎ … +3 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -17296,7 +18202,11 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
     // The strip's text shares the prompt's column, under a rail at the edge.
     strip_row(&app, "▎ 1. first");
     strip_row(&app, "▎ 2. second");
-    assert!(working.contains("\n  Ask anything"), "{working}");
+    // While work runs the prompt says what Enter does with a message.
+    assert!(
+        working.contains("\n  Enter steers · alt+enter queues"),
+        "{working}"
+    );
 
     app.active_turn = None;
     let paused = frame_text(&app, (100, 30));
@@ -17313,10 +18223,13 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
         editing.contains("▎ Editing — Enter saves it in place"),
         "{editing}"
     );
+    // The header says what Enter does; the line under the queue, how to back
+    // out, Esc included.
     assert!(
-        editing.contains("▎ Editing queued message · Enter saves · Click to cancel"),
+        editing.contains("▎ Esc or click cancels and restores your draft"),
         "{editing}"
     );
+    assert_eq!(editing.matches("Enter saves").count(), 1, "{editing}");
     assert!(!editing.contains("half-written thought"), "{editing}");
     // Only the message being edited is raised.
     let (_, edited) = strip_row(&app, "▎ 2. second");
@@ -18106,7 +19019,7 @@ async fn at_mentions_complete_subagents_and_attach_a_delegation() {
         .join("\n");
     assert!(text.contains("@explore"), "{text}");
     assert!(text.contains("Delegate to agent"), "{text}");
-    assert!(text.contains("agents · files"), "{text}");
+    assert!(text.contains("files · agents"), "{text}");
 
     assert!(
         crate::prompt_context::apply(&mut app, &client)
@@ -18656,6 +19569,52 @@ fn a_batch_with_a_failed_step_reads_failed_and_marks_that_step() {
     assert!(german.contains("✗ batch  1 fehlgeschlagen"), "{german}");
 }
 
+/// A batch waiting on a person for one of its steps marks that step ⚠, the
+/// steps before it ● and the steps after it ○: the waiting status names no
+/// call, so the step is the one the last tool status named.
+#[tokio::test]
+async fn a_batch_waiting_on_a_step_marks_that_step() {
+    let thread = fixture_thread();
+    let steps = [
+        ("bash", serde_json::json!({"command":"echo first"})),
+        ("bash", serde_json::json!({"command":"echo second"})),
+        ("bash", serde_json::json!({"command":"echo third"})),
+    ];
+    let turn = TurnId::new();
+    let mut items = batch_items(&thread, &steps, None);
+    items[0].turn_id = Some(turn);
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let client = offline_client();
+    let status = |state: &str, call: Option<&str>| {
+        fixture_event(
+            "turn.status",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "state": state,
+                "tool": call.map(|_| "bash"),
+                "callId": call,
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    app.reduce(status("tool", Some("call-batch:2")), &client)
+        .await
+        .unwrap();
+    let mut pending = pending_permission_fixture(&thread, "perm-step");
+    pending.turn_id = Some(turn);
+    app.pending_permissions = vec![pending];
+    app.reduce(status("waiting_permission", None), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("⚠ batch"), "{text}");
+    assert!(text.contains("● bash echo first"), "{text}");
+    assert!(text.contains("⚠ bash echo second"), "{text}");
+    assert!(text.contains("○ bash echo third"), "{text}");
+}
+
 #[tokio::test]
 async fn completion_toasts_only_reach_an_unfocused_terminal() {
     let thread = fixture_thread();
@@ -18721,11 +19680,118 @@ async fn clearing_input_reports_in_the_status_line_not_a_toast() {
     .await
     .unwrap();
     assert!(app.composer.is_empty());
-    assert_eq!(app.notice, "Input cleared");
+    assert_eq!(app.notice, "Draft cleared · ↑ brings it back");
     assert!(
         app.notification_toast.is_none(),
         "ambient feedback belongs to the status line"
     );
+    // Attachments are not brought back, and the notice does not say they are.
+    app.composer.set_text("look at this".into());
+    app.attachments = vec!["/tmp/shot.png".into()];
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.notice,
+        "Draft cleared · ↑ brings back its text, not its attachments"
+    );
+    app.attachments = vec!["/tmp/shot.png".into()];
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "Attachments removed");
+    // Shell mode alone has no draft to bring back.
+    app.shell_mode = true;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "Input cleared");
+}
+
+/// A draft Ctrl+C cleared is not lost: ↑ brings it back from history, and
+/// undo (Ctrl+-) restores it in place.
+#[tokio::test]
+async fn a_draft_cleared_with_ctrl_c_comes_back() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let client = offline_client();
+    let press = |code, modifiers| KeyEvent::new(code, modifiers);
+    type_text(&mut app, "half a thought", &client).await;
+    for key in [
+        press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        press(KeyCode::Up, KeyModifiers::NONE),
+    ] {
+        crate::input::handle_key(&mut app, key, &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.composer.text(), "half a thought");
+    assert_eq!(
+        app.notice, "",
+        "back in the prompt, it is not cleared any more"
+    );
+    for key in [
+        press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        press(KeyCode::Char('-'), KeyModifiers::CONTROL),
+    ] {
+        crate::input::handle_key(&mut app, key, &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.composer.text(), "half a thought");
+}
+
+/// Undo answers to Ctrl+- however the terminal sends it: as itself (kitty's
+/// keyboard protocol), or as 0x1F, which tmux and macOS Terminal send for
+/// Ctrl+- and Ctrl+_ and crossterm reads as Ctrl+7.
+#[tokio::test]
+async fn composer_undo_answers_every_form_of_ctrl_minus() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let client = offline_client();
+    for (code, modifiers) in [
+        (KeyCode::Char('-'), KeyModifiers::CONTROL),
+        (KeyCode::Char('7'), KeyModifiers::CONTROL),
+        (KeyCode::Char('_'), KeyModifiers::CONTROL),
+        (
+            KeyCode::Char('_'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+    ] {
+        app.composer.clear();
+        type_text(&mut app, "keep", &client).await;
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.composer.text(), "");
+        crate::input::handle_key(&mut app, KeyEvent::new(code, modifiers), &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "keep ", "{code:?} {modifiers:?}");
+    }
 }
 
 /// `/diff` must not hold the event loop: the viewer appears immediately in a
@@ -19213,6 +20279,55 @@ fn a_typo_of_a_command_is_named_instead_of_sent() {
         app.unknown_command_notice("frobnicate"),
         "Unknown command /frobnicate · start with a space to send it as text"
     );
+    // A slip of an alias names the command itself, as the palette lists it.
+    assert_eq!(
+        app.unknown_command_notice("mdoel"),
+        "Unknown command /mdoel · did you mean /models?"
+    );
+    // `/look` is a word, not another name for `/loop`.
+    app.composer.set_text("/look at the logs".into());
+    assert_eq!(
+        crate::input::unknown_slash_command(&app).as_deref(),
+        Some("look")
+    );
+    assert_eq!(
+        app.unknown_command_notice("look"),
+        "Unknown command /look · did you mean /loop?"
+    );
+}
+
+/// A command that refuses what follows it (here an interval it cannot read)
+/// says how to use it and leaves the line in the prompt to fix.
+#[tokio::test]
+async fn a_command_that_refuses_its_arguments_keeps_the_line() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    for line in [
+        "/loop 5 minutes check the deploy",
+        "/permissions-mode sometimes",
+    ] {
+        app.composer.set_text(line.into());
+        // Nothing listens on the offline client: nothing may be sent.
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.composer.text(), line);
+        assert!(app.notice.starts_with("Usage: /"), "{}", app.notice);
+    }
+    // A command that runs takes its line.
+    app.composer.set_text("/tools show".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
 }
 
 #[tokio::test]
@@ -19232,6 +20347,344 @@ async fn enter_on_an_unknown_command_keeps_the_draft_and_sends_nothing() {
     assert_eq!(
         app.notice,
         "Unknown command /stauts · did you mean /status?"
+    );
+}
+
+/// A notice that stopped being true goes: an unknown command's once a
+/// dialog opens or another command runs, and "Viewing … Ctrl+End returns to
+/// latest" once the view is back at the latest message.
+#[tokio::test]
+async fn notices_go_when_they_stop_being_true() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let client = offline_client();
+    app.composer.set_text("/hepl".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.notice.starts_with("Unknown command /hepl"),
+        "{}",
+        app.notice
+    );
+    // (With the line still there, Ctrl+P moves through its suggestions.)
+    app.composer.clear();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "", "the palette took over");
+    app.close_overlay();
+    app.composer.set_text("/hepl".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.composer.set_text("/tools show".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.notice.starts_with("Tool details shown"),
+        "{}",
+        app.notice
+    );
+
+    // A notice that took the refused one's place is not cleared with it.
+    app.composer.set_text("/hepl".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.notice = "Copied the last reply".into();
+    app.open_overlay(crate::state::Overlay::Commands);
+    assert_eq!(app.notice, "Copied the last reply");
+    app.close_overlay();
+    app.composer.clear();
+
+    let viewing = "Viewing assistant message · #3 · Ctrl+End returns to latest".to_owned();
+    app.notice_lasting(
+        viewing.clone(),
+        crate::state::NoticeLasts::WhileScrolledBack,
+    );
+    app.viewport_offset = 12;
+    app.expire_notice(std::time::Instant::now());
+    assert_eq!(app.notice, viewing, "true while scrolled back");
+    app.scroll_to_bottom();
+    app.expire_notice(std::time::Instant::now());
+    assert_eq!(app.notice, "");
+}
+
+/// /help reads each command whole where the terminal has the room, at a
+/// width that filtering does not change; /keybinds lists the fixed keys.
+#[test]
+fn help_uses_the_width_it_has_and_keybinds_names_the_fixed_keys() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.open_overlay(crate::state::Overlay::Commands);
+    let wide = frame_text(&app, (180, 40));
+    assert!(
+        wide.contains("Resume a session · → actions · --all includes archived · also /resume"),
+        "{wide}"
+    );
+    let edge = |text: &str| {
+        text.lines()
+            .find(|row| row.contains("Commands"))
+            .map(|row| row.find("Commands").unwrap())
+    };
+    let opened = edge(&wide);
+    app.overlay_filter = "mo".into();
+    assert_eq!(edge(&frame_text(&app, (180, 40))), opened, "no width jump");
+    // A narrow terminal still gets a card that fits.
+    for line in app.lines((80, 30)) {
+        assert!(line.width() <= 80);
+    }
+    let view = crate::keybindings::view(&serde_json::json!({})).unwrap();
+    assert!(view.lines.iter().any(|line| line.contains("esc esc stop")));
+    assert!(
+        view.lines
+            .iter()
+            .any(|line| line.contains("alt+enter queue"))
+    );
+    assert!(
+        view.fields
+            .iter()
+            .any(|field| field.key == "fold" && field.value == "ctrl+r")
+    );
+}
+
+/// A dialog keeps its top edge while a filter shortens its list.
+#[test]
+fn a_filtered_dialog_keeps_its_top_edge() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.open_overlay(crate::state::Overlay::Commands);
+    let top = |app: &App| {
+        frame_text(app, (100, 40))
+            .lines()
+            .position(|row| row.contains("Commands"))
+            .expect("dialog title")
+    };
+    let opened = top(&app);
+    for filter in ["mo", "models", "zzz-nothing"] {
+        app.overlay_filter = filter.into();
+        assert_eq!(top(&app), opened, "{filter}");
+    }
+    // Opened again it centres on what it shows then.
+    app.close_overlay();
+    app.open_overlay(crate::state::Overlay::Commands);
+    assert_eq!(top(&app), opened);
+}
+
+/// Small wording: the band says "1 child agent", /status names a language
+/// server that is not installed as one, and /usage never calls a cost both
+/// unavailable and a subtotal.
+#[test]
+fn report_wording_is_precise() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.active_turn = Some(TurnId::new());
+    app.phase = Some(crate::state::PhaseInfo {
+        state: "child_tasks".into(),
+        tool: None,
+        call_id: None,
+        since: Some(Utc::now()),
+        received: Some(std::time::Instant::now()),
+    });
+    let (call, task) = (
+        "call-1".to_owned(),
+        crate::state::ChildTask {
+            child_thread_id: ThreadId::new(),
+            child_turn_id: None,
+            invoked_turn_id: None,
+            state: "running".into(),
+            tool_calls: 0,
+            last_tool: None,
+            started_at: None,
+        },
+    );
+    app.children.insert(call, task);
+    let text = frame_text(&app, (120, 30));
+    assert!(text.contains("1 child agent "), "{text}");
+    assert!(!text.contains("1 child agents"), "{text}");
+
+    let server = |id: &str, status: &str, extensions: &[&str]| crate::api::LspStatus {
+        id: id.into(),
+        status: status.into(),
+        error: None,
+        extensions: extensions.iter().map(|value| (*value).to_owned()).collect(),
+    };
+    let rows = crate::commands::language_tool_rows(
+        vec![
+            server("bash", "missing", &[".sh", ".bash"]),
+            server("rust", "idle", &[".rs"]),
+        ],
+        vec![crate::api::FormatterStatus {
+            id: "prettier".into(),
+            status: "missing".into(),
+        }],
+    );
+    assert!(
+        rows.contains(&"  bash  language server not installed · .sh .bash".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(rows.contains(&"  rust  idle".to_owned()), "{rows:#?}");
+    assert!(
+        rows.contains(&"  prettier  not installed".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.ends_with("missing")),
+        "{rows:#?}"
+    );
+
+    let cost = |value| crate::commands::usage_cost(&value);
+    assert_eq!(
+        cost(serde_json::json!({"costUsd": null, "costIncomplete": true})),
+        "not priced"
+    );
+    assert_eq!(
+        cost(serde_json::json!({"costUsd": 0.5, "costIncomplete": true})),
+        "$0.500000 so far · some turns have no price"
+    );
+    assert_eq!(cost(serde_json::json!({"costUsd": 0.5})), "$0.500000");
+}
+
+/// In Review, the default, a passing notice wins the band's room: the mode
+/// shows only where room is left. In Auto the band keeps saying requests are
+/// answered without asking, and the notice is cut to the room that is left,
+/// the folder going first.
+#[test]
+fn the_band_keeps_auto_beside_a_passing_notice_and_lets_review_yield() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let notice = "Unknown command /frobnicate · start with a space to send it as text";
+    app.notice = notice.into();
+    let band = |app: &App, width| line_text(app.lines((width, 30)).last().unwrap());
+    let review = band(&app, 100);
+    assert!(review.contains(notice), "{review}");
+    assert!(!review.contains("approvals"), "{review}");
+    assert!(band(&app, 160).contains("approvals: review"));
+
+    app.set_auto_permissions(true);
+    app.notice = notice.into();
+    for width in [80, 100, 120] {
+        let text = band(&app, width);
+        assert!(text.contains("auto"), "{width}: {text}");
+        assert!(
+            text.contains("Unknown command /frobnicate"),
+            "{width}: {text}"
+        );
+        assert!(
+            text.trim_end().ends_with('…') || text.contains(notice),
+            "{width}: {text}"
+        );
+        assert_eq!(text.width(), width as usize, "{width}: {text}");
+    }
+    // Where even the short mode leaves no room to read the notice, the mode
+    // still shows as "auto", never as a bare "review".
+    let narrow = band(&app, 50);
+    assert!(narrow.contains("auto"), "{narrow}");
+}
+
+/// A notice that fits nowhere whole is cut to the room the band has left,
+/// not to a share of the width, and the folder gives way before its text;
+/// an approval's summary likewise.
+#[tokio::test]
+async fn the_band_cuts_a_notice_to_the_room_left_after_the_folder() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.server_info = Some(haarness_protocol::ServerInfo {
+        name: "haarness".into(),
+        version: "0.1.0".into(),
+        schema_version: "1".into(),
+        server_instance_id: uuid::Uuid::now_v7(),
+        event_cursor: 0,
+        capabilities: vec![],
+        workspace: Some("/work/project".into()),
+        git_branch: Some("main".into()),
+        default_provider: None,
+        default_model: None,
+        default_agent: None,
+        project_trusted: Some(true),
+        pid: None,
+    });
+    let band = |app: &App, width| line_text(app.lines((width, 30)).last().unwrap());
+    app.notice =
+        "Unknown command /frobnicate-everything · start with a space to send it as text".into();
+    let narrow = band(&app, 80);
+    assert!(!narrow.contains("project  main"), "{narrow}");
+    // Beside the model, as much of the notice as the row holds.
+    assert!(narrow.contains("GPT-5.4"), "{narrow}");
+    assert!(
+        narrow.contains("Unknown command /frobnicate-everything · start"),
+        "{narrow}"
+    );
+    assert!(narrow.trim_end().ends_with('…'), "{narrow}");
+    assert_eq!(narrow.width(), 80, "{narrow}");
+    assert!(band(&app, 160).contains("project  main"));
+
+    app.reduce(outside_write_event(&thread, "perm-band"), &offline_client())
+        .await
+        .unwrap();
+    app.release_permission_focus(false);
+    let narrow = band(&app, 80);
+    assert!(!narrow.contains("project  main"), "{narrow}");
+    assert!(
+        narrow.contains("Approval pending: Access outside the project"),
+        "{narrow}"
+    );
+}
+
+/// In Review the band's left side follows one rule at every width: the model
+/// stays beside a notice cut to fit while the cut keeps two thirds of it, and
+/// gives way to the notice past that.
+#[test]
+fn the_band_keeps_the_model_beside_a_notice_by_one_rule_at_every_width() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let notice = "Unknown command /frobnicate · start with a space to send it as text";
+    app.notice = notice.into();
+    let band = |width| line_text(app.lines((width, 30)).last().unwrap());
+    let wide = band(100);
+    assert!(wide.contains("GPT-5.4") && wide.contains(notice), "{wide}");
+    let middle = band(80);
+    assert!(middle.contains("GPT-5.4"), "{middle}");
+    assert!(middle.trim_end().ends_with('…'), "{middle}");
+    let narrow = band(60);
+    assert!(!narrow.contains("GPT-5.4"), "{narrow}");
+    assert!(narrow.contains("Unknown command /frobnicate"), "{narrow}");
+    for (width, text) in [(100, wide), (80, middle), (60, narrow)] {
+        assert_eq!(text.width(), width, "{text}");
+    }
+}
+
+/// Typing in a child agent's read-only view says so instead of vanishing.
+#[tokio::test]
+async fn typing_in_a_child_view_says_it_is_read_only() {
+    let (mut child, _, _, _) = child_navigation_fixture();
+    type_text(&mut child, "hi", &offline_client()).await;
+    assert!(child.composer.is_empty());
+    assert_eq!(
+        child.notice,
+        "A child agent's conversation is read-only · ↑ returns to its parent"
     );
 }
 

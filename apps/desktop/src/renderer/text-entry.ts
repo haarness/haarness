@@ -5,9 +5,7 @@ type Focused = {
   isContentEditable?: boolean;
   type?: string;
   readOnly?: boolean;
-  value?: string;
 };
-type Container = { contains(node: unknown): boolean };
 
 const notText = new Set([
   "button",
@@ -31,19 +29,4 @@ export function isTextEntry(element: unknown): boolean {
   if (field.readOnly) return false;
   if (field.tagName === "TEXTAREA") return true;
   return field.tagName === "INPUT" && !notText.has(field.type ?? "text");
-}
-
-/**
- * Whether the focused element belongs to someone typing outside `dock`, so a
- * dock opening by itself must not take the focus away. The message box only
- * counts while it holds a draft: it stays in view during a question, and an
- * idle empty one would otherwise keep every answer a click away.
- */
-export function typingElsewhere(
-  active: unknown,
-  dock: Container | null | undefined,
-  composer?: unknown,
-): boolean {
-  if (!isTextEntry(active) || dock?.contains(active)) return false;
-  return active !== composer || !!(active as Focused).value;
 }

@@ -145,7 +145,7 @@ pub fn queued_strip(app: &App, width: usize) -> TaggedLines {
         // has no room for notices, so this line is where the reason lands.
         let (text, color) = edit.conflict.as_deref().map_or(
             (
-                language.text("Editing queued message · Enter saves · Click to cancel"),
+                language.text("Esc or click cancels and restores your draft"),
                 theme.accent,
             ),
             |reason| (language.text(reason), theme.danger),
@@ -348,40 +348,14 @@ fn status_band(app: &App, width: usize) -> Line {
     // that will not fit does identity start giving way — and then state wins,
     // because on a 40-column terminal "how do I stop this" outranks "on what
     // model".
-    let mut chosen = None;
-    'detail: for (left_index, left) in identity.iter().enumerate() {
-        for (right_index, right) in state.iter().enumerate().take(essential + 1) {
-            if measure(left) + measure(right) + 3 <= width {
-                chosen = Some((left_index, right_index));
-                break 'detail;
-            }
-        }
-    }
-    if chosen.is_none() {
-        'identity: for (right_index, right) in state.iter().enumerate().skip(essential + 1) {
-            for (left_index, left) in identity.iter().enumerate() {
-                if measure(left) + measure(right) + 3 <= width {
-                    chosen = Some((left_index, right_index));
-                    break 'identity;
-                }
-            }
-        }
-    }
-    let (left_index, right_index) = chosen.unwrap_or((identity.len() - 1, state.len()));
-    let mut left = identity.into_iter().nth(left_index).unwrap_or_default();
-    let right = state.into_iter().nth(right_index).unwrap_or_default();
-    let mut left_width = measure(&left);
-    let right_width = measure(&right);
-    if let Some(place) = place_segment(app) {
-        let place_width = place.width() + 2;
-        if left_width + place_width + right_width + 5 <= width {
-            left.push(Span::new(format!("  {place}"), theme.muted).on(theme.surface));
-            left_width += place_width;
-        }
-    }
-    // Permission mode uses spare space without displacing location, queue or
-    // stop hints. It names what it is: an agent can be called "review" too.
+    //
+    // Permission mode names what it is: an agent can be called "review" too.
     // `--yolo` answers this TUI's requests whatever the chat's own mode is.
+    // In Auto or --yolo, requests are answered without asking, which the
+    // band keeps saying ahead of a passing notice's detail (as "auto" when it
+    // must). In Review, the default, a notice wins and the mode takes what
+    // room is left.
+    let answering = app.yolo || app.auto_permissions;
     let mode = format!(
         "  {}",
         app.language.text(if app.yolo {
@@ -392,18 +366,116 @@ fn status_band(app: &App, width: usize) -> Line {
             "approvals: review"
         })
     );
-    let mode_width = mode.width();
-    if left_width + right_width + mode_width + 3 <= width {
+    let modes = if answering {
+        vec![
+            mode.clone(),
+            format!("  {}", if app.yolo { "--yolo" } else { "auto" }),
+        ]
+    } else {
+        Vec::new()
+    };
+    let named = identity.len().saturating_sub(1).max(1);
+    let fits = |left: &[Span], right: &[Span], reserved: usize| {
+        measure(left) + measure(right) + reserved + 3 <= width
+    };
+    let mut fitted = None;
+    let mut kept_mode = None;
+    'mode: for mode in &modes {
+        for left in identity.iter().take(named) {
+            for right in state.iter().take(essential + 1) {
+                if fits(left, right, mode.width()) {
+                    fitted = Some((left.clone(), right.clone()));
+                    kept_mode = Some(mode.clone());
+                    break 'mode;
+                }
+            }
+        }
+    }
+    // The cut a notice takes to fit: the essential state cut to the room left
+    // beside the model, or beside the chip alone when that leaves too little
+    // to read; `None` when even that is too little.
+    let cut_beside = |reserved: usize, any_room: bool| {
+        [named - 1, identity.len() - 1]
+            .into_iter()
+            .find_map(|left_index| {
+                let left = &identity[left_index];
+                let room = width.saturating_sub(measure(left) + reserved + 3);
+                (room >= MIN_NOTICE || (any_room && left_index == identity.len() - 1)).then(|| {
+                    let essential_state = state.get(essential).cloned().unwrap_or_default();
+                    (left.clone(), cut(essential_state, room))
+                })
+            })
+    };
+    // Auto keeps its room: the notice is cut first.
+    if fitted.is_none()
+        && let Some(short) = modes.last()
+        && let Some(cut) = cut_beside(short.width(), false)
+    {
+        fitted = Some(cut);
+        kept_mode = Some(short.clone());
+    }
+    // A running turn has shorter states of its own to fall back on; a
+    // notice has only itself.
+    let notice_like = state.len() <= essential + 1;
+    if fitted.is_none() {
+        let lefts = if notice_like { named } else { identity.len() };
+        'detail: for left in identity.iter().take(lefts) {
+            for right in state.iter().take(essential + 1) {
+                if fits(left, right, 0) {
+                    fitted = Some((left.clone(), right.clone()));
+                    break 'detail;
+                }
+            }
+        }
+    }
+    // A notice that fits nowhere whole beside the model keeps the model, cut
+    // to the room left, while the cut keeps two thirds of it; past that the
+    // model gives way to the notice. One rule at every width, so the band's
+    // left side does not change shape from one width to the next.
+    if fitted.is_none() && notice_like {
+        let notice = state.get(essential).cloned().unwrap_or_default();
+        let whole = measure(&notice);
+        let beside = |left: &Vec<Span>| width.saturating_sub(measure(left) + 3);
+        let named_left = &identity[named - 1];
+        // A child agent's view names its lifecycle there instead, which a
+        // passing notice never displaces.
+        let left = if app.is_child_view() || beside(named_left) * 3 >= whole * 2 {
+            named_left
+        } else {
+            &identity[identity.len() - 1]
+        };
+        fitted = Some((left.clone(), cut(notice, beside(left))));
+    }
+    if fitted.is_none() {
+        'identity: for right in state.iter().skip(essential + 1) {
+            for left in &identity {
+                if fits(left, right, 0) {
+                    fitted = Some((left.clone(), right.clone()));
+                    break 'identity;
+                }
+            }
+        }
+    }
+    let (left, right) = fitted.or_else(|| cut_beside(0, true)).unwrap_or_default();
+    let mut left = left;
+    let mut left_width = measure(&left);
+    let right_width = measure(&right);
+    // Where the session works takes the room left once state and a mode that
+    // keeps its room have theirs: the folder goes before a notice is cut.
+    let reserved = kept_mode.as_ref().map_or(0, |mode| mode.width());
+    if let Some(place) = place_segment(app) {
+        let place_width = place.width() + 2;
+        if left_width + place_width + right_width + reserved + 5 <= width {
+            left.push(Span::new(format!("  {place}"), theme.muted).on(theme.surface));
+            left_width += place_width;
+        }
+    }
+    let shown_mode = kept_mode
+        .or_else(|| (left_width + right_width + mode.width() + 3 <= width).then_some(mode));
+    if let Some(mode) = shown_mode {
+        let mode_width = mode.width();
         left.push(
-            Span::new(
-                mode,
-                if app.yolo || app.auto_permissions {
-                    theme.accent
-                } else {
-                    theme.muted
-                },
-            )
-            .on(theme.surface),
+            Span::new(mode, if answering { theme.accent } else { theme.muted }).on(theme.surface),
         );
         left_width += mode_width;
     }
@@ -419,6 +491,21 @@ fn status_band(app: &App, width: usize) -> Line {
 
 fn measure(spans: &[Span]) -> usize {
     spans.iter().map(Span::width).sum()
+}
+
+/// The fewest cells a notice cut to fit the band is still worth reading in.
+const MIN_NOTICE: usize = 16;
+
+/// `spans` cut to `room` cells, ending in `…` when anything was left out.
+fn cut(spans: Vec<Span>, room: usize) -> Vec<Span> {
+    if measure(&spans) <= room {
+        return spans;
+    }
+    let mut kept = clamp(spans, room.saturating_sub(1)).spans;
+    if let Some(last) = kept.last_mut() {
+        last.text.push('…');
+    }
+    kept
 }
 
 /// Who is answering and on what, richest first. The chip alone is the floor:
@@ -632,19 +719,18 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         ]);
     }
     if !app.pending_permissions.is_empty() {
-        let notice = single_line(&app.notice, width / 2);
-        return detail(vec![
-            vec![
-                Span::new(notice, theme.accent)
-                    .on(theme.surface)
-                    .with_attributes(attr::BOLD),
-            ],
-            vec![
-                Span::new(app.language.text("approval needed"), theme.accent)
-                    .on(theme.surface)
-                    .with_attributes(attr::BOLD),
-            ],
-        ]);
+        // The request's summary, cut to the room the band has left (the
+        // folder goes first), or what it is when there is none.
+        let notice = if app.notice.trim().is_empty() {
+            app.language.text("approval needed").to_owned()
+        } else {
+            single_line(&app.notice, width)
+        };
+        return detail(vec![vec![
+            Span::new(notice, theme.accent)
+                .on(theme.surface)
+                .with_attributes(attr::BOLD),
+        ]]);
     }
     if app.active_turn.is_some() {
         return running_segments(app, theme);
@@ -719,19 +805,16 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         );
         (format!("{fill}{flow}{cost}"), format!("{fill}{flow}"), flow)
     });
-    let brief = |text: &str| single_line(text, (width / 3).max(12));
+    // A notice that fits nowhere whole is cut to the room the band has left
+    // (`status_band`), not to a fixed share of it.
     match (notice.is_empty(), usage) {
         (false, Some((full, medium, flow))) => detail(vec![
             plain(format!("{notice}   {full}"), theme.muted),
             plain(format!("{notice}   {medium}"), theme.muted),
             plain(format!("{notice}   {flow}"), theme.muted),
             plain(notice.clone(), theme.muted),
-            plain(brief(&notice), theme.muted),
         ]),
-        (false, None) => detail(vec![
-            plain(notice.clone(), theme.muted),
-            plain(brief(&notice), theme.muted),
-        ]),
+        (false, None) => detail(vec![plain(notice.clone(), theme.muted)]),
         (true, Some((full, medium, flow))) => detail(vec![
             plain(full, theme.muted),
             plain(medium, theme.muted),
@@ -916,8 +999,15 @@ fn phase_text(app: &App) -> String {
     let turn_elapsed = app
         .turn_started
         .map_or(0, |started| started.elapsed().as_secs());
+    // Before a first token the model may be thinking or still on its way:
+    // only reasoning that actually streams is called thinking.
+    let waiting = if app.reasoning_preview.is_empty() {
+        "working"
+    } else {
+        "thinking"
+    };
     let Some(phase) = &app.phase else {
-        return format!("{}   {turn_elapsed}s", app.language.text("thinking"));
+        return format!("{}   {turn_elapsed}s", app.language.text(waiting));
     };
     let elapsed = phase.elapsed_seconds();
     match phase.state.as_str() {
@@ -949,7 +1039,9 @@ fn phase_text(app: &App) -> String {
         "waiting_question" => app.language.text("waiting for your answer").into(),
         "child_tasks" => {
             let running = app.running_children();
-            if running > 0 {
+            if running == 1 {
+                format!("1 child agent   {elapsed}s   ctrl+o opens")
+            } else if running > 0 {
                 format!("{running} child agents   {elapsed}s   ctrl+o opens")
             } else {
                 format!("child agents   {elapsed}s")
@@ -959,7 +1051,29 @@ fn phase_text(app: &App) -> String {
         "retrying" => format!("recovering incomplete response   {elapsed}s"),
         "stopping" => app.language.text("stopping").into(),
         "done" => app.language.text("finishing").into(),
-        _ => format!("{}   {turn_elapsed}s", app.language.text("thinking")),
+        _ => format!("{}   {turn_elapsed}s", app.language.text(waiting)),
+    }
+}
+
+/// What the empty prompt says it is for. While work runs that is what Enter
+/// does with a message, which the project's input mode decides (`/input-mode`;
+/// Alt+Enter always queues).
+pub(crate) fn placeholder(app: &App) -> &'static str {
+    if app.shell_mode {
+        "shell command…"
+    } else if !app.attachments.is_empty() {
+        "Add a question, or Enter to send media"
+    } else if app.active_turn.is_some()
+        && app.queue_edit.is_none()
+        && app.first_pending_question().is_none()
+    {
+        if app.input_delivery == Some(haarness_protocol::InputDelivery::Queue) {
+            "Enter queues until this work is done"
+        } else {
+            "Enter steers · alt+enter queues"
+        }
+    } else {
+        "Ask anything…"
     }
 }
 
@@ -990,20 +1104,13 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
             })
             .collect();
     }
-    let placeholder = if app.shell_mode {
-        "shell command…"
-    } else if app.attachments.is_empty() {
-        "Ask anything…"
-    } else {
-        "Add a question, or Enter to send media"
-    };
     let lead = app
         .shell_mode
         .then(|| Span::new("! ", theme.accent).with_attributes(attr::BOLD));
     editor_rows(
         app,
         &app.composer,
-        app.language.text(placeholder),
+        app.language.text(placeholder(app)),
         lead,
         !card_owns_keys,
         width,
@@ -1062,18 +1169,29 @@ pub(crate) fn editor_rows(
             display.push((String::new(), cursor_here.then_some(0)));
             continue;
         }
+        // Rows break after the last space that fits, as prose wraps; a word
+        // longer than a row (a path, a URL) breaks where it reaches the edge.
+        // Every byte stays in exactly one row, so the cursor maps exactly.
         let mut start = 0;
         let mut cells = 0;
+        let mut after_space: Option<(usize, usize)> = None;
         for (index, character) in row.char_indices() {
             let character_width = character.width().unwrap_or(0);
-            if index > start && cells + character_width > inner_width {
-                let segment = row[start..index].to_owned();
-                let holds_cursor = cursor_here && cursor_byte >= start && cursor_byte < index;
+            while index > start && cells + character_width > inner_width {
+                let (cut, cut_cells) = after_space
+                    .take()
+                    .filter(|(cut, _)| *cut > start)
+                    .unwrap_or((index, cells));
+                let segment = row[start..cut].to_owned();
+                let holds_cursor = cursor_here && cursor_byte >= start && cursor_byte < cut;
                 display.push((segment, holds_cursor.then(|| cursor_byte - start)));
-                start = index;
-                cells = 0;
+                start = cut;
+                cells -= cut_cells;
             }
             cells += character_width;
+            if character == ' ' {
+                after_space = Some((index + 1, cells));
+            }
         }
         {
             let end = row.len();
@@ -1094,11 +1212,21 @@ pub(crate) fn editor_rows(
 
     let mut lead = lead;
     let mut lines = Vec::new();
+    let last = start + visible - 1;
     for (index, (row, cursor_column)) in display.iter().enumerate() {
-        if index < start || index >= start + visible {
+        if index < start || index > last {
             continue;
         }
-        let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
+        // Rows of the draft out of the window above or below are marked in
+        // the margin, where they cost no room.
+        let margin = if index == start && start > 0 {
+            "▴ "
+        } else if index == last && last + 1 < display.len() {
+            "▾ "
+        } else {
+            "  "
+        };
+        let mut spans = vec![Span::new(margin, theme.muted)];
         if index == start {
             spans.extend(lead.take());
         }

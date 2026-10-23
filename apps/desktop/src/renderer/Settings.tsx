@@ -1,7 +1,7 @@
 import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
-import { BaseTag, SettingRow as Row } from "./SettingRow";
+import { BaseTag, CurrentTag, PathText, SettingRow as Row } from "./SettingRow";
 import { DiagnosticsSetting } from "./Diagnostics";
 import { Markdown } from "./Markdown";
 import { UsageStatisticsSetting } from "./UsageStatistics";
@@ -18,6 +18,7 @@ import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
 import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
+import { definitionSource, OPEN_GROUP_LIMIT, toolGroupKeys, toolGroups, toolSummary, toolTitle, type DefinitionRow, type ToolGroup } from "./settings-lists";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
 import { RouterConnectionDialog } from "./RouterConnectionDialog";
@@ -29,10 +30,12 @@ import {
   Match,
   Show,
   Switch,
+  createMemo,
   createSignal,
   createEffect,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import { computers, lastSeen, loadComputers, platformName, watchComputers } from "./computers";
 import type * as T from "@haarness/sdk";
@@ -70,31 +73,67 @@ export function Settings() {
         `[data-setting="${CSS.escape(target)}"]`,
       );
       if (!element) return;
-      marked = element;
-      element.classList.add("setting-search-target");
-      element.scrollIntoView({ block: "center", behavior: "instant" });
+      if (marked !== element) {
+        marked = element;
+        element.classList.add("setting-search-target");
+        element.scrollIntoView({ block: "center", behavior: "instant" });
+        clearTimeout(timer);
+        timer = setTimeout(
+          () => element.classList.remove("setting-search-target"),
+          2500,
+        );
+      }
+      // The keyboard lands on the place's own action (`data-search-focus`),
+      // the option a choice has chosen, or its first control that works.
+      const usable = ":not(:disabled)";
       const control =
+        element.querySelector<HTMLElement>(`[data-search-focus]${usable}`) ??
+        element.querySelector<HTMLElement>(`[role="radio"][aria-checked="true"]${usable}`) ??
         element.querySelector<HTMLElement>(
-          "input:not(:disabled), button:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
-        ) ?? element;
-      if (control === element) element.tabIndex = -1;
-      control.focus({ preventScroll: true });
-      observer.disconnect();
-      timer = setTimeout(
-        () => element.classList.remove("setting-search-target"),
-        2500,
-      );
+          ["input", "button", "select", "textarea"].map((name) => name + usable).join(", "),
+        );
+      // Controls still disabled while the place loads are waited for, a few
+      // seconds at most and only while the keyboard is still on the place
+      // (or nowhere): once the person has moved it, the jump is over.
+      const waited = landed;
+      const still = () => {
+        const active = document.activeElement;
+        return !active || active === document.body || active === element;
+      };
+      if (waited && !still()) return stop();
+      landed = true;
+      if (!control && element.querySelector("input, button, select, textarea")) {
+        element.tabIndex = -1;
+        if (document.activeElement !== element) element.focus({ preventScroll: true });
+        waiting ??= setTimeout(stop, 4000);
+        return;
+      }
+      if (!control) element.tabIndex = -1;
+      (control ?? element).focus({ preventScroll: true });
+      stop();
     };
+    let landed = false;
+    let waiting: ReturnType<typeof setTimeout> | undefined;
+    // The keyboard going anywhere else ends the wait at once.
+    const moved = (event: FocusEvent) => {
+      if (landed && marked && !marked.contains(event.target as Node)) stop();
+    };
+    const stop = () => {
+      observer.disconnect();
+      clearTimeout(waiting);
+      document.removeEventListener("focusin", moved);
+    };
+    document.addEventListener("focusin", moved);
     const observer = new MutationObserver(focus);
     queueMicrotask(() => {
       if (!disposed && content?.isConnected) {
-        observer.observe(content, { childList: true, subtree: true });
+        observer.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled"] });
         focus();
       }
     });
     onCleanup(() => {
       disposed = true;
-      observer.disconnect();
+      stop();
       clearTimeout(timer);
       marked?.classList.remove("setting-search-target");
     });
@@ -691,40 +730,44 @@ function Shortcuts() {
       <p class="muted">
         {t("Click a shortcut and press the keys you want. The editor also supports standard search, selection, undo, and save shortcuts.")}
       </p>
-      <For each={Object.entries(app.state.preferences.shortcuts)}>
-        {([name, value]) => (
-          <Row
-            title={shortcutTitles[name] ?? name}
-            target={"shortcut:" + name}
-            description={shortcutDescriptions[name]}
-          >
-            <kbd class="shortcut-preview" dir="ltr" aria-hidden="true">
-              {shortcutLabel(value, app.state.platform)}
-            </kbd>
-            <input
-              class="shortcut-input"
-              aria-label={t("Shortcut {name}", { name })}
-              value={shortcutField(value, app.state.platform)}
-              onKeyDown={(event) => {
-                const chord = recordChord(event, app.state.platform);
-                if (!chord) return;
-                event.preventDefault();
-                event.currentTarget.value = shortcutField(chord, app.state.platform);
-                event.currentTarget.dispatchEvent(new Event("change"));
-              }}
-              onChange={(event) =>
-                app.run(() =>
-                  app.settings({
-                    shortcuts: {
-                      ...app.state.preferences.shortcuts,
-                      [name]: shortcutFromField(event.currentTarget.value, app.state.platform),
-                    },
-                  }),
-                )
-              }
-            />
-          </Row>
-        )}
+      {/* By name, so recording a shortcut keeps its row and the keyboard in it. */}
+      <For each={Object.keys(app.state.preferences.shortcuts)}>
+        {(name) => {
+          const value = () => app.state.preferences.shortcuts[name];
+          return (
+            <Row
+              title={shortcutTitles[name] ?? name}
+              target={"shortcut:" + name}
+              description={shortcutDescriptions[name]}
+            >
+              <kbd class="shortcut-preview" dir="ltr" aria-hidden="true">
+                {shortcutLabel(value(), app.state.platform)}
+              </kbd>
+              <input
+                class="shortcut-input"
+                aria-label={t("Shortcut {name}", { name })}
+                value={shortcutField(value(), app.state.platform)}
+                onKeyDown={(event) => {
+                  const chord = recordChord(event, app.state.platform);
+                  if (!chord) return;
+                  event.preventDefault();
+                  event.currentTarget.value = shortcutField(chord, app.state.platform);
+                  event.currentTarget.dispatchEvent(new Event("change"));
+                }}
+                onChange={(event) =>
+                  app.run(() =>
+                    app.settings({
+                      shortcuts: {
+                        ...app.state.preferences.shortcuts,
+                        [name]: shortcutFromField(event.currentTarget.value, app.state.platform),
+                      },
+                    }),
+                  )
+                }
+              />
+            </Row>
+          );
+        }}
       </For>
       <GlobalShortcutRows />
       <Row title="New line">
@@ -754,6 +797,7 @@ function Servers() {
           <Row
             title={item.label}
             target={"server:" + item.id}
+            tag={app.state.activeServer === item.id ? <CurrentTag /> : undefined}
             description={
               item.url ??
               (item.cloud
@@ -761,14 +805,13 @@ function Servers() {
                 : "Local projects on this computer")
             }
           >
-            <button
-              disabled={
-                app.state.activeServer === item.id && !app.state.openingProject
-              }
-              onClick={() => app.run(() => app.switchServer(item.id))}
-            >
-              {app.state.activeServer === item.id ? t("Selected") : t("Switch")}
-            </button>
+            {/* The server shown says so beside its name and has nothing to
+                switch to; the row never grows or loses a button meanwhile. */}
+            <Show when={app.state.activeServer !== item.id}>
+              <button onClick={() => app.run(() => app.switchServer(item.id))}>
+                {t("Switch")}
+              </button>
+            </Show>
             <Show when={item.url}>
               <button
                 onClick={() =>
@@ -815,8 +858,8 @@ function Servers() {
           </Row>
         )}
       </For>
-      <div class="settings-after-list">
-        <button data-setting="Add remote server" class="primary" onClick={openServerConnection}>
+      <div class="settings-after-list" data-setting="Add remote server">
+        <button class="primary" onClick={openServerConnection}>
           {t("Add remote server")}
         </button>
       </div>
@@ -898,23 +941,26 @@ function Computers() {
           >
             <Icon name="host" size="md" />
             <div>
-              <strong>{computer.name}</strong>
+              <span class="computer-row-name">
+                <strong>{computer.name}</strong>
+                <Show when={active() === computer.id}>
+                  <CurrentTag />
+                </Show>
+              </span>
               <p>
                 {computer.connected
                   ? platformName(computer.platform) || t("Connected")
                   : lastSeen(computer)}
               </p>
             </div>
-            <button
-              disabled={
-                active() === computer.id
-                  ? !app.state.openingProject
-                  : !computer.connected
-              }
-              onClick={() => app.run(() => app.openComputer(computer))}
-            >
-              {active() === computer.id ? t("Selected") : t("Switch")}
-            </button>
+            <Show when={active() !== computer.id}>
+              <button
+                disabled={!computer.connected}
+                onClick={() => app.run(() => app.openComputer(computer))}
+              >
+                {t("Switch")}
+              </button>
+            </Show>
           </div>
         )}
       </For>
@@ -933,7 +979,7 @@ function Projects() {
             <div class="settings-current-project-details">
               <span class="small muted">{t("Current working folder")}</span>
               <h3>{connection().workspace.split(/[\\/]/).filter(Boolean).at(-1) || connection().workspace}</h3>
-              <p class="settings-current-project-path">{connection().workspace}</p>
+              <PathText class="settings-current-project-path" path={connection().workspace} local={!connection().remote} />
               <span class="small muted">{t(app.currentServer().label)}</span>
               <Show when={!connection().remote && !connection().trust}>
                 <p class="small muted">{t("Project configuration disabled")}</p>
@@ -948,9 +994,6 @@ function Projects() {
         <p>
           {t("Manage projects on this server. Switch servers to see another server’s projects.")}
         </p>
-        <button onClick={() => app.openSettings("servers")}>
-          {t("Switch server")}
-        </button>
         <button
           class="primary"
           onClick={() => app.run(() => app.openProject())}
@@ -966,27 +1009,34 @@ function Projects() {
       </Show>
       <For each={app.projects()}>
         {(item) => (
-          <Row title={item.label} target={"project:" + item.id} description={item.root}>
+          <Row
+            title={item.label}
+            target={"project:" + item.id}
+            detail={<PathText class="setting-row-path" path={item.root} local={!app.currentServer().url && !app.currentServer().host && !app.currentServer().cloud} />}
+          >
             <button onClick={() => app.run(() => app.selectProject(item.id))}>
               {t("Open")}
             </button>
+            {/* The sidebar's Remove project, in the same words; the name only
+                adds to what the button says. */}
             <button
+              aria-label={t("Remove project {name}", { name: item.label })}
               onClick={() =>
                 app.run(async () => {
                   if (
                     await confirm(
-                      t("Forget project {name}?", { name: item.label }),
+                      t("Remove {name} from the sidebar?", { name: item.label }),
                       t(
                         "Chat history, running tasks and the saved server connection are preserved.",
                       ),
-                      { submit: t("Forget project"), danger: true },
+                      { submit: t("Remove project"), danger: true },
                     )
                   )
                     await app.forgetProject(item.id);
                 })
               }
             >
-              {t("Forget")}
+              {t("Remove project")}
             </button>
           </Row>
         )}
@@ -1001,25 +1051,41 @@ function Providers() {
   const local = () => !app.state.connection?.remote;
   const [adding, setAdding] = createSignal(false);
   const [addingRouter, setAddingRouter] = createSignal(false);
+  const [open, setOpen] = createSignal<Record<string, boolean>>({});
   const connected = () =>
     app.state.providers.filter((provider) => provider.authenticated);
-  const rows = () =>
-    [...app.state.providers].sort(
-      (a, b) => Number(b.authenticated) - Number(a.authenticated),
-    );
-  const summary = (provider: (typeof app.state.providers)[number]) => {
-    if (!provider.authenticated) return t("Not connected");
-    const count = provider.models.length;
-    return [
-      t("Connected"),
-      count === 1 ? t("1 model") : count ? t("{count} models", { count }) : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
+  // The page lists what is connected; the catalog lives in Connect a
+  // provider. Search still offers every provider, so one it opened that is
+  // not connected shows here too, for the jump to land on.
+  const sought = () => {
+    const target = app.state.settingsTarget;
+    return target?.startsWith("provider:")
+      ? app.state.providers.find((provider) => !provider.authenticated && "provider:" + provider.id === target)
+      : undefined;
   };
+  const rows = () => {
+    const extra = sought();
+    return extra ? [...connected(), extra] : connected();
+  };
+  const count = (models: number) => (models === 1 ? t("1 model") : t("{count} models", { count: models }));
+  let page!: HTMLDivElement;
+  // The row goes once its provider is disconnected: the keyboard moves on to
+  // the next row (or the one before), else to Connect a provider.
+  async function disconnect(provider: (typeof app.state.providers)[number]) {
+    const list = rows();
+    const index = list.findIndex((item) => item.id === provider.id);
+    const next = list[index + 1] ?? list[index - 1];
+    await app.run(async () => {
+      if (!(await disconnectProvider(app, provider))) return;
+      queueMicrotask(() => {
+        const row = next && page.parentElement?.querySelector<HTMLElement>(`[data-setting="${CSS.escape("provider:" + next.id)}"] [data-search-focus]`);
+        (row ?? page.querySelector<HTMLElement>("button.primary"))?.focus();
+      });
+    });
+  }
   return (
     <>
-      <div class="setting-block providers-hero">
+      <div ref={page} class="setting-block providers-hero" data-setting="Connect a provider">
         <header>
           <div>
             <h3>
@@ -1037,7 +1103,6 @@ function Providers() {
           </div>
           <button
             class="primary"
-            data-setting="Connect a provider"
             onClick={() => app.openConnect({ onboarding: !connected().length })}
           >
             {t("Connect a provider")}
@@ -1062,68 +1127,81 @@ function Providers() {
         <RouterConnectionDialog close={() => setAddingRouter(false)} />
       </Show>
       <For each={rows()}>
-        {(provider) => (
-          <div class="setting-block">
-            <header>
-              <div>
-                <h3 data-setting={"provider:" + provider.id}>
-                  <ProviderLabel provider={provider.id} size="lg">
-                    {provider.name}
-                  </ProviderLabel>
-                </h3>
-                <span classList={{ added: provider.authenticated }}>
-                  {summary(provider)}
-                </span>
-              </div>
-              <div class="toolbar">
-                {/* Haarness Cloud is the Haarness account, not a stored key:
-                    "Disconnect" removed nothing and "Reconnect" opened a
-                    picker that leaves Cloud out, so both go to the account. */}
-                <Show
-                  when={provider.id !== "haarness"}
-                  fallback={
-                    <button
-                      classList={{ primary: !provider.authenticated }}
-                      onClick={() => window.dispatchEvent(new Event("haarness:account"))}
-                    >
-                      {provider.authenticated ? t("Haarness account") : t("Sign in to Haarness")}
-                    </button>
-                  }
-                >
-                  <button
-                    classList={{ primary: !provider.authenticated }}
-                    onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
-                  >
-                    {provider.authenticated ? t("Reconnect") : t("Connect")}
-                  </button>
-                </Show>
-                <Show when={provider.authenticated && provider.id !== "haarness"}>
-                  <button
-                    onClick={() =>
-                      app.run(() => disconnectProvider(app, provider))
+        {(provider) => {
+          const expanded = () => !!open()[provider.id];
+          const list = "provider-models-" + provider.id.replace(/[^\w-]/g, "_");
+          return (
+            <div class="setting-block provider-row" data-setting={"provider:" + provider.id}>
+              <header>
+                <div>
+                  <h3>
+                    <ProviderLabel provider={provider.id} size="lg">
+                      {provider.name}
+                    </ProviderLabel>
+                  </h3>
+                  <p class="provider-status">
+                    <span classList={{ added: provider.authenticated }}>
+                      {provider.authenticated ? t("Connected") : t("Not connected")}
+                    </span>
+                    <Show when={provider.models.length}>
+                      <span aria-hidden="true">·</span>
+                      <button
+                        type="button"
+                        class="disclosure-toggle"
+                        aria-expanded={expanded()}
+                        aria-controls={list}
+                        onClick={() => setOpen((state) => ({ ...state, [provider.id]: !expanded() }))}
+                      >
+                        {count(provider.models.length)}
+                        <Icon name="chevron" size="xs" />
+                      </button>
+                    </Show>
+                  </p>
+                </div>
+                <div class="toolbar">
+                  {/* Haarness Cloud is the Haarness account, not a stored key:
+                      "Disconnect" removed nothing and "Reconnect" opened a
+                      picker that leaves Cloud out, so both go to the account. */}
+                  <Show
+                    when={provider.id !== "haarness"}
+                    fallback={
+                      <button data-search-focus onClick={() => window.dispatchEvent(new Event("haarness:account"))}>
+                        {provider.authenticated ? t("Haarness account") : t("Sign in to Haarness")}
+                      </button>
                     }
                   >
-                    {t("Disconnect")}
-                  </button>
-                </Show>
-              </div>
-            </header>
-            <details>
-              <summary>{t("Available models")}</summary>
-              <For each={provider.models}>
-                {(model) => (
-                  <p>
-                    <strong>
-                      {modelName(provider.id, model.id, app.state.providers)}
-                    </strong>{" "}
-                    <code>{model.id}</code> ·{" "}
-                    {t("{count} context", { count: model.contextWindow != null ? formatNumber(model.contextWindow) : t("Unknown") })}
-                  </p>
-                )}
-              </For>
-            </details>
-          </div>
-        )}
+                    <button
+                      data-search-focus
+                      onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
+                    >
+                      {provider.authenticated ? t("Reconnect") : t("Connect")}
+                    </button>
+                  </Show>
+                  <Show when={provider.authenticated && provider.id !== "haarness"}>
+                    <button onClick={() => void disconnect(provider)}>
+                      {t("Disconnect")}
+                    </button>
+                  </Show>
+                </div>
+              </header>
+              <Show when={expanded()}>
+                <ul class="provider-models" id={list}>
+                  <For each={provider.models}>
+                    {(model) => (
+                      <li>
+                        <strong>{modelName(provider.id, model.id, app.state.providers)}</strong>
+                        <code>{model.id}</code>
+                        <span>
+                          {t("{count} context", { count: model.contextWindow != null ? formatNumber(model.contextWindow) : t("Unknown") })}
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+            </div>
+          );
+        }}
       </For>
     </>
   );
@@ -1131,72 +1209,118 @@ function Providers() {
 function Models() {
   const app = useApp();
   const [filter, setFilter] = createSignal("");
+  const [all, setAll] = createSignal(false);
+  // Search finds every model; one of a provider that is not connected opens
+  // the whole catalog so the jump lands on it.
+  createEffect(() => {
+    const target = app.state.settingsTarget;
+    if (!target?.startsWith("model:")) return;
+    const id = target.slice("model:".length);
+    if (app.state.providers.some((provider) => !provider.authenticated && id.startsWith(provider.id + ":")))
+      setAll(true);
+  });
+  const matches = (provider: T.ProviderInfo, model: T.ProviderInfo["models"][number]) =>
+    (modelName(provider.id, model.id, app.state.providers) + " " + model.id + " " + provider.name)
+      .toLowerCase()
+      .includes(filter().trim().toLowerCase());
+  const rows = () =>
+    app.state.providers
+      .filter((provider) => all() || provider.authenticated)
+      .flatMap((provider) => provider.models.map((model) => ({ provider, model })))
+      .filter(({ provider, model }) => matches(provider, model));
+  // While searching, say how many more the other providers have.
+  const elsewhere = () =>
+    all() || !filter().trim()
+      ? 0
+      : app.state.providers
+          .filter((provider) => !provider.authenticated)
+          .reduce((sum, provider) => sum + provider.models.filter((model) => matches(provider, model)).length, 0);
+  const anyConnected = () => app.state.providers.some((provider) => provider.authenticated);
   return (
     <>
-      <input
-        placeholder={t("Search models…")}
-        aria-label={t("Search models")}
-        value={filter()}
-        onInput={(event) => setFilter(event.currentTarget.value)}
-      />
-      <table>
-        <thead>
-          <tr>
-            <th>{t("Model")}</th>
-            <th>{t("Provider")}</th>
-            <th>{t("Context")}</th>
-            <th>{t("Capabilities")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <For
-            each={app.state.providers
-              .flatMap((provider) =>
-                provider.models.map((model) => ({ provider, model })),
-              )
-              .filter((item) =>
-                (
-                  modelName(
-                    item.provider.id,
-                    item.model.id,
-                    app.state.providers,
-                  ) +
-                  " " +
-                  item.model.id +
-                  " " +
-                  item.provider.name
-                )
-                  .toLowerCase()
-                  .includes(filter().toLowerCase()),
-              )}
+      <div class="toolbar models-toolbar">
+        <input
+          placeholder={t("Search models…")}
+          aria-label={t("Search models")}
+          value={filter()}
+          onInput={(event) => setFilter(event.currentTarget.value)}
+        />
+        <label class="quiet-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-description={t("Include models of providers that aren't connected")}
+            checked={all()}
+            onChange={(event) => setAll(event.currentTarget.checked)}
+          />
+          <span>{t("Show all")}</span>
+        </label>
+      </div>
+      <Show
+        when={rows().length}
+        fallback={
+          <Show
+            when={filter().trim() || all() || anyConnected()}
+            fallback={
+              <Empty
+                title={t("No provider connected yet")}
+                detail={t("Sign in with a ChatGPT subscription, or paste an API key from OpenAI, Anthropic, Google and more.")}
+              />
+            }
           >
-            {({ provider, model }) => (
-              <tr data-setting={"model:" + provider.id + ":" + model.id}>
-                <td>
-                  {modelName(provider.id, model.id, app.state.providers)}
-                  <small>{model.id}</small>
-                </td>
-                <td>
-                  <ProviderLabel provider={provider.id}>
-                    {provider.name}
-                  </ProviderLabel>
-                </td>
-                <td>{model.contextWindow != null ? formatNumber(model.contextWindow) : "—"}</td>
-                <td>
-                  {[
-                    model.tools ? t("Tools") : "",
-                    model.images ? t("Images") : "",
-                    model.video ? t("Video") : "",
-                    model.reasoning ? t("Reasoning") : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </td>
-              </tr>
-            )}
-          </For>
-        </tbody>
-      </table>
+            <p class="muted">{t("No model matches that search.")}</p>
+          </Show>
+        }
+      >
+        <table>
+          <thead>
+            <tr>
+              <th>{t("Model")}</th>
+              <th>{t("Provider")}</th>
+              <th>{t("Context")}</th>
+              <th>{t("Capabilities")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <For each={rows()}>
+              {({ provider, model }) => (
+                <tr data-setting={"model:" + provider.id + ":" + model.id}>
+                  <td>
+                    {modelName(provider.id, model.id, app.state.providers)}
+                    <small>{model.id}</small>
+                  </td>
+                  <td>
+                    <ProviderLabel provider={provider.id}>
+                      {provider.name}
+                    </ProviderLabel>
+                  </td>
+                  <td>{model.contextWindow != null ? formatNumber(model.contextWindow) : "—"}</td>
+                  <td>
+                    {[
+                      model.tools ? t("Tools") : "",
+                      model.images ? t("Images") : "",
+                      model.video ? t("Video") : "",
+                      model.reasoning ? t("Reasoning") : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </td>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
+      </Show>
+      <Show when={elsewhere()}>
+        <p class="models-elsewhere">
+          {elsewhere() === 1
+            ? t("1 more from providers that aren't connected.")
+            : t("{count} more from providers that aren't connected.", { count: elsewhere() })}{" "}
+          <button type="button" class="settings-link" onClick={() => setAll(true)}>
+            {t("Show all")}
+          </button>
+        </p>
+      </Show>
     </>
   );
 }
@@ -1229,7 +1353,8 @@ const assetCopy = {
 } as const;
 function Assets(props: { kind: string; cli: Cli }) {
   const app = useApp();
-  const [rows, setRows] = createSignal<AssetRow[]>([]);
+  const [rows, setRows] = createSignal<(AssetRow & DefinitionRow)[]>([]);
+  const [plugins, setPlugins] = createSignal<T.PluginInfo[]>([]);
   const kind = () =>
     props.kind === "agents"
       ? "agent"
@@ -1242,8 +1367,8 @@ function Assets(props: { kind: string; cli: Cli }) {
   let latest = 0;
   async function refresh() {
     const request = ++latest;
-    const [list, state] = await Promise.all([
-      app.native<AssetRow[]>({
+    const [list, state, installed] = await Promise.all([
+      app.native<(AssetRow & DefinitionRow)[]>({
         action: "asset",
         kind: kind(),
         input: { action: "list" },
@@ -1257,11 +1382,14 @@ function Assets(props: { kind: string; cli: Cli }) {
               { action: "list" },
             )
             .catch(() => undefined),
+      // Plugins name where a definition that is not the person's own comes from.
+      app.api<T.PluginInfo[]>("plugins").catch(() => [] as T.PluginInfo[]),
     ]);
     // The pane serves agents, commands and skills in turn: a slower answer
     // for the section shown before must not replace this one.
     if (request !== latest) return;
     setRows(list);
+    setPlugins(installed);
     setEnabled(
       Object.fromEntries(
         (state?.[props.kind] ?? []).map((row) => [row.name, row.enabled !== false]),
@@ -1288,6 +1416,10 @@ function Assets(props: { kind: string; cli: Cli }) {
     prior: Record<string, unknown>;
     editing: boolean;
   }>();
+  const sourceLabel = (item: DefinitionRow) => {
+    const source = definitionSource(item, plugins());
+    return source === "builtin" ? t("Built-in") : source;
+  };
   async function edit(item?: AssetRow) {
     let prior: Record<string, unknown> = {};
     if (item)
@@ -1340,9 +1472,7 @@ function Assets(props: { kind: string; cli: Cli }) {
                 ? t("This project")
                 : item.scope === "global"
                   ? t("All projects")
-                  : item.scope === "base"
-                    ? undefined
-                    : t("Built-in / plugin"),
+                  : sourceLabel(item),
             ]
               .filter(Boolean)
               .join(" · ")}
@@ -1403,7 +1533,11 @@ function Assets(props: { kind: string; cli: Cli }) {
 function Tools() {
   const app = useApp();
   const [catalog, setCatalog] = createSignal<T.ToolCatalogResponse>(),
-    [filter, setFilter] = createSignal("");
+    [filter, setFilter] = createSignal(""),
+    // Groups the reader opened or closed; the rest follow their size. A
+    // search opens every group it finds something in, until closed there.
+    [opened, setOpened] = createSignal<Record<string, boolean>>({}),
+    [closedInSearch, setClosedInSearch] = createSignal<Record<string, boolean>>({});
   async function refresh() {
     setCatalog(
       await app.api(
@@ -1416,6 +1550,126 @@ function Tools() {
     app.state.catalogVersion;
     void app.run(refresh);
   });
+  const needle = () => filter().trim().toLowerCase();
+  const groups = createMemo(() =>
+    toolGroups(
+      (catalog()?.tools ?? []).filter(
+        (tool) =>
+          !needle() ||
+          `${tool.id} ${toolTitle(tool)} ${tool.description}`.toLowerCase().includes(needle()),
+      ),
+    ),
+  );
+  // Groups and tools render by key, so a switch keeps its row (and the
+  // keyboard) when the catalog it changed comes back.
+  const index = createMemo(() => {
+    const groupsByKey = new Map<string, ToolGroup>();
+    const visit = (list: ToolGroup[]) =>
+      list.forEach((group) => {
+        groupsByKey.set(group.key, group);
+        visit(group.groups ?? []);
+      });
+    visit(groups());
+    return { groups: groupsByKey, tools: new Map((catalog()?.tools ?? []).map((tool) => [tool.id, tool])) };
+  });
+  // A tool Search opened is shown in its group and part, which open for it.
+  createEffect(() => {
+    const target = app.state.settingsTarget;
+    if (!target?.startsWith("tool:")) return;
+    const keys = toolGroupKeys(untrack(groups), target.slice("tool:".length));
+    if (catalog() && keys.length)
+      setOpened((state) => ({ ...state, ...Object.fromEntries(keys.map((key) => [key, true])) }));
+  });
+  const expanded = (group: ToolGroup) =>
+    needle()
+      ? !closedInSearch()[group.key]
+      : (opened()[group.key] ?? (!group.key.startsWith("builtin/") && group.tools.length <= OPEN_GROUP_LIMIT));
+  const toggle = (group: ToolGroup) => {
+    const open = !expanded(group);
+    if (needle()) setClosedInSearch((state) => ({ ...state, [group.key]: !open }));
+    else setOpened((state) => ({ ...state, [group.key]: open }));
+  };
+  const groupTitle = (group: ToolGroup) =>
+    group.key === "builtin" ? t("Built-in") : group.kind === "builtin" ? t(group.name) : group.name;
+  const groupMeta = (group: ToolGroup) => {
+    const off = group.tools.filter((tool) => !tool.enabled).length;
+    return [
+      group.kind === "mcp" ? t("MCP server") : group.kind === "extension" ? t("Extension") : "",
+      group.tools.length === 1 ? t("1 tool") : t("{count} tools", { count: group.tools.length }),
+      off === 1 ? t("1 turned off") : off ? t("{count} turned off", { count: off }) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  };
+  function ToolRow(props: { id: string; prefix?: string }) {
+    const tool = () => index().tools.get(props.id)!;
+    return (
+      <Show when={index().tools.get(props.id)}>
+        <Row
+          literal
+          title={toolTitle(tool(), props.prefix)}
+          description={toolSummary(tool().description)}
+          tag={<code class="setting-id">{tool().id}</code>}
+          target={"tool:" + tool().id}
+        >
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label={t("Enable {name}", { name: tool().id })}
+            checked={tool().enabled}
+            onChange={(event) =>
+              app.run(async () =>
+                setCatalog(
+                  await app.api("updateTool", tool().id, {
+                    enabled: event.currentTarget.checked,
+                  }),
+                ),
+              )
+            }
+          />
+        </Row>
+      </Show>
+    );
+  }
+  function GroupView(props: { group: string; part?: boolean }) {
+    const group = () => index().groups.get(props.group)!;
+    const body = "tool-group-" + props.group.replace(/[^\w-]/g, "_");
+    return (
+      <Show when={index().groups.get(props.group)}>
+        <div class="tool-group" classList={{ "tool-group-part": props.part }}>
+          <button
+            type="button"
+            class="tool-group-toggle disclosure-toggle"
+            aria-expanded={expanded(group())}
+            aria-controls={body}
+            onClick={() => toggle(group())}
+          >
+            <Icon name="chevron" size="xs" />
+            <strong>{groupTitle(group())}</strong>
+            <span>{groupMeta(group())}</span>
+          </button>
+          <Show when={expanded(group())}>
+            <div id={body}>
+              <Show
+                when={group().groups}
+                fallback={
+                  <For each={group().tools.map((tool) => tool.id)}>
+                    {(id) => <ToolRow id={id} prefix={group().prefix} />}
+                  </For>
+                }
+              >
+                {(parts) => (
+                  <For each={parts().map((part) => part.key)}>
+                    {(key) => <GroupView group={key} part />}
+                  </For>
+                )}
+              </Show>
+            </div>
+          </Show>
+        </div>
+      </Show>
+    );
+  }
   return (
     <>
       <Row
@@ -1437,46 +1691,31 @@ function Tools() {
           ]}
         />
       </Row>
-      <p class="muted">
-        {t("{advertised} advertised tokens · {saved} saved", {
-          advertised: catalog() ? formatNumber(catalog()!.estimatedAdvertisedTokens) : "",
-          saved: catalog() ? formatNumber(catalog()!.estimatedSavedTokens) : "",
-        })}
-      </p>
-      <input
-        aria-label={t("Search tools")}
-        placeholder={t("Find a tool…")}
-        onInput={(event) => setFilter(event.currentTarget.value)}
-      />
-      <For
-        each={catalog()?.tools.filter((tool) =>
-          tool.id.toLowerCase().includes(filter().toLowerCase()),
-        )}
-      >
-        {(tool) => (
-          <Row
-            title={tool.id}
-            description={tool.description}
-            target={"tool:" + tool.id}
-          >
-            <span class="badge">{tool.source}</span>
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label={t("Enable {name}", { name: tool.id })}
-              checked={tool.enabled}
-              onChange={(event) =>
-                app.run(async () =>
-                  setCatalog(
-                    await app.api("updateTool", tool.id, {
-                      enabled: event.currentTarget.checked,
-                    }),
-                  ),
-                )
-              }
-            />
-          </Row>
-        )}
+      <div class="toolbar tools-toolbar">
+        <input
+          aria-label={t("Search tools")}
+          placeholder={t("Find a tool…")}
+          onInput={(event) => {
+            setFilter(event.currentTarget.value);
+            setClosedInSearch({});
+          }}
+        />
+        <Show when={catalog()}>
+          {(current) => (
+            <span class="tools-tokens">
+              {t("{advertised} advertised tokens · {saved} saved", {
+                advertised: formatNumber(current().estimatedAdvertisedTokens),
+                saved: formatNumber(current().estimatedSavedTokens),
+              })}
+            </span>
+          )}
+        </Show>
+      </div>
+      <Show when={catalog() && needle() && !groups().length}>
+        <p class="muted">{t("No tool matches that search.")}</p>
+      </Show>
+      <For each={groups().map((group) => group.key)}>
+        {(key) => <GroupView group={key} />}
       </For>
     </>
   );
@@ -1832,8 +2071,8 @@ function Extensions(props: { cli: Cli }) {
           }
         />
       </Row>
-      <div class="toolbar">
-        <button data-setting="Install extension" class="primary" onClick={() => setInstalling(true)}>
+      <div class="toolbar" data-setting="Install extension">
+        <button class="primary" onClick={() => setInstalling(true)}>
           {t("Install extension")}
         </button>
       </div>

@@ -367,6 +367,8 @@ export interface Bridge {
     servers: SavedServer[];
     version: string;
     platform: string;
+    /** This computer's home folder. */
+    home: string;
     updateConfigured: boolean;
   }>;
   connect(input: {

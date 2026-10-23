@@ -6,8 +6,13 @@ use haarness_protocol::{ManagementField, ManagementView};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// Opens or closes the fold nearest the prompt: a tool's output, a long
+/// prompt, a thought.
+pub(crate) const FOLD_ACTION: &str = "fold";
+
 pub(crate) const ACTIONS: &[(&str, &str, &str)] = &[
     ("commands", "Command palette", "ctrl+p"),
+    (FOLD_ACTION, "Open or close a fold", "ctrl+r"),
     ("sessions", "Sessions", "ctrl+l"),
     ("messages", "Message browser", "alt+m"),
     ("models", "Models", "F2"),
@@ -279,6 +284,13 @@ pub(crate) fn overrides_default(bindings: &BTreeMap<String, String>, key: KeyEve
             && bindings.get(*name).is_some_and(|value| value != default)
     })
 }
+/// The chat's main keys that are not shortcuts to rebind, listed above the
+/// shortcuts. Editing keys (Ctrl+A/E/W/K/U, Ctrl+- undo) work as in any
+/// prompt and are left to the reference.
+const FIXED_KEYS: &[&str] = &[
+    "Fixed: esc esc stop · ctrl+c clear, then stop · alt+enter queue · ctrl+g approval · tab agent · ctrl+y Auto · ctrl+b sidebar · ctrl+t thinking",
+];
+
 pub(crate) fn view(input: &Value) -> Result<ManagementView> {
     let (mut bindings, _) = load();
     if input["action"] == "save" {
@@ -298,7 +310,7 @@ pub(crate) fn view(input: &Value) -> Result<ManagementView> {
         );
         crate::config::save_state(|s| s.keybindings = saved);
     }
-    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:vec!["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".into()],fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
+    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:FIXED_KEYS.iter().map(|line| (*line).to_owned()).chain(["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".to_owned()]).collect(),fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
 }
 
 #[cfg(test)]

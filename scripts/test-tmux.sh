@@ -513,7 +513,28 @@ if echo "$pane" | grep -q "Delete"; then
   echo "Sessions modal exposed an unsupported irreversible delete action" >&2
   exit 1
 fi
+# Escape backs out one level: from the actions to the list, then closes it.
 tmux send-keys -t "$session":0.0 Escape
+attempt=0
+while [ "$attempt" -lt 40 ]; do
+  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
+  echo "$pane" | grep -q "enter resume" && ! echo "$pane" | grep -q "Copy session ID" && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if ! echo "$pane" | grep -q "enter resume" || echo "$pane" | grep -q "Copy session ID"; then
+  echo "$pane" >&2
+  echo "Escape in the session actions did not go back to the list" >&2
+  exit 1
+fi
+tmux send-keys -t "$session":0.0 Escape
+attempt=0
+while [ "$attempt" -lt 40 ]; do
+  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
+  echo "$pane" | grep -q "enter resume" || break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
 
 tmux send-keys -t "$session":0.0 "/plan" Enter
 attempt=0
@@ -959,29 +980,45 @@ tmux send-keys -t "$session":0.0 Escape
 tmux send-keys -t "$session":0.0 C-u
 
 # Haarness parity: one Ctrl+C clears a non-empty draft, does not interrupt or
-# quit, and says so in the status line. Ambient feedback never pops a card.
+# quit, and says in the status line how to bring it back. Ambient feedback
+# never pops a card.
 tmux send-keys -l -t "$session":0.0 'clear this draft once'
 tmux send-keys -t "$session":0.0 C-c
 attempt=0
 while [ "$attempt" -lt 40 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Input cleared" && break
+  echo "$pane" | grep -q "Draft cleared" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if echo "$pane" | grep -q "clear this draft once" || ! echo "$pane" | grep -q "Input cleared"; then
+if echo "$pane" | grep -q "clear this draft once" || ! echo "$pane" | grep -q "Draft cleared"; then
   echo "$pane" >&2
   echo "Single Ctrl+C did not clear the draft and show feedback" >&2
   exit 1
 fi
-notice_row="$(echo "$pane" | awk '/Input cleared/ { print NR; exit }')"
+notice_row="$(echo "$pane" | awk '/Draft cleared/ { print NR; exit }')"
 if [ -z "$notice_row" ] || [ "$notice_row" -lt 20 ]; then
   echo "$pane" >&2
-  echo "Input-cleared feedback was not in the status line" >&2
+  echo "Draft-cleared feedback was not in the status line" >&2
   exit 1
 fi
 
-# History recall: the earlier submitted prompt returns on Up.
+# The cleared draft is the newest history entry: Up brings it back.
+tmux send-keys -t "$session":0.0 Up
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
+  echo "$pane" | grep -q "▏ .*clear this draft once" && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if ! echo "$pane" | grep -q "clear this draft once"; then
+  echo "$pane" >&2
+  echo "Up did not bring back the draft Ctrl+C cleared" >&2
+  exit 1
+fi
+
+# History recall: the earlier submitted prompt returns on the next Up.
 tmux send-keys -t "$session":0.0 Up
 attempt=0
 while [ "$attempt" -lt 50 ]; do
@@ -1456,11 +1493,11 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "▸ Thought for" && echo "$pane" | grep -q "Reasoned reply" && break
+  echo "$pane" | grep -q "▹ Thought for" && echo "$pane" | grep -q "Reasoned reply" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "▸ Thought for" || echo "$pane" | grep -q "Considering deeply"; then
+if ! echo "$pane" | grep -q "▹ Thought for" || echo "$pane" | grep -q "Considering deeply"; then
   echo "$pane" >&2
   echo "Compact reasoning did not settle as one Thought row" >&2
   exit 1

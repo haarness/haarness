@@ -135,6 +135,27 @@ impl PermissionChoice {
     }
 }
 
+/// What a notice is true for, when that ends before its time runs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeLasts {
+    /// While the conversation is scrolled back ("Viewing … Ctrl+End returns
+    /// to latest").
+    WhileScrolledBack,
+    /// Until a dialog opens or another command runs: why a command would
+    /// not run as typed.
+    UntilNextCommand,
+}
+
+/// A one-key answer (`y`, `n`, a Chrome card's `a`) lit on its chip and not
+/// sent yet: its letter, the request it answers, and when the letter was
+/// typed (read from the terminal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlingAnswer {
+    pub permission_id: String,
+    pub letter: char,
+    pub typed: std::time::Instant,
+}
+
 /// Where the approval card's subject (a long command, say) is scrolled to,
 /// and whether it is expanded, for the request it was moved on: any other
 /// request starts at its first row, collapsed.
@@ -632,6 +653,9 @@ pub struct Toast {
     /// Repeats the approval card. It stays hidden while the card itself is on
     /// screen, and only shows where a dialog or a small terminal hides it.
     pub approval: bool,
+    /// Repeats a question waiting for an answer: hidden while the question
+    /// itself shows in the conversation.
+    pub question: bool,
 }
 
 /// A context estimate keyed by the shown thread's item count, last sequence
@@ -744,6 +768,15 @@ pub struct App {
     /// session list leads with the chats they wait in.
     pub waiting: std::collections::HashMap<String, WaitingRequest>,
     pub notice: String,
+    /// A notice that stops being true before its time runs out, and when: it
+    /// goes then if it is still the one on the band.
+    pub notice_lasts: Option<(String, NoticeLasts)>,
+    /// The session whose actions are open, and the sessions list's filter,
+    /// for ← and Esc to return to.
+    pub session_return: Option<(ThreadId, String)>,
+    /// What Enter does with a message while work runs, as last read from
+    /// the project (`/input-mode`): steer it in, or queue it.
+    pub input_delivery: Option<haarness_protocol::InputDelivery>,
     /// The notice last seen by the render tick and when it appeared, so an
     /// answer to something the user did fades instead of describing the past.
     pub(crate) notice_shown: Option<(String, std::time::Instant)>,
@@ -820,6 +853,14 @@ pub struct App {
     /// and when the last one was taken. When the next key shows they began a
     /// message, they move to the composer with it instead.
     pub permission_typed: Option<(String, usize, std::time::Instant)>,
+    /// The one-key answer waiting out its window, if any; it answers only
+    /// the request it was typed at.
+    pub permission_settling: Option<SettlingAnswer>,
+    /// The request the card's typed letters, staged answer and chip
+    /// selection belong to: a different one at the head starts afresh.
+    pub permission_head: Option<String>,
+    /// The call the open conversation's latest tool status named.
+    pub last_tool_call: Option<String>,
     /// Highlighted chip on the docked approval panel: an index into
     /// `permission_choices`, or into confirm/cancel while `confirm_always`
     /// is staged.
@@ -851,6 +892,10 @@ pub struct App {
     /// separate from transcript scrollback.
     pub overlay_scroll: usize,
     pub max_overlay_scroll: std::cell::Cell<usize>,
+    /// The open filterable dialog (by title, at a screen height) and the
+    /// tallest it has been: its top edge stays there while a filter shortens
+    /// the list.
+    pub dialog_anchor: std::cell::RefCell<Option<(String, usize, usize)>>,
     /// `!` shell passthrough: Enter runs the composer as a command.
     pub shell_mode: bool,
     /// Full-screen terminal tabs. Dropping this view detaches the client but
@@ -1107,6 +1152,9 @@ impl App {
             notice,
             notice_shown: None,
             undo_draft: None,
+            notice_lasts: None,
+            session_return: None,
+            input_delivery: None,
             custom_status_line: None,
             billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
@@ -1138,6 +1186,9 @@ impl App {
             permission_focus: false,
             confirm_always: None,
             permission_typed: None,
+            permission_settling: None,
+            permission_head: None,
+            last_tool_call: None,
             permission_selection: 0,
             permission_scroll: None,
             permission_fit: std::cell::Cell::new(SubjectFit::default()),
@@ -1151,6 +1202,7 @@ impl App {
             pending_message_jump: std::cell::Cell::new(None),
             overlay_scroll: 0,
             max_overlay_scroll: std::cell::Cell::new(0),
+            dialog_anchor: std::cell::RefCell::new(None),
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
@@ -1441,6 +1493,7 @@ impl App {
             variant,
             expires_at: std::time::Instant::now() + duration,
             approval: false,
+            question: false,
         });
     }
 
@@ -1467,12 +1520,44 @@ impl App {
         }
     }
 
+    /// Show `text` on the band for as long as it `lasts`.
+    pub(crate) fn notice_lasting(&mut self, text: impl Into<String>, lasts: NoticeLasts) {
+        self.notice = text.into();
+        self.notice_lasts = Some((self.notice.clone(), lasts));
+    }
+
+    /// Whether the band still shows the notice set to last `lasts`.
+    pub(crate) fn shows_notice_lasting(&self, lasts: NoticeLasts) -> bool {
+        self.notice_lasts
+            .as_ref()
+            .is_some_and(|(text, until)| *until == lasts && *text == self.notice)
+    }
+
+    /// The time a notice set to last `lasts` was true for is over: it goes,
+    /// unless another notice took its place meanwhile.
+    pub(crate) fn end_notice(&mut self, lasts: NoticeLasts) {
+        if self
+            .notice_lasts
+            .as_ref()
+            .is_some_and(|(_, until)| *until == lasts)
+        {
+            if self.shows_notice_lasting(lasts) {
+                self.notice.clear();
+            }
+            self.notice_lasts = None;
+        }
+    }
+
     /// Age the status-line notice. Notices are set from many places, so the
     /// render tick notes when the text changes and clears it once it has
     /// been on screen for [`NOTICE_TTL`]. A notice that describes a state
     /// still in force stays: an approval waiting, shell mode, a queued
     /// message being edited, a folder operation in flight.
     pub fn expire_notice(&mut self, now: std::time::Instant) {
+        // A notice about reading back stops being true at the latest message.
+        if self.effective_viewport_offset() == 0 && self.pending_message_jump.get().is_none() {
+            self.end_notice(NoticeLasts::WhileScrolledBack);
+        }
         if self.notice.is_empty() {
             self.notice_shown = None;
             return;
@@ -2413,6 +2498,9 @@ impl App {
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay) {
+        // A refused command's notice is done with once a dialog takes over.
+        self.end_notice(NoticeLasts::UntilNextCommand);
+        *self.dialog_anchor.get_mut() = None;
         self.overlay = overlay;
         self.overlay_filter.clear();
         self.overlay_scroll = 0;
@@ -2500,6 +2588,7 @@ impl App {
             self.apply_theme(&name, &variant);
         }
         self.overlay = Overlay::None;
+        *self.dialog_anchor.get_mut() = None;
         self.overlay_filter.clear();
         self.overlay_scroll = 0;
         self.max_overlay_scroll.set(0);
@@ -2896,6 +2985,7 @@ impl App {
             return;
         };
         let id = thread.id.to_string();
+        self.session_return = Some((thread.id, self.overlay_filter.clone()));
         let language = self.language;
         let text = |key: &str| language.text(key).to_owned();
         let mut entries = Vec::new();
@@ -2954,6 +3044,22 @@ impl App {
             kind: OptionsKind::SessionActions,
             entries,
         });
+    }
+
+    /// ← or Esc in a session's actions: back to the sessions list as it was,
+    /// its filter kept and that session selected.
+    pub fn return_to_sessions(&mut self) {
+        let Some((id, filter)) = self.session_return.take() else {
+            self.close_overlay();
+            return;
+        };
+        self.open_overlay(Overlay::Threads);
+        self.overlay_filter = filter;
+        self.selection = self
+            .filtered_threads()
+            .iter()
+            .position(|thread| thread.id == id)
+            .unwrap_or(0);
     }
 
     pub fn model_label(&self, qualified: &str) -> String {

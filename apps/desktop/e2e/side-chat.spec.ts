@@ -28,6 +28,19 @@ const box = () => panel().getByRole("textbox", { name: "Ask a side question", ex
 const threadTabs = () => panel().getByRole("tab");
 const composer = () => page.getByRole("textbox", { name: "Message", exact: true });
 const mod = process.platform === "darwin" ? "Meta" : "Control";
+const sidebar = () => page.locator(".sidebar");
+const bench = () => page.locator(".workbench");
+const resize = (width: number, height: number) =>
+  app.evaluate(({ BrowserWindow }, [width, height]) => BrowserWindow.getAllWindows()[0]?.setSize(width, height), [width, height]);
+/** Zoomed in, even the smallest window (900 wide) leaves the chat and the
+ * side chat no room side by side, sidebar or not. */
+const zoom = (factor: number) =>
+  app.evaluate(({ BrowserWindow }, factor) => BrowserWindow.getAllWindows()[0]?.webContents.setZoomFactor(factor), factor);
+/** The conversation's right edge is at or before the side chat's left one. */
+async function besideChat() {
+  const [chat, side] = await Promise.all([chatPane().boundingBox(), column().boundingBox()]);
+  return !!chat && !!side && chat.x + chat.width <= side.x + 1;
+}
 
 test.beforeAll(async () => {
   temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-side-chat-")));
@@ -209,22 +222,39 @@ test("/btw opens a side chat beside the chat that streams answers and keeps foll
   await page.keyboard.press(`${mod}+Shift+J`);
   await expect(column()).toBeVisible();
   await expect(sidePanel()).toBeHidden();
-  // In a narrow window it takes the whole workbench.
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1000, 800));
-  await expect(page.locator(".workbench")).toHaveClass(/side-over/);
+  // In a smaller window the sidebar steps aside first, so the side chat still
+  // stands beside the conversation.
+  await resize(1000, 800);
+  await expect(sidebar()).toBeHidden();
+  await expect(bench()).not.toHaveClass(/side-over/);
+  await expect(chatPane()).toBeVisible();
   await expect(column()).toBeVisible();
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1440, 900));
-  await expect(page.locator(".workbench")).not.toHaveClass(/side-over/);
+  await expect.poll(besideChat).toBe(true);
+  // Only where even that leaves no room does it take the whole workbench.
+  await zoom(1.5);
+  await expect(bench()).toHaveClass(/side-over/);
+  await expect(column()).toBeVisible();
+  await zoom(1);
+  await resize(1440, 900);
+  await expect(bench()).not.toHaveClass(/side-over/);
+  await expect(sidebar()).toBeVisible();
   await expect(sidePanel()).toBeVisible();
   // The side panel goes, the side chat stays.
   await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
   await expect(sidePanel()).toBeHidden();
   await expect(column()).toBeVisible();
+  // On its own the side chat has the sidebar step aside too.
+  await resize(1000, 800);
+  await expect(sidebar()).toBeHidden();
+  await expect.poll(besideChat).toBe(true);
 
-  // The far-end × puts the side chat away, back to the message box.
+  // The far-end × puts the side chat away, back to the message box, and the
+  // sidebar comes back.
   await panel().getByRole("button", { name: "Hide side chat", exact: true }).click();
   await expect(column()).toBeHidden();
   await expect(composer()).toBeFocused();
+  await expect(sidebar()).toBeVisible();
+  await resize(1440, 900);
   await send("/btw");
   await expect(column()).toBeVisible();
   await expect(box()).toBeFocused();
@@ -385,14 +415,17 @@ test("answers keep streaming across chats and page loads, and the side chat shar
   await page.keyboard.press("Escape");
   await expect(page.locator(".settings-dialog")).toBeHidden();
 
-  // In a narrow window it covers the workspace, and Esc in its idle box puts it away.
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1000, 800));
-  await expect(page.locator(".workbench")).toHaveClass(/side-over/);
+  // Where nothing fits beside the chat it covers the workspace, and Esc in
+  // its idle box puts it away.
+  await resize(1000, 800);
+  await zoom(1.5);
+  await expect(bench()).toHaveClass(/side-over/);
   await box().focus();
   await box().press("Escape");
   await expect(column()).toBeHidden();
   // The side panel it covered comes back, and expanded it still takes the whole workspace.
   await expect(sidePanel()).toBeVisible();
+  await zoom(1);
   await page.getByRole("button", { name: "Expand side panel", exact: true }).click();
   const workbench = await page.locator(".workbench").boundingBox();
   const expanded = await sidePanel().boundingBox();

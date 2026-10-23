@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-input-tmux-') as directory:
         click('▎ 1. deferred one')
         until(lambda:'Steer now' in pane(),'clicking a queued row did not open its actions')
         keys('Down','Enter')
-        until(lambda:'Editing queued message · Enter saves · Click to cancel' in pane(),'edit did not load into the prompt')
+        until(lambda:'Esc or click cancels and restores your draft' in pane(),'edit did not load into the prompt')
         assert 'Editing — Enter saves it in place' in pane(), pane()
         evidence.append('EDITING\n'+pane())
         text(' edited');keys('Enter')

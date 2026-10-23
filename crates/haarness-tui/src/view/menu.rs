@@ -112,18 +112,10 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     .mention_suggestions
                     .iter()
                     .any(|path| crate::resource_mentions::find(app, path).is_some());
+                // One order whatever matches, the masthead's: the header
+                // says what `@` reaches, not which kind matched first.
                 let title = if query.starts_with('/') || query.starts_with('~') || dot_path {
                     "files · local paths"
-                } else if app
-                    .mention_suggestions
-                    .iter()
-                    .any(|path| path.starts_with("agent://"))
-                {
-                    if resources {
-                        "agents · files · resources"
-                    } else {
-                        "agents · files"
-                    }
                 } else if resources {
                     "files · agents · resources"
                 } else {
@@ -814,6 +806,24 @@ impl SelectorLayout {
     }
 }
 
+/// The card width that shows every command and its description on one
+/// aligned row, as [`SelectorLayout`] lays them out.
+pub(crate) fn commands_width(app: &App) -> usize {
+    let entries = app.filtered_slash_entries("");
+    let label = entries
+        .iter()
+        .map(|entry| entry.name.width() + 1)
+        .max()
+        .unwrap_or_default();
+    let detail = entries
+        .iter()
+        .map(|entry| entry.description.width())
+        .max()
+        .unwrap_or_default();
+    // Card padding, the marker gutter, the label, its gap, the description.
+    4 + 3 + label + 2 + detail
+}
+
 /// The filter line. Empty reads as an invitation, not as the word "Search"
 /// with a cursor stuck to it.
 /// Selector fields edit at the end of their text. Keep that insertion point
@@ -1036,7 +1046,9 @@ fn selector_footer(app: &App, start: usize, end: usize, total: usize) -> String 
         OptionsKind::ConnectApiKey => {
             language.hints(&["enter connect", "ctrl+u clear", "esc back"])
         }
-        OptionsKind::ConnectMethod => range(&["enter choose", "esc back"]),
+        OptionsKind::ConnectMethod | OptionsKind::SessionActions => {
+            range(&["enter choose", "esc back"])
+        }
         OptionsKind::ConnectProvider => range(&["enter connect", "type to filter"]),
         _ => range(&["\u{2191}\u{2193} navigate", "enter select"]),
     }
