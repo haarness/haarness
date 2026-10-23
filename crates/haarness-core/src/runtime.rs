@@ -4289,6 +4289,7 @@ impl AgentRuntime {
                     review: None,
                     reviewer: reviewer.clone(),
                     review_abort: review_now.then(CancellationToken::new),
+                    own_call: !agent_work,
                 },
             );
             drop(approval_gate);
@@ -4775,7 +4776,12 @@ impl AgentRuntime {
                 // With the reviewer on, a waiting request is reviewed, not
                 // released outright; one it already left to a person, and
                 // an ask a person configured, stay theirs.
-                if review_on {
+                if review_on
+                    && self
+                        .permissions
+                        .get(&permission_id)
+                        .is_some_and(|entry| !entry.own_call)
+                {
                     let Some(mut entry) = self.permissions.get_mut(&permission_id) else {
                         continue;
                     };
@@ -6253,6 +6259,9 @@ struct PendingPermission {
     /// Ends a running review at once: the chat left Auto, or a person
     /// answered the request.
     review_abort: Option<CancellationToken>,
+    /// A person's own call (`!`, a client's tool call), which Auto approves
+    /// once without a review: turning Auto on releases it.
+    own_call: bool,
 }
 
 /// Where Auto's reviewer is with a waiting request.
@@ -9891,6 +9900,7 @@ impl RunnerTask {
                     review: None,
                     reviewer: reviewer.clone(),
                     review_abort: review_now.then(CancellationToken::new),
+                    own_call: false,
                 },
             );
         }
