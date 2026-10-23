@@ -124,14 +124,46 @@ test.afterAll(async () => {
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
-/** Sends `text`, which the echo provider repeats as the reply, and returns that reply. */
+/**
+ * Sends `text`, which the echo provider repeats as the reply, and returns that
+ * reply, found by its item: the transcript draws only the rows near the view.
+ */
 async function reply(text: string, attachments?: string[]) {
   await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
-  const before = await page.locator(".message.assistant").count();
+  // Back to following the newest output (End), as the person would after looking at an earlier image.
+  await page.locator(".transcript").focus();
+  await page.keyboard.press("End");
   const turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text, attachments });
   await client.waitTurn(turn.id);
-  await expect(page.locator(".message.assistant")).toHaveCount(before + 1);
-  return page.locator(".message.assistant").last();
+  const items = await client.listItems(thread);
+  const saved = items.findLast((item) => item.turnId === turn.id && item.data.type === "assistant_message")!;
+  const message = page.locator(`[data-item-id="${saved.id}"] .message.assistant`);
+  await expect(message).toBeInViewport();
+  await expect(page.locator(".assistant-activity")).toHaveCount(0);
+  return message;
+}
+
+/** Opens a tool row and returns its preview. */
+async function openPreview(row: Locator) {
+  if ((await row.getAttribute("open")) === null) await row.locator("summary").click();
+  const preview = row.locator(".tool-image img");
+  await expect(preview).toBeVisible();
+  return preview;
+}
+
+/**
+ * A picture of `target` where it is now: the window clipped to its box, so a
+ * row the transcript draws anew meanwhile does not hold the picture up.
+ */
+async function shoot(target: Locator | Page, path: string) {
+  if (!("boundingBox" in target)) return void (await target.screenshot({ path }));
+  const box = (await target.boundingBox())!;
+  const view = page.viewportSize()!;
+  const top = Math.max(0, box.y);
+  await page.screenshot({
+    path,
+    clip: { x: Math.max(0, box.x), y: top, width: Math.min(box.width, view.width), height: Math.min(box.y + box.height, view.height) - top },
+  });
 }
 
 /** Light and dark pictures of `target`, kept when HAARNESS_IMAGE_SCREENSHOTS names a folder. */
@@ -145,7 +177,7 @@ async function pictures(target: Locator | Page, name: string) {
       await Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {})));
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     });
-    await target.screenshot({ path: join(shots, `${name}-${theme}.png`) });
+    await shoot(target, join(shots, `${name}-${theme}.png`));
   }
   await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
 }
@@ -239,35 +271,39 @@ test("a reply drawn again shows its image at once, and a changed file shows anew
   expect(errors).toEqual([]);
 });
 
+/** Runs a read through the echo provider and returns its row, once the turn's reply is drawn. */
+async function read(path: string) {
+  const answer = await reply(`!tool read {"path":"${path}"}`);
+  const items = await client.listItems(thread);
+  const call = items.findLast((item) => item.data.type === "tool_call")!;
+  const result = items.findLast((item) => item.data.type === "tool_result")!.data as { metadata?: { attachments?: string[] } };
+  await expect(answer).toBeVisible();
+  return { row: page.locator(`[data-item-id="${call.id}"] details.tool-call`), attachment: result.metadata?.attachments?.[0] };
+}
+
 test("a read that returned an image shows it once its row is open", async () => {
   // A small image comes back as the file it read, which the row reads from the project.
-  await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
-  let turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: '!tool read {"path":"out/chart.png"}' });
-  await client.waitTurn(turn.id);
-  const items = await client.listItems(thread);
-  const result = items.findLast((item) => item.data.type === "tool_result")!.data as { metadata?: { attachments?: string[] } };
-  expect(result.metadata?.attachments?.[0]).toBe(join(workspace, "out/chart.png"));
-  const row = page.locator(".tool-call").filter({ hasText: "chart.png" }).last();
+  const { row, attachment } = await read("out/chart.png");
+  expect(attachment).toBe(join(workspace, "out/chart.png"));
   await expect(row).toBeVisible();
   // Closed, the row is as it was.
   await expect(row.locator(".tool-image")).toHaveCount(0);
-  await row.locator("summary").click();
-  const preview = row.locator(".tool-image img");
+  const preview = await openPreview(row);
   await expect(preview).toHaveAttribute("src", /^data:image\/png;base64,/);
   expect((await size(preview)).natural).toEqual([360, 200]);
   await pictures(row, "read-image");
 
   // A large one comes back smaller, carried in the result: shown as it is, not read.
-  turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: '!tool read {"path":"out/wide.png"}' });
-  await client.waitTurn(turn.id);
-  const wide = page.locator(".tool-call").filter({ hasText: "wide.png" }).last();
-  await wide.locator("summary").click();
-  const shown = wide.locator(".tool-image img");
+  const wide = await read("out/wide.png");
+  expect(wide.attachment).toMatch(/^data:image\/png;name=wide\.png;base64,/);
+  const shown = await openPreview(wide.row);
   await expect(shown).toHaveAttribute("src", /^data:image\/png;base64,/);
   const measured = await size(shown);
-  expect(measured.natural[0]).toBeLessThanOrEqual(2000);
+  expect(measured.natural).toEqual([2000, 267]);
   expect(measured.shown[1]).toBeLessThanOrEqual(320);
-  // A read outside the project that the result does not carry shows nothing more than before.
+  // Closing the row takes the image away again.
+  await wide.row.locator("summary").click();
+  await expect(wide.row.locator(".tool-image")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -303,9 +339,8 @@ test("any image of the conversation opens full size; Esc, a click outside or Clo
   await expect(full).toHaveAttribute("src", attached);
   await viewer.getByRole("button", { name: "Close", exact: true }).click();
   await expect(viewer).toHaveCount(0);
-  const read = page.locator(".tool-call").filter({ hasText: "chart.png" }).last();
-  if (!(await read.locator(".tool-image-open").count())) await read.locator("summary").click();
-  await read.locator(".tool-image-open").click();
+  await openPreview(page.locator(".tool-call").filter({ hasText: "chart.png" }).last());
+  await page.locator(".tool-call").filter({ hasText: "chart.png" }).last().locator(".tool-image-open").click();
   await expect(full).toHaveAttribute("src", /^data:image\/png;base64,/);
   await page.keyboard.press("Escape");
   await expect(viewer).toHaveCount(0);
@@ -319,7 +354,7 @@ test("placeholders speak the interface language", async () => {
     const message = await reply("![](../outside/secret.png) ![x](out/missing.png)");
     await expect(message.locator(".project-image-alt").first()).toHaveText("صورة");
     await expect(message.locator(".project-image-note")).toHaveText(["خارج هذا المشروع", "غير متاح"]);
-    if (shots) await message.screenshot({ path: join(shots, "reply-image-notes-rtl.png") });
+    if (shots) await shoot(message, join(shots, "reply-image-notes-rtl.png"));
   } finally {
     await page.evaluate(() => window.haarness.preferences({ language: "en" }));
   }
