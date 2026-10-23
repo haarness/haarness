@@ -1022,6 +1022,9 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     Ok(true) => {
                         app.undo_draft = None;
                         app.mention_resources.want = None;
+                        // An Esc before it hid that prompt's list, not the
+                        // next one's.
+                        app.autocomplete_hidden = false;
                         app.save_prompt_history();
                     }
                     // A draft whose unknown picks became plain text comes
@@ -1032,6 +1035,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                             let (before, after) = returned.text.split_at(returned.at);
                             app.composer.set_text_split(before, after);
                             app.mention_resources.want = Some(returned.row);
+                            app.autocomplete_hidden = false;
                             refresh_mentions(app, client).await;
                         }
                         None => app.composer.set_text(text),
