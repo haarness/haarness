@@ -12,13 +12,17 @@
  * What was read is remembered in memory, so a reply drawn again (scrolled
  * back into view, or the live reply once it is saved) shows its image at
  * once, with no placeholder in between, and a reply asks for each of its
- * images once. Once the project may have changed (a turn of the chat being
- * viewed ended or one of its tools wrote files, or the window of a project
- * on this computer came back to the front) a remembered image still shows at
- * once and is read again behind it the next time a reply draws it, at most
- * every `PROJECT_IMAGE_LIMITS.recheck`, unless the file API wrote that very
- * file. Pure apart from the DOM it is handed, so it is tested without a
- * window.
+ * images once. A remembered image keeps showing while it is read again behind
+ * it, and every reply showing it takes the new one when it differs. It is
+ * read again the next time a reply draws it:
+ * - at once after the chat being viewed ends a turn, or after a write tool or
+ *   the file API wrote that very file;
+ * - at most every `PROJECT_IMAGE_LIMITS.recheck` after another change of the
+ *   project (any chat's turn ended, a tool of the viewed chat wrote files, the
+ *   window of a project on this computer came back to the front). A draw the
+ *   wait turned away leaves one read for when it ends, as long as a reply
+ *   that asked still shows the image.
+ * Pure apart from the DOM it is handed, so it is tested without a window.
  */
 import { linkTarget, parsedAddress } from "./link-target";
 import { madeHere, markMade } from "./remote-images";
@@ -60,22 +64,44 @@ export type ImageNote = "outside" | "large" | "failed";
 export type ProjectImagePath = { path: string } | { refused: ImageNote };
 
 /**
+ * A Windows path as Desktop reads it: without the `\\?\` prefix a
+ * canonical path carries (`\\?\C:\proj`), which would otherwise read as a
+ * network path. One on a share (`\\?\UNC\host\share`) keeps it, and so
+ * stays one.
+ */
+export const windowsPath = (path: string) => path.replace(/^[\\/]{2}\?[\\/](?!UNC[\\/])/i, "");
+
+/**
+ * The folders a project is known by: the one Desktop opened, and the one the
+ * server reports, where links are resolved (macOS's `/private/tmp` for
+ * `/tmp`, a synced folder's real place); a path under either is in it.
+ */
+export function projectRoots(connection: { workspace: string; info?: { workspace?: string | null } }) {
+  return [...new Set([connection.workspace, connection.info?.workspace ?? ""].map(windowsPath).filter(Boolean))];
+}
+
+/**
  * What an image source names, decided before anything is read. Undefined
  * when it is not a path at all (a remote address, `data:`, `blob:`, a
  * fragment, a network path), which stays as the sanitizer left it. A path
- * that leaves the project, or a local `file:` URL there, is refused as
- * outside; one that is not a raster image, or is spelled with a control
- * character, as unreadable.
+ * that leaves the project (every one of `roots`), or a local `file:` URL
+ * there, is refused as outside; one that is not a raster image, or is
+ * spelled with a control character, as unreadable.
  */
-export function projectImagePath(src: string | null | undefined, root: string): ProjectImagePath | undefined {
-  const raw = parsedAddress(src ?? "");
+export function projectImagePath(
+  src: string | null | undefined,
+  roots: string | readonly string[],
+): ProjectImagePath | undefined {
+  const raw = windowsPath(parsedAddress(src ?? ""));
   if (!raw || raw.startsWith("#") || /^[\\/]{2}/.test(raw)) return undefined;
   const scheme = /^([a-z][a-z\d+.-]*):/i.exec(raw)?.[1]?.toLowerCase();
   const drive = scheme?.length === 1 && /^[a-z]:[\\/]/i.test(raw);
   if (scheme && !drive && scheme !== "file") return undefined;
-  if (!root) return { refused: "outside" };
-  const target = linkTarget(raw, { root });
-  if (target.kind !== "file") return { refused: "outside" };
+  const target = (typeof roots === "string" ? [roots] : roots)
+    .filter(Boolean)
+    .map((root) => linkTarget(raw, { root: windowsPath(root) }))
+    .find((found) => found.kind === "file");
+  if (target?.kind !== "file") return { refused: "outside" };
   if (/[\x00-\x1f\x7f]/.test(target.path)) return { refused: "failed" };
   if (!imageType(target.path)) return { refused: "failed" };
   return { path: target.path };
@@ -248,7 +274,7 @@ const CARRIED = /^data:(image\/(?:png|jpeg|gif|webp))((?:;[^,;]*)*);base64,/i;
 export function readToolImage(
   name: string,
   result: { is_error: boolean; metadata?: unknown } | undefined,
-  root: string,
+  root: string | readonly string[],
 ): { data: string } | { path: string; size?: number } | undefined {
   if (name !== "read" || !result || result.is_error) return undefined;
   const metadata = result.metadata as { attachments?: unknown; mime?: unknown; size?: unknown } | undefined;
@@ -275,19 +301,26 @@ export type ImageReader = (
 /** What a reply shows for a path: the image and its file's size in bytes, or why there is none. */
 export type ShownImage = { data: string; size?: number; note?: undefined } | { data?: undefined; note: ImageNote };
 
-/** A remembered answer: the project's change it was read after, when, and the file API's writes of it then. */
-type Entry = ShownImage & { epoch: number; at: number; touch: number };
+/**
+ * A remembered answer: the project's changes it was read after (those that
+ * wait for the recheck time, and those that do not), when, and the writes of
+ * the file then. `transient` marks one the read could not settle (a timeout,
+ * a dropped connection): it is read again as after a change.
+ */
+type Entry = ShownImage & { epoch: number; urgent: number; at: number; touch: number; transient?: boolean };
 
 const remembered = new Map<string, Entry>();
 let rememberedBytes = 0;
-/** Each project's changes since this window started. */
+/** Each project's changes since this window started: those read again after the recheck time, and those at once. */
 const epochs = new Map<string, number>();
+const urgents = new Map<string, number>();
 /** The file API's writes of each file. */
 const touches = new Map<string, number>();
 /** Projects on this computer, which the window coming to the front marks as changed. */
 const local = new Set<string>();
 const key = (scope: string, path: string) => `${scope}\n${path}`;
 const epoch = (scope: string) => epochs.get(scope) ?? 0;
+const urgent = (scope: string) => urgents.get(scope) ?? 0;
 
 function remember(entry: string, value: Entry) {
   const limit = PROJECT_IMAGE_LIMITS.bytes;
@@ -317,16 +350,20 @@ export function shownProjectImage(scope: string, path: string): ShownImage | und
 /**
  * The project may have changed on disk: what it showed keeps showing, and is
  * read again the next time a reply draws it, once it has shown for
- * `PROJECT_IMAGE_LIMITS.recheck`.
+ * `PROJECT_IMAGE_LIMITS.recheck`. With `now`, as when the chat being viewed
+ * ends a turn, at once, and so are the reads waiting for the recheck time.
  */
-export function projectChanged(scope: string) {
-  epochs.set(scope, epoch(scope) + 1);
+export function projectChanged(scope: string, now = false) {
+  if (!now) return void epochs.set(scope, epoch(scope) + 1);
+  urgents.set(scope, urgent(scope) + 1);
+  for (const [entry, trail] of trailing) if (entry.startsWith(`${scope}\n`)) trail.run();
 }
 
-/** The file API wrote this file: the next reply that draws it reads it again at once. */
+/** The file was written: the next reply that draws it, or one waiting to read it again, reads it at once. */
 export function projectFileWritten(scope: string, path: string) {
   const entry = key(scope, path.replace(/\\/g, "/").replace(/^\.\//, ""));
   touches.set(entry, (touches.get(entry) ?? 0) + 1);
+  trailing.get(entry)?.run();
 }
 
 /**
@@ -360,43 +397,92 @@ export function inViewedTree(
   return [thread, root].some((id) => !!id && (id === selected || id === top));
 }
 
+/** What a server event means for a project's images (see `projectEvent`). */
+export type ProjectChange =
+  /** The file API wrote this file. */
+  | { written: string }
+  /** A write or edit tool call names this image; it is written once its result says so. */
+  | { writing: string; call: string }
+  /** A tool call finished; if it was writing an image and did not fail, that file is written. */
+  | { finished: string; failed?: boolean }
+  /** Files may have changed: read again after the recheck time, or `now`. */
+  | { changed: true; now?: boolean };
+
 /**
- * What a server event means for a project's images: an image file was
- * written (`{ path }`, relative to the project) by the file API or by a
- * write or edit tool of the chat being viewed that names it, or files may
- * have changed because a turn of that chat ended or one of its tools that
- * write finished (as the Files panel reads them). Another chat's work,
- * however busy, is not a change for the replies on screen; `viewed` says
- * whether an event's chat (or its tree) is the one being viewed, and `root`
- * is the project's folder, which a tool's absolute path is read against.
+ * What a server event means for a project's images. The file API wrote a
+ * file. A write or edit tool call names an image of the project, which is
+ * written only once its result arrives (it may wait for approval, or fail).
+ * The chat being viewed ended a turn: its images are read again at once.
+ * Another chat ended a turn, or a tool of the viewed chat that writes
+ * (as the Files panel reads them) finished: files may have changed, read again
+ * after the recheck time. Another chat's tools, however busy, change nothing
+ * on their own; its turn's end, once per turn, does. `viewed` says whether an
+ * event's chat (or its tree) is the one being viewed, and `roots` are the
+ * project's folders, which a tool's absolute path is read against.
  */
 export function projectEvent(
   event: { type?: string; payload?: unknown; threadId?: string | null; rootThreadId?: string | null },
   viewed: (thread?: string | null, root?: string | null) => boolean,
-  root = "",
-): { path: string } | "changed" | undefined {
+  roots: string | readonly string[] = [],
+): ProjectChange | undefined {
   if (event.type === "files.updated") {
     const path = (event.payload as { path?: unknown } | undefined)?.path;
-    return typeof path === "string" && path ? { path } : undefined;
+    return typeof path === "string" && path ? { written: path } : undefined;
   }
   const mine = () => viewed(event.threadId, event.rootThreadId);
-  if (event.type === "turn.finished") return mine() ? "changed" : undefined;
+  if (event.type === "turn.finished") return { changed: true, now: mine() };
   if (event.type !== "item.created") return undefined;
   const data = (
     event.payload as
-      | { data?: { type?: string; name?: string; is_error?: boolean; arguments?: Record<string, unknown> } }
+      | {
+          data?: {
+            type?: string;
+            name?: string;
+            call_id?: string;
+            is_error?: boolean;
+            arguments?: Record<string, unknown>;
+          };
+        }
       | undefined
   )?.data;
-  if (data?.type === "tool_call" && /(?:^|\.)(?:write|edit|multiedit)$/i.test(data.name ?? "") && mine()) {
+  if (data?.type === "tool_call" && /(?:^|\.)(?:write|edit|multiedit)$/i.test(data.name ?? "") && data.call_id) {
     const named = [data.arguments?.path, data.arguments?.filePath, data.arguments?.file_path].find(
       (value): value is string => typeof value === "string",
     );
-    const found = named === undefined ? undefined : projectImagePath(named, root);
-    return found && "path" in found ? found : undefined;
+    const found = named === undefined ? undefined : projectImagePath(named, roots);
+    return found && "path" in found ? { writing: found.path, call: data.call_id } : undefined;
   }
-  const writes =
-    data?.type === "tool_result" && !data.is_error && /write|edit|patch|apply|bash|shell|move|delete/.test(data.name ?? "");
-  return writes && mine() ? "changed" : undefined;
+  if (data?.type !== "tool_result") return undefined;
+  if (data.is_error) return data.call_id ? { finished: data.call_id, failed: true } : undefined;
+  const writes = /write|edit|patch|apply|bash|shell|move|delete/.test(data.name ?? "");
+  if (writes && mine()) return { changed: true };
+  return data.call_id ? { finished: data.call_id } : undefined;
+}
+
+/** Image files each project's write tool calls are writing, by call, until their results arrive. */
+const writing = new Map<string, string>();
+
+/** Applies a server event of project `scope` to what its images show (see `projectEvent`). */
+export function applyProjectEvent(
+  scope: string,
+  event: Parameters<typeof projectEvent>[0],
+  viewed: Parameters<typeof projectEvent>[1],
+  roots: Parameters<typeof projectEvent>[2] = [],
+) {
+  const change = projectEvent(event, viewed, roots);
+  if (!change) return;
+  if ("written" in change) return projectFileWritten(scope, change.written);
+  if ("writing" in change) return void writing.set(key(scope, change.call), change.writing);
+  const call =
+    "finished" in change
+      ? change.finished
+      : (event.payload as { data?: { call_id?: string } } | undefined)?.data?.call_id;
+  const path = call === undefined ? undefined : writing.get(key(scope, call));
+  if (call !== undefined && path !== undefined) {
+    writing.delete(key(scope, call));
+    if (!("failed" in change && change.failed)) projectFileWritten(scope, path);
+  }
+  if ("changed" in change) projectChanged(scope, change.now);
 }
 
 type Settled = (scope: string, path: string, shown: ShownImage) => void;
@@ -439,29 +525,71 @@ function pump() {
 const tooLarge = (error: unknown) => /\bexceeds\b/i.test(error instanceof Error ? error.message : String(error));
 
 /**
+ * Whether the server answered that the file is not there or not one it reads
+ * (gone, out of the project, Git metadata, not a regular file), which is an
+ * answer, unlike a timeout or a dropped connection.
+ */
+const refused = (error: unknown) =>
+  /no longer exists|escapes the workspace|must be relative|Git metadata|Only regular files/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+
+/** A read that answered nothing: the remembered image stays, and is read again on the next occasion. */
+const UNSETTLED = Symbol("unsettled");
+
+type Trail = { timer: ReturnType<typeof setTimeout>; waiters: Set<AbortSignal>; run: () => void };
+/** One read each remembered image waits for until the recheck time ends, by the replies that asked. */
+const trailing = new Map<string, Trail>();
+
+/**
+ * When the image remembered as `current` is read again: now, never (nothing
+ * changed it), or in so many milliseconds, when the recheck time ends.
+ */
+function due(scope: string, entry: string, current: Entry): "now" | "fresh" | number {
+  if (current.touch !== (touches.get(entry) ?? 0) || current.urgent !== urgent(scope)) return "now";
+  if (current.epoch === epoch(scope) && !current.transient) return "fresh";
+  const wait = current.at + PROJECT_IMAGE_LIMITS.recheck - Date.now();
+  return wait > 0 ? wait : "now";
+}
+
+/**
  * Asks for the image at `path` for a reply that shows it until `signal`
- * aborts (the reply unmounts). Nothing is read when this project shows it
- * since its latest change, or for `PROJECT_IMAGE_LIMITS.recheck` after it was
- * read unless the file API wrote the file since, or when a read for it
- * already runs or waits, which the reply then waits on as well. A read starts
- * only while some reply that asked is still there; it ends as unavailable
- * after `PROJECT_IMAGE_LIMITS.wait`, and an answer after that changes
- * nothing. `decode` checks that the window can draw the image before it is
- * shown.
+ * aborts (the reply unmounts). Nothing is read when nothing changed it since
+ * it was read (see `due`), or when a read for it already runs or waits, which
+ * the reply then waits on as well; a change that waits for the recheck time
+ * leaves one read for when it ends. A read starts only while some reply that
+ * asked is still there; it ends unsettled after `PROJECT_IMAGE_LIMITS.wait`,
+ * and an answer after that changes nothing. Only an answer replaces what is
+ * remembered: a file gone or no image says so, while a timeout or a dropped
+ * connection keeps the picture and is read again on the next occasion.
+ * `decode` checks that the window can draw the image (or says it is too
+ * large) before it is shown.
  */
 export function requestProjectImage(
   scope: string,
   path: string,
   read: ImageReader,
   signal: AbortSignal,
-  decode: (data: string) => Promise<boolean> = async () => true,
+  decode: (data: string) => Promise<boolean | "large"> = async () => true,
 ) {
   if (signal.aborted) return;
   const entry = key(scope, path);
   const current = remembered.get(entry);
-  if (current && current.touch === (touches.get(entry) ?? 0)) {
-    const changed = current.epoch !== epoch(scope);
-    if (!changed || Date.now() - current.at < PROJECT_IMAGE_LIMITS.recheck) return;
+  const when = current ? due(scope, entry, current) : "now";
+  if (when === "fresh") return;
+  if (when !== "now") {
+    const trail = trailing.get(entry);
+    if (trail) return void trail.waiters.add(signal);
+    const waiters = new Set([signal]);
+    const run = () => {
+      clearTimeout(timer);
+      if (trailing.get(entry)?.run !== run) return;
+      trailing.delete(entry);
+      for (const waiter of waiters) if (!waiter.aborted) requestProjectImage(scope, path, read, waiter, decode);
+    };
+    const timer = setTimeout(run, when + 5);
+    trailing.set(entry, { timer, waiters, run });
+    return;
   }
   const queued = pending.get(entry);
   if (queued) {
@@ -476,9 +604,11 @@ export function requestProjectImage(
         return;
       }
       active++;
-      const asked = { epoch: epoch(scope), at: Date.now(), touch: touches.get(entry) ?? 0 };
+      const asked = { epoch: epoch(scope), urgent: urgent(scope), at: Date.now(), touch: touches.get(entry) ?? 0 };
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<"late">((done) => (timer = setTimeout(() => done("late"), PROJECT_IMAGE_LIMITS.wait)));
+      const deadline = new Promise<typeof UNSETTLED>(
+        (done) => (timer = setTimeout(() => done(UNSETTLED), PROJECT_IMAGE_LIMITS.wait)),
+      );
       const answer = Promise.resolve()
         .then(() => read(path))
         .then(
@@ -488,15 +618,22 @@ export function requestProjectImage(
             if (tooManyPixels(file!.content!)) return { note: "large" };
             const size = file?.size ?? decodedSize(file!.content!);
             if (data === remembered.get(entry)?.data) return { data, size };
-            return (await decode(data)) ? { data, size } : { note: "failed" };
+            const drawn = await decode(data);
+            return drawn === true ? { data, size } : { note: drawn === "large" ? "large" : "failed" };
           },
-          (error: unknown): ShownImage => ({ note: tooLarge(error) ? "large" : "failed" }),
+          (error: unknown): ShownImage | typeof UNSETTLED =>
+            tooLarge(error) ? { note: "large" } : refused(error) ? { note: "failed" } : UNSETTLED,
         )
-        .catch((): ShownImage => ({ note: "failed" }));
+        .catch((): typeof UNSETTLED => UNSETTLED);
       void Promise.race([answer, deadline])
-        .then((result) => {
-          const shown: ShownImage = result === "late" ? { note: "failed" } : result;
+        .then((shown) => {
           const before = remembered.get(entry);
+          if (shown === UNSETTLED) {
+            // Nothing was learned: what showed keeps showing, and is read again on the next occasion.
+            remember(entry, before ? { ...before, ...asked, transient: true } : { note: "failed", ...asked, transient: true });
+            if (!before) settle(scope, path, { note: "failed" });
+            return;
+          }
           // A file gone or no longer an image says so from now on; a reply
           // already showing its picture keeps it (Markdown.tsx).
           remember(entry, { ...shown, ...asked });
@@ -520,7 +657,11 @@ export function forgetProjectImages() {
   remembered.clear();
   rememberedBytes = 0;
   epochs.clear();
+  urgents.clear();
   touches.clear();
+  writing.clear();
+  for (const trail of trailing.values()) clearTimeout(trail.timer);
+  trailing.clear();
   local.clear();
   waiting.length = 0;
   pending.clear();
@@ -543,7 +684,7 @@ export interface ProjectImageLabels {
  */
 export function holdProjectImages(
   root: ParentNode,
-  project: string,
+  project: string | readonly string[],
   source: (image: Element) => string | null,
   shown: (path: string) => ShownImage | undefined,
   labels: ProjectImageLabels,
@@ -648,8 +789,8 @@ export function askOnce(paths: readonly string[], asked: Set<string>, request: (
 /** The project an image is read from, and whether a server event concerns the chat being viewed. */
 export interface ImageProject {
   connection: string;
-  /** The project's folder, as the server reports it. */
-  root: string;
+  /** The project's folders (`projectRoots`). */
+  roots: string[];
   /** A remote host's project, whose files the window coming to the front does not change. */
   remote: boolean;
   viewed: (thread?: string | null, root?: string | null) => boolean;
@@ -657,7 +798,7 @@ export interface ImageProject {
 
 /** The project of the window's open chat, read from the app's state when an event arrives. */
 export function imageProject(state: {
-  connection?: { id: string; remote: boolean; workspace: string } | null;
+  connection?: { id: string; remote: boolean; workspace: string; info?: { workspace?: string | null } } | null;
   selected?: string | null;
   threads: readonly { id: string; parentId?: string | null }[];
 }): ImageProject | undefined {
@@ -665,24 +806,22 @@ export function imageProject(state: {
   if (!connection) return undefined;
   return {
     connection: connection.id,
-    root: connection.workspace,
+    roots: projectRoots(connection),
     remote: connection.remote,
     viewed: (thread, root) => inViewedTree(state.selected, state.threads, thread, root),
   };
 }
 
 let watching = false;
-/** Each project's folder, which a tool's absolute path is read against. */
-const roots = new Map<string, string>();
+/** Each project's folders, which a tool's absolute path is read against. */
+const roots = new Map<string, string[]>();
 /** Images read from a project are read again once its files may have changed (see `projectEvent`). */
 function watchProjects(viewed: ImageProject["viewed"]) {
   if (watching) return;
   watching = true;
   window.haarness.onEvent((event) => {
     if (event.kind !== "server" || !event.connection) return;
-    const change = projectEvent(event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
-    if (change === "changed") projectChanged(event.connection);
-    else if (change) projectFileWritten(event.connection, change.path);
+    applyProjectEvent(event.connection, event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
   });
   window.addEventListener("focus", windowFocused);
 }
@@ -693,13 +832,25 @@ const reader =
   (path) =>
     window.haarness.files<FileContent>(connection, "read", { path });
 
-/** Whether the window can draw the image; decoding it first also lets it show at its size at once. */
-async function decodeImage(data: string) {
+/**
+ * Whether the window can draw the image, or "large" when it has more pixels
+ * than `PROJECT_IMAGE_LIMITS.pixels`. Loading it reads only its header, which
+ * gives its real size (a header the cheap check could not read, or one that
+ * says less than the frames hold); only an image within the limit is then
+ * decoded, which also lets it show at its size at once.
+ */
+async function decodeImage(data: string): Promise<boolean | "large"> {
   const image = new Image();
+  const loaded = new Promise<boolean>((done) => {
+    image.onload = () => done(true);
+    image.onerror = () => done(false);
+  });
   image.src = data;
+  if (!(await loaded) || !image.naturalWidth) return false;
+  if (image.naturalWidth * image.naturalHeight > PROJECT_IMAGE_LIMITS.pixels) return "large";
   try {
     await image.decode();
-    return image.naturalWidth > 0;
+    return true;
   } catch {
     return false;
   }
@@ -708,7 +859,7 @@ async function decodeImage(data: string) {
 /** Reads one image of the project for a view that shows it until `signal` aborts. */
 export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
   watchProjects(project.viewed);
-  roots.set(project.connection, project.root);
+  roots.set(project.connection, project.roots);
   if (!project.remote) localProject(project.connection);
   requestProjectImage(project.connection, path, reader(project.connection), signal, decodeImage);
 }

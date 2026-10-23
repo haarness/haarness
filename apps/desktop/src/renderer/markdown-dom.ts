@@ -139,8 +139,8 @@ export function createMarkdownDOM(
     loading: (src: string) => boolean;
     labels: () => RemoteImageLabels;
     project?: {
-      /** The project's folder, absolute, as the server reports it. */
-      root: () => string;
+      /** The project's folders, absolute (`projectRoots`). */
+      root: () => readonly string[];
       shown: (path: string) => ShownImage | undefined;
       labels: () => ProjectImageLabels;
     };
