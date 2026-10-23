@@ -12109,6 +12109,8 @@ test("a card answered elsewhere says so in one quiet line where its buttons were
   await once.click();
   const settled = card.locator(".approval-settled");
   await expect(settled).toHaveText("Already answered");
+  // The click had focus on a button: the line keeps it.
+  await expect(settled).toBeFocused();
   await expect(card.getByRole("button")).toHaveCount(0);
   const after = (await settled.boundingBox())!;
   expect(Math.abs(after.y - before.y)).toBeLessThan(2);
