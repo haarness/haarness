@@ -3948,18 +3948,10 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
     // The composer sits exactly where it will stay once the session starts.
     let band = lines.last().unwrap();
     assert!(line_text(band).contains("build"), "{}", line_text(band));
-    // Beside a notice, the approval mode keeps its place before the folder,
-    // which the masthead already names; with the room, both show.
     assert!(
-        line_text(band).contains("approvals: review"),
+        line_text(band).contains("haarness  main"),
         "{}",
         line_text(band)
-    );
-    let wide = app.lines((140, 30));
-    assert!(
-        line_text(wide.last().unwrap()).contains("haarness  main"),
-        "{}",
-        line_text(wide.last().unwrap())
     );
     let rule = &lines[lines.len() - 2];
     assert_eq!(rule.width(), 100);
@@ -20386,22 +20378,91 @@ fn report_wording_is_precise() {
     assert_eq!(cost(serde_json::json!({"costUsd": 0.5})), "$0.500000");
 }
 
-/// The band keeps how approvals are answered beside a long passing notice:
-/// the notice's detail and the folder give way first.
+/// In Review, the default, a passing notice wins the band's room: the mode
+/// shows only where room is left. In Auto the band keeps saying requests are
+/// answered without asking, and the notice is cut to the room that is left,
+/// the folder going first.
 #[test]
-fn the_approval_mode_outlasts_a_passing_notice() {
+fn the_band_keeps_auto_beside_a_passing_notice_and_lets_review_yield() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
-    app.notice = "Unknown command /frobnicate · start with a space to send it as text".into();
-    for width in [100, 120] {
-        let lines = app.lines((width, 30));
-        let band = line_text(lines.last().unwrap());
-        assert!(band.contains("approvals: review"), "{width}: {band}");
+    let notice = "Unknown command /frobnicate · start with a space to send it as text";
+    app.notice = notice.into();
+    let band = |app: &App, width| line_text(app.lines((width, 30)).last().unwrap());
+    let review = band(&app, 100);
+    assert!(review.contains(notice), "{review}");
+    assert!(!review.contains("approvals"), "{review}");
+    assert!(band(&app, 160).contains("approvals: review"));
+
+    app.set_auto_permissions(true);
+    app.notice = notice.into();
+    for width in [80, 100, 120] {
+        let text = band(&app, width);
+        assert!(text.contains("auto"), "{width}: {text}");
         assert!(
-            band.contains("Unknown command /frobnicate"),
-            "{width}: {band}"
+            text.contains("Unknown command /frobnicate"),
+            "{width}: {text}"
         );
+        assert!(
+            text.trim_end().ends_with('…') || text.contains(notice),
+            "{width}: {text}"
+        );
+        assert_eq!(text.width(), width as usize, "{width}: {text}");
     }
+    // Where even the short mode leaves no room to read the notice, the mode
+    // still shows as "auto", never as a bare "review".
+    let narrow = band(&app, 50);
+    assert!(narrow.contains("auto"), "{narrow}");
+}
+
+/// A notice that fits nowhere whole is cut to the room the band has left,
+/// not to a share of the width, and the folder gives way before its text;
+/// an approval's summary likewise.
+#[tokio::test]
+async fn the_band_cuts_a_notice_to_the_room_left_after_the_folder() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.server_info = Some(haarness_protocol::ServerInfo {
+        name: "haarness".into(),
+        version: "0.1.0".into(),
+        schema_version: "1".into(),
+        server_instance_id: uuid::Uuid::now_v7(),
+        event_cursor: 0,
+        capabilities: vec![],
+        workspace: Some("/work/project".into()),
+        git_branch: Some("main".into()),
+        default_provider: None,
+        default_model: None,
+        default_agent: None,
+        project_trusted: Some(true),
+        pid: None,
+    });
+    let band = |app: &App, width| line_text(app.lines((width, 30)).last().unwrap());
+    app.notice =
+        "Unknown command /frobnicate-everything-twice · start with a space to send it as text"
+            .into();
+    let narrow = band(&app, 80);
+    assert!(!narrow.contains("project  main"), "{narrow}");
+    // Beside the model, as much of the notice as the row holds.
+    assert!(narrow.contains("GPT-5.4"), "{narrow}");
+    assert!(
+        narrow.contains("Unknown command /frobnicate-everything-twice · start"),
+        "{narrow}"
+    );
+    assert!(narrow.trim_end().ends_with('…'), "{narrow}");
+    assert_eq!(narrow.width(), 80, "{narrow}");
+    assert!(band(&app, 160).contains("project  main"));
+
+    app.reduce(outside_write_event(&thread, "perm-band"), &offline_client())
+        .await
+        .unwrap();
+    app.release_permission_focus(false);
+    let narrow = band(&app, 80);
+    assert!(!narrow.contains("project  main"), "{narrow}");
+    assert!(
+        narrow.contains("Approval pending: Access outside the project"),
+        "{narrow}"
+    );
 }
 
 /// Typing in a child agent's read-only view says so instead of vanishing.

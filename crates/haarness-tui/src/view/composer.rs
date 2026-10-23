@@ -348,8 +348,14 @@ fn status_band(app: &App, width: usize) -> Line {
     // that will not fit does identity start giving way — and then state wins,
     // because on a 40-column terminal "how do I stop this" outranks "on what
     // model".
+    //
     // Permission mode names what it is: an agent can be called "review" too.
     // `--yolo` answers this TUI's requests whatever the chat's own mode is.
+    // In Auto or --yolo, requests are answered without asking, which the
+    // band keeps saying ahead of a passing notice's detail (as "auto" when it
+    // must). In Review, the default, a notice wins and the mode takes what
+    // room is left.
+    let answering = app.yolo || app.auto_permissions;
     let mode = format!(
         "  {}",
         app.language.text(if app.yolo {
@@ -360,50 +366,81 @@ fn status_band(app: &App, width: usize) -> Line {
             "approvals: review"
         })
     );
-    let mode_width = mode.width();
-    // How approvals are answered outranks a passing notice's detail and the
-    // session's badges: those give way first, while the model stays named.
-    // Only when even that cannot fit does the mode go.
-    let mut chosen = None;
-    let mut keep_mode = false;
+    let modes = if answering {
+        vec![
+            mode.clone(),
+            format!("  {}", if app.yolo { "--yolo" } else { "auto" }),
+        ]
+    } else {
+        Vec::new()
+    };
     let named = identity.len().saturating_sub(1).max(1);
-    'mode: for (left_index, left) in identity.iter().enumerate().take(named) {
-        for (right_index, right) in state.iter().enumerate().take(essential + 1) {
-            if measure(left) + measure(right) + mode_width + 3 <= width {
-                chosen = Some((left_index, right_index));
-                keep_mode = true;
-                break 'mode;
+    let fits = |left: &[Span], right: &[Span], reserved: usize| {
+        measure(left) + measure(right) + reserved + 3 <= width
+    };
+    let mut fitted = None;
+    let mut kept_mode = None;
+    'mode: for mode in &modes {
+        for left in identity.iter().take(named) {
+            for right in state.iter().take(essential + 1) {
+                if fits(left, right, mode.width()) {
+                    fitted = Some((left.clone(), right.clone()));
+                    kept_mode = Some(mode.clone());
+                    break 'mode;
+                }
             }
         }
     }
-    'detail: for (left_index, left) in identity.iter().enumerate() {
-        if chosen.is_some() {
-            break;
-        }
-        for (right_index, right) in state.iter().enumerate().take(essential + 1) {
-            if measure(left) + measure(right) + 3 <= width {
-                chosen = Some((left_index, right_index));
-                break 'detail;
+    // The cut a notice takes to fit: the essential state cut to the room left
+    // beside the model, or beside the chip alone when that leaves too little
+    // to read; `None` when even that is too little.
+    let cut_beside = |reserved: usize, any_room: bool| {
+        [named - 1, identity.len() - 1]
+            .into_iter()
+            .find_map(|left_index| {
+                let left = &identity[left_index];
+                let room = width.saturating_sub(measure(left) + reserved + 3);
+                (room >= MIN_NOTICE || (any_room && left_index == identity.len() - 1)).then(|| {
+                    let essential_state = state.get(essential).cloned().unwrap_or_default();
+                    (left.clone(), cut(essential_state, room))
+                })
+            })
+    };
+    // Auto keeps its room: the notice is cut first.
+    if fitted.is_none()
+        && let Some(short) = modes.last()
+        && let Some(cut) = cut_beside(short.width(), false)
+    {
+        fitted = Some(cut);
+        kept_mode = Some(short.clone());
+    }
+    if fitted.is_none() {
+        'detail: for left in &identity {
+            for right in state.iter().take(essential + 1) {
+                if fits(left, right, 0) {
+                    fitted = Some((left.clone(), right.clone()));
+                    break 'detail;
+                }
             }
         }
     }
-    if chosen.is_none() {
-        'identity: for (right_index, right) in state.iter().enumerate().skip(essential + 1) {
-            for (left_index, left) in identity.iter().enumerate() {
-                if measure(left) + measure(right) + 3 <= width {
-                    chosen = Some((left_index, right_index));
+    if fitted.is_none() {
+        'identity: for right in state.iter().skip(essential + 1) {
+            for left in &identity {
+                if fits(left, right, 0) {
+                    fitted = Some((left.clone(), right.clone()));
                     break 'identity;
                 }
             }
         }
     }
-    let (left_index, right_index) = chosen.unwrap_or((identity.len() - 1, state.len()));
-    let mut left = identity.into_iter().nth(left_index).unwrap_or_default();
-    let right = state.into_iter().nth(right_index).unwrap_or_default();
+    let (left, right) = fitted.or_else(|| cut_beside(0, true)).unwrap_or_default();
+    let mut left = left;
     let mut left_width = measure(&left);
     let right_width = measure(&right);
-    // Where the session works takes the room left once the mode has its own.
-    let reserved = if keep_mode { mode_width } else { 0 };
+    // Where the session works takes the room left once state and a mode that
+    // keeps its room have theirs: the folder goes before a notice is cut.
+    let reserved = kept_mode.as_ref().map_or(0, |mode| mode.width());
     if let Some(place) = place_segment(app) {
         let place_width = place.width() + 2;
         if left_width + place_width + right_width + reserved + 5 <= width {
@@ -411,17 +448,12 @@ fn status_band(app: &App, width: usize) -> Line {
             left_width += place_width;
         }
     }
-    if left_width + right_width + mode_width + 3 <= width {
+    let shown_mode = kept_mode
+        .or_else(|| (left_width + right_width + mode.width() + 3 <= width).then_some(mode));
+    if let Some(mode) = shown_mode {
+        let mode_width = mode.width();
         left.push(
-            Span::new(
-                mode,
-                if app.yolo || app.auto_permissions {
-                    theme.accent
-                } else {
-                    theme.muted
-                },
-            )
-            .on(theme.surface),
+            Span::new(mode, if answering { theme.accent } else { theme.muted }).on(theme.surface),
         );
         left_width += mode_width;
     }
@@ -437,6 +469,21 @@ fn status_band(app: &App, width: usize) -> Line {
 
 fn measure(spans: &[Span]) -> usize {
     spans.iter().map(Span::width).sum()
+}
+
+/// The fewest cells a notice cut to fit the band is still worth reading in.
+const MIN_NOTICE: usize = 16;
+
+/// `spans` cut to `room` cells, ending in `…` when anything was left out.
+fn cut(spans: Vec<Span>, room: usize) -> Vec<Span> {
+    if measure(&spans) <= room {
+        return spans;
+    }
+    let mut kept = clamp(spans, room.saturating_sub(1)).spans;
+    if let Some(last) = kept.last_mut() {
+        last.text.push('…');
+    }
+    kept
 }
 
 /// Who is answering and on what, richest first. The chip alone is the floor:
@@ -650,19 +697,18 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         ]);
     }
     if !app.pending_permissions.is_empty() {
-        let notice = single_line(&app.notice, width / 2);
-        return detail(vec![
-            vec![
-                Span::new(notice, theme.accent)
-                    .on(theme.surface)
-                    .with_attributes(attr::BOLD),
-            ],
-            vec![
-                Span::new(app.language.text("approval needed"), theme.accent)
-                    .on(theme.surface)
-                    .with_attributes(attr::BOLD),
-            ],
-        ]);
+        // The request's summary, cut to the room the band has left (the
+        // folder goes first), or what it is when there is none.
+        let notice = if app.notice.trim().is_empty() {
+            app.language.text("approval needed").to_owned()
+        } else {
+            single_line(&app.notice, width)
+        };
+        return detail(vec![vec![
+            Span::new(notice, theme.accent)
+                .on(theme.surface)
+                .with_attributes(attr::BOLD),
+        ]]);
     }
     if app.active_turn.is_some() {
         return running_segments(app, theme);
@@ -737,19 +783,16 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         );
         (format!("{fill}{flow}{cost}"), format!("{fill}{flow}"), flow)
     });
-    let brief = |text: &str| single_line(text, (width / 3).max(12));
+    // A notice that fits nowhere whole is cut to the room the band has left
+    // (`status_band`), not to a fixed share of it.
     match (notice.is_empty(), usage) {
         (false, Some((full, medium, flow))) => detail(vec![
             plain(format!("{notice}   {full}"), theme.muted),
             plain(format!("{notice}   {medium}"), theme.muted),
             plain(format!("{notice}   {flow}"), theme.muted),
             plain(notice.clone(), theme.muted),
-            plain(brief(&notice), theme.muted),
         ]),
-        (false, None) => detail(vec![
-            plain(notice.clone(), theme.muted),
-            plain(brief(&notice), theme.muted),
-        ]),
+        (false, None) => detail(vec![plain(notice.clone(), theme.muted)]),
         (true, Some((full, medium, flow))) => detail(vec![
             plain(full, theme.muted),
             plain(medium, theme.muted),
