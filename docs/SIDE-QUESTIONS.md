@@ -102,9 +102,11 @@ chat gives way first, down to 300. Where the three do not fit, the side chat
 and the side panel take turns in one place: whichever was asked for last is in
 front (opening the side panel, or a file from a link, brings it forward;
 `/btw` or ⇧⌘J bring the side chat back), and the other returns when there is
-room. A reload keeps which one was in front. In a window too narrow for the
-conversation and the side chat, the side chat takes the whole workspace, as the
-side panel does there, until it is put away. A preview the agent opens never
+room. A reload keeps which one was in front. Where the conversation and the
+side chat do not fit, the sidebar steps aside first, as it does for the side
+panel, and comes back when the side chat is put away; only in a window too
+narrow even then does the side chat take the whole workspace, as the side panel
+does there, until it is put away. A preview the agent opens never
 takes its place; one you open yourself does. The new-chat screen has no side
 chat: it comes back with the chat.
 
