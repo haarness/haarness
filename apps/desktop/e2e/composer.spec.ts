@@ -548,6 +548,20 @@ test("the message box keeps the keyboard through a send, and what is typed right
     await expect(transcript).toContainText("Echo: second message");
     await expect(input).toBeFocused();
     await expect(input).toHaveValue("third, typed at once");
+    // Enter pressed again while a message is on its way sends the next one
+    // once it has gone, in order and only once.
+    await input.fill("fourth message");
+    await input.press("Enter");
+    await page.keyboard.type("fifth, sent right after");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(transcript).toContainText("Echo: fifth, sent right after");
+    await expect(input).toHaveValue("");
+    const sent = await page.locator(".message.user").allInnerTexts();
+    expect(sent.filter((text) => text.includes("fifth, sent right after"))).toHaveLength(1);
+    expect(sent.findIndex((text) => text.includes("fourth message"))).toBeLessThan(
+      sent.findIndex((text) => text.includes("fifth, sent right after")),
+    );
 
     // Enter in an empty box while work runs does nothing: no empty message,
     // no error, and Stop stays.
