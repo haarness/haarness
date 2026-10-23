@@ -12784,16 +12784,20 @@ test("shared input settings apply project and global modes to real Desktop chat"
     const row = settings.locator('[data-setting="Messages sent while working"]');
     const steer = row.getByRole("radio", { name: "Steer", exact: true });
     const queue = row.getByRole("radio", { name: "Queue", exact: true });
-    // /input-mode saved this project's own value; the row says so.
+    // /input-mode saved this project's own value; the caption says so and
+    // names the value its reset falls back to.
+    const caption = row.locator(".input-settings-scope");
     await expect(steer).toHaveAttribute("aria-checked", "true");
-    await expect(row).toContainText("This project");
+    await expect(caption).toContainText("This project");
+    await expect(caption.getByRole("button", { name: "Use global setting (Queue)", exact: true })).toBeVisible();
     await queue.click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
     expect(await readFile(globalFile, "utf8")).toBe(originalGlobal);
     // Use global setting removes the project's value; the global one shows.
-    await row.getByRole("button", { name: "Use global setting", exact: true }).click();
-    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await row.getByRole("button", { name: "Use global setting (Queue)", exact: true }).click();
     await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(caption).toContainText("All projects");
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
     await expect(row).not.toContainText("This project");
     // Without a project value, the choice is the global setting's.
     await steer.click();
@@ -12810,9 +12814,19 @@ test("shared input settings apply project and global modes to real Desktop chat"
     await expect(queue).toBeFocused();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
     expect((await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
-    await row.getByRole("button", { name: "Use global setting", exact: true }).click();
+    await row.getByRole("button", { name: "Use global setting (Steer)", exact: true }).click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer");
+    // A reset and a choice right after it change the global setting, never
+    // bring the project's value back.
+    await row.getByRole("button", { name: "Override for this project", exact: true }).click();
+    await row.getByRole("button", { name: "Use global setting (Steer)", exact: true }).click();
+    await queue.click();
+    await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("queue");
+    expect((await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(caption).toContainText("All projects");
+    await steer.click();
+    await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
     // An external client changes the same project while General stays open.
     await settingsApi({ action: "set", delivery: "queue" });
     await expect(queue).toHaveAttribute("aria-checked", "true");

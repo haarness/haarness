@@ -16,28 +16,39 @@ interface InputSettingsValue {
 /**
  * The setting belongs to the connected server/project, not Electron storage.
  *
- * One choice shows what a message sent during work does here. Without a
- * project override it is the global setting, and choosing changes it for
- * every project; "Override for this project" saves this project's own value
- * (the same one, to start with), and "Use global setting" removes it again.
- * A value a parent folder sets is changed with an override of this project's,
- * since the global setting would not reach it.
+ * One choice shows what a message sent during work does here, and a caption
+ * under it names where that value lives and what resetting it leads to.
+ * Without a project override it is the global setting ("All projects"), and
+ * choosing changes it for every project; "Override for this project" saves
+ * this project's own value (the one shown, to start with), and the reset
+ * ("Use global setting (Queue)") removes it again, naming the value the
+ * project then falls back to. A value a parent folder sets is changed with
+ * an override of this project's, since the global setting would not reach it.
  */
 export function InputSettings() {
   const app = useApp();
   const projectConfig = () => app.state.connection?.info.projectTrusted !== false;
   const [value, setValue] = createSignal<InputSettingsValue>();
-  const [pending, setPending] = createSignal<Delivery>();
+  const [globalDelivery, setGlobalDelivery] = createSignal<Delivery>("steer");
+  // What the person chose last, shown until the saves behind it are read back.
+  const [pending, setPending] = createSignal<{ delivery?: Delivery; overridden?: boolean }>({});
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const supported = () => app.state.connection?.info.capabilities.includes("input-settings.v1");
   // Read where this project stands; with project configuration off, only the
   // global setting applies.
   const readScope = () => (projectConfig() ? "project" : "global");
-  const overridden = () => projectConfig() && value()?.scopeDelivery != null;
-  const fromParent = () => projectConfig() && !overridden() && value()?.source === "project";
+  const savedOverride = () => projectConfig() && value()?.scopeDelivery != null;
+  // What the project falls back to without its own value, and whether a
+  // parent folder sets that: the inherited value differs from the global one
+  // (with no override, the server says where the value in effect comes from).
+  const fallback = () => (savedOverride() ? value()?.inheritedDelivery : value()?.delivery) ?? "steer";
+  const fallbackFromParent = () =>
+    !!value() && (savedOverride() ? value()!.inheritedDelivery !== globalDelivery() : value()!.source === "project");
+  const overridden = () => projectConfig() && (pending().overridden ?? savedOverride());
+  const fromParent = () => projectConfig() && !overridden() && fallbackFromParent();
   const writeScope = () => (overridden() || fromParent() ? "project" : "global");
-  const shown = () => pending() ?? value()?.delivery;
+  const shown = () => pending().delivery ?? value()?.delivery;
   let generation = 0;
   /** `force` runs even while a read is under way (a save, or a new
    * connection); `clear` forgets the value shown, which belongs to another
@@ -54,9 +65,13 @@ export function InputSettings() {
       // A change is read back where the row reads, which may not be the scope
       // written; it carries the revision read last, so a stale save is refused.
       if (input.action !== "get") await call({ ...input, revision: value()?.revision });
-      const result = await call({ action: "get", scope: readScope() });
+      const [result, global] = await Promise.all([
+        call({ action: "get", scope: readScope() }),
+        readScope() === "global" ? undefined : call({ action: "get", scope: "global" }),
+      ]);
       if (current !== generation || connection !== app.state.connection?.id) return;
       setValue(result.data);
+      setGlobalDelivery((global ?? result).data.scopeDelivery ?? "steer");
       setError("");
     } catch (cause) {
       if (current === generation) setError(cause instanceof Error ? cause.message : String(cause));
@@ -65,7 +80,7 @@ export function InputSettings() {
     }
   }
   // Saves run one after another, each with the revision the one before read
-  // back; the choice shows at once and until the last of them is done.
+  // back; the choice and its scope show at once and until the last is done.
   let saves = Promise.resolve();
   let waiting = 0;
   function save(scope: string, delivery: Delivery | "inherit") {
@@ -73,14 +88,25 @@ export function InputSettings() {
     saves = saves
       .then(() => request({ action: "set", scope, delivery }, { force: true }))
       .finally(() => {
-        if (--waiting === 0) setPending(undefined);
+        if (--waiting === 0) setPending({});
       });
   }
   function choose(delivery: Delivery) {
     if (!value() || delivery === shown()) return;
-    setPending(delivery);
-    save(writeScope(), delivery);
+    const scope = writeScope();
+    setPending((state) => ({ ...state, delivery, overridden: overridden() || scope === "project" }));
+    save(scope, delivery);
   }
+  function override() {
+    const delivery = shown() ?? "steer";
+    setPending({ delivery, overridden: true });
+    save("project", delivery);
+  }
+  function reset() {
+    setPending({ delivery: fallback(), overridden: false });
+    save("project", "inherit");
+  }
+  const label = (delivery: Delivery) => t(delivery === "queue" ? "Queue" : "Steer");
   createEffect(() => {
     void app.state.connection?.id;
     void readScope();
@@ -138,28 +164,26 @@ export function InputSettings() {
             )}
           </For>
         </div>
-        <Show when={projectConfig() && value()}>
+        <Show when={value()}>
+          {/* Where the value lives, then what changes that. */}
           <span class="input-settings-scope">
-            <Show
-              when={overridden()}
-              fallback={
-                <Show
-                  when={fromParent()}
-                  fallback={
-                    <button type="button" class="settings-link" onClick={() => save("project", value()!.delivery)}>
-                      {t("Override for this project")}
-                    </button>
-                  }
-                >
-                  {t("Set in a parent folder")}
-                </Show>
-              }
-            >
-              <span>{t("This project")}</span>
+            <span>{overridden() ? t("This project") : fromParent() ? t("Parent folder") : t("All projects")}</span>
+            <Show when={projectConfig()}>
               <span aria-hidden="true">·</span>
-              <button type="button" class="settings-link" onClick={() => save("project", "inherit")}>
-                {t("Use global setting")}
-              </button>
+              <Show
+                when={overridden()}
+                fallback={
+                  <button type="button" class="settings-link" onClick={override}>
+                    {t("Override for this project")}
+                  </button>
+                }
+              >
+                <button type="button" class="settings-link" onClick={reset}>
+                  {fallbackFromParent()
+                    ? t("Use parent folder's setting ({value})", { value: label(fallback()) })
+                    : t("Use global setting ({value})", { value: label(fallback()) })}
+                </button>
+              </Show>
             </Show>
           </span>
         </Show>
