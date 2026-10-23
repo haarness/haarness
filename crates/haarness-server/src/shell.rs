@@ -50,6 +50,13 @@ pub(crate) async fn run(
     for name in haarness_core::private_env_names() {
         command.env_remove(name);
     }
+    // A person's own command is not marked, also when this server holds
+    // Haarness's own markers (a `haarness serve` an agent's command started).
+    if agent.is_none() {
+        for name in haarness_core::own_agent_markers(std::env::var_os("AI_AGENT").as_deref()) {
+            command.env_remove(name);
+        }
+    }
     // Without a locale (Desktop opened from Finder) a command would read 日本
     // as six characters, as a terminal would; a hook's own LANG still wins.
     if let Some(locale) = haarness_pty::missing_locale() {
@@ -184,7 +191,8 @@ pub(crate) async fn run(
 /// environment, which a `haarness` started by another chat's command inherits
 /// with that chat's id, and over `env` (`shell.env` hooks and extensions). An
 /// `AI_AGENT` already set, there or in the server's environment, names an
-/// outer agent and is kept. A person's own command is not marked.
+/// outer agent and is kept, unless it is Haarness's own. A person's own
+/// command is not marked.
 fn mark_agent(command: &mut std::process::Command, thread: ThreadId, env: &[(&String, &String)]) {
     // What the command would get otherwise: `env`'s value, else the server's.
     let given = |name: &str| {
@@ -202,7 +210,9 @@ fn mark_agent(command: &mut std::process::Command, thread: ThreadId, env: &[(&St
             .filter(|value| !value.is_empty())
     };
     let id = thread.to_string();
-    let outer = given("AI_AGENT").is_some();
+    // `AI_AGENT=haarness` (this server started in an agent's command, say)
+    // is Haarness's own marker, not an outer agent's.
+    let outer = given("AI_AGENT").is_some_and(|value| value != haarness_core::AI_AGENT_VALUE);
     let stale = given(haarness_core::SESSION_ID_ENV).is_some_and(|value| value != id.as_str());
     command
         .env("AGENT", "1")
@@ -465,9 +475,29 @@ mod tests {
                     "{:?}",
                     logs.marked()
                 );
-                // A person's own command is not marked, and no chat id reaches it.
-                assert_eq!(stdout(&root, SHOW, &none, None).await, "0|0||unset");
+                // A person's own command is not marked, and no chat id reaches it:
+                // the server's AGENT and HAARNESS are left out too.
+                assert_eq!(stdout(&root, SHOW, &none, None).await, "unset|unset||unset");
                 assert_eq!(logs.marked().len(), 1);
+            }
+            "own" => {
+                // This server started in another chat's agent command (a
+                // `haarness serve`, say): its AI_AGENT=haarness is Haarness's
+                // own marker, not an outer agent's, and a person's command
+                // gets none of that command's markers.
+                assert_eq!(
+                    stdout(&root, SHOW, &none, Some(thread)).await,
+                    format!("1|1|haarness|{thread}")
+                );
+                assert!(
+                    logs.marked()[0].ends_with(&line(false, true)),
+                    "{:?}",
+                    logs.marked()
+                );
+                assert_eq!(
+                    stdout(&root, SHOW, &none, None).await,
+                    "unset|unset|unset|unset"
+                );
             }
             "outer" => {
                 // An agent that runs Haarness keeps its own marker.
@@ -576,8 +606,21 @@ mod tests {
     }
 
     #[test]
+    fn a_server_started_in_an_agent_s_command_marks_its_commands_as_its_own() {
+        in_server_environment(
+            "own",
+            &[
+                ("AGENT", "1"),
+                ("HAARNESS", "1"),
+                ("AI_AGENT", "haarness"),
+                ("HAARNESS_SESSION_ID", "another-chat"),
+            ],
+        );
+    }
+
+    #[test]
     fn an_agent_command_keeps_an_outer_ai_agent_marker() {
-        in_server_environment("outer", &[("AI_AGENT", "outer-agent")]);
+        in_server_environment("outer", &[("AGENT", "1"), ("AI_AGENT", "outer-agent")]);
     }
 
     #[test]
