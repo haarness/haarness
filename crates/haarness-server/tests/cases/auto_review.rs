@@ -192,6 +192,42 @@ async fn auto_approves_what_the_reviewer_allows_and_blocks_what_it_denies() {
     assert_eq!(metadata["review"]["rule"], "Test rule");
     assert_eq!(metadata["review"]["rationale"], "Test verdict: deny.");
     assert_eq!(metadata["review"]["risk"], "critical");
+    // What the reviewer saw: the person's messages and the agent's calls,
+    // the action whole with where it runs; never the agent's prose or a
+    // tool's output.
+    let review = provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|request| request.output_schema.is_some())
+        .cloned()
+        .unwrap();
+    assert!(review.system.starts_with("You review one action"));
+    assert_eq!(review.parameters.temperature, Some(0.0));
+    assert_eq!(review.parameters.max_output_tokens, Some(2048));
+    assert!(review.tools.is_empty());
+    let ProviderMessage::Text { content, .. } = &review.messages[0] else {
+        panic!("a text prompt");
+    };
+    for part in [
+        "<transcript>",
+        "user: !tool bash {\"command\":\"printf yes > allowed.txt\"} [review:allow]",
+        "agent called: bash {\"command\":\"printf yes > allowed.txt\"}",
+        "<action>",
+        "\"command\": \"printf no > blocked.txt\"",
+        "\"permission\": \"bash\"",
+        &format!("Working directory: {}", workspace.0.display()),
+        "No sandbox",
+    ] {
+        assert!(content.contains(part), "{part} missing from {content}");
+    }
+    assert!(
+        !content.contains("Tool finished"),
+        "no agent prose: {content}"
+    );
+    assert!(!content.contains("exit: 0"), "no tool output: {content}");
     // An approval is once: Auto never remembers a rule.
     set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
     let turn = runtime
