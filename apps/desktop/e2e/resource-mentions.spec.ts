@@ -93,7 +93,7 @@ test.afterAll(async () => {
 });
 
 const input = () => page.getByRole("textbox", { name: "Message", exact: true });
-const list = () => page.getByRole("listbox", { name: "Files and agents", exact: true });
+const list = () => page.getByRole("listbox", { name: "Files, agents and resources", exact: true });
 const rows = () => list().locator('[role="option"][data-kind="resource"]');
 const row = (name: string, server: string) =>
   rows()

@@ -1,6 +1,7 @@
 import { formatNumber, language, t } from "./i18n";
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
   Match,
@@ -143,9 +144,11 @@ export function PromptContextControls(props: {
   const [resources, setResources] = createSignal<{ connection: string; list: ResourceOption[] }>();
   const offersResources = () =>
     !!app.state.connection?.info.capabilities.includes(RESOURCE_MENTIONS);
+  // Only opening the list (or a project switch) asks; typing in it does not.
+  const opened = createMemo(open);
   createEffect(() => {
     const connection = app.state.connection?.id;
-    if (!open() || !connection || !offersResources()) return;
+    if (!opened() || !connection || !offersResources()) return;
     void cachedResources(connection, () => listResources(connection))
       .then((list) => {
         // An answer for a project left meanwhile waits in the cache.
@@ -487,7 +490,11 @@ export function PromptContextControls(props: {
           <div
             id="prompt-mentions"
             role="listbox"
-            aria-label={t("Files and agents")}
+            aria-label={
+              resources()?.connection === app.state.connection?.id && resources()?.list.length
+                ? t("Files, agents and resources")
+                : t("Files and agents")
+            }
             class="mention-options"
           >
             <For each={options()}>
