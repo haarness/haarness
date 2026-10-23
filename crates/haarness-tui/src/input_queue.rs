@@ -24,21 +24,34 @@ impl App {
         {
             bail!("This server does not support deferred messages. Update it before using Queue.");
         }
-        let response = client
-            .queue_input(
-                self.thread.id,
-                QueueInputRequest {
-                    preview: Some(false),
-                    reasoning_effort: self.reasoning_effort.clone(),
-                    delivery: InputDelivery::Queue,
-                    request_id: RequestId::new(),
-                    text,
-                    attachments: self.attachments.clone(),
-                    resources: Vec::new(),
-                    synthetic: false,
-                },
-            )
-            .await?;
+        if self.still_sending() {
+            return Ok(false);
+        }
+        let draft = text.clone();
+        let (text, resources) = self.take_mentions(&text)?;
+        let request = QueueInputRequest {
+            preview: Some(false),
+            reasoning_effort: self.reasoning_effort.clone(),
+            delivery: InputDelivery::Queue,
+            request_id: RequestId::new(),
+            text,
+            attachments: self.attachments.clone(),
+            resources,
+            synthetic: false,
+        };
+        if !request.resources.is_empty() {
+            let mentions = request.resources.clone();
+            let (client, chat) = (client.clone(), self.thread.id);
+            self.send_with_mentions(draft, &mentions, async move {
+                client
+                    .queue_input(chat, request)
+                    .await
+                    .map(crate::resource_mentions::Outcome::Queued)
+            })
+            .await;
+            return Ok(true);
+        }
+        let response = client.queue_input(self.thread.id, request).await?;
         self.attachments.clear();
         if let Some(turn) = response.turn {
             self.active_turn = Some(turn.id);

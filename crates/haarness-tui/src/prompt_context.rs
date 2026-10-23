@@ -269,6 +269,22 @@ fn reference_at(text: &str) -> Option<(Part<'_>, usize)> {
     }
 }
 
+/// Why the server left an MCP resource a prompt mentions unread: the reason
+/// its block holds. `None` for any other reference.
+pub(crate) fn unread(body: &str) -> Option<&str> {
+    let (summary, inner) = body
+        .strip_prefix("<details>\n<summary>MCP resource: ")?
+        .split_once("</summary>\n\n")?;
+    if !summary.ends_with(" (not read)") {
+        return None;
+    }
+    let (fence, after) = inner.split_once('\n')?;
+    if fence.len() < 3 || !fence.bytes().all(|byte| byte == b'`') {
+        return None;
+    }
+    after.strip_suffix(format!("\n{fence}\n\n</details>").as_str())
+}
+
 /// A sent prompt with every folded paste back to the text pasted, for
 /// reading or copying it whole.
 pub(crate) fn plain(text: &str) -> std::borrow::Cow<'_, str> {

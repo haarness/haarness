@@ -1,7 +1,7 @@
 """MCP stdio fixture that declares resources: a text page, an image, a template, and a page that never answers.
 
 A read of `docs://slow` gets no answer; the cancellation the client sends for it is appended to CANCEL_LOG.
-With REQUEST_LOG set, the method of every request is appended to it.
+With REQUEST_LOG set, the method of every request is appended to it. LIST_SLOW=1 lists `docs://slow` too.
 """
 import base64
 import json
@@ -19,6 +19,8 @@ RESOURCES = [
     {'uri': 'docs://setup', 'name': 'setup', 'title': 'Setup guide', 'mimeType': 'text/markdown'},
     {'uri': 'docs://logo', 'name': 'logo', 'mimeType': 'image/png'},
 ]
+if os.environ.get('LIST_SLOW') == '1':
+    RESOURCES.append({'uri': 'docs://slow', 'name': 'slow'})
 
 
 def reply(request_id, result):
