@@ -142,13 +142,13 @@ pub trait ThreadRepository: Send + Sync {
     ) -> CoreResult<bool> {
         Ok(false)
     }
-    /// Whether request `request` of chat `id` already started a turn.
-    async fn has_turn_for_request(
+    /// The turn request `request` of chat `id` started, if it started one.
+    async fn turn_for_request(
         &self,
         _id: ThreadId,
         _request: haarness_protocol::RequestId,
-    ) -> CoreResult<bool> {
-        Ok(false)
+    ) -> CoreResult<Option<Turn>> {
+        Ok(None)
     }
     async fn input_queue(&self, _id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         Ok(Default::default())
@@ -160,14 +160,18 @@ pub trait ThreadRepository: Send + Sync {
     ) -> CoreResult<haarness_protocol::InputQueue> {
         Err(CoreError::Invalid("Deferred input is unavailable".into()))
     }
-    /// Records that request `request` was steered into a running turn of
-    /// chat `id`, so `has_input_admission` finds a retry of it.
-    async fn record_steered_input(
+    /// Appends `data` to running turn `turn` of chat `id` as request
+    /// `request`'s steer, and records the request so `has_input_admission`
+    /// finds a retry of it, both at once. `None`, and nothing appended, when
+    /// the request was already taken. A store that keeps no records appends.
+    async fn append_steered_input(
         &self,
-        _id: ThreadId,
+        id: ThreadId,
+        turn: TurnId,
         _request: haarness_protocol::RequestId,
-    ) -> CoreResult<()> {
-        Ok(())
+        data: ItemData,
+    ) -> CoreResult<Option<Item>> {
+        self.append_item(id, Some(turn), data).await.map(Some)
     }
     async fn change_input_queue(
         &self,
