@@ -361,7 +361,6 @@ pub struct PhaseInfo {
     pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// In-flight rendering state belongs to its thread. Keeping it keyed avoids
 /// What a chat waits on from a person. An approval outranks a question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Waiting {
@@ -379,6 +378,7 @@ pub struct WaitingRequest {
     pub kind: Waiting,
 }
 
+/// In-flight rendering state belongs to its thread. Keeping it keyed avoids
 /// dropping a streaming prefix when the user opens a child agent and returns
 /// before the durable assistant item is written.
 #[derive(Clone, Default)]
@@ -2691,10 +2691,13 @@ impl App {
     /// up its chain that is not a child agent, as Desktop's
     /// `conversationRoot` finds it (a fork is a chat of its own). A thread
     /// this client has not listed falls back to the server's root.
-    fn waiting_chat(&self, request: &WaitingRequest) -> ThreadId {
+    fn waiting_chat(
+        threads: &std::collections::HashMap<ThreadId, &Thread>,
+        request: &WaitingRequest,
+    ) -> ThreadId {
         let mut id = request.thread_id;
         for _ in 0..16 {
-            match self.threads.iter().find(|thread| thread.id == id) {
+            match threads.get(&id) {
                 Some(thread) if thread.is_subagent => match thread.parent_id {
                     Some(parent) => id = parent,
                     None => break,
@@ -2707,11 +2710,20 @@ impl App {
     }
 
     /// What each chat waits on from a person: an approval over a question.
+    /// Built once per list or frame, not per row.
     pub fn waiting_chats(&self) -> std::collections::HashMap<ThreadId, Waiting> {
         let mut chats = std::collections::HashMap::new();
+        if self.waiting.is_empty() {
+            return chats;
+        }
+        let threads = self
+            .threads
+            .iter()
+            .map(|thread| (thread.id, thread))
+            .collect();
         for request in self.waiting.values() {
             let kind = chats
-                .entry(self.waiting_chat(request))
+                .entry(Self::waiting_chat(&threads, request))
                 .or_insert(request.kind);
             *kind = (*kind).max(request.kind);
         }
@@ -2765,8 +2777,9 @@ impl App {
 
     /// Compact, truthful metadata for a session-list row. Haarness only calls
     /// a session "working" when local REST/SSE state proves it; older sessions
-    /// are never guessed active from their update timestamp.
-    pub fn session_detail(&self, thread: &Thread) -> String {
+    /// are never guessed active from their update timestamp. `waiting` is
+    /// what the chat waits on, from one [`Self::waiting_chats`] for the list.
+    pub fn session_detail(&self, thread: &Thread, waiting: Option<Waiting>) -> String {
         let current = thread.id == self.thread.id
             || (!self.parent_stack.is_empty() && thread.id == self.root_thread_id);
         let working =
@@ -2777,7 +2790,6 @@ impl App {
         // reaches it, in the words the activity line uses. Its turn is
         // stopped on the reader, so it says that rather than "working", as
         // Desktop's waiting rows do.
-        let waiting = self.waiting_chats().get(&thread.id).copied();
         match waiting {
             Some(Waiting::Approval) => {
                 detail.push(language.text("waiting for approval").to_owned());

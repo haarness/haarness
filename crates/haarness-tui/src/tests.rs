@@ -12154,7 +12154,10 @@ async fn idle_root_with_live_child_stays_working_and_cancels_the_session_not_the
         "the root turn is genuinely idle"
     );
     assert_eq!(app.root_descendant_active_count(), 1);
-    assert!(app.session_detail(&root).contains("current · working"));
+    assert!(
+        app.session_detail(&root, None)
+            .contains("current · working")
+    );
     let rendered = crate::view::composer::composer_lines(&app, 100)
         .iter()
         .map(Line::text)
@@ -12207,7 +12210,7 @@ fn activity_from_an_unrelated_root_does_not_mark_the_current_session_working() {
     app.hydrate_active_turns(vec![fixture_running_turn(unrelated_child.id)]);
 
     assert_eq!(app.root_descendant_active_count(), 0);
-    assert!(!app.session_detail(&root).contains("working"));
+    assert!(!app.session_detail(&root, None).contains("working"));
 }
 
 #[tokio::test]
@@ -13395,17 +13398,33 @@ async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_cha
         ]
     );
     assert!(
-        app.session_detail(&old)
+        app.session_detail(&old, app.waiting_chats().get(&old.id).copied())
             .starts_with("waiting for approval · ")
+    );
+    // A compact terminal draws the same signs.
+    let compact = app
+        .lines((38, 24))
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>();
+    assert!(
+        compact
+            .iter()
+            .any(|row| row.contains("? ") && row.contains("Forked chat"))
+            && compact
+                .iter()
+                .any(|row| row.contains("⚠") && row.contains("Old chat")),
+        "{compact:#?}"
     );
     app.live_threads.entry(child.id).or_default();
     assert!(
-        !app.session_detail(&old).contains("working"),
+        !app.session_detail(&old, app.waiting_chats().get(&old.id).copied())
+            .contains("working"),
         "a chat stopped on the reader is not working"
     );
     app.live_threads.clear();
     assert!(
-        app.session_detail(&fork)
+        app.session_detail(&fork, app.waiting_chats().get(&fork.id).copied())
             .starts_with("waiting for your answer · ")
     );
     // An approval outranks a question in the same chat, and the current chat
@@ -13447,7 +13466,7 @@ async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_cha
     );
     assert_eq!(app.filtered_threads()[app.selection].title, "Old chat");
     assert!(
-        app.session_detail(&current)
+        app.session_detail(&current, app.waiting_chats().get(&current.id).copied())
             .starts_with("waiting for approval · current")
     );
     assert_eq!(session_rows(&app)[1], ("Current chat".into(), "⚠".into()));
@@ -13513,7 +13532,7 @@ fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
         vec![recent.id, current.id],
         "normal session browsing hides archived entries and sorts by activity"
     );
-    let current_detail = app.session_detail(&current);
+    let current_detail = app.session_detail(&current, None);
     assert!(
         current_detail.contains("current · working"),
         "{current_detail}"
@@ -13521,7 +13540,7 @@ fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
     assert!(current_detail.contains("GPT-5.4"), "{current_detail}");
 
     app.session_include_archived = true;
-    let archived_detail = app.session_detail(&archived);
+    let archived_detail = app.session_detail(&archived, None);
     assert!(archived_detail.contains("archived"), "{archived_detail}");
     let archived_id = archived.id.to_string();
     assert!(
