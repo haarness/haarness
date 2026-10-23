@@ -842,6 +842,14 @@ fn apply_toml(layers: &mut JsonLayers, path: &Path) {
     let result = (|| -> anyhow::Result<()> {
         let mut config: super::FileConfig = toml::from_str(&fs::read_to_string(path)?)?;
         merge_auto_review(layers, config.auto_review.take(), path);
+        if let Some(small) = config
+            .defaults
+            .as_ref()
+            .and_then(|defaults| defaults.small_model.clone())
+            .filter(|_| !layers.project)
+        {
+            layers.auto_review.small_model = Some(small);
+        }
         if let Some(permissions) = &config.permissions {
             layers
                 .rules
@@ -997,6 +1005,11 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
     }
     if let Some(small) = value.get("small_model").and_then(Value::as_str) {
         layers.small_model = Some(small.to_owned());
+        // Auto's reviewer reads the person's messages: a project's file
+        // never picks where they go.
+        if !layers.project {
+            layers.auto_review.small_model = Some(small.to_owned());
+        }
     }
     if let Some(agent) = value.get("default_agent").and_then(Value::as_str) {
         layers.default_agent = Some(agent.to_owned());
@@ -2353,6 +2366,45 @@ mod tests {
         .unwrap();
         let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
         assert_eq!(layers.auto_review.timeout, Duration::from_secs(30));
+        // A project's small_model is the project's chats' default, never the
+        // reviewer's; the person's own is.
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"small_model": "openai/gpt-5", "auto_review": {"model": "openai/gpt-5"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(layers.small_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(layers.auto_review.small_model, None);
+        assert_eq!(
+            layers.auto_review.model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        fs::write(
+            config.join("config.toml"),
+            "[defaults]\nsmall_model = \"anthropic/claude-haiku\"\n",
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(
+            layers.auto_review.small_model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        fs::remove_file(config.join("config.toml")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"small_model": "anthropic/claude-haiku"}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(
+            layers.auto_review.small_model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        assert_eq!(
+            layers.auto_review.model, None,
+            "a project never names the reviewer"
+        );
         let layers = load_layers_with_base(&config, None, None, &workspace, false, &[]);
         assert!(layers.auto_review.project_block.is_empty());
         // Defaults: on, the chat's models, a minute.

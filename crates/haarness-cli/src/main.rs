@@ -9063,9 +9063,13 @@ fn auto_review_line(layers: &jsonconfig::JsonLayers) -> String {
     }
     let model = review.model.clone().map_or_else(
         || {
-            layers.small_model.as_ref().map_or_else(
+            review.small_model.as_ref().map_or_else(
                 || "each chat's own model".to_owned(),
-                |small| format!("{small} (small_model), then each chat's own model"),
+                |small| {
+                    format!(
+                        "{small} (small_model) for chats on its provider, then each chat's own model"
+                    )
+                },
             )
         },
         |model| format!("{model} (auto_review.model)"),
@@ -14968,10 +14972,16 @@ request_timeout = 0
             auto_review_line(&layers),
             "auto review: each chat's own model, timeout 60s"
         );
-        layers.small_model = Some("anthropic/claude-haiku".into());
+        // A project's small_model is not the reviewer's.
+        layers.small_model = Some("openai/gpt-5".into());
         assert_eq!(
             auto_review_line(&layers),
-            "auto review: anthropic/claude-haiku (small_model), then each chat's own model, timeout 60s"
+            "auto review: each chat's own model, timeout 60s"
+        );
+        layers.auto_review.small_model = Some("anthropic/claude-haiku".into());
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: anthropic/claude-haiku (small_model) for chats on its provider, then each chat's own model, timeout 60s"
         );
         layers.auto_review.model = Some("openai/gpt-mini".into());
         assert_eq!(

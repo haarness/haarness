@@ -4240,7 +4240,6 @@ impl AgentRuntime {
                             .config
                             .prompts
                             .text(crate::PromptName::AutoReview),
-                        small_model: components.config.small_model.clone(),
                         model: (thread.provider.clone(), thread.model.clone()),
                         workspace: self.workspace.clone(),
                         state: Arc::clone(&self.approval_modes.reviews),
@@ -9746,7 +9745,6 @@ impl RunnerTask {
             providers: Arc::clone(&self.providers),
             settings: self.config.auto_review.clone(),
             policy: self.config.prompts.text(crate::PromptName::AutoReview),
-            small_model: self.config.small_model.clone(),
             model: (self.turn.provider.clone(), self.turn.model.clone()),
             workspace: self.workspace.clone(),
             state: Arc::clone(&self.approval_modes.reviews),
