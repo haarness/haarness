@@ -1042,3 +1042,234 @@ async fn a_card_announced_again_when_auto_turns_on_keeps_its_script() {
     answer(&runtime, &pending.permission_id, Reply::Reject).await;
     wait_done(&runtime, &turn).await;
 }
+
+/// The first time a request is listed, whatever it carries: polled as often
+/// as the runtime lets another task in.
+async fn first_listing(runtime: &AgentRuntime) -> haarness_protocol::PendingPermissionInfo {
+    for _ in 0..50_000 {
+        if let Some(pending) = runtime.pending_permissions().into_iter().next() {
+            return pending;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("no request was listed");
+}
+
+#[tokio::test]
+async fn in_auto_a_card_is_listed_with_its_script_from_the_first() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
+    // The reviewer leaves it to the person.
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    for _ in 0..5 {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&format!(
+                    "{} [review:ask]",
+                    bash(json!({"command": "sh x.sh"}))
+                )),
+            )
+            .await
+            .unwrap();
+        let pending = first_listing(&runtime).await;
+        assert!(pending.script.is_some(), "listed without its script");
+        assert!(pending.review.is_some());
+        answer(&runtime, &pending.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+    // An ask a person configured.
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(PermissionRule {
+        pattern: "bash:sh x*".into(),
+        decision: D::Ask,
+    });
+    let runtime = plain_runtime(&fixture.0, config);
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    for _ in 0..5 {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&bash(json!({"command": "sh x.sh"}))),
+            )
+            .await
+            .unwrap();
+        let pending = first_listing(&runtime).await;
+        assert!(pending.script.is_some(), "listed without its script");
+        answer(&runtime, &pending.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+}
+
+#[tokio::test]
+async fn a_card_reads_what_its_command_runs_once() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _capture = tracing::subscriber::set_default(Messages {
+        wanted: "reading the script a command runs for its permission prompt",
+        seen: Arc::clone(&seen),
+    });
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    tracing::callsite::rebuild_interest_cache();
+    // In Review, a command with no script and one with a script: each card
+    // reads once.
+    for (command, script) in [("printf hi", false), ("sh x.sh", true)] {
+        let before = seen.load(std::sync::atomic::Ordering::SeqCst);
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&bash(json!({"command": command}))))
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        assert_eq!(pending.script.is_some(), script, "{command}");
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "{command}"
+        );
+        answer(&runtime, &pending.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+    // In Auto, a card the reviewer leaves to the person reads once too.
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    let before = seen.load(std::sync::atomic::Ordering::SeqCst);
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "{} [review:ask]",
+                bash(json!({"command": "sh x.sh"}))
+            )),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert!(pending.script.is_some());
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst) - before, 1);
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+}
+
+#[tokio::test]
+async fn in_auto_a_workflows_card_shows_the_script_and_a_persons_own_command_reads_none() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf ran >> ran.txt\n").unwrap();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _capture = tracing::subscriber::set_default(Messages {
+        wanted: "reading the script a command runs for its permission prompt",
+        seen: Arc::clone(&seen),
+    });
+    let runtime = Arc::new(runtime(&fixture.0, RuntimeConfig::default()));
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    tracing::callsite::rebuild_interest_cache();
+    // A workflow's `ctx.shell` the reviewer leaves to the person (the marker
+    // is in the action it sees): its card shows the script.
+    let call = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move {
+            runtime
+                .run_workflow_tool(
+                    thread.id,
+                    "bash",
+                    json!({"command": "sh x.sh '[review:ask]'"}),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        }
+    });
+    let pending = first_listing(&runtime).await;
+    assert!(pending.script.is_some(), "{pending:?}");
+    assert!(pending.review.is_some());
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    assert!(call.await.unwrap().unwrap().is_error);
+    assert!(!fixture.0.join("ran.txt").exists());
+    // A person's own `!` command in Auto is approved once: no card, nothing
+    // read.
+    let own = runtime
+        .run_direct_tool(
+            thread.id,
+            "bash",
+            json!({"command": "sh x.sh"}),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!own.is_error, "{}", own.output.text);
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("ran.txt")).unwrap(),
+        "ran"
+    );
+}
+
+#[tokio::test]
+async fn auto_turned_off_mid_review_shows_the_card_with_its_script() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "{} [review:stall]",
+                bash(json!({"command": "sh x.sh"}))
+            )),
+        )
+        .await
+        .unwrap();
+    for _ in 0..500 {
+        if runtime.auto_reviews_running() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(runtime.auto_reviews_running(), 1);
+    assert!(runtime.pending_permissions().is_empty());
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Review,
+    )
+    .await;
+    let pending = first_listing(&runtime).await;
+    assert!(pending.script.is_some(), "listed without its script");
+    assert!(pending.review.is_none());
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert!(!fixture.0.join("shown.txt").exists());
+}

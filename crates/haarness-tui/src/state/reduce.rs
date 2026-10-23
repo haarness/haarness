@@ -538,7 +538,11 @@ impl App {
                         .find(|pending| pending.permission_id == id);
                     let again = known.is_some();
                     if let Some(known) = known {
+                        // Announced again (Auto turned on, the reviewer left
+                        // it to the person): its note and its script as they
+                        // are now.
                         known.review = serde_json::from_value(event.payload["review"].clone()).ok();
+                        known.script = serde_json::from_value(event.payload["script"].clone()).ok();
                     } else {
                         self.pending_permissions.push(PendingPermissionInfo {
                             allow_always: event.payload["allowAlways"].as_bool(),
