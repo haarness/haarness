@@ -475,6 +475,8 @@ test("thinking is Compact by default: one ticking activity line, then a Thought 
     await expect(page.locator(".conversation-find [role=status]")).toHaveText("1 of 1 messages");
     await expect(thought.locator(".thought-body")).toContainText("The second keeps the public API stable.");
     await page.keyboard.press("Escape");
+    // Closing Find gives the keyboard back to what had it.
+    await expect(thought.locator("summary")).toBeFocused();
 
     // Show writes the thought out in full; Hide leaves it out.
     await chooseThinking(page, "Show");
@@ -505,8 +507,367 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
     await input.fill("::thinkslow");
     await input.press("Enter");
     await expect(page.locator(".message.reasoning").first()).toContainText("Reading the request");
+    // The thought being written says Thinking; the activity line keeps its
+    // place without saying it a second time.
+    await expect(page.locator(".assistant-activity")).toHaveClass(/activity-said/);
     await expect(page.locator(".message.assistant").last()).toContainText("Thought it through");
     await expect(page.locator(".message.reasoning")).toContainText("The second keeps the public API stable.");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("the message box keeps the keyboard through a send, and what is typed right after Enter is the next message", async ({}, info) => {
+  const { app, page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const transcript = page.locator(".transcript");
+    // A first message makes its chat and the view moves to it: the box keeps
+    // the keyboard, and what was typed straight after Enter goes along.
+    await input.fill("first message of the chat");
+    await input.press("Enter");
+    await page.keyboard.type("typed straight after");
+    await expect(transcript).toContainText("Echo: first message of the chat");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("typed straight after");
+    await expect(transcript).not.toContainText("typed straight after");
+    // The new-chat page starts empty again; the chat kept its draft.
+    await page.getByRole("button", { name: "New chat", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await page.locator(".sessions").getByRole("button", { name: /first message of the chat/ }).first().click();
+    await expect(input).toHaveValue("typed straight after");
+
+    // In a chat: the box empties as Enter goes, keeps the keyboard, and the
+    // next message is typed into it while the first one is still on its way.
+    await input.fill("second message");
+    await input.press("Enter");
+    await expect(input).toHaveValue("");
+    await expect(input).toBeEnabled();
+    await page.keyboard.type("third, typed at once");
+    await expect(transcript).toContainText("Echo: second message");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("third, typed at once");
+    // Enter pressed again while a message is on its way sends the next one
+    // once it has gone, in order and only once.
+    await input.fill("fourth message");
+    await input.press("Enter");
+    await page.keyboard.type("fifth, sent right after");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(transcript).toContainText("Echo: fifth, sent right after");
+    await expect(input).toHaveValue("");
+    const sent = await page.locator(".message.user").allInnerTexts();
+    expect(sent.filter((text) => text.includes("fifth, sent right after"))).toHaveLength(1);
+    expect(sent.findIndex((text) => text.includes("fourth message"))).toBeLessThan(
+      sent.findIndex((text) => text.includes("fifth, sent right after")),
+    );
+
+    // Enter in an empty box while work runs does nothing: no empty message,
+    // no error, and Stop stays.
+    await input.fill("!linger 8000 slow task");
+    await input.press("Enter");
+    const stop = page.getByRole("button", { name: "Stop response", exact: true });
+    await expect(stop).toBeVisible();
+    await expect(input).toBeFocused();
+    const bubbles = await page.locator(".message.user").count();
+    await input.press("Enter");
+    await page.waitForTimeout(400);
+    await expect(page.locator(".message.user")).toHaveCount(bubbles);
+    await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
+    await expect(stop).toBeVisible();
+    // A menu of the box takes Esc first: it closes, and the work goes on.
+    await page.getByRole("button", { name: "Attach", exact: true }).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(stop).toBeVisible();
+    // So does the slash list (the box is not empty then).
+    await input.fill("/");
+    await expect(page.locator("#slash-commands")).toBeVisible();
+    await input.press("Escape");
+    await expect(page.locator("#slash-commands")).toHaveCount(0);
+    await expect(stop).toHaveCount(0);
+    await input.fill("");
+    await expect(stop).toBeVisible();
+    // Esc in the empty box stops the work, as Stop does.
+    await input.focus();
+    await input.press("Escape");
+    await expect(page.locator(".turn-stopped")).toHaveCount(1);
+    await expect(stop).toHaveCount(0);
+    await expect(input).toBeFocused();
+
+    // File → Stop response does the same, and with nothing running nothing.
+    const menuStop = () =>
+      app.evaluate(({ Menu, BrowserWindow }) => {
+        const find = (items: Electron.MenuItem[]): Electron.MenuItem | undefined => {
+          for (const item of items) {
+            if (item.label === "Stop response") return item;
+            const inner = item.submenu ? find(item.submenu.items) : undefined;
+            if (inner) return inner;
+          }
+        };
+        const item = find(Menu.getApplicationMenu()!.items);
+        item?.click(undefined, BrowserWindow.getAllWindows()[0], undefined as never);
+        return item?.accelerator;
+      });
+    expect(await menuStop()).toBe("CmdOrCtrl+.");
+    await page.waitForTimeout(300);
+    await input.fill("!linger 8000 another slow task");
+    await input.press("Enter");
+    await expect(stop).toBeVisible();
+    await menuStop();
+    await expect(page.locator(".turn-stopped")).toHaveCount(2);
+    await expect(stop).toHaveCount(0);
+
+    // A message that cannot go (the chat changed as it was sent) comes back
+    // where it was typed, and the chat does not get it.
+    const chat = page.locator(".sessions").getByRole("button", { name: /first message of the chat/ }).first();
+    await page.getByRole("button", { name: "New chat", exact: true }).click();
+    await input.fill("another chat");
+    await input.press("Enter");
+    await expect(transcript).toContainText("Echo: another chat");
+    await chat.click();
+    await expect(transcript).toContainText("Echo: second message");
+    await input.fill("not lost");
+    await page.evaluate(() => {
+      const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]")!;
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      [...document.querySelectorAll<HTMLElement>(".sessions button")].find((button) => /another chat/.test(button.textContent ?? ""))!.click();
+    });
+    await expect(transcript).toContainText("Echo: another chat");
+    await page.waitForTimeout(500);
+    // Depending on how far it got, it ends quietly or says the chat changed.
+    const dismiss = page.getByRole("button", { name: "Dismiss error", exact: true });
+    if (await dismiss.count()) await dismiss.click();
+    await chat.click();
+    await expect(transcript).toContainText("Echo: second message");
+    await page.waitForTimeout(500);
+    // Depending on how far it got, it went or it came back: never both,
+    // never neither.
+    const back = (await input.inputValue()) === "not lost";
+    const went = (await transcript.innerText()).includes("Echo: not lost");
+    expect(back !== went).toBe(true);
+    await input.fill("");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("every slash command row keeps its description, and the list scrolls", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("/");
+    const list = page.locator("#slash-commands");
+    const rows = list.getByRole("option");
+    await expect(rows.first()).toBeVisible();
+    expect(await rows.count()).toBeGreaterThan(6);
+    for (const row of await rows.all()) {
+      const description = row.locator("span");
+      const height = await description.evaluate((element) => element.getBoundingClientRect().height);
+      expect(height, await row.locator("strong").innerText()).toBeGreaterThan(10);
+    }
+    expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    // The last row scrolls into view when the selection wraps to it.
+    await input.press("ArrowUp");
+    await expect(rows.last()).toHaveAttribute("aria-selected", "true");
+    await expect(rows.last()).toBeInViewport();
+    await shot(page, [list, page.locator(".composer")], info.outputPath("slash-rows.png"));
+    await input.press("Escape");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("a step opened at the end of the chat stays where it was clicked, and following pauses", async ({}, info) => {
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
+  });
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const transcript = page.locator(".transcript");
+    await input.fill("::long 60");
+    await input.press("Enter");
+    await expect(transcript).toContainText("line 60 marker-60");
+    await input.fill('!tool read {"path":"README.md"}');
+    await input.press("Enter");
+    await expect(transcript).toContainText("Tool read =>");
+    const row = page.locator(".tool-call").filter({ hasText: "README.md" }).last();
+    const summary = row.locator(":scope > summary");
+    const settle = () => page.evaluate(() => new Promise((done) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(done)), 300)));
+    await settle();
+    const at = async () => (await summary.boundingBox())!.y;
+    const before = await at();
+    await summary.click();
+    await expect(row.locator(".tool-body")).toBeVisible();
+    await settle();
+    expect(Math.abs((await at()) - before)).toBeLessThan(2);
+    // Its body pushed the newest output down, so following has paused.
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+    // Closing it from the keyboard keeps it in place too.
+    await summary.press("Enter");
+    await expect(row.locator(".tool-body")).toHaveCount(0);
+    await settle();
+    expect(Math.abs((await at()) - before)).toBeLessThan(2);
+
+    // While a reply streams below it, opening it holds it as well: the
+    // stream is not followed past it, and Jump to latest offers the way on.
+    await input.fill("::scrollstream");
+    await input.press("Enter");
+    await expect(transcript).toContainText("STREAM_REFLOW_STAGE_ONE");
+    const streaming = await at();
+    await summary.click();
+    const places: number[] = [];
+    for (let sample = 0; sample < 8; sample++) {
+      await page.waitForTimeout(120);
+      places.push(await at());
+    }
+    await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+    places.push(await at());
+    for (const place of places) expect(Math.abs(place - streaming)).toBeLessThan(2);
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("a turn's reply has one footer, under its last text, with its full time; Copy takes the whole reply", async ({}, info) => {
+  const { app, page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
+  });
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill('!preface read {"path":"README.md"}');
+    await input.press("Enter");
+    const replies = page.locator(".message.assistant");
+    await expect(replies.last()).toContainText("Tool read =>");
+    await expect(replies).toHaveCount(2);
+    const footers = replies.locator(".message-footer");
+    // The earlier text keeps the footer's height with nothing in it.
+    await expect(footers.first().locator("time")).toHaveCount(0);
+    await expect(footers.first().getByRole("button")).toHaveCount(0);
+    const heights = await Promise.all([footers.first(), footers.last()].map(async (footer) => (await footer.boundingBox())!.height));
+    expect(Math.abs(heights[0] - heights[1])).toBeLessThan(1);
+    const time = footers.last().locator("time");
+    await expect(time).toHaveAttribute("datetime", /^\d{4}-\d{2}-\d{2}T/);
+    await expect(time).toHaveAttribute("title", new RegExp(String(new Date().getFullYear())));
+    const text = await copied(app, page, footers.last().getByRole("button", { name: "Copy message" }));
+    expect(text).toMatch(/^I’ll inspect the repository first\.\n\nTool read => /);
+    await expect(footers.last().getByRole("button", { name: "Fork from message" })).toHaveCount(1);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("an edit's preview opens its file in Review, and an added file reads in one column", async ({}, info) => {
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await writeFile(join(workspace, "src", "kept.ts"), "export const kept = 1;\n");
+    gitCheckout(workspace);
+  });
+  try {
+    await page.evaluate(() => window.haarness.preferences({ diffLayout: "split" } as never));
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    for (const path of ["src/first.ts", "src/second.ts"]) {
+      await input.fill('!tool write {"path":"' + path + '","content":"export const value = 1;\\n"}');
+      await input.press("Enter");
+      await expect(page.locator(".tool-call").filter({ hasText: path })).toHaveAttribute("data-status", "done");
+    }
+    const row = page.locator(".tool-call").filter({ hasText: "src/first.ts" });
+    if ((await row.getAttribute("open")) === null) await row.locator(":scope > summary").click();
+    // The preview's gutter says added, beside the code.
+    await expect(row.locator(".diff-line.add .diff-sign").first()).toHaveText("+");
+    await row.getByRole("button", { name: "Show in Review", exact: true }).click();
+    const file = page.locator('.diff-file[data-file="src/first.ts"]');
+    await expect(file).toBeVisible();
+    // Added, it has one side: no empty half beside it, though the layout is Split.
+    await expect(file.locator(".split-row")).toHaveCount(0);
+    await expect(file.locator(".diff-line.add")).toHaveCount(1);
+    await page.screenshot({ path: info.outputPath("show-in-review.png") });
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("the queue's Steer now has an arrow of its own, and Remove hands the keyboard on", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("!linger 15000 long running task");
+    await input.press("Enter");
+    await expect(page.getByRole("button", { name: "Stop response", exact: true })).toBeVisible();
+    for (const text of ["first queued", "second queued"]) {
+      await input.fill(text);
+      await input.press("Alt+Enter");
+      await expect(page.locator(".input-queue")).toContainText(text);
+    }
+    const tray = page.locator(".input-queue");
+    const steer = tray.getByRole("button", { name: "Steer now", exact: true }).first();
+    const send = page.locator(".send-button svg");
+    await input.fill("draft");
+    expect(await steer.locator("svg").innerHTML()).not.toBe(await send.innerHTML());
+    await input.fill("");
+    const remove = tray.getByRole("button", { name: "Remove queued message", exact: true });
+    await remove.first().focus();
+    await page.keyboard.press("Enter");
+    await expect(tray.locator(".input-queue-row")).toHaveCount(1);
+    await expect(remove.first()).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(tray).toHaveCount(0);
+    await expect(input).toBeFocused();
+    await page.getByRole("button", { name: "Stop response", exact: true }).click();
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("the new-chat heading holds still as the box grows, @ lists as wide as the box, and replies keep task boxes", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const heading = page.locator(".conversation-empty h2");
+    await expect(heading).toBeVisible();
+    // Let the hero's entrance finish before measuring where it rests.
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
+    const rest = (await heading.boundingBox())!.y;
+    await page.evaluate(() => {
+      const transfer = new DataTransfer();
+      const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+      transfer.items.add(new File([png], "pixel.png", { type: "image/png" }));
+      document.querySelector(".conversation")!.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    });
+    await expect(page.locator(".composer-attachments")).toBeVisible();
+    expect(Math.abs((await heading.boundingBox())!.y - rest)).toBeLessThan(1);
+    await page.getByRole("button", { name: "Remove pixel.png", exact: true }).click();
+
+    // The @ list is as wide as the message box it completes.
+    await input.fill("@");
+    const popover = page.locator(".mention-popover");
+    await expect(popover).toBeVisible();
+    const [list, box] = await Promise.all([popover.boundingBox(), page.locator(".composer").boundingBox()]);
+    expect(Math.abs(list!.width - (box!.width - 2))).toBeLessThan(3);
+    await input.press("Escape");
+
+    // A reply's task list keeps its boxes, ticked as written and read-only;
+    // its table heads read in the reply's own case.
+    await input.fill("Checklist\n\n- [ ] open task\n- [x] finished task\n\n| Name | Status |\n| --- | --- |\n| parser | done |");
+    await input.press("Enter");
+    const reply = page.locator(".message.assistant").last();
+    await expect(reply).toContainText("finished task");
+    const boxes = reply.locator("input.task-box");
+    await expect(boxes).toHaveCount(2);
+    await expect(boxes.nth(0)).not.toBeChecked();
+    await expect(boxes.nth(1)).toBeChecked();
+    await expect(boxes.nth(1)).toBeDisabled();
+    await expect(reply.locator("th").first()).toHaveCSS("text-transform", "none");
+    await expect(reply.locator("th").first()).toHaveText("Name");
     expect(errors).toEqual([]);
   } finally {
     await close();

@@ -181,6 +181,30 @@
 .message.assistant {
   padding: var(--s3) 0 0;
 }
+/* The reply a fork continued from, as its chat opens from the fork: a tint
+   that fades, or, for a reader who prefers less motion, one that just goes. */
+.fork-source > .message {
+  border-radius: var(--r-lg);
+  animation: fork-source 1.6s var(--ease) both;
+}
+@keyframes fork-source {
+  0%,
+  35% {
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 var(--s2) var(--accent-soft);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 var(--s2) transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fork-source > .message {
+    animation: none;
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 var(--s2) var(--accent-soft);
+  }
+}
 .message.assistant > .inline-error,
 .message.assistant > .notice-inline.media-omitted,
 .message.assistant > .plan-block,
@@ -304,6 +328,21 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 .markdown li::marker {
   color: var(--faint);
 }
+/* A task list's box takes the bullet's place; it shows, it does not take
+   clicks. */
+.markdown li.task-item {
+  list-style: none;
+}
+.markdown .task-box {
+  margin-block: 0;
+  margin-inline: calc(-1 * var(--s5) + 2px) var(--s2);
+  vertical-align: -2px;
+  cursor: default;
+}
+.markdown .task-box:checked {
+  background: var(--muted);
+  border-color: var(--muted);
+}
 .markdown h1,
 .markdown h2,
 .markdown h3,
@@ -414,6 +453,15 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   display: block;
   overflow: auto;
   margin: var(--s3) 0;
+}
+/* A reply's table heads its columns in the reply's own words and case;
+   the app's own tables keep their small capitals (base.css). */
+.markdown th {
+  color: var(--text);
+  font-size: inherit;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
 }
 .markdown hr {
   margin: var(--s5) 0;
@@ -633,6 +681,26 @@ html[dir="rtl"] .tool-target {
 .tool-call[open] > summary .tool-chevron {
   transform: rotate(90deg);
 }
+/* A question reads as words, not as a command: what was asked, then the
+   answer it got. */
+.tool-question > summary .tool-target {
+  flex: 0 1 auto;
+  font-family: var(--sans);
+  font-size: var(--ui);
+}
+.tool-answer {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.tool-answer::before {
+  content: "·";
+  margin-inline-end: var(--s2);
+  color: var(--faint);
+}
 .tool-batch > summary strong {
   min-width: 0;
   flex: 1;
@@ -759,12 +827,49 @@ html[dir="rtl"] .tool-target {
 .change-lines .diff-line code {
   white-space: pre;
 }
+/* Added or removed says itself in a quiet gutter, not by colour alone; a
+   copied selection takes the code without it. */
+.change-lines .diff-sign {
+  flex: none;
+  width: 1.5ch;
+  margin-inline-end: var(--s2);
+  color: var(--faint);
+  user-select: none;
+}
+.change-lines .diff-line.add .diff-sign {
+  color: color-mix(in srgb, var(--green) 70%, var(--faint));
+}
+.change-lines .diff-line.remove .diff-sign {
+  color: color-mix(in srgb, var(--danger) 70%, var(--faint));
+}
 .change-more {
   margin: 0;
   padding: var(--s1) var(--s3);
   border-top: 1px solid var(--hairline);
   font-size: var(--ui-xs);
   color: var(--muted);
+}
+/* The way to the whole file: one quiet link at the end of the preview. */
+.change-review {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: var(--control-sm);
+  padding-block: 0;
+}
+.change-review-link {
+  margin-inline-start: auto;
+  min-height: 0;
+  padding: 2px var(--s1);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.change-review-link:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 /* Separate sibling targets keep stopping independent from opening the row. */
@@ -1095,6 +1200,12 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui);
   color: var(--muted);
 }
+/* Show: the live thought above already says Thinking; the line keeps its
+   place, and its word for screen readers. */
+.assistant-activity.activity-said > .activity-shimmer,
+.assistant-activity.activity-said > span:first-child {
+  color: transparent;
+}
 /* Compact thinking: the newest line of thought after "Thinking", cut at
    its start to fit (ThoughtTicker), so the words just thought show. */
 .activity-thought {
@@ -1146,10 +1257,12 @@ html[dir="rtl"] .tool-target {
 .empty-start .transcript-tail {
   display: none;
 }
+/* Placed from the top of the window, not centred in what the message box
+   leaves: a chip or a second line in the box below never moves it. */
 .conversation-empty {
   width: 100%;
   max-width: var(--measure);
-  margin: auto 0;
+  margin: max(0px, calc(50vh - 330px)) 0 auto;
   padding: var(--s8) 0 var(--s7);
   text-align: center;
   animation: fade-up var(--slow) var(--ease);
@@ -1208,6 +1321,30 @@ html[dir="rtl"] .tool-target {
    both sides instead of tucking it under the last letter. */
 .conversation-empty .heading-project-picker {
   padding-inline-end: 2px;
+}
+/* The name and the mark after it ("?") hold together; a name too long for
+   the line ends in an ellipsis, keeping its caret. */
+.conversation-empty .heading-project {
+  white-space: nowrap;
+}
+.conversation-empty .heading-project-picker {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
+  max-width: calc(100% - 1.5ch);
+  vertical-align: bottom;
+}
+.conversation-empty .heading-project-picker .picker-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Right after the ellipsis: the chevron's own inset is the space. */
+.conversation-empty .heading-project-picker .picker-caret {
+  flex: none;
+  align-self: center;
+  margin-inline-start: 0;
 }
 .conversation-empty .picker-caret {
   width: 18px;
@@ -1322,6 +1459,7 @@ html[dir="rtl"] .tool-target {
 }
 @container (max-width: 660px) {
   .conversation-empty {
+    margin-top: max(0px, calc(50vh - 380px));
     padding: var(--s6) 0;
   }
   .conversation-empty h2 {
@@ -1528,11 +1666,13 @@ html[dir="rtl"] .tool-target {
   overflow: hidden;
 }
 
+/* At rest the edge is quiet; focus, work under way and a waiting decision
+   give it the agent's full colour (below). */
 .composer {
   position: relative;
   min-width: 0;
   border: 1px solid
-    color-mix(in srgb, var(--composer-agent, var(--primary)) 60%, transparent);
+    color-mix(in srgb, var(--composer-agent, var(--primary)) 30%, var(--hairline));
   padding-block: var(--s3);
   padding-inline: var(--s4);
   background: var(--raised);
@@ -1847,25 +1987,29 @@ html[dir="rtl"] .tool-target {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* A control above the text, not part of it: raised on a shadow, with a ring
+   of the page around it where it crosses words. */
 .jump-latest {
   position: absolute;
-  top: calc(-32px - var(--s2));
+  top: calc(-34px - var(--s2));
   left: 50%;
   translate: -50% 0;
   background: var(--raised);
-  border: 1px solid var(--hairline);
-  box-shadow: var(--shadow-1);
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--page) 80%, transparent),
+    var(--shadow-1);
   font-size: var(--ui-sm);
-  color: var(--muted);
-  width: 32px;
-  height: 32px;
+  color: var(--text);
+  width: 34px;
+  height: 34px;
   padding: 0;
   border-radius: var(--r-pill);
   z-index: 5;
   animation: fade-up var(--fast) var(--ease);
 }
 .jump-latest:hover {
-  color: var(--text);
+  background: color-mix(in srgb, var(--raised) 88%, var(--text));
 }
 
 /* -------------------------------------------------------------- approvals */
@@ -1891,6 +2035,15 @@ html[dir="rtl"] .tool-target {
   border-radius: var(--r-xl);
   background: var(--raised);
   animation: fade-up var(--fast) var(--ease);
+}
+/* A card that took the keyboard itself (nothing had it, or in an agent's
+   chat) says so quietly; Tab goes on to its answers. */
+.prompt-dock:focus {
+  outline: none;
+}
+:root:not([data-pointer-focus]) .prompt-dock:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
 }
 /* Tucked under whatever follows in the tray, the way the plan is. */
 .approvals:has(~ .plan-dock, ~ .composer) {
@@ -2095,6 +2248,25 @@ html[dir="rtl"] .tool-target {
 .prompt-actions .prompt-always {
   gap: var(--s1);
 }
+/* The Always slot holds its button and its menu in one place, the unused
+   one unseen, so it is as wide as the wider of the two. */
+.prompt-always-slot {
+  display: inline-grid;
+}
+.prompt-always-slot > * {
+  grid-area: 1 / 1;
+  justify-self: stretch;
+}
+.prompt-always-slot .prompt-always-menu {
+  display: inline-flex;
+}
+.prompt-always-slot .prompt-always-menu > .prompt-always {
+  flex: 1;
+  justify-content: center;
+}
+.prompt-always-slot > .slot-unused {
+  visibility: hidden;
+}
 /* Apart from the answers, so they stay put when it goes. */
 .prompt-actions .prompt-auto {
   margin-inline-end: auto;
@@ -2127,10 +2299,14 @@ html[dir="rtl"] .tool-target {
   min-height: var(--control-sm);
   font-size: var(--ui-sm);
 }
+/* The chosen answer reads as chosen in every palette, dark ones included:
+   the text colour's own edge, on the selection tint. */
 .question-options .active {
-  background: var(--primary-soft);
-  color: var(--primary);
-  border-color: var(--primary-edge);
+  background: var(--selected);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 70%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 70%, transparent);
+  font-weight: 500;
 }
 
 /* --------------------------------------------------- slash command popover */
@@ -2164,6 +2340,11 @@ html[dir="rtl"] .tool-target {
   letter-spacing: 0;
   font-weight: 400;
   text-align: end;
+}
+/* Rows keep their height and the list scrolls: in a column that has to fit,
+   flex would squash every row until its description was cut away. */
+.slash-suggestions > * {
+  flex-shrink: 0;
 }
 .slash-suggestions > button {
   display: flex;

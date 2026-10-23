@@ -154,9 +154,13 @@ export function ProjectPicker(props: { heading?: boolean }) {
         </Show>
         {/* A Cloud session's title is often a sentence; inside the heading's own
             question it must not end in a full stop before the question mark. */}
-        {(props.heading
-          ? selected()?.label.replace(/[.!?。！？]+$/u, "")
-          : selected()?.label) || t("Choose a project")}
+        {/* Its own box, so a long name gives way with an ellipsis and the
+            caret stays. */}
+        <span class="picker-label">
+          {(props.heading
+            ? selected()?.label.replace(/[.!?。！？]+$/u, "")
+            : selected()?.label) || t("Choose a project")}
+        </span>
         {/* A caret marks this as a control rather than a word in the sentence.
             It contributes no text, so the heading still reads as one line. */}
         <Icon name="down" size="xs" class="picker-caret" />
