@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page, type Locator } from "@playwright/test";
-import { mkdtemp, mkdir, writeFile, readFile, realpath } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, writeFile, readFile, realpath } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,6 +8,9 @@ import { join, resolve } from "node:path";
 // quiet toggle under the command: closed at first, so the card keeps its size, opened in place by
 // mouse or keyboard, its text in a short box that scrolls on its own.
 let app: ElectronApplication, page: Page, root: string, project: string, env: Record<string, string>;
+// A project with the default rules (bash runs without asking), a folder
+// outside it, and the project the tests are in now.
+let plain: string, outside: string, current: string;
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 const shots = process.env.HAARNESS_SCREENSHOTS;
 const errors: string[] = [];
@@ -30,7 +33,7 @@ const deploy = [
 
 async function api(method: string, ...args: unknown[]): Promise<any> {
   return page.evaluate(({ connection, method, args }) => window.haarness.api(connection, method, args), {
-    connection: "local:" + project,
+    connection: "local:" + current,
     method,
     args,
   });
@@ -73,6 +76,14 @@ test.beforeAll(async () => {
     Array.from({ length: 400 }, (_, line) => `echo big-${String(line + 1).padStart(4, "0")} ${"x".repeat(100)}\n`).join(""),
   );
   await writeFile(join(project, ".env.local"), "TOKEN=fixture-only\n");
+  plain = join(root, "plain");
+  outside = join(root, "outside");
+  await mkdir(join(plain, ".haarness"), { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(plain, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await writeFile(join(outside, "run.sh"), "#!/bin/sh\nprintf ran > ran.txt\n");
+  await chmod(join(outside, "run.sh"), 0o755);
+  current = project;
   env = Object.fromEntries(
     Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("HAARNESS_")),
   ) as Record<string, string>;
@@ -103,7 +114,8 @@ test.afterAll(async () => {
     await app.evaluate(({ BrowserWindow }) => { for (const win of BrowserWindow.getAllWindows()) win.destroy(); }).catch(() => {});
     await app.close().catch(() => {});
   }
-  try { execFileSync(binary, ["--workspace", project, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
+  for (const workspace of [project, plain])
+    try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
   await test.info().attach("fixture", { body: root ?? "not started", contentType: "text/plain" });
 });
 
@@ -188,7 +200,7 @@ test("in Arabic the card reads right to left while the script keeps left to righ
   const body = card().locator(".approval-script-body");
   expect(
     await body
-      .locator(".change-path, .change-lines")
+      .locator(".change-path bdi, .change-lines")
       .evaluateAll((parts) => parts.map((part) => getComputedStyle(part).direction)),
   ).toEqual(["ltr", "ltr"]);
   await expect(body.locator(".diff-line").first()).toHaveText("#!/bin/sh");
@@ -207,5 +219,31 @@ test("a secret-named file, or a command that runs no script, shows no toggle", a
     await card().getByRole("button", { name: "Deny", exact: true }).click();
     await idle();
   }
+});
+
+test("under the default rules the outside folder's card offers the script that runs there", async () => {
+  await app.evaluate(({ dialog }, path) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
+  }, plain);
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  current = plain;
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+  await expect(page.locator(".titlebar")).toContainText("plain");
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await send(`cd ${outside} && ./run.sh`);
+  // `bash` asks nothing here; the one card is about the folder.
+  await expect(card().locator(".prompt-title")).toHaveText("Access a folder outside this project");
+  await expect(toggle()).toHaveText("View script · 2 lines");
+  await toggle().click();
+  const path = card().locator(".approval-script-body .change-path");
+  await expect(path).toHaveText(join(outside, "run.sh"));
+  // A long path gives way from its start: the file's own name stays in view.
+  const [box, name] = await Promise.all([path.boundingBox(), path.locator("bdi").boundingBox()]);
+  expect(name!.x + name!.width).toBeLessThanOrEqual(box!.x + box!.width);
+  await expect(card().locator(".approval-script-body .diff-line").last()).toHaveText("printf ran > ran.txt");
+  await pictures(card(), "card-outside-open");
+  await card().getByRole("button", { name: "Allow once", exact: true }).click();
+  await idle();
+  expect(await readFile(join(outside, "ran.txt"), "utf8")).toBe("ran");
   expect(errors).toEqual([]);
 });

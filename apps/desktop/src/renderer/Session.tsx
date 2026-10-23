@@ -3044,7 +3044,7 @@ function Permission(props: {
                   aria-live="off"
                 >
                   <div class="change-path" title={item().path}>
-                    {item().path}
+                    <bdi dir="ltr">{item().path}</bdi>
                   </div>
                   <div
                     class="change-lines"

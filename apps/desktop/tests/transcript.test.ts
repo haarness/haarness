@@ -470,7 +470,9 @@ test("a shell permission shows the script its command runs, and nothing when the
   assert.equal(permissionScript({ permission: "bash" }), undefined);
   assert.equal(permissionScript({ permission: "bash", script: "echo hi" }), undefined);
   assert.equal(permissionScript({ permission: "bash", script: { path: 1, content: "x" } }), undefined);
-  assert.equal(permissionScript({ permission: "read", script }), undefined);
+  // An outside folder's card, the one a shell command raises under the
+  // default rules, shows it too.
+  assert.equal(permissionScript({ permission: "external_directory", script })?.lines.length, 2);
   // Tabs are drawn as spaces to the next stop of four.
   assert.deepEqual(
     permissionScript({ permission: "bash", script: { ...script, content: "\tif x; then\n\t\techo a\tb\n" } })?.lines,

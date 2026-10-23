@@ -4191,15 +4191,19 @@ impl AgentRuntime {
             }
             let always_rules = plan.always_rules();
             let card = plan.card_detail(&arguments, asked);
-            // The script is read for a person, so not in Auto, which approves
-            // this without one (the check under the gate below is the one
-            // that counts). When the Auto reviewer hands a request to a
-            // person, it reads the script there with `script_for_person`.
-            let shown = if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
+            // A shell command's card, whatever it asks about (under the
+            // default rules, a folder outside the project), shows the script
+            // the command runs. It is read for a person, so not in Auto, which
+            // approves this without one (the check under the gate below is
+            // the one that counts). When the Auto reviewer hands a request to
+            // a person, it reads the script there with `script_for_person`.
+            let shown = if !shows_script(name, &arguments)
+                || (!forced && !explicit && self.approval_modes.is_auto(thread_id).await)
+            {
                 None
             } else {
-                plan.script_for_person(&arguments, &self.workspace, engine.clone())
-                    .await
+                let readable = script_readable(engine.clone(), None, &self.workspace);
+                script_for_person(&arguments, &self.workspace, readable).await
             };
             let script = shown.as_ref().map(|shown| shown.script.clone());
             // Same rule as model calls: a chat in Auto approves eligible
@@ -4305,7 +4309,7 @@ impl AgentRuntime {
                 result = receiver => result.map_err(|_| CoreError::Cancelled),
             }?;
             allowed = match &shown {
-                Some(shown) if resolution.allowed && !shown.seal.holds().await => {
+                Some(shown) if resolution.once && !shown.seal.holds().await => {
                     Err(script_changed(&shown.script.path, &self.workspace))
                 }
                 _ if resolution.allowed => Ok(()),
@@ -4593,14 +4597,19 @@ impl AgentRuntime {
                     let _ = other_pending.sender.send(PermissionResolution {
                         allowed: false,
                         feedback: reply.feedback.clone(),
+                        once: false,
                     });
                 }
             }
         }
         self.publish_permission_resolved(id, &pending, allowed);
+        // A forced request offers nothing longer, so any allow of it is once.
+        let once = allowed
+            && (matches!(decision, PermissionReplyDecision::Once) || (pending.forced && !explicit));
         let _ = pending.sender.send(PermissionResolution {
             allowed,
             feedback: reply.feedback,
+            once,
         });
         Ok(())
     }
@@ -4658,6 +4667,7 @@ impl AgentRuntime {
                     let _ = pending.sender.send(PermissionResolution {
                         allowed: true,
                         feedback: None,
+                        once: false,
                     });
                     released.push(permission_id);
                 }
@@ -6086,16 +6096,80 @@ struct PendingPermission {
     sender: oneshot::Sender<PermissionResolution>,
 }
 
-/// Why a command whose script changed after its card showed it does not
-/// run, for the model.
+/// Whether a card about this call shows the script its command runs: any
+/// card a shell command raises. Checked before anything else is built, so
+/// other prompts pay nothing.
+fn shows_script(tool: &str, detail: &serde_json::Value) -> bool {
+    tool == "bash"
+        && detail
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
+
+/// What a card may show of a script, by path (the file named and where it
+/// leads): what the chat's `read` rules allow (the built-in secret rules and
+/// every configured deny or ask) and an active skill's do not deny, and,
+/// outside the project, in a folder no `external_directory` rule denies (an
+/// ask is often the very question the card asks, so it does not hide it).
+fn script_readable(
+    engine: PermissionEngine,
+    skill: Option<PermissionEngine>,
+    workspace: &Path,
+) -> impl Fn(&Path) -> bool + Send + 'static {
+    let workspace = workspace.to_path_buf();
+    move |path| {
+        let read = format!("read:{}", path.display());
+        let inside = path.starts_with(&workspace)
+            || workspace
+                .canonicalize()
+                .is_ok_and(|root| path.starts_with(root));
+        engine.evaluate(&read) == PermissionDecision::Allow
+            && skill
+                .as_ref()
+                .is_none_or(|skill| skill.evaluate(&read) != PermissionDecision::Deny)
+            && (inside
+                || path.parent().is_none_or(|folder| {
+                    let folder = folder.display().to_string();
+                    engine.evaluate(&format!(
+                        "external_directory:{}/*",
+                        folder.trim_end_matches(['/', '\\'])
+                    )) != PermissionDecision::Deny
+                }))
+    }
+}
+
+/// The script a shell call's command runs, read for the person a card about
+/// it is announced to (`permissions::script`): off the async workers, within
+/// a short deadline, and only what `readable` lets the card show. Display
+/// only: it decides nothing, and hooks, Auto and rules never see it. Its
+/// seal is checked when the person allows the call once.
+async fn script_for_person(
+    detail: &serde_json::Value,
+    workspace: &Path,
+    readable: impl Fn(&Path) -> bool + Send + 'static,
+) -> Option<crate::permissions::script::Shown> {
+    let command = detail.get("command")?.as_str()?.to_owned();
+    let cwd = match detail.get("workdir").and_then(serde_json::Value::as_str) {
+        Some(workdir) => crate::permissions::resolve_permission_path(workspace, workdir),
+        None => workspace.to_path_buf(),
+    };
+    crate::permissions::script::for_prompt(command, cwd, readable).await
+}
+
+/// Why a command whose script changed after its card showed it did not run,
+/// for the model.
 fn script_changed(path: &str, workspace: &Path) -> String {
-    let root = workspace.to_string_lossy();
+    let path = Path::new(path);
+    let canonical = workspace.canonicalize().ok();
     let shown = path
-        .strip_prefix(root.trim_end_matches('/'))
-        .and_then(|rest| rest.strip_prefix('/'))
+        .strip_prefix(workspace)
+        .ok()
+        .or_else(|| path.strip_prefix(canonical.as_ref()?).ok())
         .unwrap_or(path);
     format!(
-        "{shown} changed after it was shown to the user; run the command again to show the new version."
+        "The command did not run: {} changed after the user saw it. Run it again so they see the new version.",
+        shown.display()
     )
 }
 
@@ -6211,6 +6285,7 @@ fn release_covered_permissions(
             let _ = pending.sender.send(PermissionResolution {
                 allowed: true,
                 feedback: None,
+                once: false,
             });
         }
     }
@@ -6370,6 +6445,10 @@ impl PendingPermission {
 struct PermissionResolution {
     allowed: bool,
     feedback: Option<String>,
+    /// A person allowed exactly this request, once (Allow once, or any
+    /// allow of a request that offers nothing longer): nothing else lets it
+    /// through again without a card.
+    once: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -9176,7 +9255,7 @@ impl RunnerTask {
                 })
                 .collect();
             let resolution = self
-                .ask_permission(agent, &plan, &arguments, forced, explicit)
+                .ask_permission(agent, name, &plan, &arguments, forced, explicit)
                 .await?;
             if !resolution.allowed {
                 let message = match resolution.feedback {
@@ -9362,6 +9441,7 @@ impl RunnerTask {
     async fn ask_permission(
         &self,
         agent: &str,
+        tool: &str,
         plan: &AskPlan,
         detail: &serde_json::Value,
         forced: bool,
@@ -9403,6 +9483,7 @@ impl RunnerTask {
             return Ok(PermissionResolution {
                 allowed: true,
                 feedback: None,
+                once: false,
             });
         }
         if let Some(hooks) = &self.hooks {
@@ -9422,6 +9503,7 @@ impl RunnerTask {
                     return Ok(PermissionResolution {
                         allowed: false,
                         feedback: Some(feedback),
+                        once: false,
                     });
                 }
                 HookAnswer::Allowed { always } if !forced && !explicit => {
@@ -9431,25 +9513,30 @@ impl RunnerTask {
                     return Ok(PermissionResolution {
                         allowed: true,
                         feedback: None,
+                        once: false,
                     });
                 }
                 HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
-        // The script is read for a person, so not in Auto, which approves
-        // this without one (the check under the gate below is the one that
+        // A shell command's card, whatever it asks about (under the default
+        // rules, a folder outside the project), shows the script the command
+        // runs. It is read for a person, so not in Auto, which approves this
+        // without one (the check under the gate below is the one that
         // counts), and before the gate is taken, so a slow disk never holds
         // up a mode change or another chat's answer. When the Auto reviewer
         // hands a request to a person, it reads the script there with
         // `script_for_person`.
-        let shown = if !forced && !explicit && self.approval_modes.is_auto(self.thread.id).await {
+        let shown = if !shows_script(tool, detail)
+            || (!forced && !explicit && self.approval_modes.is_auto(self.thread.id).await)
+        {
             None
         } else {
             let engine =
                 self.permission_engine_with_session_rules(agent, &self.session_rules.lock());
-            plan.script_for_person(detail, &self.workspace, engine)
-                .await
+            let readable = script_readable(engine, Some(self.skill_engine()), &self.workspace);
+            script_for_person(detail, &self.workspace, readable).await
         };
         let script = shown.as_ref().map(|shown| shown.script.clone());
         let id = uuid::Uuid::now_v7().to_string();
@@ -9482,6 +9569,7 @@ impl RunnerTask {
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
+                    once: false,
                 });
             }
             if auto {
@@ -9493,6 +9581,7 @@ impl RunnerTask {
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
+                    once: false,
                 });
             }
             self.permissions.insert(
@@ -9597,9 +9686,7 @@ impl RunnerTask {
         // The person approved what the card showed: a script that changed
         // since, or is gone, does not run in its place.
         if let Some(shown) = &shown
-            && resolution
-                .as_ref()
-                .is_ok_and(|resolution| resolution.allowed)
+            && resolution.as_ref().is_ok_and(|resolution| resolution.once)
             && !shown.seal.holds().await
         {
             tracing::info!(
@@ -11938,32 +12025,6 @@ impl AskPlan {
                 self.operation(pattern)
             ),
         }
-    }
-    /// For a bash request, the script its command runs, read for the person
-    /// the request is announced to (`permissions::script`): off the async
-    /// workers, within a short deadline, and only what this chat may read
-    /// without asking (`engine`'s `read` rules, the built-in secret rules and
-    /// every configured deny or ask, must allow both the file named and
-    /// where it leads). Display only: it decides nothing, and hooks, Auto and
-    /// rules never see it. Its seal is checked when the person answers.
-    async fn script_for_person(
-        &self,
-        detail: &serde_json::Value,
-        workspace: &Path,
-        engine: PermissionEngine,
-    ) -> Option<crate::permissions::script::Shown> {
-        if self.permission != "bash" {
-            return None;
-        }
-        let command = detail.get("command")?.as_str()?.to_owned();
-        let cwd = match detail.get("workdir").and_then(serde_json::Value::as_str) {
-            Some(workdir) => crate::permissions::resolve_permission_path(workspace, workdir),
-            None => workspace.to_path_buf(),
-        };
-        crate::permissions::script::for_prompt(command, cwd, move |path| {
-            engine.evaluate(&format!("read:{}", path.display())) == PermissionDecision::Allow
-        })
-        .await
     }
     /// The tool's arguments as a prompt about `patterns` shows them: with
     /// the rule a command met because a limit stopped reading it
@@ -16030,6 +16091,49 @@ mod tests {
         // The three seconds between provider checkpoints represent tool,
         // child-agent, or human-question wait and are charged exactly once.
         assert_eq!(accounting.elapsed_delta_at(5), 3);
+    }
+
+    /// A script card shows what the chat may read: `read` rules (built-in
+    /// and configured) and an active skill's deny hide a file, and outside
+    /// the project an `external_directory` deny of its folder does, not an
+    /// ask.
+    #[test]
+    fn a_script_card_shows_only_what_the_chat_may_read() {
+        use crate::{PermissionDecision, PermissionEngine, PermissionRule};
+        let rule = |pattern: &str, decision| PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        };
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-readable-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(&workspace);
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.add_rule(rule("read:private/*", PermissionDecision::Ask));
+        engine.add_rule(rule(
+            "external_directory:/opt/denied/*",
+            PermissionDecision::Deny,
+        ));
+        let mut skill =
+            PermissionEngine::new(vec![rule("read:skill-hidden/*", PermissionDecision::Deny)]);
+        skill.set_workspace(&workspace);
+        let readable = super::script_readable(engine, Some(skill), &workspace);
+        assert!(readable(&workspace.join("run.sh")));
+        for hidden in [
+            ".env",
+            "secrets/run.sh",
+            "private/run.sh",
+            "skill-hidden/run.sh",
+        ] {
+            assert!(!readable(&workspace.join(hidden)), "{hidden}");
+        }
+        // Outside the project: the folder's ask (the default) shows it, a
+        // deny of it or of a folder above hides it.
+        assert!(readable(std::path::Path::new("/opt/tools/run.sh")));
+        assert!(!readable(std::path::Path::new("/opt/denied/run.sh")));
+        assert!(!readable(std::path::Path::new("/opt/denied/deeper/run.sh")));
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 }
 
