@@ -15,6 +15,9 @@ pub async fn handle_mouse(
     event: MouseEvent,
     client: &ApiClient,
 ) -> Result<AppAction> {
+    // A click on a chip answers the request on screen, never a staged or
+    // selected choice left from another.
+    app.follow_permission_head();
     match event.kind {
         MouseEventKind::ScrollUp => {
             app.hovered_cell = None;

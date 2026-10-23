@@ -22,6 +22,7 @@
   "Archive": "アーカイブ",
   "Ask": "確認",
   "Ask anything…": "何でも聞いてください…",
+  "{answer} in a moment · enter now · esc cancels": "まもなく{answer} · enter で今すぐ · esc で取り消し",
   "Enter steers · alt+enter queues": "Enter で即座に実行 · alt+enter でキューに追加",
   "Enter queues until this work is done": "Enter でキューに追加（この作業の完了後に送信）",
   "Assistant": "アシスタント",

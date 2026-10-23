@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{FutureExt as _, StreamExt};
@@ -24,6 +24,8 @@ pub(crate) trait Source {
     fn next(&mut self) -> impl Future<Output = Option<io::Result<Event>>>;
     /// An event that came with the last read, already decoded; never waits.
     fn ready(&mut self) -> Option<io::Result<Event>>;
+    /// Whether the terminal has sent something not read yet; never waits.
+    fn pending(&mut self) -> bool;
 }
 
 impl Source for EventStream {
@@ -39,13 +41,21 @@ impl Source for EventStream {
         }
         StreamExt::next(self).now_or_never().flatten()
     }
+
+    fn pending(&mut self) -> bool {
+        crossterm::event::poll(Duration::ZERO).unwrap_or(false)
+    }
 }
 
-/// The terminal's events, with an Escape-prefixed key joined into one.
+/// The terminal's events, with an Escape-prefixed key joined into one, each
+/// stamped with when it was read: a key that waited behind slow work keeps
+/// the moment it came in.
 pub(crate) struct TerminalInput<S = EventStream> {
     source: S,
-    /// Events already read and decoded, not handed out yet.
-    ready: VecDeque<io::Result<Event>>,
+    /// Events already read and decoded, not handed out yet, and when.
+    ready: VecDeque<(io::Result<Event>, Instant)>,
+    /// When the event `next` handed out last was read.
+    read_at: Instant,
 }
 
 impl TerminalInput {
@@ -59,15 +69,30 @@ impl<S: Source> TerminalInput<S> {
         Self {
             source,
             ready: VecDeque::new(),
+            read_at: Instant::now(),
         }
+    }
+
+    /// When the event [`Self::next`] handed out last was read.
+    pub(crate) const fn read_at(&self) -> Instant {
+        self.read_at
+    }
+
+    /// Whether more input is already here, read or not: it came before now.
+    pub(crate) fn pending(&mut self) -> bool {
+        !self.ready.is_empty() || self.source.pending()
     }
 
     /// The next event. Cancel safe: it only waits before taking anything.
     pub(crate) async fn next(&mut self) -> Option<io::Result<Event>> {
-        let event = match self.ready.pop_front() {
-            Some(event) => event,
-            None => self.source.next().await?,
+        let (event, read_at) = match self.ready.pop_front() {
+            Some(entry) => entry,
+            None => {
+                let event = self.source.next().await?;
+                (event, Instant::now())
+            }
         };
+        self.read_at = read_at;
         if !escape(&event) {
             return Some(event);
         }
@@ -79,7 +104,7 @@ impl<S: Source> TerminalInput<S> {
                 break;
             };
             let key = matches!(next, Ok(Event::Key(_)));
-            self.ready.push_back(next);
+            self.ready.push_back((next, Instant::now()));
             if !key {
                 break;
             }
@@ -95,13 +120,16 @@ fn escape(event: &io::Result<Event>) -> bool {
 /// `event` as it is, or, when it is an Escape and the keys at the front of
 /// `ready` (what came with it) spell a cursor key, that key with Alt, which
 /// takes them out of `ready`.
-fn join(event: io::Result<Event>, ready: &mut VecDeque<io::Result<Event>>) -> io::Result<Event> {
+fn join(
+    event: io::Result<Event>,
+    ready: &mut VecDeque<(io::Result<Event>, Instant)>,
+) -> io::Result<Event> {
     if !escape(&event) {
         return event;
     }
     let keys = ready
         .iter()
-        .map_while(|event| match event {
+        .map_while(|(event, _)| match event {
             Ok(Event::Key(key)) => Some(*key),
             _ => None,
         })
@@ -254,10 +282,10 @@ mod tests {
     fn read(events: Vec<KeyEvent>) -> Vec<KeyEvent> {
         let mut ready = events
             .into_iter()
-            .map(|key| Ok(Event::Key(key)))
+            .map(|key| (Ok(Event::Key(key)), Instant::now()))
             .collect::<VecDeque<_>>();
         let mut out = Vec::new();
-        while let Some(event) = ready.pop_front() {
+        while let Some((event, _)) = ready.pop_front() {
             let Ok(Event::Key(key)) = join(event, &mut ready) else {
                 panic!("not a key");
             };
@@ -315,6 +343,10 @@ mod tests {
 
         fn ready(&mut self) -> Option<io::Result<Event>> {
             Some(Ok(Event::Key(self.0.front_mut()?.pop_front()?)))
+        }
+
+        fn pending(&mut self) -> bool {
+            self.0.iter().any(|read| !read.is_empty())
         }
     }
 

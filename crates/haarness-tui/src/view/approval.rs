@@ -1367,6 +1367,11 @@ pub fn compact_lines(app: &App, width: usize) -> Option<CompactCard> {
         }
         let label = single_line(label, width.saturating_sub(key.width() + 4).max(1));
         let selected = app.permission_focus && index == selection;
+        let key = if selected && crate::input::settling_answer(app).is_some() {
+            "…".to_owned()
+        } else {
+            key.clone()
+        };
         let (foreground, background, attributes) = if selected {
             (theme.bg, theme.accent, attr::BOLD)
         } else {
@@ -1384,7 +1389,7 @@ pub fn compact_lines(app: &App, width: usize) -> Option<CompactCard> {
             )
             .on(background),
         );
-        let chip = chip_width(&label, key);
+        let chip = chip_width(&label, &key);
         targets.push((
             column,
             (column + chip).min(width),
@@ -1406,6 +1411,7 @@ pub fn compact_lines(app: &App, width: usize) -> Option<CompactCard> {
 fn chip_rows(app: &App, width: usize, staged: bool) -> Vec<ChipRow> {
     let theme = &app.theme;
     let chips = chips(app, staged);
+    let settling = crate::input::settling_answer(app).is_some();
     let selection = app.permission_selection.min(chips.len() - 1);
     let start = || vec![Span::new(RAIL, theme.accent).on(theme.overlay)];
     let finish = |mut spans: Vec<Span>, column: usize| {
@@ -1444,6 +1450,12 @@ fn chip_rows(app: &App, width: usize, staged: bool) -> Vec<ChipRow> {
         } else {
             theme.selected
         };
+        // A one-key answer on its way shows it in place of its key.
+        let key = if selected && settling {
+            "…".to_owned()
+        } else {
+            key.clone()
+        };
         let (foreground, attributes) = match (selected, app.permission_focus) {
             (true, _) => (theme.bg, attr::BOLD),
             (false, true) => (theme.text, attr::NONE),
@@ -1480,6 +1492,20 @@ fn footer(app: &App, width: usize, staged: bool) -> Vec<Span> {
     let explicit = app
         .first_pending_permission()
         .is_some_and(|pending| pending.explicit);
+    // A one-key answer on its way says what is about to happen, and how to
+    // keep it from happening.
+    if let Some(settling) = crate::input::settling_answer(app) {
+        let answer = PermissionChoice::available(app)
+            .into_iter()
+            .find(|choice| choice.key() == settling.letter)
+            .map(|choice| app.language.text(choice.label_for(explicit)))
+            .unwrap_or_default();
+        let text = app.language.format(
+            "{answer} in a moment · enter now · esc cancels",
+            &[("answer", answer)],
+        );
+        return vec![Span::new(single_line(&text, width), theme.muted).on(surface)];
+    }
     let pairs: &[(&str, &str)] = if !app.permission_focus {
         &[("ctrl+g", "answer"), ("click", "choose")]
     } else if staged {
