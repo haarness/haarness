@@ -1006,7 +1006,9 @@ impl App {
             crate::config::save_scoped_history(scope, &self.thread.id.to_string(), &text)
         {
             self.notice = format!("Prompt sent; history could not be saved: {error}");
+            return;
         }
+        self.keep_picks(&[text]);
     }
 
     pub fn new(

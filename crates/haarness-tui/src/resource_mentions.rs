@@ -4,12 +4,15 @@
 //! A server the chat's rules take away entirely is left out.
 //!
 //! A picked resource is a chip whose draft text is a marker naming it and
-//! the pick (a nonce this TUI keeps), so drafts, history and undo keep it
-//! like any other reference. Only the TUI's own sends turn a marker it knows
-//! into the request's `resources`, which the server reads into the message;
-//! anything else (a prompt piped to `haarness run`, an editor's text over
-//! ACP, a scheduled prompt, a marker this TUI did not make) is sent as the
-//! text it is.
+//! the pick (a nonce), so drafts, history and undo keep it like any other
+//! reference. The TUI keeps its picks next to its history and drafts
+//! (`tui-resource-picks.json`), so a chip recalled after a restart still
+//! works. Only the TUI's own sends turn a marker of a pick it made into the
+//! request's `resources`, which the server reads into the message; a marker
+//! of a pick it does not know goes back to the prompt as plain `@name`, and
+//! anywhere else (a question's answer, a shell command, a queued message's
+//! edit) a marker leaves as `@name`. Text from elsewhere (a prompt piped to
+//! `haarness run`, an editor over ACP, a scheduled prompt) is never read.
 use crate::{api::ApiClient, state::App};
 use anyhow::{Result, bail};
 use haarness_protocol::{RESOURCE_MENTIONS_CAPABILITY, ResourceMention, ThreadId};
@@ -42,8 +45,9 @@ pub(crate) struct Listing {
     pub list: Vec<Resource>,
     /// When the listing in progress (or the last one) was asked for.
     pub asked: Option<Instant>,
-    /// The chat the servers were asked about, and those it cannot reach.
-    pub chat: Option<ThreadId>,
+    /// The chat and agent the servers were asked about, and those it cannot
+    /// reach.
+    pub chat: Option<(ThreadId, String)>,
     pub turned_off: HashSet<String>,
     /// No row of the listing asked at `asked` has come yet: the earlier
     /// rows stay until one does.
@@ -52,6 +56,9 @@ pub(crate) struct Listing {
     pub picked: HashMap<String, ResourceMention>,
     /// A message whose mentions the server is reading, sent off the loop.
     pub sending: bool,
+    /// A draft whose unknown picks became plain `@name` text: what the
+    /// prompt gets back instead of the draft that was not sent.
+    pub returned: Option<String>,
 }
 
 /// What a listing off the event loop reports, tagged with when it was asked.
@@ -60,7 +67,7 @@ pub(crate) enum Update {
     /// Which servers the chat cannot reach.
     Servers {
         asked: Instant,
-        chat: ThreadId,
+        chat: (ThreadId, String),
         turned_off: Vec<String>,
     },
     /// One server's rows.
@@ -117,16 +124,16 @@ fn rows(server: &str, listed: &[serde_json::Value]) -> Vec<Resource> {
         .collect()
 }
 
-/// Lists the servers for `chat`, then each connected one on its own,
-/// sending what comes as it comes.
+/// Lists the servers for `chat` under its agent, then each connected one on
+/// its own, sending what comes as it comes.
 async fn list(
     client: ApiClient,
-    chat: ThreadId,
+    chat: (ThreadId, String),
     asked: Instant,
     only_servers: bool,
     sender: tokio::sync::mpsc::Sender<Update>,
 ) {
-    let Ok(servers) = client.mcp_for(chat).await else {
+    let Ok(servers) = client.mcp_for(chat.0, &chat.1).await else {
         let _ = sender.send(Update::Failed { asked }).await;
         return;
     };
@@ -270,45 +277,102 @@ fn marked(body: &str) -> Option<Marked> {
     serde_json::from_str(inner).ok()
 }
 
-/// A message's text with each marker of a pick in `picked` back to the
-/// `@name` it was picked as, and those mentions. A marker of no pick this
-/// TUI made stays the text it is.
-pub(crate) fn take(
-    text: &str,
-    picked: &HashMap<String, ResourceMention>,
-) -> (String, Vec<ResourceMention>) {
-    let mut kept = String::new();
-    let mut mentions = Vec::new();
+/// Whether a reference's text is a pick's marker, which is a chip in the
+/// prompt but never in the transcript.
+pub(crate) fn is_marker(body: &str) -> bool {
+    marked(body).is_some()
+}
+
+/// How a pick reads as text: `@name`.
+fn at_name(mention: &ResourceMention) -> String {
+    format!("@{}", mention.name.as_deref().unwrap_or(&mention.uri))
+}
+
+/// A message's text taken apart around its markers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Taken {
+    /// What goes to the server: every marker as `@name` where it stood.
+    pub sent: String,
+    /// The picks in `picked` it names.
+    pub mentions: Vec<ResourceMention>,
+    /// The `@name` of each marker of a pick not in `picked`.
+    pub unknown: Vec<String>,
+    /// The draft with those unknown markers as plain `@name` text, the known
+    /// ones still chips.
+    pub back: String,
+}
+
+/// `text` taken apart around its markers, knowing the picks in `picked`.
+pub(crate) fn take(text: &str, picked: &HashMap<String, ResourceMention>) -> Taken {
+    let mut taken = Taken {
+        sent: String::new(),
+        mentions: Vec::new(),
+        unknown: Vec::new(),
+        back: String::new(),
+    };
     for part in crate::prompt_context::parts(text) {
-        match part {
-            crate::prompt_context::Part::Reference { body, .. } => {
-                match marked(body)
-                    .filter(|marked| picked.get(&marked.pick) == Some(&marked.mention))
-                {
-                    Some(marked) => {
-                        kept.push('@');
-                        kept.push_str(
-                            marked
-                                .mention
-                                .name
-                                .as_deref()
-                                .unwrap_or(&marked.mention.uri),
-                        );
-                        if !mentions.contains(&marked.mention) {
-                            mentions.push(marked.mention);
+        let piece = match part {
+            crate::prompt_context::Part::Reference { body, .. } => match marked(body) {
+                Some(marked) => {
+                    let name = at_name(&marked.mention);
+                    taken.sent.push_str(&name);
+                    if picked.get(&marked.pick) == Some(&marked.mention) {
+                        taken.back.push_str(body);
+                        if !taken.mentions.contains(&marked.mention) {
+                            taken.mentions.push(marked.mention);
                         }
+                    } else {
+                        taken.back.push_str(&name);
+                        taken.unknown.push(name);
                     }
-                    None => kept.push_str(body),
+                    continue;
                 }
-            }
+                None => body,
+            },
             crate::prompt_context::Part::Text(text)
-            | crate::prompt_context::Part::Paste { body: text, .. } => kept.push_str(text),
-        }
+            | crate::prompt_context::Part::Paste { body: text, .. } => text,
+        };
+        taken.sent.push_str(piece);
+        taken.back.push_str(piece);
     }
-    if mentions.is_empty() {
-        return (text.to_owned(), mentions);
-    }
-    (kept, mentions)
+    taken
+}
+
+/// Composer text that leaves the TUI without being sent as a prompt (a
+/// question's answer, a shell command, a queued message's edit): every
+/// marker as plain `@name`, never its JSON.
+pub(crate) fn plain(text: &str) -> String {
+    take(text, &HashMap::new()).sent
+}
+
+/// Where the TUI keeps its picks, beside its history and drafts.
+const PICKS: &str = "tui-resource-picks.json";
+
+/// The picks kept for later sessions.
+fn kept_picks() -> HashMap<String, ResourceMention> {
+    crate::config::load_client_json(PICKS).unwrap_or_default()
+}
+
+/// The files that keep prompts across sessions: the history, each server's
+/// drafts and the stash.
+const SAVED: [&str; 3] = [
+    crate::config::HISTORY_FILE,
+    crate::servers::DRAFTS_FILE,
+    crate::preferences::STASH_FILE,
+];
+
+/// Keeps `named` (the picks a prompt just saved names) for later sessions,
+/// and forgets the kept picks no saved prompt names any more. The saved
+/// prompts are read under the picks' own lock, so a pick another TUI just
+/// saved is never forgotten.
+fn keep(named: Vec<(String, ResourceMention)>) {
+    let _ =
+        crate::config::update_client_json(PICKS, |picks: &mut HashMap<String, ResourceMention>| {
+            let saved = SAVED.map(crate::config::client_file_text).concat();
+            let fresh: HashSet<String> = named.iter().map(|(nonce, _)| nonce.clone()).collect();
+            picks.extend(named);
+            picks.retain(|nonce, _| fresh.contains(nonce) || saved.contains(nonce.as_str()));
+        });
 }
 
 impl App {
@@ -326,8 +390,9 @@ impl App {
             .mention_resources
             .asked
             .is_some_and(|asked| asked.elapsed() < TTL);
-        let chat = self.thread.id;
-        if fresh && self.mention_resources.chat == Some(chat) {
+        // The rules of the agent the next prompt runs under decide.
+        let chat = (self.thread.id, self.agent().to_owned());
+        if fresh && self.mention_resources.chat.as_ref() == Some(&chat) {
             return;
         }
         let asked = if fresh {
@@ -338,7 +403,7 @@ impl App {
             self.mention_resources.stale = true;
             now
         };
-        self.mention_resources.chat = Some(chat);
+        self.mention_resources.chat = Some(chat.clone());
         tokio::spawn(list(client.clone(), chat, asked, fresh, sender));
     }
 
@@ -352,7 +417,7 @@ impl App {
                 asked,
                 chat,
                 turned_off,
-            } if listing.asked == Some(asked) && listing.chat == Some(chat) => {
+            } if listing.asked == Some(asked) && listing.chat.as_ref() == Some(&chat) => {
                 listing.turned_off = turned_off.into_iter().collect();
             }
             Update::Rows { asked, rows } if listing.asked == Some(asked) => {
@@ -425,19 +490,55 @@ impl App {
         true
     }
 
-    /// A prompt this TUI sends, with its picks as mentions. A server that
-    /// cannot read them is told nothing and the draft stays, as in Desktop.
-    pub(crate) fn take_mentions(&self, text: &str) -> Result<(String, Vec<ResourceMention>)> {
-        let (sent, mentions) = take(text, &self.mention_resources.picked);
-        if mentions.is_empty() {
-            return Ok((text.to_owned(), mentions));
+    /// A prompt this TUI sends, with its picks as mentions and each as
+    /// `@name` where it stood. `None` when a marker names a pick this TUI
+    /// does not know (made on another computer, or forgotten): nothing is
+    /// sent, the draft comes back with that marker as plain `@name`
+    /// (`returned`), and a notice says to pick it again. A server that
+    /// cannot read mentions sends nothing either, as in Desktop.
+    pub(crate) fn take_mentions(
+        &mut self,
+        text: &str,
+    ) -> Result<Option<(String, Vec<ResourceMention>)>> {
+        let mut taken = take(text, &self.mention_resources.picked);
+        if !taken.unknown.is_empty() {
+            // Picked in an earlier session: kept beside the history.
+            self.mention_resources.picked.extend(kept_picks());
+            taken = take(text, &self.mention_resources.picked);
+        }
+        if !taken.unknown.is_empty() {
+            self.notice = match taken.unknown.as_slice() {
+                [one] => format!("Pick {one} again to include it"),
+                many => format!("Pick {} again to include them", many.join(", ")),
+            };
+            self.mention_resources.returned = Some(taken.back);
+            return Ok(None);
+        }
+        if taken.mentions.is_empty() {
+            return Ok(Some((text.to_owned(), Vec::new())));
         }
         if !offered(self) {
             bail!(
                 "This server cannot read MCP resources. Remove them from the message, or update the server."
             );
         }
-        Ok((sent, mentions))
+        Ok(Some((taken.sent, taken.mentions)))
+    }
+
+    /// Keeps the picks `texts` name for later sessions: called once they are
+    /// saved in the history, a draft or the stash, so a chip recalled or
+    /// restored after a restart is still read.
+    pub(crate) fn keep_picks(&self, texts: &[String]) {
+        let named: Vec<(String, ResourceMention)> = self
+            .mention_resources
+            .picked
+            .iter()
+            .filter(|(nonce, _)| texts.iter().any(|text| text.contains(nonce.as_str())))
+            .map(|(nonce, mention)| (nonce.clone(), mention.clone()))
+            .collect();
+        if !named.is_empty() {
+            keep(named);
+        }
     }
 
     /// Whether a message with mentions is still on its way: the next one
@@ -627,18 +728,28 @@ mod tests {
             crate::prompt_context::display(&marked),
             "Compare @setup with @setup now"
         );
-        let (text, mentions) = take(&marked, &picked);
-        // The pick stays where it was, as `@name`; the marker whose nonce
-        // names another resource is not a pick, and stays text.
-        assert!(text.starts_with("Compare @setup with <details>"), "{text}");
-        assert!(text.ends_with("</details> now"), "{text}");
-        assert_eq!(mentions, std::slice::from_ref(&setup));
+        let taken = take(&marked, &picked);
+        // Each reads as `@name` where it stood. The marker whose nonce names
+        // another resource is not a pick: it is unknown, and goes back to the
+        // prompt as plain text while the pick stays a chip.
+        assert_eq!(taken.sent, "Compare @setup with @setup now");
+        assert_eq!(taken.mentions, std::slice::from_ref(&setup));
+        assert_eq!(taken.unknown, ["@setup"]);
+        assert_eq!(
+            taken.back,
+            format!("Compare {} with @setup now", marker(&setup, "a"))
+        );
         // Text no pick of this TUI made (piped to `run`, an editor's over
         // ACP, a schedule's) is no mention.
-        assert_eq!(take(&marked, &HashMap::new()), (marked.clone(), Vec::new()));
+        assert!(take(&marked, &HashMap::new()).mentions.is_empty());
+        // Whatever leaves without being sent as a prompt carries `@name`.
+        assert_eq!(plain(&marked), "Compare @setup with @setup now");
         // What the server read for one is text, sent again as it is.
         let read = "Look\n\n<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n```\n# Setup\n```\n\n</details>";
-        assert_eq!(take(read, &picked), (read.to_owned(), Vec::new()));
+        let again = take(read, &picked);
+        assert_eq!((again.sent.as_str(), again.mentions.len()), (read, 0));
+        assert_eq!(plain(read), read);
+        assert!(!is_marker(read) && is_marker(&marker(&setup, "a")));
         assert_eq!(crate::prompt_context::display(read), "Look\n\n@setup");
         let unread = "<details>\n<summary>MCP resource: wiki:docs://&lt;x&gt; (not read)</summary>\n\n```\na rule keeps this resource from the model\n```\n\n</details>";
         assert_eq!(
@@ -649,6 +760,67 @@ mod tests {
             crate::prompt_context::unread(unread),
             Some("a rule keeps this resource from the model")
         );
+    }
+
+    #[test]
+    fn a_pick_recalled_after_a_restart_is_still_read_and_an_unknown_one_comes_back_as_text() {
+        let setup = mention("docs", "docs://setup", "setup");
+        let mut first = app();
+        first.server_info = Some(info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]));
+        first.mention_resources.list = vec![resource("docs", "docs://setup", "setup")];
+        first.composer.set_text("Explain @se".into());
+        assert!(first.attach_resource(&suggestions(&first, "se")[0]));
+        let draft = first.composer.take();
+        // Sent, the prompt is in the history the next session recalls.
+        let scope = format!("restart-{}", uuid::Uuid::now_v7());
+        crate::config::save_scoped_history(&scope, "chat", &draft).unwrap();
+        first.keep_picks(std::slice::from_ref(&draft));
+        // The next session knows the pick from the file kept beside the history.
+        let mut next = app();
+        next.server_info = Some(info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]));
+        let recalled = crate::config::load_scoped_history(&scope, "chat")
+            .pop()
+            .unwrap();
+        assert_eq!(recalled, draft);
+        let (text, mentions) = next.take_mentions(&recalled).unwrap().unwrap();
+        assert_eq!(
+            (text.as_str(), mentions),
+            ("Explain @setup ", vec![setup.clone()])
+        );
+        // A pick neither session made (another computer's, a forgotten one)
+        // is not sent: the draft comes back with it as plain text, once.
+        let forged = format!("Explain {}", marker(&setup, "not-a-pick"));
+        assert!(next.take_mentions(&forged).unwrap().is_none());
+        assert_eq!(next.notice, "Pick @setup again to include it");
+        let back = next.mention_resources.returned.take().unwrap();
+        assert_eq!(back, "Explain @setup");
+        // Sent again, it is the plain text it now is.
+        assert_eq!(
+            next.take_mentions(&back).unwrap(),
+            Some(("Explain @setup".to_owned(), Vec::new()))
+        );
+        // A later save forgets the kept picks no saved prompt names.
+        let stale = "f".repeat(32);
+        let _ = crate::config::update_client_json(
+            PICKS,
+            |picks: &mut HashMap<String, ResourceMention>| {
+                picks.insert(stale.clone(), setup.clone());
+            },
+        );
+        next.mention_resources.list = vec![resource("docs", "docs://setup", "setup")];
+        next.composer.set_text("Again @se".into());
+        assert!(next.attach_resource(&suggestions(&next, "se")[0]));
+        let again = next.composer.take();
+        crate::config::save_scoped_history(&scope, "chat", &again).unwrap();
+        next.keep_picks(std::slice::from_ref(&again));
+        let kept = kept_picks();
+        assert!(!kept.contains_key(&stale));
+        for prompt in [&draft, &again] {
+            assert!(
+                kept.keys().any(|nonce| prompt.contains(nonce.as_str())),
+                "{prompt}"
+            );
+        }
     }
 
     #[test]
@@ -719,7 +891,7 @@ mod tests {
         app.server_info = Some(info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]));
         let asked = Instant::now();
         app.mention_resources.asked = Some(asked);
-        app.mention_resources.chat = Some(app.thread.id);
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
         app.composer.set_text("Compare @se".into());
         app.mention_suggestions = vec!["src/setup.rs".into()];
         app.selection = 1;
@@ -751,19 +923,14 @@ mod tests {
         assert_eq!(app.composer.text(), "Compare [@setup] ");
         assert!(app.notice.starts_with("Attached @setup"), "{}", app.notice);
         let draft = app.composer.take();
-        let (text, mentions) = app.take_mentions(&draft).unwrap();
+        let (text, mentions) = app.take_mentions(&draft).unwrap().unwrap();
         assert_eq!(text, "Compare @setup ");
         assert_eq!(mentions, [mention("wiki", "docs://setup", "setup")]);
         // History brings the chip back, naming the same pick.
         app.composer.set_text(draft.clone());
         assert_eq!(app.composer.text(), "Compare [@setup] ");
-        assert_eq!(
-            app.take_mentions(&app.composer.expanded_text())
-                .unwrap()
-                .1
-                .len(),
-            1
-        );
+        let recalled = app.composer.expanded_text();
+        assert_eq!(app.take_mentions(&recalled).unwrap().unwrap().1.len(), 1);
         // A server that cannot read them keeps the draft, as Desktop does.
         app.server_info = Some(info(Vec::new()));
         assert!(app.take_mentions(&draft).is_err());
@@ -886,5 +1053,54 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    /// A question's answer is the person's text, not a prompt: a pick in
+    /// it leaves as its `@name`, never as the marker's JSON.
+    #[tokio::test]
+    async fn a_question_answered_with_a_pick_in_the_prompt_answers_with_its_name() {
+        let mut app = app();
+        let thread = app.thread.id;
+        app.reduce(
+            haarness_protocol::EventEnvelope {
+                schema_version: haarness_protocol::SCHEMA_VERSION.into(),
+                server_instance_id: uuid::Uuid::now_v7(),
+                event_id: 1,
+                event_type: "question.requested".into(),
+                thread_id: Some(thread),
+                root_thread_id: Some(thread),
+                turn_id: None,
+                item_id: None,
+                payload: serde_json::json!({
+                    "questionId": "question-pick",
+                    "prompt": "Which page?",
+                    "choices": ["first"],
+                    "custom": true,
+                }),
+                created_at: chrono::Utc::now(),
+            },
+            &ApiClient::new("http://127.0.0.1:9", "token").unwrap(),
+        )
+        .await
+        .unwrap();
+        let setup = mention("docs", "docs://setup", "setup");
+        app.mention_resources
+            .picked
+            .insert("a".into(), setup.clone());
+        app.composer
+            .set_text(format!("Use {} please", marker(&setup, "a")));
+        let (url, server) = capture(1).await;
+        crate::input::handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &ApiClient::new(&url, "token").unwrap(),
+        )
+        .await
+        .unwrap();
+        let bodies = server.await.unwrap();
+        assert_eq!(bodies[0]["answer"], "Use @setup please");
     }
 }

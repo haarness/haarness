@@ -28,7 +28,9 @@ impl App {
             return Ok(false);
         }
         let draft = text.clone();
-        let (text, resources) = self.take_mentions(&text)?;
+        let Some((text, resources)) = self.take_mentions(&text)? else {
+            return Ok(false);
+        };
         let request = QueueInputRequest {
             preview: Some(false),
             reasoning_effort: self.reasoning_effort.clone(),
@@ -270,7 +272,8 @@ impl App {
         let Some(id) = self.queue_edit.as_ref().map(|edit| edit.id) else {
             return Ok(());
         };
-        let text = self.composer.expanded_text();
+        // The edit saves text, so a pick in it is its `@name`.
+        let text = crate::resource_mentions::plain(&self.composer.expanded_text());
         if text.trim_start().starts_with('/') {
             self.notice = "Commands cannot be queued. Use a normal message or Steer.".into();
             return Ok(());

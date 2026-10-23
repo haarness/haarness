@@ -4081,7 +4081,9 @@ impl App {
         }
         let attachments = self.attachments.clone();
         let draft = text.clone();
-        let (text, resources) = self.take_mentions(&text)?;
+        let Some((text, resources)) = self.take_mentions(&text)? else {
+            return Ok(false);
+        };
         let request = StartTurnRequest {
             request_id: RequestId::new(),
             text,
@@ -4272,7 +4274,9 @@ impl App {
         }
         let attachments = self.attachments.clone();
         let draft = text.clone();
-        let (text, resources) = self.take_mentions(&text)?;
+        let Some((text, resources)) = self.take_mentions(&text)? else {
+            return Ok(false);
+        };
         let request = haarness_protocol::QueueInputRequest {
             preview: Some(false),
             reasoning_effort: self.reasoning_effort.clone(),

@@ -592,7 +592,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     .filter_map(|index| question.choices.get(*index).cloned())
                     .collect::<Vec<_>>();
                 if question.custom && !app.composer.text().trim().is_empty() {
-                    let custom = app.composer.take();
+                    // A pick in an answer is its `@name`, never its marker.
+                    let custom = crate::resource_mentions::plain(&app.composer.take());
                     app.save_prompt_history();
                     answers.extend(
                         custom
@@ -609,7 +610,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             }
             KeyCode::Enter if plain => {
                 let answer = if custom_allowed && !app.composer.text().trim().is_empty() {
-                    let answer = app.composer.take();
+                    let answer = crate::resource_mentions::plain(&app.composer.take());
                     app.save_prompt_history();
                     Some(answer)
                 } else {
@@ -957,7 +958,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             {
                 app.notice = "Commands cannot be queued. Use a normal message or Steer.".into();
             } else if app.shell_mode {
-                let command = app.composer.take();
+                let command = crate::resource_mentions::plain(&app.composer.take());
                 app.save_prompt_history();
                 if !command.trim().is_empty() {
                     app.notice = "Shell command started…".into();
@@ -1019,7 +1020,11 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                         app.undo_draft = None;
                         app.save_prompt_history();
                     }
-                    Ok(false) => app.composer.set_text(text),
+                    // A draft whose unknown picks became plain text comes
+                    // back that way.
+                    Ok(false) => app
+                        .composer
+                        .set_text(app.mention_resources.returned.take().unwrap_or(text)),
                     Err(error) => {
                         app.composer.set_text(text);
                         return Err(error);
