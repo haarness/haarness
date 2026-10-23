@@ -109,6 +109,23 @@ export function markAt(marks: readonly Mark[], y: number) {
 }
 
 /**
+ * A line of Markdown as it reads: without its heading, quote or list mark,
+ * emphasis, strike-through, code ticks or link targets (a link keeps its
+ * words). A word with underscores inside it (`snake_case`) stays as it is.
+ */
+export function plainLine(line: string) {
+  const plain = line
+    .replace(/^(?:#{1,6}\s+|(?:>\s*)+|(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)/, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/(`+)(.+?)\1/g, "$2")
+    .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, "$2")
+    .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1")
+    .replace(/(^|[^\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])/g, "$1$2")
+    .replace(/(^|[^\w])_(?=\S)([^_]+?)(?<=\S)_(?!\w)/g, "$1$2")
+    .trim();
+  return plain || line;
+}
+/**
  * The prompt being read: the one whose row starts at or above the reading
  * line, or the newest one at the end of a conversation or when nothing
  * scrolls. `undefined` without marks.
@@ -120,16 +137,17 @@ export function readingMark(marks: readonly Mark[], scrollTop: number, maxScroll
 }
 
 /**
- * A prompt's title: its first written line. Context attached after the text
- * (file snapshots) is not part of it; attachment-only prompts name their
- * files, falling back to `fallback`.
+ * A prompt's title: its first written line, as it reads rather than as it
+ * was marked up. Context attached after the text (file snapshots) is not
+ * part of it; attachment-only prompts name their files, falling back to
+ * `fallback`.
  */
 export function promptTitle(text: string, attachments: readonly string[], name: (value: string) => string, fallback: string) {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
     if (/^<(details|summary)\b/i.test(line)) break;
-    return line;
+    return plainLine(line);
   }
   return attachments.length ? attachments.map(name).join(", ") : fallback;
 }

@@ -241,6 +241,136 @@ test("a secret-named file, or a command that runs no script, shows no toggle", a
   }
 });
 
+test("a card never takes the keyboard from the message box: typing as it comes answers nothing", async () => {
+  const box = page.locator("[data-composer-input]");
+  await box.fill(" !tool bash " + JSON.stringify({ command: "printf keyboard > keyboard.txt" }));
+  await box.press("Enter");
+  // Typing straight on, as the card comes: spaces, Enter and all.
+  await page.keyboard.type("also check tests");
+  await expect(card()).toBeVisible();
+  await page.keyboard.type(" and then the docs");
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue("also check tests and then the docs");
+  await page.keyboard.press(" ");
+  await expect(box).toHaveValue("also check tests and then the docs ");
+  expect((await api("listPermissions")).length).toBe(1);
+  // Deny, Always allow and Allow once share one line.
+  const tops = await Promise.all(
+    ["Deny", "Always allow", "Allow once"].map(async (name) =>
+      Math.round((await card().getByRole("button", { name, exact: true }).boundingBox())!.y),
+    ),
+  );
+  expect(new Set(tops).size).toBe(1);
+  // Enter sends the sentence as the person's own message; the card waits.
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("");
+  await page.waitForTimeout(300);
+  expect((await api("listPermissions")).length).toBe(1);
+  await expect(card()).toBeVisible();
+  // Its answers are a Shift+Tab away; one chosen there answers it, and the
+  // keyboard goes back to the message box.
+  await page.keyboard.press("Shift+Tab");
+  await expect(card().getByRole("button", { name: "Allow once", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await idle();
+  await expect(card()).toHaveCount(0);
+  await expect(box).toBeFocused();
+  expect(await readFile(join(project, "keyboard.txt"), "utf8")).toBe("keyboard");
+});
+
+test("a card that takes the keyboard because nothing had it sends what is typed to the message box", async () => {
+  const box = page.locator("[data-composer-input]");
+  await box.fill(" !tool bash " + JSON.stringify({ command: "printf idle > idle.txt" }));
+  await page.locator(".send-button").click();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect(card()).toBeVisible();
+  await expect(card()).toBeFocused();
+  // The card binds no key: typing there goes to the message box, and
+  // neither Space nor Enter answers it.
+  await page.keyboard.type("hi there");
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue("hi there");
+  expect((await api("listPermissions")).length).toBe(1);
+  // The Always slot is as wide as the wider of its button and its menu, so
+  // the answers keep their places whichever it shows.
+  const widths = await card().locator(".prompt-always-slot").evaluate((slot) => [
+    slot.getBoundingClientRect().width,
+    ...[...slot.children].map((child) => child.getBoundingClientRect().width),
+  ]);
+  expect(widths).toHaveLength(3);
+  expect(Math.abs(widths[0] - Math.max(widths[1], widths[2]))).toBeLessThan(1);
+  await card().getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  await box.fill("");
+});
+
+test("a step opened while its turn waits on a card stays where it was clicked", async () => {
+  const box = page.locator("[data-composer-input]");
+  const transcript = page.locator(".transcript");
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await box.fill("::long 40");
+  await box.press("Enter");
+  await expect(transcript).toContainText("line 40 marker-40");
+  await idle();
+  await box.fill(" !multi " + JSON.stringify([
+    { name: "bash", arguments: { command: "echo first-step-output; seq 1 30" } },
+    { name: "bash", arguments: { command: "printf second > second-step.txt" } },
+  ]));
+  await box.press("Enter");
+  await expect(card()).toBeVisible();
+  await card().getByRole("button", { name: "Allow once", exact: true }).click();
+  await expect(card().locator(".approval-command")).toHaveText("printf second > second-step.txt");
+  const settle = () => page.evaluate(() => new Promise((done) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(done)), 300)));
+  await settle();
+  /** Where a summary sits for a second after its click: it may come up
+   * once, by at most 80px, for its first lines to show at the bottom of
+   * the view, and then it holds. */
+  const holds = async (summary: Locator, before: number) => {
+    const places: number[] = [];
+    for (let sample = 0; sample < 8; sample++) {
+      await page.waitForTimeout(120);
+      places.push((await summary.boundingBox())!.y);
+    }
+    for (const place of places) {
+      expect(before - place).toBeLessThanOrEqual(81);
+      expect(place - before).toBeLessThan(2);
+      expect(Math.abs(place - places[0])).toBeLessThan(2);
+    }
+  };
+  // A finished step of the waiting turn: opening it moves nothing, and as its
+  // output pushes the end of the chat out of view, following pauses.
+  const finished = page.locator(".tool-call").filter({ hasText: "first-step-output" }).last();
+  const first = finished.locator(":scope > summary");
+  if ((await finished.getAttribute("open")) !== null) {
+    await first.click();
+    await settle();
+  }
+  const at = (await first.boundingBox())!.y;
+  await first.click();
+  await expect(finished.locator(".tool-output")).toContainText("first-step-output");
+  await holds(first, at);
+  await expect(jump).toBeVisible();
+  // Closing it again takes following back up.
+  await first.click();
+  await expect(jump).toHaveCount(0);
+  await settle();
+  // The running step at the end: opening it moves nothing either; what it
+  // writes once it runs is followed.
+  const running = page.locator(".tool-call").filter({ hasText: "second-step.txt" }).last();
+  const second = running.locator(":scope > summary");
+  const rest = (await second.boundingBox())!.y;
+  await second.click();
+  await expect(running.locator(".tool-empty")).toHaveText("Waiting for output…");
+  await holds(second, rest);
+  await card().getByRole("button", { name: "Allow once", exact: true }).click();
+  await idle();
+  await expect(transcript).toContainText("All tools finished");
+  await expect(jump).toHaveCount(0);
+  await expect
+    .poll(() => transcript.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
+    .toBeLessThan(5);
+});
+
 test("under the default rules the outside folder's card offers the script that runs there", async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });

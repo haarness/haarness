@@ -141,21 +141,49 @@ function humanTarget(record: Record<string, unknown> | undefined) {
   }
   return "";
 }
-const toolKind = (name: string) =>
-  /bash|shell|exec|command/.test(name)
-    ? "run"
-    : /write|edit|patch|apply/.test(name)
-      ? "edit"
-      : /read|open|cat|view/.test(name)
-        ? "read"
-        : /search|grep|find|glob|list/.test(name)
-          ? "search"
-          : /fetch|web|http|browse/.test(name)
-            ? "web"
-            : /task|agent|spawn/.test(name)
-              ? "agent"
-              : "other";
-const kindShape: Record<string, { icon: IconName } & Verbs> = {
+type ToolKind = "run" | "edit" | "read" | "search" | "web" | "agent" | "other";
+/** The family of each of Haarness's own family tools, whose names are not
+    always words of it (`multiedit`, `webfetch`). */
+const ownFamily: Record<string, ToolKind> = {
+  bash: "run",
+  read: "read",
+  write: "edit",
+  edit: "edit",
+  multiedit: "edit",
+  apply_patch: "edit",
+  list: "search",
+  glob: "search",
+  grep: "search",
+  webfetch: "web",
+  task: "agent",
+};
+/** The words that put another tool in a family. A whole word of its name
+    has to be one: `search_issues` searches, while `frobnicate` (which holds
+    "cat") or `catalog_sync` is no read. */
+const familyWords: [ToolKind, string[]][] = [
+  ["run", ["bash", "shell", "exec", "execute", "command", "cmd"]],
+  ["edit", ["write", "edit", "editor", "patch", "apply", "replace"]],
+  ["read", ["read", "open", "cat", "view"]],
+  ["search", ["search", "grep", "find", "glob", "list"]],
+  ["web", ["fetch", "web", "http", "browse"]],
+  ["agent", ["task", "agent", "spawn"]],
+];
+/** A tool name's words: split at `_`, `-`, `.` (an MCP tool's `__` too)
+    and where camelCase starts a word. */
+export const toolWords = (name: string) =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+export function toolKind(name: string): ToolKind {
+  if (Object.hasOwn(ownFamily, name)) return ownFamily[name];
+  // An MCP tool (`mcp__<server>__<tool>`) is read by its own words, not its
+  // server's: `mcp__web-search__create_note` creates a note.
+  const words = toolWords(/^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(name)?.[1] ?? name);
+  return familyWords.find(([, family]) => words.some((word) => family.includes(word)))?.[0] ?? "other";
+}
+const kindShape: Record<ToolKind, { icon: IconName } & Verbs> = {
   run: { icon: "terminal", ...verbs("Ran", "Running", "Tried to run") },
   edit: { icon: "edit", ...verbs("Edited", "Editing", "Tried to edit") },
   read: { icon: "file-text", ...verbs("Read", "Reading", "Tried to read") },
@@ -389,6 +417,28 @@ export interface ToolResult {
   output: string;
   is_error: boolean;
   metadata?: unknown;
+}
+/**
+ * A result as a row shows it. An error loses the engine's category in front
+ * ("tool error: ", which the row's state already says) and the system's
+ * error number ("(os error 2)"); a command's output loses the `exit: N` line
+ * the server puts first, which the row says as a chip when it is not 0.
+ */
+export function resultText(name: string, result: ToolResult) {
+  let text = result.output;
+  if (result.is_error)
+    text = text
+      .replace(/^(?:tool error|invalid request|provider error|storage error|conflict): /, "")
+      .replace(/ ?\(os error \d+\)/g, "");
+  // Only when the status is known: then the row says it, as a chip or not at all.
+  else if (toolName(name) === "bash" && typeof object(result.metadata)?.exit === "number")
+    text = text.replace(/^exit: -?\d+\n/, "");
+  return toolOutput(name, text);
+}
+/** A command's exit status, when it is not 0. */
+export function exitStatus(name: string, result?: ToolResult) {
+  const exit = object(result?.metadata)?.exit;
+  return toolName(name) === "bash" && typeof exit === "number" && exit !== 0 ? exit : undefined;
 }
 /**
  * The user's own Chrome, when a browser step ran there. The server reports
@@ -724,11 +774,7 @@ export function toolChanges(
   args: unknown,
   result?: ToolResult,
 ): Change[] {
-  if (
-    !args ||
-    typeof args !== "object" ||
-    !/write|edit|patch|apply/.test(name)
-  )
+  if (!args || typeof args !== "object" || toolKind(toolName(name)) !== "edit")
     return [];
   // A targeted edit's own old/new snippet is the clearest preview. A patch
   // only says what to do, so the diff its tool reports is the better one.

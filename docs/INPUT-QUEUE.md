@@ -13,7 +13,7 @@ Queued prompts remain outside the conversation transcript until delivery. They r
 
 ## Stop, failures and resuming
 
-- **Stop** cancels the current work and dismisses its approval prompts in connected clients. If you sent steering the agent has not answered yet, the agent answers it next instead of dropping it.
+- **Stop** cancels the current work and dismisses its approval prompts in connected clients. In Desktop, Esc in the empty message box and **File → Stop response** (Cmd+. on macOS, Ctrl+. elsewhere) do the same. If you sent steering the agent has not answered yet, the agent answers it next instead of dropping it.
 - After Stop the queue **pauses**, even once that steering has been answered. It also stays idle after a daemon restart.
 - If a turn **fails**, prompts queued behind it still run. If a queued prompt's own turn fails, the rest of the queue pauses.
 - Resume a paused queue in either of two ways:
@@ -59,7 +59,7 @@ Queued messages appear in a tray joined to the top of the composer. It is visibl
 | Queue paused — send when ready | Nothing runs until you resume the queue. |
 | Editing — sending saves it in place | You are editing a queued message in the composer. |
 
-Each message has icon buttons: **Edit**, **Send now** (**Steer now** while work runs, which hands it to the current work at its next step), and **Remove**. Hovering a row also reveals **Move up** and **Move down**.
+Each message has icon buttons: **Edit**, **Send now** (**Steer now** while work runs, which hands it to the current work at its next step, with an arrow of its own), and **Remove**, after which the keyboard moves to the next message's **Remove**, or to the message box. Hovering a row also reveals **Move up** and **Move down**.
 
 **Edit** loads the message's text and attachments into the composer and sets your draft aside. The send button becomes **Save queued message**. Sending saves the message in place: it keeps its position, and a paused queue stays paused. **Esc** or the ✕ in the tray header cancels the edit and restores your draft; it never stops running work. If another client changes, sends or removes that message first, the save is refused and your edit stays in the composer. The tray refreshes after reconnecting and follows the selected server and conversation.
 

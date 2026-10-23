@@ -2191,11 +2191,13 @@ test("file drops attach across the chat area and preserve text drop behavior", a
     return event.defaultPrevented;
   });
   expect(textDropPrevented).toBe(false);
+  // A file Desktop cannot attach or point to (made by the page, so it has
+  // no path) gets a quiet notice, not an error.
   const invalid = await fileTransfer("unsupported.txt", "text/plain");
   await chat.dispatchEvent("drop", { dataTransfer: invalid });
-  await expect(page.getByText("Attach an image, PDF, audio, or video file.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Only images, PDFs, audio and video can be attached.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
   await expect(page.locator(".composer-attachments > span")).toHaveCount(3);
-  await page.getByRole("button", { name: "Dismiss error", exact: true }).click();
   await send("Dropped files are sent once");
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(page.locator('.transcript img[alt="Attached image"]')).toHaveCount(4);
@@ -2203,10 +2205,33 @@ test("file drops attach across the chat area and preserve text drop behavior", a
   await invalid.dispose();
 });
 
-test("a dropped file that is not media goes into the message as its path at the caret, and undo takes it out", async () => {
+test("a dropped text file of the project is mentioned, any other goes into the message as its path at the caret, and undo takes it out", async () => {
   await newSession();
   const chat = page.getByRole("region", { name: "Chat", exact: true });
   const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const chips = page.getByLabel("Attached context", { exact: true }).locator(".prompt-context-item");
+  const drop = async (path: string, name: string) => {
+    const transfer = await page.evaluateHandle(({ path, name }) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["# spec"], name, { type: "text/markdown" }));
+      // A file the page makes has no path of its own; a real drop's file URL
+      // names it, as Electron's own path would.
+      transfer.setData("text/uri-list", "file://" + encodeURI(path));
+      return transfer;
+    }, { path, name });
+    for (const type of ["dragenter", "dragover", "drop"])
+      await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+    await transfer.dispose();
+  };
+  // A text file of the project becomes a mention, as choosing it after @ would.
+  await mkdir(join(workspace, "docs"), { recursive: true });
+  await writeFile(join(workspace, "docs", "dropped notes.md"), "# Dropped notes\n");
+  await drop(join(workspace, "docs", "dropped notes.md"), "dropped notes.md");
+  await expect(chips.filter({ hasText: "docs/dropped notes.md" })).toHaveCount(1);
+  await expect(input).toHaveValue("");
+  await chips.filter({ hasText: "docs/dropped notes.md" }).getByRole("button", { name: /Remove/ }).click();
+  await expect(chips).toHaveCount(0);
+
   const before = "Hello\n\nsee this path: ";
   const after = "\n\nAlso!";
   await input.fill(before + after);
@@ -2215,25 +2240,17 @@ test("a dropped file that is not media goes into the message as its path at the 
     element.setSelectionRange(at, at);
     element.blur();
   }, before.length);
-  const spec = join(workspace, "docs", "drop spec.md");
-  const transfer = await page.evaluateHandle((path) => {
-    const transfer = new DataTransfer();
-    transfer.items.add(new File(["# spec"], "drop spec.md", { type: "text/markdown" }));
-    // A file the page makes has no path of its own; a real drop's file URL
-    // names it, as Electron's own path would.
-    transfer.setData("text/uri-list", "file://" + encodeURI(path));
-    return transfer;
-  }, spec);
-  for (const type of ["dragenter", "dragover", "drop"])
-    await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+  // One the project cannot read (here, not there at all) is named by its path.
+  await drop(join(workspace, "docs", "drop spec.md"), "drop spec.md");
   await expect(input).toHaveValue(before + '"docs/drop spec.md"' + after);
   await expect(input).toBeFocused();
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(chat).not.toHaveClass(/file-drop-active/);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(input).toHaveValue(before + after);
-  await transfer.dispose();
   await input.fill("");
+  // Later tests review the project's changes; this one leaves none.
+  await rm(join(workspace, "docs"), { recursive: true, force: true });
   expect(errors).toEqual([]);
 });
 
@@ -4014,11 +4031,11 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   const command =
     '!tool bash {"command":"printf auto-once-proof > auto-once.txt"}';
   await start(parent.id, command);
-  await expect(
-    page.getByRole("button", { name: "Allow once + Auto", exact: true }),
-  ).toBeVisible();
+  // Allow once + Auto waits in the Always menu, so the card's answers fit
+  // one line: Deny, Always allow, Allow once.
+  await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("button", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
     .click();
   await finished();
   expect(await readFile(join(workspace, "auto-once.txt"), "utf8")).toBe(
@@ -4322,18 +4339,23 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     });
   await still();
   const rest = await bottom();
-  // Its answers keep their places as Allow once + Auto goes, and a focus on
-  // that button passes to Allow once; the card is the same element, updated.
+  // Its answers keep their places as Allow once + Auto leaves the Always
+  // menu, and the keyboard stays on Allow once; the card is the same
+  // element, updated.
   const deny = card.getByRole("button", { name: "Deny", exact: true });
+  const always = card.getByRole("button", { name: "Always allow", exact: true });
   const once = card.getByRole("button", { name: "Allow once", exact: true });
   const across = async () =>
-    Promise.all([deny, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
+    Promise.all([deny, always, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
   const places = await across();
   await card.screenshot({ path: test.info().outputPath("auto-review-review-card-light.png") });
   await card.evaluate((node) => {
     node.dataset.probe = "kept";
   });
-  await card.getByRole("button", { name: "Allow once + Auto", exact: true }).focus();
+  await always.click();
+  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await once.focus();
   await client.setApprovalMode(thread.id, { mode: "auto" });
   await expect(auto).toBeVisible();
   await expect(card.locator(".approval-review")).toHaveText("Auto review is deciding…");
@@ -4341,6 +4363,9 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
   expect(Math.abs((await bottom()) - rest)).toBeLessThan(2);
   expect(await across()).toEqual(places);
   await expect(once).toBeFocused();
+  await always.click();
+  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await expect(card).toHaveAttribute("data-probe", "kept");
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
@@ -4412,7 +4437,7 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
   // Requests are decided one at a time: the dock shows the oldest and counts
   // the rest, so both children's prompts never stack.
   await expect(
-    page.getByRole("button", { name: "Allow once + Auto", exact: true }),
+    page.getByRole("button", { name: "Always allow", exact: true }),
   ).toHaveCount(1);
   await expect(page.locator(".prompt-count")).toHaveText("1 of 2");
   await page
@@ -4421,8 +4446,9 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
       exact: true,
     })
     .click();
+  await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("button", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
     .click();
   await expect
     .poll(() =>
@@ -4745,7 +4771,7 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   expect(errors).toEqual([]);
 });
 
-test("an open-ended question opens in its answer field unless a draft is being typed, and Enter replies", async () => {
+test("an open-ended question leaves the keyboard in the message box, its answer field a Shift+Tab away, and Enter replies", async () => {
   const thread = await client.createThread({
     title: "Open-ended question focus",
     provider: "echo",
@@ -4770,10 +4796,14 @@ test("an open-ended question opens in its answer field unless a draft is being t
   };
   await expect(composer).toBeEnabled();
 
-  // The message box stays in view during a question, but an empty one is idle.
+  // The message box stays in view during a question and keeps the keyboard,
+  // even empty: what is typed there is the next message, not an answer. The
+  // answer field is the card's last stop before it.
   await composer.focus();
   await ask({ prompt: "What should the release be called?" });
   await expect(question).toContainText("What should the release be called?");
+  await expect(composer).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   await expect(answer).toBeFocused();
   await page.screenshot({ path: test.info().outputPath("question-open-ended-focus.png") });
   await page.keyboard.type("Aurora");
@@ -9644,6 +9674,8 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   });
   const activity = page.locator(".message.step > .tool-call").last();
   await expect(activity.locator(":scope > summary")).toContainText("printf");
+  // The approval card docks first and moves the step up; then it is opened.
+  await expect(page.getByRole("alert", { name: "Permission request" })).toBeVisible();
   await activity.locator(":scope > summary").click();
   await expect(activity.locator(".tool-empty")).toHaveText(
     "Waiting for output…",
@@ -9700,9 +9732,16 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   await expect(activity.locator(":scope > summary")).toContainText("Edited");
   await activity.locator(":scope > summary").click();
   await expect(activity.locator(".change-preview")).toBeVisible();
-  await expect(activity.locator(".change-lines .add")).toHaveText("false");
-  await expect(activity.locator(".change-lines .remove")).toHaveText("true");
+  await expect(activity.locator(".change-lines .add code")).toHaveText("false");
+  await expect(activity.locator(".change-lines .remove code")).toHaveText("true");
+  await expect(activity.locator(".change-lines .add .diff-sign")).toHaveText("+");
+  await expect(activity.locator(".change-lines .remove .diff-sign")).toHaveText("−");
   await expect(activity).not.toContainText('"old":');
+  // Opening a finished step whose body pushed the end out of view paused
+  // following; closing it takes following back up for the next turn.
+  await activity.locator(":scope > summary").click();
+  await expect(activity.locator(".change-preview")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
   const waiting = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
     text:
@@ -9732,8 +9771,26 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     .toBeTruthy();
   const live = page.locator(".tool-batch").last();
   await expect(live.locator(":scope > summary")).toContainText("Read files");
+  // The question docks first and the view follows it down; then the batch
+  // is opened, so nothing moves between aiming and clicking.
+  await expect(page.locator(".prompt-dock.question")).toBeVisible();
+  await expect
+    .poll(() => page.locator(".transcript").evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
+    .toBeLessThan(5);
   await live.locator(":scope > summary").click();
+  // Its steps draw a moment after it opens, and the batch then comes up
+  // for them to show: aim at the first one once it has stopped there.
   const reading = live.locator(".tool-child").first();
+  await expect(reading.locator("summary")).toBeInViewport({ ratio: 1 });
+  let aimed = "";
+  await expect
+    .poll(async () => {
+      const box = JSON.stringify(await reading.locator("summary").boundingBox());
+      const still = box === aimed;
+      aimed = box;
+      return still;
+    })
+    .toBe(true);
   await reading.locator("summary").click();
   await expect(reading.locator(".tool-empty")).toHaveText(
     "Waiting for output…",
@@ -9752,6 +9809,11 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     (element) => getComputedStyle(element).borderLeftColor,
   );
   expect(failedBatchRail).toBe(neutralRail);
+  // Steps opened above paused following, as scrolling up would; the next
+  // turn is read from the latest again.
+  const jumpToLatest = page.getByRole("button", { name: "Jump to latest", exact: true });
+  if (await jumpToLatest.isVisible()) await jumpToLatest.click();
+  await expect(jumpToLatest).toHaveCount(0);
   const missing = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
     text: '!tool glob {"pattern":"**/*.{yml,yaml,json,toml,lock}","path":".missing-tools-folder"}',
@@ -11531,7 +11593,8 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   await page.screenshot({ path: test.info().outputPath("conversation-find-light.png") });
   await find.press("Escape");
   await expect(find).toHaveCount(0);
-  await expect(page.locator(".transcript")).toBeFocused();
+  // The keyboard goes back to where Find was opened from, the message box.
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Chat actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Find in chat", exact: true }).click();
   await expect(find).toBeFocused();

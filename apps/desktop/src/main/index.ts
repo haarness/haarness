@@ -2002,6 +2002,12 @@ function menu() {
             click: () => action("new"),
           },
           {
+            // The window's chat stops what it is doing, as its Stop button does.
+            label: t("Stop response"),
+            accelerator: "CmdOrCtrl+.",
+            click: (_item, win) => action("stop-response", win),
+          },
+          {
             label: t("Open project") + "…",
             accelerator: "CmdOrCtrl+O",
             click: () => action("open"),
