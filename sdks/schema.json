@@ -3843,11 +3843,11 @@
         "description": "The script file a shell command runs, as the server read it when the\ncommand asked for permission.",
         "properties": {
           "content": {
-            "description": "Its text: at most its first 30,000 bytes, with line breaks as `\\n`\nand other control characters (tabs aside) and bidirectional controls\nshown as `\ufffd`.",
+            "description": "Its text: at most its first 30,000 bytes, with line breaks as `\\n`\nand other control characters (tabs aside), bidirectional controls\nand marks, and Unicode line and paragraph separators shown as `\ufffd`.",
             "type": "string"
           },
           "path": {
-            "description": "The file the command names, as an absolute path (links are followed\nto read it, not here).",
+            "description": "The file the command names, as an absolute path (links are followed\nto read it, not here), with the replacements `content` has and its\ntabs and line breaks as `\ufffd` too.",
             "type": "string"
           },
           "truncated": {

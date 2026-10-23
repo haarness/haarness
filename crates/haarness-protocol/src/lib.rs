@@ -1081,11 +1081,12 @@ pub struct PendingPermissionInfo {
 #[serde(rename_all = "camelCase")]
 pub struct PermissionScript {
     /// The file the command names, as an absolute path (links are followed
-    /// to read it, not here).
+    /// to read it, not here), with the replacements `content` has and its
+    /// tabs and line breaks as `�` too.
     pub path: String,
     /// Its text: at most its first 30,000 bytes, with line breaks as `\n`
-    /// and other control characters (tabs aside) and bidirectional controls
-    /// shown as `�`.
+    /// and other control characters (tabs aside), bidirectional controls
+    /// and marks, and Unicode line and paragraph separators shown as `�`.
     pub content: String,
     /// The file goes on past `content`.
     #[serde(default)]
