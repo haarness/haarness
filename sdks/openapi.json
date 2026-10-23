@@ -5080,7 +5080,8 @@
         "description": "Why a script's text is not shown on its card.",
         "enum": [
           "written",
-          "changeable"
+          "changeable",
+          "unknown"
         ],
         "type": "string"
       },

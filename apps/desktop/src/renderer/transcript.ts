@@ -612,8 +612,9 @@ export function permissionScript(
     lines: text ? text.split("\n").map(expandTabs) : [],
     truncated: truncated === true,
     // Why its text is not shown, when it is not: the command writes it
-    // first ("written"), or an earlier step may change it ("changeable").
-    withheld: withheld === "written" || withheld === "changeable" ? withheld : undefined,
+    // first ("written"), or an earlier step may change it ("changeable",
+    // also for a reason a newer server gives that this one does not know).
+    withheld: withheld === "written" ? ("written" as const) : withheld ? ("changeable" as const) : undefined,
   };
 }
 

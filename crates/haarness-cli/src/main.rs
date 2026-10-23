@@ -5549,7 +5549,7 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
 }
 
 /// What a shell request's script says, for the terminal prompt: its path
-/// and first lines, indented and each cut to [`PREVIEW_COLUMNS`], or why its
+/// and first lines, indented and each cut to `PREVIEW_COLUMNS` cells, or why its
 /// text is not shown. The server has already made its text safe for a
 /// terminal.
 fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
@@ -5565,7 +5565,7 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
                 script.path
             ));
         }
-        Some(ScriptWithheld::Changeable) => {
+        Some(ScriptWithheld::Changeable | ScriptWithheld::Unknown) => {
             return Some(format!(
                 "An earlier step of it can change {}, so its contents aren't shown.\n",
                 script.path
@@ -5577,8 +5577,14 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
     let mut text = format!("It runs {}:\n", script.path);
     for line in lines.iter().take(LINES) {
         text.push_str("    ");
-        match line.char_indices().nth(PREVIEW_COLUMNS) {
-            Some((cut, _)) => {
+        // Cut by the cells a terminal draws, so wide characters count twice.
+        let mut used = 0;
+        let cut = line.char_indices().find_map(|(at, character)| {
+            used += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+            (used > PREVIEW_COLUMNS).then_some(at)
+        });
+        match cut {
+            Some(cut) => {
                 text.push_str(&line[..cut]);
                 text.push('…');
             }
@@ -11726,11 +11732,23 @@ mod tests {
                 .as_deref(),
             Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
         );
-        // A long line is cut, not wrapped over the terminal.
+        // A long line is cut, not wrapped over the terminal, by the cells it
+        // takes: a wide character counts twice.
         let wide = super::script_preview(Some(&script(&"x".repeat(500), false, None))).unwrap();
         assert!(
             wide.contains(&format!("    {}…\n", "x".repeat(200))),
             "{wide}"
+        );
+        let wide = super::script_preview(Some(&script(&"字".repeat(150), false, None))).unwrap();
+        assert!(
+            wide.contains(&format!("    {}…\n", "字".repeat(100))),
+            "{wide}"
+        );
+        // A reason a newer server gives reads like the cautious one.
+        assert_eq!(
+            super::script_preview(Some(&script("", false, Some(ScriptWithheld::Unknown))))
+                .as_deref(),
+            Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
         );
     }
 

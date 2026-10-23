@@ -398,7 +398,7 @@ fn script_rows(
                 "This command writes {path} before running it, so its contents can't be shown.",
                 &[("path", path)],
             ),
-            ScriptWithheld::Changeable => language.format(
+            ScriptWithheld::Changeable | ScriptWithheld::Unknown => language.format(
                 "An earlier step of this command can change {path}, so its contents aren't shown.",
                 &[("path", path)],
             ),

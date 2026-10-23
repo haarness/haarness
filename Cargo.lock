@@ -1546,6 +1546,7 @@ dependencies = [
  "tracing-appender",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-width",
  "uuid",
  "zip",
 ]

@@ -191,11 +191,11 @@ try:
     approval()
     screen = until(
         lambda: (text if 'before running it' in (text := capture()) else None),
-        'rewritten note',
+        'written note',
     )
     assert 'This command writes scripts/gen.sh before running it' in screen, screen
     assert 'Script:' not in screen, screen
-    check('a script the command writes before it runs it is named in one quiet line', 'rewritten')
+    check('a script the command writes before it runs it is named in one quiet line', 'written')
     keys('n')
     finish(started)
 

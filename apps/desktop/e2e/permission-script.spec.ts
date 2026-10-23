@@ -196,7 +196,7 @@ test("a script whose text may not be what runs is named in one quiet line, with 
     "This command writes scripts/gen.sh before running it, so its contents can't be shown.",
   );
   await expect(toggle()).toHaveCount(0);
-  await pictures(card(), "card-rewritten");
+  await pictures(card(), "card-written");
   await card().getByRole("button", { name: "Deny", exact: true }).click();
   await idle();
   // After a step that may change it, its own line.
