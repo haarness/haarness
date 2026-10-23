@@ -330,6 +330,58 @@ test("a plain click opens a preview tab that the next one replaces, until the ch
   expect(errors).toEqual([]);
 });
 
+test("a preview holding only a folded paste stays, Enter on its tab keeps it, and a double-click in another project keeps a tab", async () => {
+  await sidebar().getByRole("button", { name: "Reload two", exact: true }).click();
+  await expect(sidebar()).toHaveClass(/current/);
+  for (const title of ["Chip one", "Chip two", "Enter one"])
+    await client.createThread({ title, provider: "echo", model: "echo-1" });
+  const row = (name: string) => sidebar().getByRole("button", { name, exact: true });
+  const tab = (name: string) => page.getByRole("tab", { name, exact: true });
+  const preview = page.locator(".workspace-tab.preview");
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  // A long paste folds into a chip and leaves the box empty: the chat is in
+  // use all the same, so the next plain click opens a tab beside it.
+  await row("Chip one").click();
+  await expect(preview).toHaveText("Chip one");
+  await expect(composer).toBeFocused();
+  const text = Array.from({ length: 200 }, (_, index) => "line " + index).join("\n");
+  await composer.evaluate((element, text) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", text);
+    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, text);
+  await expect(page.locator(".prompt-context-item[data-kind=paste]")).toHaveCount(1);
+  await expect(composer).toHaveValue("");
+  await expect(preview).toHaveCount(0);
+  // A chat of the project already open loads in place: the session bar and
+  // its tabs stay on screen (a remounted bar would lose the mark).
+  await page.locator(".session-bar").evaluate(element => element.setAttribute("data-mark", ""));
+  await row("Chip two").click();
+  await expect(tab("Chip one")).toHaveCount(1);
+  await expect(preview).toHaveText("Chip two");
+  await expect(page.locator(".session-bar[data-mark]")).toHaveCount(1);
+  // Enter on the preview's own tab, while it is shown, keeps it.
+  await tab("Chip two").focus();
+  await expect(tab("Chip two")).toHaveAttribute("aria-description", /Press Enter or double-click to keep it open\.$/);
+  await page.keyboard.press("Enter");
+  await expect(preview).toHaveCount(0);
+  await row("Enter one").click();
+  await expect(preview).toHaveText("Enter one");
+  // A double-click on a chat in another project keeps its tab there, though
+  // that project opens (and chooses its own last chat) first.
+  const other = others[0].client;
+  await other.createThread({ title: "Second three", provider: "echo", model: "echo-1" });
+  const second = page.getByRole("region", { name: "Project second", exact: true });
+  await second.getByRole("button", { name: "Second three", exact: true }).dblclick();
+  await expect(second).toHaveClass(/current/);
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+  await expect(tab("Second three")).toHaveAttribute("aria-selected", "true");
+  await expect(preview).toHaveCount(0);
+  await second.getByRole("button", { name: "Second one", exact: true }).click();
+  await expect(tab("Second three")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
 test("the active chat tab stays in view in a strip that scrolls, and a working chat's tab shows a round dot", async () => {
   await sidebar().getByRole("button", { name: "Reload two", exact: true }).click();
   await expect(sidebar()).toHaveClass(/current/);
