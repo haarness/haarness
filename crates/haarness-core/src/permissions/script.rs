@@ -282,10 +282,11 @@ fn perl_runs_another_program(bytes: &[u8]) -> bool {
 /// itself a script (Linux follows its `#!` line in turn), or an argument
 /// that is not an option or has a `/` (`#!/bin/sh /x/evil.sh`,
 /// `#!/bin/sh evil.sh`, `#!/usr/bin/perl -I/x`), the script's own path
-/// coming after them. `#!/usr/bin/env NAME` looks the program up by name;
-/// under `#!/usr/bin/env -S …`, only a known shell or interpreter's
-/// arguments are read (`-S sh /x/evil.sh`), not another program's (`-S
-/// deno run --allow-read=/tmp`).
+/// coming after them. `#!/usr/bin/env NAME` looks the program up by name.
+/// Under `#!/usr/bin/env -S …`, a known shell's or interpreter's arguments
+/// are read the same way (`-S sh /x/evil.sh`); another program may have a
+/// subcommand and options, a path only as an option's value (`-S deno run
+/// --allow-read=/tmp`, not `-S awk -f evil.awk`).
 fn runs_another_file(bytes: &[u8]) -> bool {
     let Some(line) = shebang_line(bytes) else {
         return false;
@@ -310,26 +311,39 @@ fn runs_another_file(bytes: &[u8]) -> bool {
         });
         match (split, arguments.first()) {
             (Some(attached), _) => {
-                // The words `-S` splits: options and assignments, the
-                // program, its arguments.
+                // The words `-S` splits: assignments, the program, its
+                // arguments. Quotes, escapes and `${NAME}`, which it reads
+                // its own way, and options before the program are not read.
                 let words: Vec<&str> = std::iter::once(attached)
                     .filter(|word| !word.is_empty())
                     .chain(arguments[1..].iter().copied())
                     .collect();
-                let Some(at) = words
+                if words
                     .iter()
-                    .position(|word| !word.starts_with('-') && !word.contains('='))
-                else {
+                    .any(|word| word.contains(['\'', '"', '\\', '$']))
+                {
+                    return true;
+                }
+                let Some(at) = words.iter().position(|word| !word.contains('=')) else {
                     return false;
                 };
-                let program = words[at];
-                if program.contains('/') {
+                let (program, rest) = (words[at], &words[at + 1..]);
+                if program.starts_with('-') || program.contains('/') {
                     return true;
                 }
                 if super::bash::interpreter(&super::bash::program_name(program)).is_none() {
-                    return false;
+                    // Another program's own arguments: a subcommand first
+                    // (`deno run`, `uv run`), then options, a path only as
+                    // an option's value (`--allow-read=/tmp`).
+                    return rest.iter().enumerate().any(|(index, word)| {
+                        index > 0 && !word.starts_with('-')
+                            || word
+                                .split_once('=')
+                                .map_or(*word, |(name, _)| name)
+                                .contains('/')
+                    });
                 }
-                arguments = words[at + 1..].to_vec();
+                arguments = rest.to_vec();
             }
             // The program it looks up by name.
             (None, Some(name)) if !name.starts_with('-') && !name.contains('/') => {
@@ -832,6 +846,8 @@ mod tests {
             "#!/usr/bin/env bash",
             "#!/usr/bin/env -S bash -e",
             "#!/usr/bin/env -S deno run --allow-read=/tmp",
+            "#!/usr/bin/env -S uv run --script",
+            "#!/usr/bin/env -S NODE_ENV=production node",
             "#!/usr/bin/awk -f",
             "echo no shebang",
         ] {
@@ -842,12 +858,24 @@ mod tests {
                 "{first}"
             );
         }
-        // Under `env -S`, a known shell's or interpreter's arguments count.
+        // Under `env -S`, a known shell's or interpreter's arguments count;
+        // another program may have a subcommand and options, a path only
+        // as an option's value. What `-S` reads its own way (quotes,
+        // escapes, `$`) and options before the program are not read.
         for first in [
             "#!/usr/bin/env -S sh /opt/evil.sh",
             "#!/usr/bin/env -S node /opt/evil.js",
             "#!/usr/bin/env -S /opt/evil",
             "#!/usr/bin/env -Ssh evil.sh",
+            "#!/usr/bin/env -S awk -f evil.awk",
+            "#!/usr/bin/env -S deno run /opt/evil.ts",
+            "#!/usr/bin/env -S deno -I/opt run",
+            "#!/usr/bin/env -S -i bash",
+            "#!/usr/bin/env -S X=1 -C /opt bash",
+            "#!/usr/bin/env -S 'sh' evil.sh",
+            "#!/usr/bin/env -S bash \"$X\"",
+            "#!/usr/bin/env -S sh\\ evil.sh",
+            "#!/usr/bin/env -S bash ${X}",
         ] {
             write(first);
             assert!(
