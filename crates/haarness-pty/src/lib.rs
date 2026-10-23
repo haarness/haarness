@@ -137,6 +137,11 @@ impl PtyManager {
         for name in haarness_core::private_env_names() {
             builder.env_remove(name);
         }
+        // A terminal is the person's, also when this server holds Haarness's
+        // own agent markers (a `haarness serve` an agent's command started).
+        for name in haarness_core::own_agent_markers(std::env::var_os("AI_AGENT").as_deref()) {
+            builder.env_remove(name);
+        }
         builder.env(
             "PATH",
             haarness_ripgrep::prepend_path(std::env::var_os("PATH").as_deref())
@@ -811,32 +816,40 @@ mod tests {
         assert!(manager.list().is_empty());
     }
 
-    /// A server started by an agent's shell command inherits that command's
-    /// chat id, which names none of its own chats: its terminals, a person's,
-    /// do not get it and are not marked as an agent's. Run again in a process
-    /// whose own environment holds one.
+    /// A server started in an agent's shell command (a `haarness serve`, say)
+    /// holds that command's markers: `AGENT=1`, `HAARNESS=1`,
+    /// `AI_AGENT=haarness` and its chat id, which names none of this server's
+    /// chats. Its terminals are a person's, so they get none of them; an outer
+    /// agent's own `AI_AGENT` is kept. Each case runs again in a process whose
+    /// own environment holds them.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_terminal_never_inherits_a_chat_id_or_gets_the_agent_markers() {
         const NAME: &str = "tests::a_terminal_never_inherits_a_chat_id_or_gets_the_agent_markers";
-        if std::env::var_os("HAARNESS_PTY_INHERITED_ID").is_none() {
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args(["--exact", NAME, "--nocapture"])
-                .env("HAARNESS_PTY_INHERITED_ID", "1")
-                .env("HAARNESS_SESSION_ID", "outer-chat");
-            for name in ["AGENT", "HAARNESS", "AI_AGENT"] {
-                command.env_remove(name);
+        let Some(expected) = std::env::var_os("HAARNESS_PTY_EXPECTED") else {
+            for (ai_agent, expected) in [
+                ("haarness", "seen=unset|unset|unset|unset"),
+                ("outer-agent", "seen=unset|unset|unset|outer-agent"),
+            ] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", NAME, "--nocapture"])
+                    .env("HAARNESS_PTY_EXPECTED", expected)
+                    .env("HAARNESS_SESSION_ID", "outer-chat")
+                    .env("AGENT", "1")
+                    .env("HAARNESS", "1")
+                    .env("AI_AGENT", ai_agent)
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success() && stdout.contains(&format!("terminal {expected}")),
+                    "{ai_agent}: {stdout}{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
-            let output = command.output().unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success() && stdout.contains("no chat id inherited"),
-                "{stdout}{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
             return;
-        }
+        };
+        let expected = expected.to_string_lossy().into_owned();
         let manager = PtyManager::new(std::env::current_dir().unwrap(), EventBus::new(64));
         let info = manager
             .create(PtyCreateRequest {
@@ -858,12 +871,9 @@ mod tests {
                 .unwrap();
             output.push_str(&String::from_utf8_lossy(&chunk));
         }
-        assert!(
-            output.contains("seen=unset|unset|unset|unset"),
-            "{output:?}"
-        );
+        assert!(output.contains(&expected), "{output:?}");
         manager.delete(info.id).unwrap();
-        println!("no chat id inherited");
+        println!("terminal {expected}");
     }
 
     #[cfg(unix)]
