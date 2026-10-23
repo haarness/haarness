@@ -12103,6 +12103,18 @@ test("a card answered elsewhere says so in one quiet line where its buttons were
       return original(event, raw);
     });
   }, pending.permissionId);
+  // The card eases in: measure where it rests.
+  const still = () =>
+    page.evaluate(async () => {
+      await Promise.all(
+        document
+          .getAnimations()
+          .filter((item) => item.effect?.getComputedTiming().iterations !== Infinity)
+          .map((item) => item.finished.catch(() => undefined)),
+      );
+      await new Promise(requestAnimationFrame);
+    });
+  await still();
   const footer = card.locator(".prompt-actions");
   const before = (await footer.boundingBox())!;
   const height = (await card.boundingBox())!.height;
@@ -12112,6 +12124,7 @@ test("a card answered elsewhere says so in one quiet line where its buttons were
   // The click had focus on a button: the line keeps it.
   await expect(settled).toBeFocused();
   await expect(card.getByRole("button")).toHaveCount(0);
+  await still();
   const after = (await settled.boundingBox())!;
   expect(Math.abs(after.y - before.y)).toBeLessThan(2);
   expect(Math.abs((await card.boundingBox())!.height - height)).toBeLessThan(2);
