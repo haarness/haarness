@@ -1021,10 +1021,15 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                         app.save_prompt_history();
                     }
                     // A draft whose unknown picks became plain text comes
-                    // back that way.
-                    Ok(false) => app
-                        .composer
-                        .set_text(app.mention_resources.returned.take().unwrap_or(text)),
+                    // back that way, its `@` list open so Enter picks the
+                    // resource again.
+                    Ok(false) => match app.mention_resources.returned.take() {
+                        Some(returned) => {
+                            app.composer.set_text(returned);
+                            refresh_mentions(app, client).await;
+                        }
+                        None => app.composer.set_text(text),
+                    },
                     Err(error) => {
                         app.composer.set_text(text);
                         return Err(error);
