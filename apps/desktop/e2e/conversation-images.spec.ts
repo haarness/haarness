@@ -305,6 +305,46 @@ test("an image that arrives above the view moves nothing being read", async () =
   expect(errors).toEqual([]);
 });
 
+test("two images coming in at once above the view still move nothing being read", async () => {
+  await writeFile(join(workspace, "out/first.png"), chart(480, 280, [200, 120, 40]));
+  await writeFile(join(workspace, "out/second.png"), chart(480, 200, [40, 120, 200]));
+  await app.evaluate(() => {
+    (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads = new Set(["out/first.png", "out/second.png"]);
+  });
+  const both = await reply("Two late charts.\n\n![First](out/first.png)\n\n![Second](out/second.png)\n\nRead on from here.");
+  await expect(both.locator(".project-image")).toHaveCount(2);
+  const id = await both.evaluate((element) => element.closest("[data-item-id]")!.getAttribute("data-item-id"));
+  for (let index = 0; index < 3; index++)
+    await reply(Array.from({ length: 8 }, (_, line) => `Line ${index}.${line} keeps the reader busy for a while.`).join("\n\n"));
+  const list = page.locator(".transcript");
+  const placed = () =>
+    list.evaluate((element, row) => {
+      const holders = element.querySelectorAll(`[data-item-id="${row}"] .project-image`);
+      return holders.length ? holders[1].getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+    }, id);
+  await list.hover();
+  for (let step = 0, at = await placed(); step < 80 && !(at !== null && at > 0 && at < 200); step++, at = await placed()) {
+    await page.mouse.wheel(0, at !== null && at >= 200 ? 100 : -150);
+    await page.waitForTimeout(40);
+  }
+  // Both waiting images just above the view; the text below them at its top.
+  await list.evaluate((element, row) => {
+    const holders = element.querySelectorAll(`[data-item-id="${row}"] .project-image`);
+    element.scrollTop += holders[1].getBoundingClientRect().bottom - element.getBoundingClientRect().top + 4;
+  }, id);
+  const text = both.getByText("Read on from here.");
+  const where = () =>
+    text.evaluate((element) => Math.round(element.getBoundingClientRect().top - element.closest(".transcript")!.getBoundingClientRect().top));
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const before = await where();
+  expect(before).toBeGreaterThan(0);
+  await app.evaluate(() => (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads?.clear());
+  await expect(both.locator("img.project-image-loaded")).toHaveCount(2);
+  await page.evaluate(() => new Promise((done) => setTimeout(done, 300)));
+  expect(await where()).toBe(before);
+  expect(errors).toEqual([]);
+});
+
 test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
   await reply("The chart again: ![Weekly chart](out/chart.png)");
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
@@ -470,7 +510,7 @@ test("an image shown smaller than it is opens at its own size, or fitted to the 
   await viewer.getByRole("button", { name: "Close", exact: true }).click();
   await expect(viewer).toHaveCount(0);
   await expect(attached.first()).toBeFocused();
-  const preview = await openPreview(page.locator(".tool-call").filter({ hasText: "wide.png" }).last());
+  const preview = await openPreview((await read("out/wide.png")).row);
   await expect(preview).toHaveAttribute("data-image-open", "");
   await preview.click();
   await expect(full).toHaveAttribute("src", /^data:image\/png;base64,/);
