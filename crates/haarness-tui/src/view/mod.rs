@@ -878,6 +878,10 @@ fn apply_dialog(
     let preferred = match app.overlay {
         Overlay::Models | Overlay::Diff(_) | Overlay::Workflow { .. } => 96,
         Overlay::Panel { .. } => 88,
+        // The command list (/help) reads each description whole where the
+        // terminal has the room, measured over every command so that
+        // filtering never changes its width.
+        Overlay::Commands => menu::commands_width(app).max(84),
         _ => 84,
     };
     // Below 80 columns a one-cell margin only shows a sliver of dimmed

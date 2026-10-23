@@ -326,7 +326,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "keybinds",
         &["shortcuts"],
-        "Configure application shortcuts",
+        "Every key: configure shortcuts, see the fixed keys",
     ),
     command(
         "queue",

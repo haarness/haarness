@@ -19965,6 +19965,44 @@ async fn notices_go_when_they_stop_being_true() {
     assert_eq!(app.notice, "");
 }
 
+/// /help reads each command whole where the terminal has the room, at a
+/// width that filtering does not change; /keybinds lists the fixed keys.
+#[test]
+fn help_uses_the_width_it_has_and_keybinds_names_the_fixed_keys() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.open_overlay(crate::state::Overlay::Commands);
+    let wide = frame_text(&app, (180, 40));
+    assert!(
+        wide.contains("Resume a session · → actions · --all includes archived · also /resume"),
+        "{wide}"
+    );
+    let edge = |text: &str| {
+        text.lines()
+            .find(|row| row.contains("Commands"))
+            .map(|row| row.find("Commands").unwrap())
+    };
+    let opened = edge(&wide);
+    app.overlay_filter = "mo".into();
+    assert_eq!(edge(&frame_text(&app, (180, 40))), opened, "no width jump");
+    // A narrow terminal still gets a card that fits.
+    for line in app.lines((80, 30)) {
+        assert!(line.width() <= 80);
+    }
+    let view = crate::keybindings::view(&serde_json::json!({})).unwrap();
+    assert!(view.lines.iter().any(|line| line.contains("esc esc stop")));
+    assert!(
+        view.lines
+            .iter()
+            .any(|line| line.contains("alt+enter queue"))
+    );
+    assert!(
+        view.fields
+            .iter()
+            .any(|field| field.key == "fold" && field.value == "ctrl+r")
+    );
+}
+
 /// A dialog keeps its top edge while a filter shortens its list.
 #[test]
 fn a_filtered_dialog_keeps_its_top_edge() {
