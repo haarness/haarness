@@ -811,7 +811,8 @@ fn unnamed_deletion(
     let kept = Kept::new(home.as_deref(), workspace);
     crate::permissions::bash::outside_deletions(command, workspace, workdir.as_deref())
         .into_iter()
-        .find(|target| !named(said, &target.path, home.as_deref(), &kept))
+        // A path nobody can place is never one the person named.
+        .find(|target| !target.placed || !named(said, &target.path, home.as_deref(), &kept))
 }
 
 /// Folders no message names for deletion: the root, the home folder, the
