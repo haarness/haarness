@@ -2096,6 +2096,9 @@ fn explicit_path_suggestions(
 }
 
 /// Subsequence match with bonuses for substring hits and file-name hits.
+/// Desktop's `fileScore` (`apps/desktop/src/renderer/prompt-context.ts`)
+/// scores the files it keeps while a search runs the same way: change both,
+/// and the scores both tests pin.
 fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(-i64::try_from(path.len()).unwrap_or(i64::MAX));
@@ -2129,7 +2132,21 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod file_search_tests {
-    use super::explicit_path_suggestions;
+    use super::{explicit_path_suggestions, fuzzy_score};
+
+    /// The scores Desktop's port is pinned to as well.
+    #[test]
+    fn file_scores_match_the_desktop_port() {
+        let score = |path: &str, query: &str| fuzzy_score(&path.to_ascii_lowercase(), query);
+        assert_eq!(score("setup.md", "s"), Some(1492));
+        assert_eq!(score("style.css", "st"), Some(1491));
+        assert_eq!(score("setup.md", "st"), Some(92));
+        assert_eq!(score("src/Setup.MD", "setup"), Some(1484));
+        assert_eq!(score("docs/guide.md", ""), Some(-13));
+        assert_eq!(score("readme.md", "q"), None);
+        assert_eq!(score("É/é.md", "é"), Some(1489));
+        assert_eq!(score("É.md", "é"), None);
+    }
 
     struct TestTree(std::path::PathBuf);
 
