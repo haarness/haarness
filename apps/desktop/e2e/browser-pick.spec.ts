@@ -520,7 +520,7 @@ test("the shortcut's menu item and the command palette start picking, and stop i
   await clickMenu();
   await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
   // Closed, the Browser opens on the request and starts picking.
-  await page.getByRole("button", { name: "Close browser panel", exact: true }).click();
+  await page.getByRole("button", { name: "Close Browser panel", exact: true }).click();
   await expect(page.getByRole("region", { name: "Web browser" })).toBeHidden();
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Pick an element");

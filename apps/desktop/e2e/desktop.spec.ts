@@ -2609,7 +2609,7 @@ test("side-panel launcher opens tools beside chat and supports tab ordering", as
   await expect(page.locator(".review")).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("header-and-project-tabs.png"), animations: "disabled" });
   const reviewHandle = page.getByRole("button", {
-    name: "Show diff panel",
+    name: "Show Review panel",
     exact: true,
   });
   await reviewHandle.focus();
@@ -6775,7 +6775,7 @@ test("workspace panes stay beside chat, resize, preserve drafts and adapt to a s
     "A workspace beside my conversation",
   );
   await page
-    .getByRole("button", { name: "Show files panel", exact: true })
+    .getByRole("button", { name: "Show Files panel", exact: true })
     .click();
   await expect(page.locator(".file-preview .cm-content")).toContainText(
     "A draft kept while reviewing",

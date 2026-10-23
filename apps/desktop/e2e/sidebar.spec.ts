@@ -332,7 +332,7 @@ test("sidebar shared pointer sorting reorders conversation and panel tabs using 
     await page.getByRole("button", { name: "Open panel", exact: true }).click();
     await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
   }
-  await electronDrag(page.getByRole("button", { name: "Show diff panel", exact: true }), page.getByRole("button", { name: "Show files panel", exact: true }));
+  await electronDrag(page.getByRole("button", { name: "Show Review panel", exact: true }), page.getByRole("button", { name: "Show Files panel", exact: true }));
   await expect(page.locator(".dock-tab > button:first-child")).toHaveText(["Review", "Files"]);
   await expect(page.locator(".review")).toBeVisible();
   await reload();
@@ -341,7 +341,7 @@ test("sidebar shared pointer sorting reorders conversation and panel tabs using 
   for (const title of ["Two", "One", "Three"])
     await project("alpha").getByRole("button", { name: title, exact: true }).dblclick();
   await expect(tabs).toHaveText(["Three", "One", "Two"]);
-  await page.getByRole("button", { name: "Close diff panel", exact: true }).click();
+  await page.getByRole("button", { name: "Close Review panel", exact: true }).click();
   for (const name of ["Files", "Review"]) {
     await page.getByRole("button", { name: "Open panel", exact: true }).click();
     await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
