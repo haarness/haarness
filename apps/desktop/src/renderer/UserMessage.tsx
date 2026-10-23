@@ -66,10 +66,15 @@ export function UserMessageBody(props: {
   let content!: HTMLDivElement;
   onMount(() => {
     // Measured from the unclamped content, before the frame is painted, so a
-    // long message never shows unfolded first.
+    // long message never shows unfolded first. An image is a thumbnail that
+    // opens full size, so it does not make a message long: only the line it
+    // sits on counts.
     const measure = () => {
       const line = parseFloat(getComputedStyle(body).lineHeight) || 22;
-      setTall(content.scrollHeight > line * FOLD_LINES + 1);
+      let pictures = 0;
+      for (const picture of content.querySelectorAll("img, .project-image"))
+        pictures += Math.max(0, picture.getBoundingClientRect().height - line);
+      setTall(content.scrollHeight - pictures > line * FOLD_LINES + 1);
     };
     const observer = new ResizeObserver(measure);
     observer.observe(content);
