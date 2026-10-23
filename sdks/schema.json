@@ -1400,6 +1400,13 @@
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
           },
+          "resources": {
+            "description": "MCP resources mentioned with `@`, read and added to string arguments\nwhen the command runs (`mcp-resource-mentions.v1`).",
+            "items": {
+              "$ref": "#/components/schemas/ResourceMention"
+            },
+            "type": "array"
+          },
           "timeoutMs": {
             "format": "int64",
             "minimum": 0,
@@ -4253,6 +4260,13 @@
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
           },
+          "resources": {
+            "description": "MCP resources mentioned with `@`, read into the message when it\narrives, before it is queued (`mcp-resource-mentions.v1`).",
+            "items": {
+              "$ref": "#/components/schemas/ResourceMention"
+            },
+            "type": "array"
+          },
           "synthetic": {
             "description": "Internal runtime prompt, hidden from user-authored transcript/history\nsurfaces but still delivered to the provider.",
             "type": "boolean"
@@ -4458,6 +4472,30 @@
       "RequestId": {
         "format": "uuid",
         "type": "string"
+      },
+      "ResourceMention": {
+        "description": "An MCP resource the person picked with `@`. The server reads it from its\nMCP server when the message arrives and adds it to the message's text as\na block under `MCP resource: \u2026` (text cut with the usual note when long,\nimages and PDFs as attachments), so the message keeps what was read. A\nresource that cannot be read is named in the message with the reason,\nand the rest of the message is still sent. Picking one is the person's\nchoice, as attaching a file is: no permission is asked.",
+        "properties": {
+          "name": {
+            "description": "The name the server lists it under, shown with it in the message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server": {
+            "description": "The MCP server to read it from, as configured. Two servers may expose\nthe same URI; each is its own mention.",
+            "type": "string"
+          },
+          "uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "uri"
+        ],
+        "type": "object"
       },
       "RevertState": {
         "properties": {
@@ -4748,6 +4786,13 @@
           },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
+          },
+          "resources": {
+            "description": "MCP resources mentioned with `@`, read into the message when it\narrives (`mcp-resource-mentions.v1`).",
+            "items": {
+              "$ref": "#/components/schemas/ResourceMention"
+            },
+            "type": "array"
           },
           "synthetic": {
             "description": "Internal runtime prompt. Backward-compatible API clients omit this and\nreceive ordinary user-message behavior.",

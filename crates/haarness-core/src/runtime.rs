@@ -1996,6 +1996,7 @@ impl AgentRuntime {
                         request_id: input.id,
                         text: input.text.clone(),
                         attachments: input.attachments.clone(),
+                        resources: Vec::new(),
                         synthetic: false,
                         auto_approve: false,
                         agent: None,
@@ -2150,6 +2151,7 @@ impl AgentRuntime {
                         request_id: request.request_id,
                         text: request.text.clone(),
                         attachments: request.attachments.clone(),
+                        resources: Vec::new(),
                         synthetic: request.synthetic,
                         auto_approve,
                         agent: None,
@@ -2899,6 +2901,7 @@ impl AgentRuntime {
                 request_id: handoff.request_id(),
                 text,
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: true,
             },
             false,
@@ -2948,6 +2951,7 @@ impl AgentRuntime {
                             request_id: RequestId::new(),
                             text,
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: true,
                         };
                         self.append_queued_input(&chat, active.id, &request).await?;
@@ -5428,6 +5432,7 @@ impl AgentRuntime {
                 request_id: RequestId::new(),
                 text: STOP_CONTINUATION.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: true,
             };
             if let Err(error) = self
@@ -10018,6 +10023,7 @@ impl RunnerTask {
                                 request_id: RequestId::new(),
                                 text: prompt,
                                 attachments: Vec::new(),
+                                resources: Vec::new(),
                                 synthetic: false,
                             },
                         )
@@ -10095,6 +10101,7 @@ impl RunnerTask {
             request_id: RequestId::new(),
             text: prompt,
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: self.request.auto_approve,
             agent: Some(agent.clone()),
@@ -10454,6 +10461,7 @@ impl RunnerTask {
                             request_id: handoff.request_id(),
                             text: envelope.clone(),
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: true,
                         },
                         task.delivery_auto_approve,

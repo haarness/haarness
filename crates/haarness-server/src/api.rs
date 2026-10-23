@@ -805,6 +805,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             haarness_protocol::INPUT_QUEUE_CAPABILITY.into(),
             haarness_protocol::APPROVAL_MODE_CAPABILITY.into(),
             haarness_protocol::THREAD_CREATE_ID_CAPABILITY.into(),
+            haarness_protocol::RESOURCE_MENTIONS_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
         ]
@@ -1565,7 +1566,7 @@ async fn start_turn(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
     headers: HeaderMap,
-    Json(request): Json<StartTurnRequest>,
+    Json(mut request): Json<StartTurnRequest>,
 ) -> ApiResult<(StatusCode, Json<Turn>)> {
     // A published chat follows its own Auto/Review setting; a remote client
     // cannot approve a turn's requests wholesale.
@@ -1585,6 +1586,14 @@ async fn start_turn(
         ))
         .into());
     }
+    read_mentions(
+        &state,
+        &headers,
+        std::mem::take(&mut request.resources),
+        &mut request.text,
+        &mut request.attachments,
+    )
+    .await?;
     let turn = state
         .runtime
         .start_turn(id, request)
@@ -1602,8 +1611,32 @@ async fn start_turn(
 async fn execute_command(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
-    Json(request): Json<ExecuteCommandRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<ExecuteCommandRequest>,
 ) -> ApiResult<(StatusCode, Json<CommandExecutionResponse>)> {
+    let resources = std::mem::take(&mut request.resources);
+    if !resources.is_empty() {
+        // Mentions join the command's argument text, as attached files do.
+        let mut text = match request.arguments.take() {
+            None => String::new(),
+            Some(Value::String(text)) => text,
+            Some(_) => {
+                return Err(CoreError::Invalid(
+                    "MCP resource mentions need string command arguments".into(),
+                )
+                .into());
+            }
+        };
+        read_mentions(
+            &state,
+            &headers,
+            resources,
+            &mut text,
+            &mut request.attachments,
+        )
+        .await?;
+        request.arguments = Some(Value::String(text));
+    }
     let response = crate::command::execute(&state, id, request).await?;
     let status = match &response {
         CommandExecutionResponse::Turn { .. } => StatusCode::ACCEPTED,
@@ -2317,12 +2350,51 @@ async fn list_questions(
 async fn queue_input(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
-    Json(request): Json<QueueInputRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<QueueInputRequest>,
 ) -> ApiResult<(StatusCode, Json<QueueInputResponse>)> {
+    read_mentions(
+        &state,
+        &headers,
+        std::mem::take(&mut request.resources),
+        &mut request.text,
+        &mut request.attachments,
+    )
+    .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(state.runtime.queue_input(id, request).await?),
     ))
+}
+
+/// The MCP resources a message mentions, read into it when it arrives, so a
+/// queued message holds what was read. A published chat's viewers cannot
+/// read the owner's MCP servers, so a mention from one is refused.
+async fn read_mentions(
+    state: &ServerState,
+    headers: &HeaderMap,
+    resources: Vec<haarness_protocol::ResourceMention>,
+    text: &mut String,
+    attachments: &mut Vec<String>,
+) -> ApiResult<()> {
+    if resources.is_empty() {
+        return Ok(());
+    }
+    if crate::remote_scope::root(headers).is_some() {
+        return Err(CoreError::PermissionDenied(
+            "A shared chat cannot read this computer's MCP resources".into(),
+        )
+        .into());
+    }
+    crate::mcp_resources::read_mentions(
+        state.mcp.as_ref(),
+        &state.workspace,
+        resources,
+        text,
+        attachments,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn input_queue(

@@ -155,6 +155,7 @@ impl Fixture {
                     request_id: RequestId::new(),
                     text: "Hello".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,

@@ -382,6 +382,22 @@ Connected servers expose tool list/call, resource and resource-template lists,
 resource reads, prompt lists, and prompt resolution through the corresponding
 `/v1/mcp/{name}/...` routes. Unsupported prompt/resource capabilities return
 an empty list rather than probing an undeclared server method.
+
+`POST /turns`, `/input` and `/commands` also accept `resources`, the MCP
+resources a person mentioned with `@`: `[{"server": "docs", "uri":
+"docs://setup", "name": "setup"}]` (`name` optional, at most 50). The server
+reads each from its MCP server when the request arrives, before the turn starts
+or the message is queued, and adds it after the text (after a command's string
+`arguments`) as a block under `MCP resource: setup · docs:docs://setup`, its
+text fenced and cut with the usual note when long; its images and PDFs join
+`attachments` (10 MiB together). A resource that cannot be read is named in its
+block with `(not read)` and the reason, and the message is still sent. The same
+server and URI twice is read once; two servers with one URI are two mentions.
+No permission is asked: the person picked it, as they attach a file. A
+published chat's request with `resources` is refused (`403`), and its
+`/v1/info` leaves the capability out. Servers advertise
+`mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
+resources only when it is there.
 That POST returns a tagged `turn`, `workflow_run`, or `text` result and leaves
 the stable `POST /turns` contract unchanged. A workflow hidden by a configured
 direct command remains explicitly available as `/workflow run <name>`.

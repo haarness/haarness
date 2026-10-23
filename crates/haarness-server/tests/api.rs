@@ -2293,6 +2293,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
         request_id: RequestId::new(),
         text: text.into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: false,
         agent: None,
@@ -3171,6 +3172,7 @@ async fn authenticated_rest_turn_runs_end_to_end() {
             request_id: RequestId::new(),
             text: "tested".into(),
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -5094,6 +5096,7 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -5429,6 +5432,7 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -6167,6 +6171,7 @@ async fn duplicate_request_id_is_not_replayed() {
         request_id: RequestId::new(),
         text: "once".into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: false,
         agent: None,
@@ -9226,6 +9231,7 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
                 request_id: RequestId::new(),
                 text: "arrived during streaming".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -9294,6 +9300,7 @@ async fn queued_message_steers_into_running_turn() {
                 request_id: RequestId::new(),
                 text: "hi".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -9385,6 +9392,7 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
                 request_id: RequestId::new(),
                 text: "hello there".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -10622,6 +10630,7 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
                 request_id: RequestId::new(),
                 text: "steer through the status tool".into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -11297,6 +11306,7 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
                 request_id: RequestId::new(),
                 text: "begin the new objective".into(),
                 attachments: Vec::new(),
+                resources: Vec::new(),
                 synthetic: false,
             },
         )
@@ -12023,6 +12033,7 @@ fn deferred_request(text: &str) -> haarness_protocol::QueueInputRequest {
         request_id: RequestId::new(),
         text: text.into(),
         attachments: vec![],
+        resources: Vec::new(),
         synthetic: false,
     }
 }
@@ -13279,6 +13290,7 @@ fn queued(text: &str, effort: Option<&str>) -> haarness_protocol::QueueInputRequ
         request_id: RequestId::new(),
         text: text.into(),
         attachments: Vec::new(),
+        resources: Vec::new(),
         synthetic: false,
     }
 }
@@ -13656,3 +13668,6 @@ async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
     );
     tokio::fs::remove_dir_all(workspace).await.unwrap();
 }
+
+#[path = "cases/resource_mentions.rs"]
+mod resource_mentions;

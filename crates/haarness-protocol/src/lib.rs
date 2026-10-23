@@ -8,6 +8,7 @@ mod goal;
 mod home;
 mod input;
 mod management;
+mod mention;
 mod model_names;
 mod pty;
 pub mod tokens;
@@ -24,6 +25,7 @@ pub use home::{
 };
 pub use input::*;
 pub use management::*;
+pub use mention::*;
 pub use model_names::{
     model_display_id, model_display_name, provider_display_id, provider_storage_id,
 };
@@ -578,6 +580,10 @@ pub struct StartTurnRequest {
     /// local-first clients do not have to persist large base64 blobs.
     #[serde(default, alias = "images")]
     pub attachments: Vec<String>,
+    /// MCP resources mentioned with `@`, read into the message when it
+    /// arrives (`mcp-resource-mentions.v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceMention>,
     /// Internal runtime prompt. Backward-compatible API clients omit this and
     /// receive ordinary user-message behavior.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -893,6 +899,10 @@ pub struct ExecuteCommandRequest {
     pub arguments: Option<Value>,
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// MCP resources mentioned with `@`, read and added to string arguments
+    /// when the command runs (`mcp-resource-mentions.v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceMention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1154,6 +1164,10 @@ pub struct QueueInputRequest {
     pub text: String,
     #[serde(default, alias = "images")]
     pub attachments: Vec<String>,
+    /// MCP resources mentioned with `@`, read into the message when it
+    /// arrives, before it is queued (`mcp-resource-mentions.v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceMention>,
     /// Internal runtime prompt, hidden from user-authored transcript/history
     /// surfaces but still delivered to the provider.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1234,6 +1248,7 @@ pub struct ApiError {
         InputQueueAction,
         QueueInputRequest,
         QueueInputResponse,
+        ResourceMention,
         ApiError,
         TurnStatus,
         WorkflowArgument,

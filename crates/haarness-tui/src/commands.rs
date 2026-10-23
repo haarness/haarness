@@ -4013,6 +4013,7 @@ impl App {
                     } else {
                         self.attachments.clone()
                     },
+                    resources: Vec::new(),
                     agent: workflow.then(|| self.agent().to_owned()),
                     provider: workflow.then(|| self.thread.provider.clone()),
                     model: workflow.then(|| self.thread.model.clone()),
@@ -4083,6 +4084,7 @@ impl App {
                     request_id: RequestId::new(),
                     text,
                     attachments,
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: Some(self.agent().into()),
@@ -4258,6 +4260,7 @@ impl App {
                     request_id: haarness_protocol::RequestId::new(),
                     text,
                     attachments,
+                    resources: Vec::new(),
                     synthetic: false,
                 },
             )
