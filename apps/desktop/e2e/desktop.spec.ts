@@ -4257,18 +4257,24 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     const composer = await page.locator(".composer").boundingBox();
     return Math.round((composer?.y ?? 0) - (box?.y ?? 0));
   };
-  let rest = await bottom();
-  await expect
-    .poll(async () => {
-      const now = await bottom();
-      const still = now === rest;
-      rest = now;
-      return still;
-    })
-    .toBe(true);
+  // The card eases in; two close samples can round alike while it is still
+  // moving, so wait for every finite animation to end instead.
+  const still = () =>
+    page.evaluate(async () => {
+      await Promise.all(
+        document
+          .getAnimations()
+          .filter((item) => item.effect?.getComputedTiming().iterations !== Infinity)
+          .map((item) => item.finished.catch(() => undefined)),
+      );
+      await new Promise(requestAnimationFrame);
+    });
+  await still();
+  const rest = await bottom();
   await review.click();
   await expect(auto).toBeVisible();
   await expect(card.locator(".approval-review")).toHaveText("Auto review is deciding…");
+  await still();
   expect(Math.abs((await bottom()) - rest)).toBeLessThan(2);
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
