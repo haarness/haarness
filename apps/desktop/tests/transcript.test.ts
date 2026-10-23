@@ -471,6 +471,11 @@ test("a shell permission shows the script its command runs, and nothing when the
   assert.equal(permissionScript({ permission: "bash", script: "echo hi" }), undefined);
   assert.equal(permissionScript({ permission: "bash", script: { path: 1, content: "x" } }), undefined);
   assert.equal(permissionScript({ permission: "read", script }), undefined);
+  // Tabs are drawn as spaces to the next stop of four.
+  assert.deepEqual(
+    permissionScript({ permission: "bash", script: { ...script, content: "\tif x; then\n\t\techo a\tb\n" } })?.lines,
+    ["    if x; then", "        echo a  b"],
+  );
 });
 
 test("credential failures offer the setting that fixes them", () => {
