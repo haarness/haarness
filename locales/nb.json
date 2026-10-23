@@ -2773,5 +2773,6 @@
   "MCP server": "MCP-server",
   "not read": "ikke lest",
   "agents · files · resources": "agenter · filer · ressurser",
-  "files · agents · resources": "filer · agenter · ressurser"
+  "files · agents · resources": "filer · agenter · ressurser",
+  "Files, agents and resources": "Filer, agenter og ressurser"
 }

@@ -2773,5 +2773,6 @@
   "MCP server": "MCP 服务器",
   "not read": "未读取",
   "agents · files · resources": "智能体 · 文件 · 资源",
-  "files · agents · resources": "文件 · 智能体 · 资源"
+  "files · agents · resources": "文件 · 智能体 · 资源",
+  "Files, agents and resources": "文件、智能体与资源"
 }

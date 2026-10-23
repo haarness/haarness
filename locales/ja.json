@@ -2773,5 +2773,6 @@
   "MCP server": "MCP サーバー",
   "not read": "読み取れませんでした",
   "agents · files · resources": "エージェント · ファイル · リソース",
-  "files · agents · resources": "ファイル · エージェント · リソース"
+  "files · agents · resources": "ファイル · エージェント · リソース",
+  "Files, agents and resources": "ファイル、エージェント、リソース"
 }
