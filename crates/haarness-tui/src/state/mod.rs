@@ -362,6 +362,23 @@ pub struct PhaseInfo {
 }
 
 /// In-flight rendering state belongs to its thread. Keeping it keyed avoids
+/// What a chat waits on from a person. An approval outranks a question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Waiting {
+    Answer,
+    Approval,
+}
+
+/// A permission request or question that waits for a person, in any chat on
+/// the server: the thread that asked and its conversation's root when the
+/// server named one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingRequest {
+    pub thread_id: ThreadId,
+    pub root_thread_id: Option<ThreadId>,
+    pub kind: Waiting,
+}
+
 /// dropping a streaming prefix when the user opens a child agent and returns
 /// before the durable assistant item is written.
 #[derive(Clone, Default)]
@@ -696,6 +713,9 @@ pub struct App {
     pub preview: String,
     pub reasoning_preview: String,
     pub live_threads: std::collections::HashMap<ThreadId, LiveThreadState>,
+    /// Every request waiting for a person on the server, by request id. The
+    /// session list leads with the chats they wait in.
+    pub waiting: std::collections::HashMap<String, WaitingRequest>,
     pub notice: String,
     /// The notice last seen by the render tick and when it appeared, so an
     /// answer to something the user did fades instead of describing the past.
@@ -1043,6 +1063,7 @@ impl App {
             preview: String::new(),
             reasoning_preview: String::new(),
             live_threads: std::collections::HashMap::new(),
+            waiting: std::collections::HashMap::new(),
             notice,
             notice_shown: None,
             undo_draft: None,
@@ -2086,6 +2107,16 @@ impl App {
     }
 
     pub fn hydrate_questions(&mut self, questions: Vec<PendingQuestionInfo>) {
+        self.hydrate_waiting(
+            Waiting::Answer,
+            questions.iter().map(|pending| {
+                (
+                    pending.question_id.clone(),
+                    pending.thread_id,
+                    pending.root_thread_id,
+                )
+            }),
+        );
         self.pending_questions = questions
             .into_iter()
             .filter(|pending| {
@@ -2108,6 +2139,7 @@ impl App {
     /// Remove one resolved prompt and immediately expose the next queued
     /// question, if any.
     pub fn question_answered(&mut self, id: &str) {
+        self.waiting.remove(id);
         let resolved_notification = self
             .pending_questions
             .iter()
@@ -2638,8 +2670,92 @@ impl App {
                     || thread.id.to_string().contains(&query)
             })
             .collect();
-        threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        // Chats that wait for a person lead, as Upstream lists them; each
+        // part stays newest first.
+        let waiting = self.waiting_chats();
+        threads.sort_by(|left, right| {
+            waiting
+                .contains_key(&right.id)
+                .cmp(&waiting.contains_key(&left.id))
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
         threads
+    }
+
+    /// The listed chat a waiting request is answered in: the nearest thread
+    /// up its chain that is not a child agent, as Desktop's
+    /// `conversationRoot` finds it (a fork is a chat of its own). A thread
+    /// this client has not listed falls back to the server's root.
+    fn waiting_chat(&self, request: &WaitingRequest) -> ThreadId {
+        let mut id = request.thread_id;
+        for _ in 0..16 {
+            match self.threads.iter().find(|thread| thread.id == id) {
+                Some(thread) if thread.is_subagent => match thread.parent_id {
+                    Some(parent) => id = parent,
+                    None => break,
+                },
+                Some(_) => break,
+                None => return request.root_thread_id.unwrap_or(id),
+            }
+        }
+        id
+    }
+
+    /// What each chat waits on from a person: an approval over a question.
+    pub fn waiting_chats(&self) -> std::collections::HashMap<ThreadId, Waiting> {
+        let mut chats = std::collections::HashMap::new();
+        for request in self.waiting.values() {
+            let kind = chats
+                .entry(self.waiting_chat(request))
+                .or_insert(request.kind);
+            *kind = (*kind).max(request.kind);
+        }
+        chats
+    }
+
+    /// Replace what waits of one kind with the server's complete list.
+    pub(crate) fn hydrate_waiting(
+        &mut self,
+        kind: Waiting,
+        requests: impl IntoIterator<Item = (String, ThreadId, Option<ThreadId>)>,
+    ) {
+        let anchor = self.session_list_anchor();
+        self.waiting.retain(|_, request| request.kind != kind);
+        for (id, thread_id, root_thread_id) in requests {
+            self.waiting.insert(
+                id,
+                WaitingRequest {
+                    thread_id,
+                    root_thread_id,
+                    kind,
+                },
+            );
+        }
+        self.keep_session_list_anchor(anchor);
+    }
+
+    /// The chat under the session list's cursor, so a change that reorders
+    /// the list (a chat starts or stops waiting, or is updated) can keep the
+    /// cursor on it.
+    pub(crate) fn session_list_anchor(&self) -> Option<ThreadId> {
+        if !matches!(self.overlay, Overlay::Threads) {
+            return None;
+        }
+        self.filtered_threads()
+            .get(self.selection)
+            .map(|thread| thread.id)
+    }
+
+    pub(crate) fn keep_session_list_anchor(&mut self, anchor: Option<ThreadId>) {
+        if let Some(id) = anchor
+            && matches!(self.overlay, Overlay::Threads)
+            && let Some(index) = self
+                .filtered_threads()
+                .iter()
+                .position(|thread| thread.id == id)
+        {
+            self.selection = index;
+        }
     }
 
     /// Compact, truthful metadata for a session-list row. Haarness only calls
@@ -2652,10 +2768,24 @@ impl App {
             (current && self.active_turn.is_some()) || self.active_tree_turn_count(thread.id) > 0;
         let language = self.language;
         let mut detail = Vec::new();
+        // What the chat waits for comes first, where truncation never
+        // reaches it, in the words the activity line uses. Its turn is
+        // stopped on the reader, so it says that rather than "working", as
+        // Desktop's waiting rows do.
+        let waiting = self.waiting_chats().get(&thread.id).copied();
+        match waiting {
+            Some(Waiting::Approval) => {
+                detail.push(language.text("waiting for approval").to_owned());
+            }
+            Some(Waiting::Answer) => {
+                detail.push(language.text("waiting for your answer").to_owned());
+            }
+            None => {}
+        }
         if current {
             detail.push(language.text("current").to_owned());
         }
-        if working {
+        if working && waiting.is_none() {
             detail.push(language.text("working").to_owned());
         }
         if thread.archived {
