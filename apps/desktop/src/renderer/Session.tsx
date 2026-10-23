@@ -2904,6 +2904,16 @@ function Permission(props: {
     });
   };
   let allowOnce: HTMLButtonElement | undefined;
+  // Settled already (Auto's reviewer, another window): one quiet line takes
+  // the buttons' place, at their height, until the card goes. No toast: the
+  // person's answer did nothing, and nothing else needs saying.
+  const [settled, setSettled] = createSignal(false);
+  let settledTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(settledTimer));
+  const showSettled = () => {
+    setSettled(true);
+    settledTimer = setTimeout(() => void app.refresh(), SETTLED_NOTE_MS);
+  };
   const decide = (decision: string) => {
     if (answered()) return;
     const connection = app.state.connection!.id;
@@ -2911,21 +2921,16 @@ function Permission(props: {
     setAnswered(true);
     void app.run(async () => {
       try {
-        // Settled already (Auto's reviewer, another window): Once + Auto
-        // still turns Auto on, and one quiet line says the card was answered.
+        // Once + Auto still turns Auto on.
         if (decision === "auto") {
-          if (await app.allowOnceAndAuto(props.permission)) app.notify(t("Already answered"));
+          if (await app.allowOnceAndAuto(props.permission)) return showSettled();
         } else
           await app.api("replyPermission", props.permission.permissionId, {
             decision,
           });
         await app.refresh();
       } catch (error) {
-        if (alreadySettled(error)) {
-          app.notify(t("Already answered"));
-          await app.refresh();
-          return;
-        }
+        if (alreadySettled(error)) return showSettled();
         setAnswered(false);
         app.recordPermissionError(connection, id, error);
         throw error;
@@ -3116,7 +3121,12 @@ function Permission(props: {
           {app.permissionError(props.permission.permissionId)}
         </p>
       </Show>
-      <Show when={explicit()}>
+      <Show when={settled()}>
+        <p class="prompt-actions approval-settled" role="status">
+          {t("Already answered")}
+        </p>
+      </Show>
+      <Show when={explicit() && !settled()}>
         <footer class="prompt-actions">
           <button
             class="ghost"
@@ -3138,7 +3148,7 @@ function Permission(props: {
           </button>
         </footer>
       </Show>
-      <Show when={!explicit()}>
+      <Show when={!explicit() && !settled()}>
         <footer class="prompt-actions">
           {/* At the start, apart from the answers: when Auto turns on and it
               goes, nothing else moves, and its focus passes to Allow once. */}
@@ -3219,6 +3229,8 @@ function chromeRequestText(category: ChromeField) {
       return t("Run scripts on {origin} in Chrome");
   }
 }
+/** How long a card answered elsewhere says so before it goes. */
+const SETTLED_NOTE_MS = 1500;
 /** Enter that confirms an input method's composition belongs to the input method. */
 const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 
