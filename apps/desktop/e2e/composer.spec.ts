@@ -644,6 +644,23 @@ test("a step opened at the end of the chat stays where it was clicked, and follo
     await expect(row.locator(".tool-body")).toHaveCount(0);
     await settle();
     expect(Math.abs((await at()) - before)).toBeLessThan(2);
+
+    // While a reply streams below it, opening it holds it as well: the
+    // stream is not followed past it, and Jump to latest offers the way on.
+    await input.fill("::scrollstream");
+    await input.press("Enter");
+    await expect(transcript).toContainText("STREAM_REFLOW_STAGE_ONE");
+    const streaming = await at();
+    await summary.click();
+    const places: number[] = [];
+    for (let sample = 0; sample < 8; sample++) {
+      await page.waitForTimeout(120);
+      places.push(await at());
+    }
+    await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+    places.push(await at());
+    for (const place of places) expect(Math.abs(place - streaming)).toBeLessThan(2);
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
     expect(errors).toEqual([]);
   } finally {
     await close();
