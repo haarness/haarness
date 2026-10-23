@@ -8,8 +8,9 @@ import { crc32, deflateSync } from "node:zlib";
 
 // An image a reply names by a path in its project shows that file, read
 // through the server, which reads only inside the project; a path out of it,
-// through a link or not, is never shown. The echo provider repeats the
-// message, so a message with `![](out/chart.png)` gets a reply with the image.
+// through a link or not, is never shown, and any image of the conversation
+// opens full size. The echo provider repeats the message, so a message with
+// `![](out/chart.png)` gets a reply with the image.
 // HAARNESS_IMAGE_SCREENSHOTS=<folder> keeps light and dark pictures there.
 test.describe.configure({ mode: "serial" });
 
@@ -234,6 +235,41 @@ test("a reply drawn again shows its image at once, and a changed file shows anew
   await expect
     .poll(() => message.locator("img.project-image-loaded").evaluate((image: HTMLImageElement) => image.naturalWidth))
     .toBe(360);
+  expect(errors).toEqual([]);
+});
+
+test("any image of the conversation opens full size; Esc, a click outside or Close shut it", async () => {
+  const attached = `data:image/png;base64,${png(64, 48, (x) => [x * 4, 120, 200]).toString("base64")}`;
+  const message = await reply("With an attachment: ![Weekly chart](out/chart.png)", [attached]);
+  const viewer = page.locator("dialog.image-viewer");
+  const picture = message.locator("img.project-image-loaded");
+  await picture.click();
+  await expect(viewer).toBeVisible();
+  const full = viewer.locator("img.image-viewer-image");
+  await expect(full).toHaveAttribute("src", (await picture.getAttribute("src"))!);
+  expect(await size(full)).toEqual({ natural: [360, 200], shown: [360, 200] });
+  await pictures(page, "image-viewer");
+
+  // The arrow keys step through the conversation's images: before it, the attachment of its message.
+  await page.keyboard.press("ArrowLeft");
+  await expect(full).toHaveAttribute("src", attached);
+  await page.keyboard.press("ArrowRight");
+  await expect(full).toHaveAttribute("src", (await picture.getAttribute("src"))!);
+  // Esc closes it, and the keyboard is back on the image that opened it.
+  await page.keyboard.press("Escape");
+  await expect(viewer).toHaveCount(0);
+  await expect(picture).toBeFocused();
+  // From the keyboard: Enter opens it, a click outside the image closes it.
+  await page.keyboard.press("Enter");
+  await expect(viewer).toBeVisible();
+  await page.mouse.click(20, 20);
+  await expect(viewer).toHaveCount(0);
+
+  // An attachment opens the same way; Close shuts it.
+  await page.locator(".message.user").last().locator(".attachment-image").click();
+  await expect(full).toHaveAttribute("src", attached);
+  await viewer.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(viewer).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 

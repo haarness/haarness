@@ -23,6 +23,7 @@ import {
   shownProjectImage,
   type ShownImage,
 } from "./project-images";
+import { markOpenImages, openImage } from "./ImageViewer";
 
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
@@ -129,6 +130,7 @@ export function Markdown(props: {
       const load = holder.querySelector<HTMLButtonElement>(".remote-image-load");
       if (load && madeHere(load)) load.disabled = false;
     }
+    if (conversation) markOpenImages(host, t("Image"));
   }
   onCleanup(onImageSettled(settled));
   const imageLabels = () => ({
@@ -155,6 +157,7 @@ export function Markdown(props: {
         if (element.getAttribute("src") !== shown.data) element.src = shown.data;
       } else element.replaceWith(projectImageElement(document, path, element.dataset.projectAlt ?? "", shown.data));
     }
+    markOpenImages(host, t("Image"));
   }
   if (conversation) onCleanup(onProjectImageSettled(projectSettled));
   let host!: HTMLDivElement;
@@ -225,11 +228,24 @@ export function Markdown(props: {
     client.dispose();
     timers.forEach(clearTimeout);
   });
+  /** An image the conversation shows opens full size, unless a modifier asks for the click (a selection). */
+  const opens = (event: MouseEvent | KeyboardEvent) => {
+    const image = (event.target as HTMLElement).closest<HTMLElement>("[data-image-open]");
+    if (!conversation || !image || !host.contains(image) || image.closest("a")) return false;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+    event.preventDefault();
+    openImage(image);
+    return true;
+  };
   return (
     <div
       ref={host}
       class={props.document ? "markdown markdown-document" : "markdown"}
+      onKeyDown={(event) => {
+        if ((event.key === "Enter" || event.key === " ") && !event.repeat) opens(event);
+      }}
       onClick={(event) => {
+        if (opens(event)) return;
         const target = event.target as HTMLElement;
         const load = target.closest<HTMLButtonElement>(".remote-image-load");
         if (load && host.contains(load) && madeHere(load)) {
