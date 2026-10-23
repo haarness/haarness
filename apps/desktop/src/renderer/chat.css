@@ -2248,6 +2248,25 @@ html[dir="rtl"] .tool-target {
 .prompt-actions .prompt-always {
   gap: var(--s1);
 }
+/* The Always slot holds its button and its menu in one place, the unused
+   one unseen, so it is as wide as the wider of the two. */
+.prompt-always-slot {
+  display: inline-grid;
+}
+.prompt-always-slot > * {
+  grid-area: 1 / 1;
+  justify-self: stretch;
+}
+.prompt-always-slot .prompt-always-menu {
+  display: inline-flex;
+}
+.prompt-always-slot .prompt-always-menu > .prompt-always {
+  flex: 1;
+  justify-content: center;
+}
+.prompt-always-slot > .slot-unused {
+  visibility: hidden;
+}
 /* Apart from the answers, so they stay put when it goes. */
 .prompt-actions .prompt-auto {
   margin-inline-end: auto;

@@ -222,6 +222,8 @@ test("a question a hook answered shows its answer and says the hook answered it"
   // included, answers nothing and stays the person's own message (sent as
   // guidance).
   await expect(card.locator(":focus")).toHaveCount(0);
+  // The empty message box says the question waits above it.
+  await expect(box).toHaveAttribute("placeholder", "Answer the question above, or send a message…");
   await box.focus();
   await page.keyboard.type("use bun instead");
   await expect(box).toHaveValue("use bun instead");

@@ -2621,7 +2621,11 @@ export function Session() {
                       ? pickedElements() > 1
                         ? t("Ask about these elements…")
                         : t("Ask about this element…")
-                      : active()
+                      : currentQuestion()
+                        ? // A question waits above: what is typed here is a
+                          // message of its own, not the answer.
+                          t("Answer the question above, or send a message…")
+                        : active()
                         ? t("Send a follow-up message…")
                         : state.selected
                           ? t("Reply, or @ to add files and agents")
@@ -3788,34 +3792,41 @@ function Permission(props: {
             {t("Deny")}
           </button>
           {/* The ways of allowing more than this request share one slot: a
-              menu, or the one way as a button of its own. */}
+              menu, or the one way as a button of its own. Both are always
+              there, one of them unseen, so the slot keeps the wider one's
+              width and the answers never move when Auto comes or goes. */}
           <Show when={props.permission.allowAlways !== false}>
-            <Show
-              when={alwaysChoices().length > 1}
-              fallback={
-                <button
-                  disabled={answered()}
-                  onClick={() => alwaysChoices()[0]?.run?.()}
-                  title={alwaysRules().join("\n") || alwaysChoices()[0]?.detail}
-                >
-                  {alwaysChoices()[0]?.label}
-                </button>
-              }
-            >
-              <MenuButton
-                label={t("Always allow")}
-                content={
-                  <>
-                    {t("Always allow")}
-                    <Icon name="down" size="xs" />
-                  </>
-                }
-                class="prompt-always"
+            <span class="prompt-always-slot">
+              <button
+                classList={{ "slot-unused": alwaysChoices().length > 1 }}
+                aria-hidden={alwaysChoices().length > 1 ? "true" : undefined}
+                tabindex={alwaysChoices().length > 1 ? -1 : undefined}
                 disabled={answered()}
-                title={alwaysRules().join("\n") || t("Always allow")}
-                items={alwaysChoices()}
-              />
-            </Show>
+                onClick={() => alwaysChoices()[0]?.run?.()}
+                title={alwaysRules().join("\n") || alwaysChoices()[0]?.detail}
+              >
+                {t("Always for this folder")}
+              </button>
+              <span
+                class="prompt-always-menu"
+                classList={{ "slot-unused": alwaysChoices().length <= 1 }}
+                aria-hidden={alwaysChoices().length <= 1 ? "true" : undefined}
+              >
+                <MenuButton
+                  label={t("Always allow")}
+                  content={
+                    <>
+                      {t("Always allow")}
+                      <Icon name="down" size="xs" />
+                    </>
+                  }
+                  class="prompt-always"
+                  disabled={answered() || alwaysChoices().length <= 1}
+                  title={alwaysRules().join("\n") || t("Always allow")}
+                  items={alwaysChoices()}
+                />
+              </span>
+            </span>
           </Show>
           <button
             class="primary"
@@ -3902,6 +3913,28 @@ function cardKeyboard(dock: () => HTMLElement | undefined) {
     });
   });
   return (element: HTMLElement) => {
+    // The card itself binds no key; what is typed on it goes to the message
+    // box, where it was meant.
+    element.addEventListener("keydown", (event) => {
+      const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
+      if (
+        event.target !== element ||
+        event.key.length !== 1 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.isComposing ||
+        !box ||
+        box.disabled
+      )
+        return;
+      event.preventDefault();
+      box.focus({ preventScroll: true });
+      if (!document.execCommand("insertText", false, event.key)) {
+        box.setRangeText(event.key, box.selectionStart, box.selectionEnd, "end");
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
     element.addEventListener("focusin", () => (holding = true));
     element.addEventListener("focusout", (event) => {
       // Focus lost with its button (answered, disabled) is still held here.
