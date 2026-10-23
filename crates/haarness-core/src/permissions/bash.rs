@@ -106,6 +106,9 @@ const SHELLS: &[&str] = &[
 /// Paths that name the reading command's own standard input.
 const STDIN_PATHS: &[&str] = &["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
 
+/// How many script files [`script_files`] gathers from one line.
+const MAX_SCRIPT_FILES: usize = 16;
+
 /// Analyze `command` as it would run from `workspace`. Parse failures fall
 /// back to treating the whole command as one opaque pattern (never silently
 /// allowing).
@@ -116,21 +119,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         analysis.unreadable = true;
         return analysis;
     }
-    let mut reader = Reader {
-        workspace,
-        analysis: BashAnalysis::default(),
-        patterns: HashSet::new(),
-        written: HashMap::new(),
-        source: None,
-        readings: HashSet::new(),
-        counts: HashMap::new(),
-        texts: HashSet::new(),
-        read_bytes: 0,
-        nested_commands: 0,
-        pattern_bytes: 0,
-        overflow: false,
-        text_depth: 0,
-    };
+    let mut reader = Reader::new(workspace);
     if !reader.read(command, Depth::default()) {
         return fallback(command);
     }
@@ -189,6 +178,29 @@ struct Reader<'w> {
     overflow: bool,
     /// How many strings deep the text being read is.
     text_depth: u8,
+    /// The script files the line runs, when [`script_files`] asks.
+    scripts: Option<Scripts>,
+}
+
+/// What [`script_files`] gathers from a line as written.
+#[derive(Default)]
+struct Scripts {
+    /// Each script file, with where its word starts in the line.
+    found: Vec<(usize, PathBuf)>,
+    /// Each `cd` (or `pushd`, `popd`, `eval`), in order.
+    moves: Vec<Move>,
+}
+
+/// Where one `cd` in a line moves the shell, for the scripts after it.
+struct Move {
+    /// Where the `cd` starts in the line.
+    at: usize,
+    /// The folder it moves to, or `None` when the line does not say where
+    /// that is (`cd "$dir"`, `cd -`, `popd`, `eval`, a `cd` inside an `if`,
+    /// a loop, a function or a pipeline).
+    to: Option<PathBuf>,
+    /// The end of the subshell it is in, past which it moves nothing.
+    until: Option<usize>,
 }
 
 /// The written command whose standard input a program reads.
@@ -253,6 +265,27 @@ const WORD_KINDS: &[&str] = &[
     "arithmetic_expansion",
 ];
 
+impl<'w> Reader<'w> {
+    fn new(workspace: &'w Path) -> Self {
+        Self {
+            workspace,
+            analysis: BashAnalysis::default(),
+            patterns: HashSet::new(),
+            written: HashMap::new(),
+            source: None,
+            readings: HashSet::new(),
+            counts: HashMap::new(),
+            texts: HashSet::new(),
+            read_bytes: 0,
+            nested_commands: 0,
+            pattern_bytes: 0,
+            overflow: false,
+            text_depth: 0,
+            scripts: None,
+        }
+    }
+}
+
 impl Reader<'_> {
     /// Read one shell program: the command as written (`depth.text` 0) or
     /// text inside it that a shell runs again. False when it does not parse.
@@ -303,6 +336,11 @@ impl Reader<'_> {
         // The traversal above visits parents before children but pops LIFO;
         // sort by position so patterns keep source order.
         command_nodes.sort_by_key(|(node, _)| node.start_byte());
+        if depth.text == 0
+            && let Some(scripts) = &mut self.scripts
+        {
+            scripts.moves = moves(tree.root_node(), command);
+        }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
 
         for (node, parent) in command_nodes {
@@ -635,6 +673,7 @@ impl Reader<'_> {
         match name.as_str() {
             "eval" => self.nested(&joined(arguments), depth),
             "source" | "." => {
+                self.note_script(arguments.first(), depth);
                 let text = match arguments.first() {
                     Some(first) if first.node.kind() == "process_substitution" => {
                         substituted(first.node, source).map_or(Input::Unknown, Input::Text)
@@ -783,10 +822,52 @@ impl Reader<'_> {
                 }
             }
             name if SHELLS.contains(&name) => {
+                self.note_interpreter(name, arguments, depth);
                 self.script(shell_script(arguments, input, source), depth);
+            }
+            name if self.scripts.is_some() => {
+                if interpreter(name).is_some() {
+                    self.note_interpreter(name, arguments, depth);
+                } else if program.value.contains('/') {
+                    // A program run by its path (`./x.sh`, `/tmp/x.sh`).
+                    self.note_script(Some(program), depth);
+                }
             }
             _ => {}
         }
+    }
+
+    /// The script file an interpreter runs (`bash x.sh`, `python3 -u x.py`),
+    /// for [`script_files`].
+    fn note_interpreter(&mut self, name: &str, arguments: &[Word<'_>], depth: Depth) {
+        if self.scripts.is_none() {
+            return;
+        }
+        if let Some(plain) = interpreter(name) {
+            self.note_script(interpreter_script(plain, arguments), depth);
+        }
+    }
+
+    /// A script file the line as written runs, for [`script_files`]: not
+    /// one named inside text a shell runs again (`bash -c 'sh x.sh'`), or by
+    /// a pattern, a variable or standard input.
+    fn note_script(&mut self, word: Option<&Word<'_>>, depth: Depth) {
+        let (Some(scripts), Some(word)) = (&mut self.scripts, word) else {
+            return;
+        };
+        let value = word.value.as_str();
+        if depth.text > 0
+            || !word.literal
+            || value.is_empty()
+            || value == "-"
+            || value.contains(['*', '?', '['])
+            || STDIN_PATHS.contains(&value)
+            || scripts.found.len() >= MAX_SCRIPT_FILES
+        {
+            return;
+        }
+        let file = home_expansion(&word.raw, value).unwrap_or_else(|| PathBuf::from(value));
+        scripts.found.push((word.node.start_byte(), file));
     }
 
     /// A script a program reads, read as a command of its own.
@@ -1054,6 +1135,207 @@ fn shell_script(arguments: &[Word<'_>], input: impl FnOnce() -> Input, source: &
         // A script file, which is not read.
         Some(_) => Input::Unknown,
     }
+}
+
+/// The script files `command` runs from `cwd`, in the order the line names
+/// them: the file an interpreter runs (`bash x.sh`, `sh -e x.sh`,
+/// `python3 -u x.py`, `node x.js`, `perl x.pl`, `ruby x.rb`), the file
+/// `source` or `.` reads, and a program run by its path (`./x.sh`,
+/// `/tmp/x.sh`), also through the wrappers [`analyze`] reads through
+/// (`sudo`, `env`, `timeout`, `nohup` …). A file named relative to the
+/// folder a `cd` earlier in the line moved to is taken from there, and left
+/// out when the line does not say where that is. For the person answering a
+/// permission request only (see `permissions::script`): it decides nothing.
+#[must_use]
+pub fn script_files(command: &str, cwd: &Path) -> Vec<PathBuf> {
+    if command.len() > MAX_COMMAND_BYTES {
+        return Vec::new();
+    }
+    let mut reader = Reader::new(cwd);
+    reader.scripts = Some(Scripts::default());
+    if !reader.read(command, Depth::default()) {
+        return Vec::new();
+    }
+    let Some(Scripts { mut found, moves }) = reader.scripts else {
+        return Vec::new();
+    };
+    found.sort_by_key(|(at, _)| *at);
+    found
+        .into_iter()
+        .filter_map(|(at, file)| {
+            let mut folder = cwd.to_path_buf();
+            if !file.is_absolute() {
+                for step in moves
+                    .iter()
+                    .filter(|step| step.at < at && step.until.is_none_or(|until| at < until))
+                {
+                    folder.push(step.to.as_ref()?);
+                }
+            }
+            Some(folder.join(file))
+        })
+        .collect()
+}
+
+/// Interpreters that run a script file named after their options, with a
+/// test for the options that take no value and run no inline code. Past
+/// any other option (`-c`, `-e`, `-m`, `-W`, `--require`, `-o name` …) the
+/// next word may be the option's value or the code itself, so no script is
+/// claimed. fish's options differ, and are not read.
+fn interpreter(name: &str) -> Option<fn(&str) -> bool> {
+    fn cluster(option: &str, letters: &str) -> bool {
+        option
+            .strip_prefix('-')
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| letters.contains(c)))
+    }
+    match name {
+        "bash" | "sh" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" | "posh" => {
+            Some(|option| {
+                cluster(option, "abefhnuvxC")
+                    || matches!(option, "--norc" | "--noprofile" | "--posix")
+            })
+        }
+        "node" => Some(|option| option == "--no-warnings"),
+        "perl" => Some(|option| cluster(option, "wWTt")),
+        "ruby" => Some(|option| cluster(option, "wW")),
+        name if name
+            .strip_prefix("python")
+            .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.')) =>
+        {
+            Some(|option| cluster(option, "uBEsSOIq"))
+        }
+        _ => None,
+    }
+}
+
+/// The word an interpreter runs as its script: the first after the options
+/// `plain` accepts (and a `--`).
+fn interpreter_script<'s, 't>(
+    plain: fn(&str) -> bool,
+    arguments: &'s [Word<'t>],
+) -> Option<&'s Word<'t>> {
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        let value = word.value.as_str();
+        if !word.literal {
+            return None;
+        }
+        if value == "--" {
+            return words.next();
+        }
+        if !value.starts_with('-') || value == "-" {
+            return Some(word);
+        }
+        if !plain(value) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Each `cd`, `pushd`, `popd` and `eval` in a line as written, in order,
+/// with the folder it moves to where the line says so: a `cd` straight in
+/// the line, or in a `{ … }` group, moves every later command, one in a
+/// subshell (`( … )`, `$( … )`) only the rest of that subshell, and one
+/// anywhere else (an `if`, a loop, a function, a pipeline) an unknown set
+/// of them.
+fn moves(root: tree_sitter::Node<'_>, source: &str) -> Vec<Move> {
+    /// What a `cd` here moves: whether the later commands it reaches are
+    /// known, and the end of the subshell they are in.
+    #[derive(Clone, Copy)]
+    struct Scope {
+        known: bool,
+        until: Option<usize>,
+    }
+    let mut moves = Vec::new();
+    let mut stack = vec![(
+        root,
+        Scope {
+            known: true,
+            until: None,
+        },
+    )];
+    while let Some((node, scope)) = stack.pop() {
+        if node.kind() == "command"
+            && let Some(destination) = movement(node, source)
+        {
+            moves.push(Move {
+                at: node.start_byte(),
+                to: match destination {
+                    Destination::Folder(folder) if scope.known => Some(folder),
+                    _ => None,
+                },
+                until: scope.until,
+            });
+        }
+        let inner = match node.kind() {
+            "program" | "list" | "redirected_statement" | "compound_statement" => scope,
+            "subshell" | "command_substitution" | "process_substitution" => Scope {
+                known: true,
+                until: Some(node.end_byte()),
+            },
+            _ => Scope {
+                known: false,
+                ..scope
+            },
+        };
+        stack.extend(node.children(&mut node.walk()).map(|child| (child, inner)));
+    }
+    moves.sort_by_key(|step| step.at);
+    moves
+}
+
+/// Where a command moves the shell to.
+enum Destination {
+    /// A folder the line names.
+    Folder(PathBuf),
+    /// Somewhere the line does not say.
+    Unknown,
+}
+
+/// Where a command moves the shell to, or `None` when it does not.
+fn movement(node: tree_sitter::Node<'_>, source: &str) -> Option<Destination> {
+    let words = words(node, source);
+    let (program, arguments) = words.split_first()?;
+    if !program.literal {
+        return None;
+    }
+    let name = program_name(&program.value);
+    match name.as_str() {
+        "cd" | "pushd" => {}
+        "popd" | "eval" => return Some(Destination::Unknown),
+        "builtin" | "command" => {
+            return arguments
+                .first()
+                .filter(|word| matches!(word.value.as_str(), "cd" | "pushd" | "popd"))
+                .map(|_| Destination::Unknown);
+        }
+        _ => return None,
+    }
+    let mut rest = arguments.iter().peekable();
+    while let Some(word) =
+        rest.next_if(|word| word.literal && word.value.starts_with('-') && word.value != "-")
+    {
+        if word.value == "--" {
+            break;
+        }
+    }
+    let folder = match rest.next() {
+        None if name == "cd" => haarness_protocol::home_dir(),
+        Some(word)
+            if word.literal
+                && !word.value.is_empty()
+                && word.value != "-"
+                && !(name == "pushd" && word.value.starts_with('+')) =>
+        {
+            Some(
+                home_expansion(&word.raw, &word.value)
+                    .unwrap_or_else(|| PathBuf::from(&word.value)),
+            )
+        }
+        _ => None,
+    };
+    Some(folder.map_or(Destination::Unknown, Destination::Folder))
 }
 
 /// The text `su -c` (or `--command`) runs, wherever the option stands.
@@ -2598,5 +2880,218 @@ mod readings {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// [`script_files`]: which file a command line runs as a script.
+#[cfg(test)]
+mod scripts {
+    use super::*;
+
+    fn cwd() -> PathBuf {
+        PathBuf::from("/project")
+    }
+
+    /// The script files `command` runs from `/project`.
+    fn found(command: &str) -> Vec<String> {
+        script_files(command, &cwd())
+            .into_iter()
+            .map(|file| file.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn first(command: &str) -> Option<String> {
+        found(command).into_iter().next()
+    }
+
+    #[test]
+    fn finds_the_file_an_interpreter_runs() {
+        for (command, file) in [
+            ("bash /tmp/x.sh", "/tmp/x.sh"),
+            ("sh -e x.sh arg", "/project/x.sh"),
+            ("zsh -- x.sh", "/project/x.sh"),
+            ("bash --norc -x x.sh", "/project/x.sh"),
+            ("/bin/bash x.sh", "/project/x.sh"),
+            ("dash x.sh", "/project/x.sh"),
+            ("python3 -u x.py", "/project/x.py"),
+            ("python3.12 x.py", "/project/x.py"),
+            ("python x.py", "/project/x.py"),
+            ("node x.js", "/project/x.js"),
+            ("node --no-warnings x.js", "/project/x.js"),
+            ("perl -w x.pl", "/project/x.pl"),
+            ("ruby x.rb", "/project/x.rb"),
+            ("source env.sh", "/project/env.sh"),
+            (". ./env.sh", "/project/./env.sh"),
+            ("\"bash\" 'my script.sh'", "/project/my script.sh"),
+        ] {
+            assert_eq!(first(command).as_deref(), Some(file), "{command}");
+        }
+    }
+
+    #[test]
+    fn finds_a_script_run_directly_by_its_path() {
+        assert_eq!(first("./x.sh a").as_deref(), Some("/project/./x.sh"));
+        assert_eq!(first("/tmp/x.sh").as_deref(), Some("/tmp/x.sh"));
+        assert_eq!(first("../bin/x").as_deref(), Some("/project/../bin/x"));
+        assert_eq!(first("FOO=1 ./x.sh").as_deref(), Some("/project/./x.sh"));
+    }
+
+    #[test]
+    fn reads_through_the_wrappers() {
+        for command in [
+            "sudo ./x.sh",
+            "sudo -u bob bash x.sh",
+            "timeout 5 bash x.sh",
+            "env FOO=1 bash x.sh",
+            "/usr/bin/env bash x.sh",
+            "nohup ./x.sh &",
+            "nice -n 5 ./x.sh",
+            "exec ./x.sh",
+            "command ./x.sh",
+            "stdbuf -o0 ./x.sh",
+        ] {
+            let file = first(command).unwrap_or_default();
+            assert!(file.ends_with("x.sh"), "{command}: {file}");
+        }
+        // A wrapper run by its path is a wrapper, not a script.
+        assert_eq!(
+            first("/usr/bin/sudo ./x.sh").as_deref(),
+            Some("/project/./x.sh")
+        );
+    }
+
+    #[test]
+    fn claims_nothing_when_the_code_is_inline_or_an_option_may_take_a_value() {
+        for command in [
+            "bash -c 'echo hi'",
+            "bash -lc 'echo hi'",
+            "bash -s x.sh",
+            "bash -o posix x.sh",
+            "python3 -c 'print(1)'",
+            "python3 -m http.server",
+            "python3 -W ignore x.py",
+            "node -e 1",
+            "node --require x y.js",
+            "bash",
+            "python3 -",
+            "bash *.sh",
+            "bash \"$SCRIPT\"",
+            "bash $DIR/x.sh",
+            "bash <(curl -s example.com)",
+            "source /dev/stdin <<<'echo hi'",
+            "fish x.fish",
+        ] {
+            assert_eq!(first(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn claims_nothing_for_a_command_that_runs_no_script() {
+        for command in ["ls -la", "git status", "cat x.sh", "cd sub", "echo ./x.sh"] {
+            assert_eq!(first(command), None, "{command}");
+        }
+        // Text a shell runs again is another shell's business.
+        assert_eq!(first("bash -c 'bash x.sh'"), None);
+        assert_eq!(first("eval ./x.sh"), None);
+    }
+
+    #[test]
+    fn takes_each_script_in_order() {
+        assert_eq!(
+            found("bash a.sh && ./b.sh; python3 c.py"),
+            ["/project/a.sh", "/project/./b.sh", "/project/c.py"]
+        );
+        // A script in a substitution runs too.
+        assert_eq!(found("echo $(./x.sh)"), ["/project/./x.sh"]);
+    }
+
+    #[test]
+    fn follows_a_cd_earlier_in_the_line() {
+        assert_eq!(
+            first("cd sub && bash x.sh").as_deref(),
+            Some("/project/sub/x.sh")
+        );
+        assert_eq!(
+            first("cd sub; ./x.sh").as_deref(),
+            Some("/project/sub/./x.sh")
+        );
+        assert_eq!(
+            first("cd /opt/tools && ./x.sh").as_deref(),
+            Some("/opt/tools/./x.sh")
+        );
+        assert_eq!(
+            first("cd a && cd b && ./x.sh").as_deref(),
+            Some("/project/a/b/./x.sh")
+        );
+        assert_eq!(
+            first("cd -P sub && ./x.sh").as_deref(),
+            Some("/project/sub/./x.sh")
+        );
+        assert_eq!(
+            first("{ cd sub; }; ./x.sh").as_deref(),
+            Some("/project/sub/./x.sh")
+        );
+        assert_eq!(
+            first("pushd sub && ./x.sh").as_deref(),
+            Some("/project/sub/./x.sh")
+        );
+        // In a subshell it moves only the rest of that subshell.
+        assert_eq!(
+            first("(cd sub && ./x.sh)").as_deref(),
+            Some("/project/sub/./x.sh")
+        );
+        assert_eq!(
+            first("(cd sub); ./x.sh").as_deref(),
+            Some("/project/./x.sh")
+        );
+        assert_eq!(
+            first("echo $(cd sub); ./x.sh").as_deref(),
+            Some("/project/./x.sh")
+        );
+        // A cd after the script, or an absolute script, changes nothing.
+        assert_eq!(first("./x.sh; cd sub").as_deref(), Some("/project/./x.sh"));
+        assert_eq!(
+            first("cd \"$X\" && /tmp/x.sh").as_deref(),
+            Some("/tmp/x.sh")
+        );
+        if let Some(home) = haarness_protocol::home_dir() {
+            let home = home.to_string_lossy().into_owned();
+            assert_eq!(first("cd && ./x.sh"), Some(format!("{home}/./x.sh")));
+            assert_eq!(
+                first("cd ~/tools && ./x.sh"),
+                Some(format!("{home}/tools/./x.sh"))
+            );
+            assert_eq!(first("bash ~/x.sh"), Some(format!("{home}/x.sh")));
+        }
+    }
+
+    #[test]
+    fn a_cd_to_somewhere_the_line_does_not_say_hides_a_relative_script() {
+        for command in [
+            "cd \"$DIR\" && ./x.sh",
+            "cd - && ./x.sh",
+            "popd && ./x.sh",
+            "eval \"$MOVE\"; ./x.sh",
+            "if true; then cd sub; fi; ./x.sh",
+            "for d in a; do cd $d; done; ./x.sh",
+            "f() { cd sub; }; f; ./x.sh",
+            "cd sub | cat; ./x.sh",
+            "builtin cd sub && ./x.sh",
+            "command cd sub && ./x.sh",
+            "(if true; then cd sub; fi; ./x.sh)",
+        ] {
+            assert_eq!(first(command), None, "{command}");
+        }
+        // Outside the subshell it was in, an unknown cd moves nothing.
+        assert_eq!(
+            first("(if true; then cd sub; fi); ./x.sh").as_deref(),
+            Some("/project/./x.sh")
+        );
+    }
+
+    #[test]
+    fn a_line_too_long_to_read_runs_no_known_script() {
+        let line = format!("bash x.sh # {}", "a".repeat(MAX_COMMAND_BYTES));
+        assert!(found(&line).is_empty());
     }
 }

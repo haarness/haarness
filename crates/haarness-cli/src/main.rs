@@ -14851,6 +14851,7 @@ request_timeout = 0
             permission_id: "p".into(),
             operation: "cloud:session_create".into(),
             detail: serde_json::Value::Null,
+            script: None,
             permission: "cloud".into(),
             patterns: Vec::new(),
             always_patterns: Vec::new(),
@@ -14882,6 +14883,7 @@ request_timeout = 0
             permission_id: "chrome".into(),
             operation: format!("browser_site:chrome-browsing:{root}:https://mail.example.test"),
             detail: serde_json::Value::Null,
+            script: None,
             permission: "browser_site".into(),
             patterns: vec![format!("chrome-browsing:{root}:https://mail.example.test")],
             always_patterns: vec![format!(
@@ -15057,6 +15059,7 @@ request_timeout = 0
             permission_id: "late".into(),
             operation: "external_directory:/outside".into(),
             detail: serde_json::Value::Null,
+            script: None,
             permission: "external_directory".into(),
             patterns: vec!["/outside".into()],
             always_patterns: vec!["/outside".into()],

@@ -1051,6 +1051,11 @@ pub struct PendingPermissionInfo {
     pub operation: String,
     #[serde(default)]
     pub detail: Value,
+    /// For a `bash` request, the script its command runs (`bash x.sh`,
+    /// `./x.sh`, `source x.sh`), read when it asked, for the person who
+    /// answers. Display only: it changes no pattern or rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<PermissionScript>,
     /// Permission category (bash, edit, external_directory, …).
     #[serde(default)]
     pub permission: String,
@@ -1068,6 +1073,23 @@ pub struct PendingPermissionInfo {
     #[serde(default)]
     pub agent: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// The script file a shell command runs, as the server read it when the
+/// command asked for permission.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionScript {
+    /// The file the command names, as an absolute path (links are followed
+    /// to read it, not here).
+    pub path: String,
+    /// Its text: at most its first 30,000 bytes, with line breaks as `\n`
+    /// and other control characters (tabs aside) and bidirectional controls
+    /// shown as `�`.
+    pub content: String,
+    /// The file goes on past `content`.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// One unanswered model question, listable so clients can hydrate every
@@ -1225,6 +1247,7 @@ pub struct ApiError {
         McpConfigureRequest,
         LoopConfig,
         PendingPermissionInfo,
+        PermissionScript,
         PendingQuestionInfo,
         BackgroundTaskInfo,
         ThreadActivity,
