@@ -847,15 +847,20 @@ fn script_content(payload: &Value) -> Option<String> {
     let script = &payload["script"];
     let path = script["path"].as_str()?;
     let content = script["content"].as_str()?;
-    let mut longest = 0;
-    let mut run = 0;
-    for character in content.chars() {
-        run = if character == '`' { run + 1 } else { 0 };
-        longest = longest.max(run);
-    }
-    let fence = "`".repeat(longest.max(2) + 1);
+    // The longest run of backticks in `text`: a fence or code span one
+    // longer cannot be closed from inside.
+    let longest = |text: &str| {
+        let (mut longest, mut run) = (0, 0);
+        for character in text.chars() {
+            run = if character == '`' { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        longest
+    };
+    let fence = "`".repeat(longest(content).max(2) + 1);
+    let span = "`".repeat(longest(path) + 1);
     let mut text = format!(
-        "Script: {path}\n\n{fence}\n{}\n{fence}",
+        "Script: {span} {path} {span}\n\n{fence}\n{}\n{fence}",
         content.strip_suffix('\n').unwrap_or(content)
     );
     if script["truncated"] == true {
@@ -1340,12 +1345,20 @@ mod tests {
     #[test]
     fn a_shell_request_shows_the_script_its_command_runs() {
         assert_eq!(script_content(&json!({"detail": {"command": "ls"}})), None);
+        // Neither can a backtick in the path close its code span.
+        assert_eq!(
+            script_content(&json!({"script": {"path": "/work/a``b.sh", "content": "x"}}))
+                .unwrap()
+                .lines()
+                .next(),
+            Some("Script: ``` /work/a``b.sh ```")
+        );
         assert_eq!(
             script_content(&json!({"script": {
                 "path": "/work/x.sh", "content": "echo hi\n", "truncated": false,
             }}))
             .as_deref(),
-            Some("Script: /work/x.sh\n\n```\necho hi\n```")
+            Some("Script: ` /work/x.sh `\n\n```\necho hi\n```")
         );
         // A fence inside the script cannot close the block early.
         assert_eq!(
@@ -1354,7 +1367,7 @@ mod tests {
             }}))
             .as_deref(),
             Some(
-                "Script: /work/x.sh\n\n`````\ncat <<'EOF'\n````\nEOF\n`````\n\nOnly the start of the file is shown."
+                "Script: ` /work/x.sh `\n\n`````\ncat <<'EOF'\n````\nEOF\n`````\n\nOnly the start of the file is shown."
             )
         );
     }

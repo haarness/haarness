@@ -166,7 +166,7 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
     }
     Some(Shown {
         script: PermissionScript {
-            path: shown.to_string_lossy().into_owned(),
+            path: displayed(&shown.to_string_lossy()).replace(['\n', '\t'], "\u{FFFD}"),
             content,
             truncated,
         },
@@ -241,15 +241,23 @@ fn complete_utf8(bytes: &[u8]) -> usize {
 
 /// The text as a person may safely read it anywhere: line breaks as `\n`,
 /// and the characters a terminal would take as commands (control characters
-/// other than tab and line feed) or that reorder what is shown
-/// (bidirectional controls) as `�`, so a script cannot hide a line.
+/// other than tab and line feed), that reorder what is shown (bidirectional
+/// controls and marks) or that break a line where nothing shows it (the
+/// Unicode line and paragraph separators) as `�`, so a script cannot hide a
+/// line. The path gets the same, with its tabs and line breaks too.
 fn displayed(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     text.chars()
         .map(|character| match character {
             '\r' => '\n',
             '\t' | '\n' => character,
-            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => '\u{FFFD}',
+            '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{061C}'
+            | '\u{2028}'
+            | '\u{2029}' => '\u{FFFD}',
             character if character.is_control() => '\u{FFFD}',
             character => character,
         })
@@ -529,6 +537,26 @@ mod tests {
         assert_eq!(
             script.content,
             "echo a\necho \u{fffd}[2Kb\necho\tc\u{fffd}d\u{fffd}\n\u{fffe}"
+        );
+        // Direction marks and Unicode line breaks too.
+        fixture.write(
+            "marks.sh",
+            "echo a\u{200e}b\u{200f}c\u{61c}d\u{2028}e\u{2029}f\n",
+        );
+        assert_eq!(
+            bash_script("bash marks.sh", &fixture.0, |_| true)
+                .unwrap()
+                .content,
+            "echo a\u{fffd}b\u{fffd}c\u{fffd}d\u{fffd}e\u{fffd}f\n"
+        );
+        // And the path, line breaks and tabs included.
+        let odd = "odd\u{202e}\nname\t.sh";
+        fixture.write(odd, "echo odd\n");
+        let script = bash_script(&format!("bash '{odd}'"), &fixture.0, |_| true).unwrap();
+        assert!(
+            script.path.ends_with("odd\u{fffd}\u{fffd}name\u{fffd}.sh"),
+            "{}",
+            script.path
         );
         // Bytes that are not UTF-8 read as replacements too.
         fixture.write("latin.sh", b"echo caf\xe9\n");
