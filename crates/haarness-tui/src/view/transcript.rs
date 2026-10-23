@@ -485,6 +485,17 @@ fn rejected_by_user(output: &str) -> bool {
         .starts_with("The user rejected this action")
 }
 
+/// The reason Auto's reviewer gave for blocking a call, when it blocked it
+/// (`metadata.review` of status `blocked`; empty when it gave none).
+fn review_block(metadata: &serde_json::Value) -> Option<&str> {
+    (metadata.pointer("/review/status")?.as_str()? == "blocked").then(|| {
+        metadata
+            .pointer("/review/rationale")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    })
+}
+
 /// A command the person typed in shell mode (`!`), as opposed to one the
 /// agent chose to run.
 fn is_user_shell(call_id: &str) -> bool {
@@ -897,7 +908,10 @@ fn render_tool_result(
     // call the user's stop cancelled, which the row already says.
     if !expanded
         && (folds
-            || (*is_error && (rejected_by_user(output) || output.trim() == "operation cancelled")))
+            || (*is_error
+                && (rejected_by_user(output)
+                    || output.trim() == "operation cancelled"
+                    || review_block(metadata).is_some())))
         && paired_call(app, item, call_id).is_some()
     {
         return;
@@ -1517,6 +1531,16 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Vec::new()
                 };
                 let failed_steps = batch_failures(name, result, &steps);
+                // Auto's reviewer refused the call: like a person's reject,
+                // a decision rather than a failure, with its reason.
+                let blocked = result.and_then(|item| match &item.data {
+                    ItemData::ToolResult {
+                        is_error: true,
+                        metadata,
+                        ..
+                    } => review_block(metadata),
+                    _ => None,
+                });
                 let result_status = result.and_then(|item| match &item.data {
                     ItemData::ToolResult {
                         output, is_error, ..
@@ -1524,6 +1548,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         "cancelled"
                     } else if *is_error && rejected_by_user(output) {
                         "rejected"
+                    } else if blocked.is_some() {
+                        "blocked"
                     } else if *is_error || exit_code.is_some() || failed_steps > 0 {
                         "failed"
                     } else {
@@ -1566,7 +1592,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     && !batch_active
                     && status.is_none()
                     && app.phase.as_ref().is_some_and(|phase| {
-                        phase.state == "tool"
+                        matches!(phase.state.as_str(), "tool" | "reviewing")
                             && phase.call_id.as_deref().is_some_and(|active| {
                                 active != call_id
                                     && crate::state::batch_parent_call(active) != Some(call_id)
@@ -1587,7 +1613,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled" | "rejected") => "  ⊘ ".into(),
+                        Some("cancelled" | "rejected" | "blocked") => "  ⊘ ".into(),
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
@@ -1606,6 +1632,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ),
                     Some(state @ ("cancelled" | "rejected")) => {
                         format!("  {}", app.language.text(state))
+                    }
+                    Some("blocked") => {
+                        let lead = app.language.text("Blocked by Auto review");
+                        match blocked.map(str::trim).filter(|reason| !reason.is_empty()) {
+                            Some(reason) => format!("  {lead}: {}", single_line(reason, 160)),
+                            None => format!("  {lead}"),
+                        }
                     }
                     None if queued => "  queued".to_owned(),
                     _ => String::new(),
@@ -1746,8 +1779,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     && let Some(run_id) = workflow_run_id(arguments, result)
                 {
                     block.push_tagged(row, HitTarget::WorkflowOpen(run_id));
-                } else if let Some(result) =
-                    compact_result.or(result.filter(|_| status == Some("rejected")))
+                } else if let Some(result) = compact_result
+                    .or(result.filter(|_| matches!(status, Some("rejected" | "blocked"))))
                 {
                     block.push_tagged(row, HitTarget::ToolToggle(result.id));
                 } else {
@@ -1791,7 +1824,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     let running = app
                         .phase
                         .as_ref()
-                        .filter(|phase| phase.state == "tool")
+                        .filter(|phase| matches!(phase.state.as_str(), "tool" | "reviewing"))
                         .and_then(|phase| phase.call_id.as_deref())
                         .and_then(|active| active.strip_prefix(call_id.as_str()))
                         .and_then(|rest| rest.strip_prefix(':'))

@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "이 채팅에 추가하지 않고 질문하기",
   "Hide side chat": "사이드 채팅 숨기기",
   "Resize side chat": "사이드 채팅 크기 조절",
-  "This server answers each question on its own": "이 서버는 질문마다 따로 답합니다"
+  "This server answers each question on its own": "이 서버는 질문마다 따로 답합니다",
+  "Auto review": "자동 검토",
+  "Auto review unavailable": "자동 검토를 사용할 수 없음",
+  "Auto review paused": "자동 검토 일시 중지됨",
+  "Blocked by Auto review": "자동 검토가 차단함",
+  "reviewing…": "검토 중…",
+  "Reviewing…": "검토 중…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "자동: 검토 모델이 이 채팅과 에이전트의 일상적인 권한 요청을 한 번 허용하고 나머지는 물어봅니다. 클릭하면 검토로 전환합니다.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "자동: 검토 모델이 여기서 시작하는 새 채팅의 일상적인 권한 요청을 한 번 허용하고 나머지는 물어봅니다. 클릭하면 검토로 전환합니다."
 }

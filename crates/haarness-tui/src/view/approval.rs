@@ -358,6 +358,37 @@ pub fn staged_lead(choice: char, pending: &PendingPermissionInfo) -> &'static st
     }
 }
 
+/// Why Auto's reviewer left the request to a person, in one line: "Auto
+/// review · <rule>: <reason>", or that it was unavailable or paused.
+pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
+    let review = pending.review.as_ref()?;
+    let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Failed => "Auto review unavailable",
+        haarness_protocol::PermissionReviewStatus::Paused => "Auto review paused",
+        _ => "Auto review",
+    };
+    let mut note = language.text(lead).to_owned();
+    if let Some(rule) = review
+        .rule
+        .as_deref()
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
+        note.push_str(" · ");
+        note.push_str(rule);
+    }
+    if let Some(reason) = review
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        note.push_str(": ");
+        note.push_str(reason);
+    }
+    Some(note)
+}
+
 /// The card, fitted to `max_rows` when the terminal is short: rows that only
 /// add detail give way first (the change preview, the spacer, the "always
 /// allows" row, the subject's later rows, the key hints), while the title,
@@ -447,6 +478,9 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let show_scroll =
         !subject_rows.is_empty() && (overflows || expanded) && spend(&mut room, 1) == 1;
     let show_footer = spend(&mut room, footer_rows) == 1;
+    // Why the reviewer asks is worth more than the subject's later rows.
+    let note = review_note(pending, language);
+    let show_note = spend(&mut room, usize::from(note.is_some())) == 1;
     let subject_count = if subject_rows.is_empty() {
         0
     } else {
@@ -552,6 +586,22 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
             ));
             push_row(&mut panel, spans, width, theme, focused);
         }
+    }
+
+    if let Some(note) = note.filter(|_| show_note) {
+        push_row(
+            &mut panel,
+            vec![
+                Span::new(
+                    format!("  {}", single_line(&note, inner.saturating_sub(2))),
+                    theme.muted,
+                )
+                .on(theme.overlay),
+            ],
+            width,
+            theme,
+            focused,
+        );
     }
 
     if change_count > 0 {

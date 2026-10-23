@@ -72,6 +72,7 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 - `haarness --auto` opens the chat in Auto (see above).
 - The status band shows the open chat's mode as `approvals: review` or `approvals: auto` when space permits, and follows a change made from another client. When a chat's mode cannot be read (the server did not answer after a switch), it reads as Review until the server says otherwise, never as the previous chat's mode. A TUI started with `--yolo` shows `approvals: --yolo` instead.
 - `/new` starts the new chat in the open chat's mode.
+- The approval card shows the reviewer's note under the request (`Auto review · <rule>: <reason>`, or that it was unavailable or paused); a blocked call's row reads `⊘ … Blocked by Auto review: <reason>`, as quietly as a reject, and the activity text reads `reviewing…` once a review has taken 800 ms (a quicker one shows only the tool).
 - With an older server, the mode is local to the TUI launch and covers new requests from every chat on that server, as before.
 
 ## Verification commands

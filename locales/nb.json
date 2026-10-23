@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "Spør om denne chatten uten å legge til noe i den",
   "Hide side chat": "Skjul sidechat",
   "Resize side chat": "Endre størrelse på sidechat",
-  "This server answers each question on its own": "Denne serveren svarer på hvert spørsmål for seg"
+  "This server answers each question on its own": "Denne serveren svarer på hvert spørsmål for seg",
+  "Auto review": "Auto-gjennomgang",
+  "Auto review unavailable": "Auto-gjennomgang er ikke tilgjengelig",
+  "Auto review paused": "Auto-gjennomgang er satt på pause",
+  "Blocked by Auto review": "Blokkert av Auto-gjennomgang",
+  "reviewing…": "går gjennom…",
+  "Reviewing…": "Går gjennom…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: En gjennomgangsmodell tillater rutinemessige tillatelsesforespørsler i denne chatten og agentene én gang, og spør deg om resten. Klikk for å bytte til Gjennomgang.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: En gjennomgangsmodell tillater rutinemessige tillatelsesforespørsler i nye chatter her én gang, og spør deg om resten. Klikk for å bytte til Gjennomgang."
 }

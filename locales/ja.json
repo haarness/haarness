@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "このチャットに追加せずに質問する",
   "Hide side chat": "サイドチャットを隠す",
   "Resize side chat": "サイドチャットのサイズを変更",
-  "This server answers each question on its own": "このサーバーは質問を一つずつ個別に答えます"
+  "This server answers each question on its own": "このサーバーは質問を一つずつ個別に答えます",
+  "Auto review": "自動レビュー",
+  "Auto review unavailable": "自動レビューを利用できません",
+  "Auto review paused": "自動レビューは一時停止中",
+  "Blocked by Auto review": "自動レビューがブロック",
+  "reviewing…": "レビュー中…",
+  "Reviewing…": "レビュー中…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "自動: レビューモデルが、このチャットとそのエージェントの定型的な権限リクエストを1回許可し、それ以外は確認します。クリックするとレビューに切り替わります。",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自動: レビューモデルが、ここで始める新しいチャットの定型的な権限リクエストを1回許可し、それ以外は確認します。クリックするとレビューに切り替わります。"
 }

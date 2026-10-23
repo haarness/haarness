@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "詢問此對話，但不加入任何內容",
   "Hide side chat": "隱藏側邊對話",
   "Resize side chat": "調整側邊對話大小",
-  "This server answers each question on its own": "此伺服器會個別回答每個問題"
+  "This server answers each question on its own": "此伺服器會個別回答每個問題",
+  "Auto review": "自動審查",
+  "Auto review unavailable": "自動審查無法使用",
+  "Auto review paused": "自動審查已暫停",
+  "Blocked by Auto review": "已被自動審查封鎖",
+  "reviewing…": "審查中…",
+  "Reviewing…": "審查中…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "自動：審查模型會將此對話及其代理程式的例行權限請求允許一次，其餘會詢問你。點擊切換為審查。",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "自動：審查模型會將此處新對話的例行權限請求允許一次，其餘會詢問你。點擊切換為審查。"
 }

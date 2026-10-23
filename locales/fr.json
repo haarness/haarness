@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "Poser des questions sur cette discussion sans rien y ajouter",
   "Hide side chat": "Masquer la discussion annexe",
   "Resize side chat": "Redimensionner la discussion annexe",
-  "This server answers each question on its own": "Ce serveur répond à chaque question séparément"
+  "This server answers each question on its own": "Ce serveur répond à chaque question séparément",
+  "Auto review": "Revue Auto",
+  "Auto review unavailable": "Revue Auto indisponible",
+  "Auto review paused": "Revue Auto en pause",
+  "Blocked by Auto review": "Bloqué par la revue Auto",
+  "reviewing…": "revue en cours…",
+  "Reviewing…": "Revue en cours…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto : un modèle de revue autorise une fois les demandes d’autorisation courantes de cette discussion et de ses agents, et vous demande pour le reste. Cliquez pour passer en Revue.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto : un modèle de revue autorise une fois les demandes d’autorisation courantes des nouvelles discussions ici, et vous demande pour le reste. Cliquez pour passer en Revue."
 }

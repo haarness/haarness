@@ -2767,5 +2767,13 @@
   "Ask about this chat without adding to it": "Pytaj o ten czat, niczego do niego nie dodając",
   "Hide side chat": "Ukryj czat poboczny",
   "Resize side chat": "Zmień rozmiar czatu pobocznego",
-  "This server answers each question on its own": "Ten serwer odpowiada na każde pytanie osobno"
+  "This server answers each question on its own": "Ten serwer odpowiada na każde pytanie osobno",
+  "Auto review": "Przegląd Auto",
+  "Auto review unavailable": "Przegląd Auto niedostępny",
+  "Auto review paused": "Przegląd Auto wstrzymany",
+  "Blocked by Auto review": "Zablokowane przez przegląd Auto",
+  "reviewing…": "przeglądanie…",
+  "Reviewing…": "Przeglądanie…",
+  "Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.": "Auto: model przeglądający raz zatwierdza rutynowe prośby o uprawnienia w tym czacie i jego agentach, a o resztę pyta ciebie. Kliknij, aby przełączyć na Przegląd.",
+  "Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.": "Auto: model przeglądający raz zatwierdza rutynowe prośby o uprawnienia w nowych czatach tutaj, a o resztę pyta ciebie. Kliknij, aby przełączyć na Przegląd."
 }
