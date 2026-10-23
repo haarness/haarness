@@ -362,13 +362,6 @@ pub fn staged_lead(choice: char, pending: &PendingPermissionInfo, reviewer: bool
     }
 }
 
-/// `text` (a path, an error) set apart from the sentence around it, so a
-/// right-to-left sentence keeps it in one piece and its own punctuation in
-/// place (FSI … PDI).
-fn isolated(text: &str) -> String {
-    format!("\u{2068}{text}\u{2069}")
-}
-
 /// Haarness's own words for a note it wrote itself, by its code, in the
 /// person's language; `None` for the reviewer's own words or a code this
 /// client does not know (its English `rationale` is shown then).
@@ -392,11 +385,7 @@ fn review_reason(
         ReviewReason::NoModel => language
             .text("No model was available to review this request.")
             .into(),
-        ReviewReason::Error { detail } => text(
-            "It could not decide ({detail}).",
-            "detail",
-            &isolated(detail),
-        ),
+        ReviewReason::Error { detail } => text("It could not decide ({detail}).", "detail", detail),
         ReviewReason::Streak { count } => text(
             "It blocked {count} actions in a row, so the rest of this turn is yours to approve.",
             "count",
@@ -410,12 +399,12 @@ fn review_reason(
         ReviewReason::UnnamedDeletion { path } => text(
             "This deletes {path}, outside the project, and your messages do not name it.",
             "path",
-            &isolated(path),
+            path,
         ),
         ReviewReason::UnplacedDeletion { path } => text(
             "This deletes {path}, a path Haarness can't place, and your messages do not name it.",
             "path",
-            &isolated(path),
+            path,
         ),
         ReviewReason::Rated => language
             .text(match review.risk {
@@ -441,8 +430,25 @@ pub(crate) fn review_reason_text(
 ) -> String {
     review_reason(review, language)
         .or_else(|| review.rationale.clone())
-        .map(|reason| reason.trim().to_owned())
+        .map(|reason| plain(reason.trim()))
         .unwrap_or_default()
+}
+
+/// A note's text as the terminal can draw it: no control characters, and no
+/// bidi marks or isolates (U+200E/F, U+202A–E, U+2066–9), which the native
+/// renderer gives a cell each while the terminal gives them none (see
+/// `Language::is_rtl`). The reviewer's words and a command's path can carry
+/// them; Haarness's own notes never add them.
+fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .collect()
 }
 
 /// The reviewer's rule as the note shows it: Haarness's own ("Destructive
@@ -488,7 +494,7 @@ pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Optio
         note.push_str(": ");
         note.push_str(reason);
     }
-    Some(note)
+    Some(plain(&note))
 }
 
 /// The card, fitted to `max_rows` when the terminal is short: rows that only

@@ -19222,6 +19222,89 @@ fn a_lost_server_says_what_this_client_does_about_it() {
 }
 
 #[test]
+fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
+    use haarness_protocol::{PermissionReview, PermissionReviewStatus, ReviewReason};
+    let thread = fixture_thread();
+    let notes = [
+        PermissionReview {
+            status: PermissionReviewStatus::Failed,
+            risk: None,
+            rule: None,
+            rationale: Some("It could not decide (HTTP 500).".into()),
+            reason: Some(ReviewReason::Error {
+                detail: "HTTP 500".into(),
+            }),
+        },
+        PermissionReview {
+            status: PermissionReviewStatus::Asked,
+            risk: None,
+            rule: Some("Destructive action".into()),
+            rationale: Some("This deletes /tmp/cache, outside the project.".into()),
+            reason: Some(ReviewReason::UnnamedDeletion {
+                path: "/tmp/cache".into(),
+            }),
+        },
+        // The reviewer's own words may carry marks; they never reach the grid.
+        PermissionReview {
+            status: PermissionReviewStatus::Asked,
+            risk: None,
+            rule: Some("Shared\u{2067}state\u{2069}".into()),
+            rationale: Some("It pushes \u{202e}to main\u{200f}.".into()),
+            reason: None,
+        },
+    ];
+    for language in [
+        crate::locale::Language::English,
+        crate::locale::Language::Arabic,
+    ] {
+        for (index, review) in notes.iter().enumerate() {
+            let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+            app.language = language;
+            let mut pending = pending_permission_fixture(&thread, "noted");
+            pending.review = Some(review.clone());
+            app.pending_permissions.push(pending);
+            app.permission_focus = true;
+            for width in [100_u32, 60] {
+                let lines = app.lines((width, 40));
+                for line in &lines {
+                    assert!(
+                        line.width() <= width as usize,
+                        "{language:?} {index} {width}: {}",
+                        line.text()
+                    );
+                    assert!(
+                        !line.text().contains([
+                            '\u{200e}', '\u{200f}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}',
+                            '\u{2069}'
+                        ]),
+                        "{language:?} {index}: {:?}",
+                        line.text()
+                    );
+                }
+                let text = lines.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+                // The note as one sentence, across the rows it wraps to.
+                let text = text
+                    .replace('▎', " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if language == crate::locale::Language::English && width == 100 {
+                    let expected = [
+                        "Auto review unavailable: It could not decide (HTTP 500).",
+                        "This deletes /tmp/cache, outside the project, and your messages do not name it.",
+                        "Auto review · Sharedstate: It pushes to main.",
+                    ][index];
+                    assert!(text.contains(expected), "{text}");
+                }
+                if language == crate::locale::Language::Arabic && index == 1 {
+                    assert!(text.contains("/tmp/cache"), "{text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn arabic_placeholder_keeps_the_cursor_out_of_its_text() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
