@@ -447,6 +447,30 @@ mod tests {
         }
     }
 
+    /// `cd lnk/../realdir`: the shell takes the `..` off the folder's name
+    /// and runs the project's `realdir/run.sh`, while the file read through
+    /// the link is the other folder's. Nothing is shown.
+    #[cfg(unix)]
+    #[test]
+    fn a_cd_through_a_linked_folder_and_dot_dot_shows_nothing() {
+        let fixture = Fixture::new();
+        let project = fixture.0.join("project");
+        fixture.write("project/realdir/run.sh", "echo project\n");
+        fixture.write("elsewhere/realdir/run.sh", "echo elsewhere\n");
+        std::fs::create_dir_all(fixture.0.join("elsewhere/inner")).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("elsewhere/inner"), project.join("lnk")).unwrap();
+        let command = "cd lnk/../realdir && sh run.sh";
+        let ran = std::process::Command::new("sh")
+            .args(["-c", command])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "project\n");
+        assert!(bash_script(command, &project, |_| true).is_none());
+        let script = bash_script("cd realdir && sh run.sh", &project, |_| true).unwrap();
+        assert_eq!(script.content, "echo project\n");
+    }
+
     #[test]
     fn never_shows_a_credential_or_what_the_chat_may_not_read() {
         let fixture = Fixture::new();
