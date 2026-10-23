@@ -516,8 +516,17 @@ export function Session() {
   let conversation!: HTMLElement;
 
   /** The new chat a first message is making, which the message box's text
-   * moves to with the view. */
-  let carriedTo: string | undefined;
+   * moves to with the view: the box it moves from and where it lands, by
+   * owner, draft key and stored draft. */
+  let carriedTo:
+    | { from: string; fromKey: string; fromStored: string; to: string; toKey: string; toStored: string }
+    | undefined;
+  /** The chat the message box was drawn for last. */
+  let shownOwner = "";
+  /** Text on its way, by stored draft: it stays stored there (ahead of what
+   * is typed since) until the message has gone, so quitting meanwhile
+   * loses nothing. */
+  const unsent = new Map<string, string>();
   let historyIndex = -1;
   let recalled: PromptHistoryEntry[] = [];
   let savedPrompt: PromptHistoryEntry | undefined;
@@ -1505,10 +1514,24 @@ export function Session() {
       ([, id]) => {
         // Navigation can happen before the typing debounce has saved the draft.
         persistDraft();
-        const carried = carriedTo === owner() ? draft() : undefined;
-        carriedTo = undefined;
-        if (carried !== undefined) change(carried);
-        else setDraft(state.drafts[draftKey()] ?? "");
+        // A first message's new chat takes the box as it is, with what was
+        // typed while the chat was made, and the new-chat page starts empty:
+        // the text is in one place only.
+        const carry = carriedTo?.to === owner() ? carriedTo : undefined;
+        if (carry) {
+          carriedTo = undefined;
+          if (carry.from === shownOwner) {
+            const held = unsent.get(carry.fromStored);
+            if (held !== undefined) {
+              unsent.delete(carry.fromStored);
+              unsent.set(carry.toStored, held);
+            }
+            change(draft());
+            set("drafts", carry.fromKey, "");
+            void app.run(() => window.haarness.storage(carry.fromStored, ""));
+          } else setDraft(state.drafts[draftKey()] ?? "");
+        } else setDraft(state.drafts[draftKey()] ?? "");
+        shownOwner = owner();
         fileDrop.reset();
         const key = draftKey();
         const current = owner();
@@ -1599,7 +1622,9 @@ export function Session() {
     if (project()) {
       set("drafts", draftKey(), text);
       clearTimeout(draftTimer);
-      draftSave = { key: storedDraftKey(), text };
+      const key = storedDraftKey();
+      const held = unsent.get(key);
+      draftSave = { key, text: held === undefined ? text : text.trim() ? held + "\n\n" + text : held };
       draftTimer = setTimeout(persistDraft, 500);
     }
   }
@@ -1652,6 +1677,24 @@ export function Session() {
   const inFlight = new Map<string, Promise<boolean>>();
   const waitingForSend = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
+    // Enter again while a message is on its way sends this one once that
+    // one has gone, however often it is pressed: the box stays editable, so
+    // what is in it then is the next message (a command such as /undo runs
+    // after it too). If that one did not go, its text is back in the box,
+    // and nothing more is sent.
+    if (submitting() && (draft().trim() || attachments().length || app.promptContext().length)) {
+      const pressed = owner();
+      if (waitingForSend.has(pressed)) return;
+      waitingForSend.add(pressed);
+      let went = false;
+      try {
+        went = (await inFlight.get(pressed)) ?? false;
+      } finally {
+        waitingForSend.delete(pressed);
+      }
+      if (!went || owner() !== pressed || submitting()) return;
+      return send(delivery);
+    }
     if (queue.editing()) {
       // A queued message keeps only its pastes and the resources it held
       // among the chips: its edit saves text.
@@ -1733,23 +1776,6 @@ export function Session() {
         change("");
       return;
     }
-    // Enter again while a message is on its way sends this one once that
-    // one has gone, however often it is pressed: the box stays editable, so
-    // what is in it then is the next message. If that one did not go, its
-    // text is back in the box, and nothing more is sent.
-    if (submitting() && (draft().trim() || attachments().length || app.promptContext().length)) {
-      const pressed = owner();
-      if (waitingForSend.has(pressed)) return;
-      waitingForSend.add(pressed);
-      let went = false;
-      try {
-        went = (await inFlight.get(pressed)) ?? false;
-      } finally {
-        waitingForSend.delete(pressed);
-      }
-      if (!went || owner() !== pressed || submitting()) return;
-      return send(delivery);
-    }
     if (
       !project() ||
       !state.ready ||
@@ -1804,6 +1830,8 @@ export function Session() {
     const contextKey = app.draftKey();
     const storedKey = storedDraftKey();
     const keyboard = document.activeElement === composer;
+    // Kept as it was until it has gone (see `change`).
+    unsent.set(storedKey, text);
     setSubmissions((items) => [...items, origin]);
     let landed!: (went: boolean) => void;
     const flight = new Promise<boolean>((done) => (landed = done));
@@ -1855,9 +1883,18 @@ export function Session() {
             app.setPromptContext(sessionKey(connection!, id), context),
           );
           createdOwner = connection + ":" + id;
-          // The view moves to the new chat, and the box goes with it as it
-          // is then, with what was typed while the chat was being made.
-          if (owner() === origin) carriedTo = createdOwner;
+          // The view moves to the new chat (state.tsx gives it the new-chat
+          // draft), and the box goes with it as it is then, with what was
+          // typed while the chat was being made.
+          if (!state.selected)
+            carriedTo = {
+              from: origin,
+              fromKey: contextKey,
+              fromStored: storedKey,
+              to: createdOwner,
+              toKey: sessionKey(connection!, id),
+              toStored: "draft:" + connection + ":" + id,
+            };
           // Commit the destination before removing the persisted starter
           // attachments. A failed disk write must leave the original recoverable.
           void app.run(async () => {
@@ -1880,6 +1917,10 @@ export function Session() {
         delivery,
       );
       sent = true;
+      // Gone: what the box holds now is what its draft keeps.
+      const landedStored = ["draft:" + connection + ":" + threadId, storedKey];
+      for (const key of landedStored) unsent.delete(key);
+      if (draftSave && landedStored.includes(draftSave.key)) draftSave = { key: draftSave.key, text: draft() };
       void app.run(() =>
         history.record(historyKey(connection!), {
           text,
@@ -1929,8 +1970,19 @@ export function Session() {
       setSubmissions((items) =>
         items.filter((item) => item !== origin && item !== createdOwner),
       );
-      // The view has moved to a new chat by now, or never will.
+      // The view has moved to a new chat by now, or never will: then the
+      // text stays on the new-chat page, where it was typed, and the new
+      // chat keeps no copy.
+      if (carriedTo?.to === createdOwner) {
+        const stale = carriedTo;
+        set("drafts", stale.toKey, "");
+        void app.run(() => window.haarness.storage(stale.toStored, ""));
+      }
       carriedTo = undefined;
+      if (!sent) {
+        unsent.delete(storedKey);
+        if (createdOwner) unsent.delete("draft:" + createdOwner);
+      }
       for (const key of [origin, createdOwner]) if (inFlight.get(key) === flight) inFlight.delete(key);
       landed(sent);
       if (!sent) putBack(text, [origin, createdOwner], contextKey, storedKey);

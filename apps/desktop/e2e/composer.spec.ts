@@ -519,7 +519,7 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
 });
 
 test("the message box keeps the keyboard through a send, and what is typed right after Enter is the next message", async ({}, info) => {
-  const { page, errors, close } = await launch(info);
+  const { app, page, errors, close } = await launch(info);
   try {
     const input = page.getByRole("textbox", { name: "Message", exact: true });
     const transcript = page.locator(".transcript");
@@ -576,11 +576,74 @@ test("the message box keeps the keyboard through a send, and what is typed right
     await expect(page.locator(".message.user")).toHaveCount(bubbles);
     await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
     await expect(stop).toBeVisible();
-    // Esc in the empty box stops the work, as Stop does.
+    // A menu of the box takes Esc first: it closes, and the work goes on.
+    await page.getByRole("button", { name: "Attach", exact: true }).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(stop).toBeVisible();
+    // So does the slash list (the box is not empty then).
+    await input.fill("/");
+    await expect(page.locator("#slash-commands")).toBeVisible();
     await input.press("Escape");
-    await expect(page.locator(".turn-stopped")).toBeVisible();
+    await expect(page.locator("#slash-commands")).toHaveCount(0);
+    await expect(stop).toHaveCount(0);
+    await input.fill("");
+    await expect(stop).toBeVisible();
+    // Esc in the empty box stops the work, as Stop does.
+    await input.focus();
+    await input.press("Escape");
+    await expect(page.locator(".turn-stopped")).toHaveCount(1);
     await expect(stop).toHaveCount(0);
     await expect(input).toBeFocused();
+
+    // File → Stop response does the same, and with nothing running nothing.
+    const menuStop = () =>
+      app.evaluate(({ Menu, BrowserWindow }) => {
+        const find = (items: Electron.MenuItem[]): Electron.MenuItem | undefined => {
+          for (const item of items) {
+            if (item.label === "Stop response") return item;
+            const inner = item.submenu ? find(item.submenu.items) : undefined;
+            if (inner) return inner;
+          }
+        };
+        const item = find(Menu.getApplicationMenu()!.items);
+        item?.click(undefined, BrowserWindow.getAllWindows()[0], undefined as never);
+        return item?.accelerator;
+      });
+    expect(await menuStop()).toBe("CmdOrCtrl+.");
+    await page.waitForTimeout(300);
+    await input.fill("!linger 8000 another slow task");
+    await input.press("Enter");
+    await expect(stop).toBeVisible();
+    await menuStop();
+    await expect(page.locator(".turn-stopped")).toHaveCount(2);
+    await expect(stop).toHaveCount(0);
+
+    // A message that cannot go (the chat changed as it was sent) comes back
+    // where it was typed, and the chat does not get it.
+    const chat = page.locator(".sessions").getByRole("button", { name: /first message of the chat/ }).first();
+    await page.getByRole("button", { name: "New chat", exact: true }).click();
+    await input.fill("another chat");
+    await input.press("Enter");
+    await expect(transcript).toContainText("Echo: another chat");
+    await chat.click();
+    await expect(transcript).toContainText("Echo: second message");
+    await input.fill("not lost");
+    await page.evaluate(() => {
+      const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]")!;
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      [...document.querySelectorAll<HTMLElement>(".sessions button")].find((button) => /another chat/.test(button.textContent ?? ""))!.click();
+    });
+    await expect(transcript).toContainText("Echo: another chat");
+    await page.waitForTimeout(500);
+    // Depending on how far it got, it ends quietly or says the chat changed.
+    const dismiss = page.getByRole("button", { name: "Dismiss error", exact: true });
+    if (await dismiss.count()) await dismiss.click();
+    await chat.click();
+    await expect(input).toHaveValue("not lost");
+    await expect(transcript).not.toContainText("Echo: not lost");
+    await input.fill("");
     expect(errors).toEqual([]);
   } finally {
     await close();
