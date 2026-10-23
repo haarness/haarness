@@ -9,6 +9,7 @@ import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-contro
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
 import {
+  alreadySettled,
   autoApproval,
   approveAndEnable,
   canAutoApprove,
@@ -446,12 +447,15 @@ function createApp(saved?: Preferences) {
     });
     await saveApprovalModes();
   }
+  /** Allow `request` once and turn Auto on; true when the request had been
+   * answered already (Auto turns on all the same). */
   async function allowOnceAndAuto(request: T.PendingPermissionInfo) {
     const connection = state.connection?.id;
-    if (!connection || !canAutoApprove(request)) return;
+    if (!connection || !canAutoApprove(request)) return false;
     const revision = approvalRevision;
     const selected = state.selected;
-    await approveAndEnable({
+    return await approveAndEnable({
+      settled: alreadySettled,
       reply: () =>
         window.haarness.api(connection, "replyPermission", [
           request.permissionId,

@@ -130,8 +130,33 @@ test("Allow once + Auto never enables after a failed reply or after navigation/r
   assert.equal(enabled, 0);
   assert.equal(acknowledged, 1);
   current = true;
-  await approveAndEnable({ ...callbacks, reply: async () => {} });
+  assert.equal(await approveAndEnable({ ...callbacks, reply: async () => {} }), false);
   assert.equal(enabled, 1);
+  // Answered already (Auto's reviewer, another window): Auto still turns on,
+  // and the caller hears the request was settled.
+  const { alreadySettled } = await import("../src/renderer/approval-mode");
+  assert.equal(
+    await approveAndEnable({
+      ...callbacks,
+      settled: alreadySettled,
+      reply: async () => {
+        throw Error("not found: permission 0199");
+      },
+    }),
+    true,
+  );
+  assert.equal(enabled, 2);
+  // Any other failure still enables nothing.
+  await assert.rejects(
+    approveAndEnable({
+      ...callbacks,
+      settled: alreadySettled,
+      reply: async () => {
+        throw Error("offline");
+      },
+    }),
+  );
+  assert.equal(enabled, 2);
 });
 
 test("always rules read as plain words, never as stored permission patterns", () => {
@@ -191,13 +216,41 @@ test("the reviewer's note reads as one quiet line, and only for a reviewed reque
     reviewNote({ status: "paused", reason: { code: "streak", count: 3 }, rationale: "English" }, words),
     "«Auto review paused»: «It blocked 3 actions in a row, so the rest of this turn is yours to approve.»",
   );
+  // Haarness's own rule is translated too, and a path or an error keeps its
+  // own direction in the sentence (FSI … PDI).
   assert.equal(
     reviewNote(
       { status: "asked", rule: "Destructive action", reason: { code: "unnamed_deletion", path: "/tmp/x" } },
       words,
     ),
-    "«Auto review» · Destructive action: «This deletes /tmp/x, outside the project, and your messages do not name it.»",
+    "«Auto review» · «Destructive action»: «This deletes \u2068/tmp/x\u2069, outside the project, and your messages do not name it.»",
   );
+  assert.equal(
+    reviewNote(
+      { status: "asked", rule: "Destructive action", reason: { code: "unplaced_deletion", path: "\"$TARGET\"" } },
+      words,
+    ),
+    "«Auto review» · «Destructive action»: «This deletes \u2068\"$TARGET\"\u2069, a path Haarness can't place, and your messages do not name it.»",
+  );
+  assert.equal(
+    reviewNote({ status: "failed", reason: { code: "error", detail: "HTTP 500" } }, words),
+    "«Auto review unavailable»: «It could not decide (\u2068HTTP 500\u2069).»",
+  );
+  // The reviewer's own rule is shown as it wrote it.
+  assert.equal(
+    reviewNote({ status: "asked", rule: "Shared state", rationale: "Pushes to main." }, words),
+    "«Auto review» · Shared state: Pushes to main.",
+  );
+  const { reviewNoteParts } = await import("../src/renderer/approval-mode");
+  assert.deepEqual(
+    reviewNoteParts({ status: "asked", rule: "Shared state", rationale: "Pushes to main." }, t),
+    { lead: "Auto review", rule: "Shared state", reason: "Pushes to main." },
+  );
+  assert.deepEqual(reviewNoteParts({ status: "paused" }, t), {
+    lead: "Auto review paused",
+    rule: undefined,
+    reason: undefined,
+  });
   assert.equal(
     reviewNote({ status: "asked", risk: "critical", reason: { code: "rated" } }, words),
     "«Auto review»: «It rated this action critical risk.»",

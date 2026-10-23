@@ -49,7 +49,7 @@ import {
   autoApprovalHint,
   canAutoApprove,
   describeAlwaysRule,
-  reviewNote,
+  reviewNoteParts,
 } from "./approval-mode";
 import {
   chromeApproval,
@@ -2903,6 +2903,7 @@ function Permission(props: {
       ...Object.fromEntries(Object.entries(value).filter(([key]) => key !== "__browser")),
     });
   };
+  let allowOnce: HTMLButtonElement | undefined;
   const decide = (decision: string) => {
     if (answered()) return;
     const connection = app.state.connection!.id;
@@ -2910,16 +2911,18 @@ function Permission(props: {
     setAnswered(true);
     void app.run(async () => {
       try {
-        if (decision === "auto") await app.allowOnceAndAuto(props.permission);
-        else
+        // Settled already (Auto's reviewer, another window): Once + Auto
+        // still turns Auto on, and one quiet line says the card was answered.
+        if (decision === "auto") {
+          if (await app.allowOnceAndAuto(props.permission)) app.notify(t("Already answered"));
+        } else
           await app.api("replyPermission", props.permission.permissionId, {
             decision,
           });
         await app.refresh();
       } catch (error) {
-        // Settled already (Auto's reviewer, another window): the card goes
-        // with the next read, and there is nothing to report.
         if (alreadySettled(error)) {
+          app.notify(t("Already answered"));
           await app.refresh();
           return;
         }
@@ -3076,8 +3079,28 @@ function Permission(props: {
       </Show>
       {/* Why Auto's reviewer left this to the person: one quiet line, there
           from the card's first paint. */}
-      <Show when={reviewNote(props.review, t)}>
-        {(note) => <p class="approval-review">{note()}</p>}
+      <Show when={reviewNoteParts(props.review, t)}>
+        {(note) => (
+          <p class="approval-review">
+            {note().lead}
+            <Show when={note().rule}>
+              {(rule) => (
+                <>
+                  {" · "}
+                  <bdi>{rule()}</bdi>
+                </>
+              )}
+            </Show>
+            <Show when={note().reason}>
+              {(reason) => (
+                <>
+                  {": "}
+                  <bdi>{reason()}</bdi>
+                </>
+              )}
+            </Show>
+          </p>
+        )}
       </Show>
       <Show when={changes().length}>
         <div class="approval-changes">
@@ -3117,6 +3140,24 @@ function Permission(props: {
       </Show>
       <Show when={!explicit()}>
         <footer class="prompt-actions">
+          {/* At the start, apart from the answers: when Auto turns on and it
+              goes, nothing else moves, and its focus passes to Allow once. */}
+          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+            <button
+              class="prompt-auto"
+              ref={(button) =>
+                onCleanup(() => {
+                  if (document.activeElement === button)
+                    queueMicrotask(() => allowOnce?.focus());
+                })
+              }
+              disabled={answered()}
+              onClick={() => decide("auto")}
+              title={t("Allow this request once and enable Auto for this chat and its agents")}
+            >
+              {t("Allow once + Auto")}
+            </button>
+          </Show>
           <button
             class="ghost"
             disabled={answered()}
@@ -3151,17 +3192,9 @@ function Permission(props: {
               />
             </Show>
           </Show>
-          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
-            <button
-              disabled={answered()}
-              onClick={() => decide("auto")}
-              title={t("Allow this request once and enable Auto for this chat and its agents")}
-            >
-              {t("Allow once + Auto")}
-            </button>
-          </Show>
           <button
             class="primary"
+            ref={allowOnce}
             disabled={answered()}
             onClick={() => decide("once")}
           >

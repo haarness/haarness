@@ -125,10 +125,14 @@ pub(crate) async fn answer_permission(
         )
         .await;
     if let Err(error) = result {
-        // Settled already (Auto's reviewer, another client): the card just
-        // goes, with nothing to report.
-        if crate::api::refusal_status(&error) == Some(reqwest::StatusCode::NOT_FOUND) {
+        // Settled already (Auto's reviewer, another client): the card goes
+        // with one quiet line, and Once + Auto still switches the chat.
+        if crate::api::refusal_code(&error) == Some("not_found") {
             app.permission_answered(&id);
+            if choice == 'u' {
+                app.change_approval_mode(true, client).await;
+            }
+            app.notice = app.language.text("Already answered").into();
             return Ok(());
         }
         // Keep the request visible when a reply fails; never enable Auto on failure.

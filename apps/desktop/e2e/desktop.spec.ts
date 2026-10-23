@@ -4271,11 +4271,26 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     });
   await still();
   const rest = await bottom();
-  await review.click();
+  // Its answers keep their places as Allow once + Auto goes, and a focus on
+  // that button passes to Allow once; the card is the same element, updated.
+  const deny = card.getByRole("button", { name: "Deny", exact: true });
+  const once = card.getByRole("button", { name: "Allow once", exact: true });
+  const across = async () =>
+    Promise.all([deny, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
+  const places = await across();
+  await card.screenshot({ path: test.info().outputPath("auto-review-review-card-light.png") });
+  await card.evaluate((node) => {
+    node.dataset.probe = "kept";
+  });
+  await card.getByRole("button", { name: "Allow once + Auto", exact: true }).focus();
+  await client.setApprovalMode(thread.id, { mode: "auto" });
   await expect(auto).toBeVisible();
   await expect(card.locator(".approval-review")).toHaveText("Auto review is deciding…");
   await still();
   expect(Math.abs((await bottom()) - rest)).toBeLessThan(2);
+  expect(await across()).toEqual(places);
+  await expect(once).toBeFocused();
+  await expect(card).toHaveAttribute("data-probe", "kept");
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");

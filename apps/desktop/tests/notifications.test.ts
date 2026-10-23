@@ -233,7 +233,13 @@ test("notification controls independently govern completion, approvals and quest
 test("a request announced again asks for attention only when it newly needs the person", async () => {
   const f = fixture();
   const request = (eventId: number, review?: Record<string, unknown>, permissionId = "p1") =>
-    f.receive(event({ eventId, type: "permission.requested", payload: { permissionId, review } }));
+    f.receive(
+      event({
+        eventId,
+        type: "permission.requested",
+        payload: { permissionId, review } as EventEnvelope["payload"],
+      }),
+    );
   // Shown in Review: one banner.
   await request(1);
   assert.equal(f.shown.length, 1);

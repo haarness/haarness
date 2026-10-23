@@ -201,7 +201,11 @@ the next prompt starts, or can be answered from another Haarness app; after a
 reconnect or a gap in the event stream, the requests the server holds are read
 again, so one raised or settled meanwhile is not missed. "Allow
 while Haarness is running" is offered only where the request allows more
-than once.
+than once. In a session in Auto, a request Auto's reviewer leaves to a person
+carries its note in the title, and a call it blocks, the session's own or a
+subagent's, live or replayed by `session/load`, reads "Blocked by Auto review:
+<reason>" with the note as its raw output, never the text written for the
+model.
 
 `haarness attach <url>` is the first-class interactive client for an existing
 server; `tui --connect` remains an alias-shaped compatibility entrypoint, and

@@ -602,6 +602,14 @@ test("a call Auto's reviewer refused is told from a person's reject", () => {
   };
   assert.equal(reviewBlock(blocked), "It uploads your SSH key.");
   assert.equal(reviewBlock({ ...blocked, metadata: { review: { status: "blocked" } } }), "");
+  // A reason Haarness wrote is worded by its code, not its English.
+  assert.equal(
+    reviewBlock({
+      ...blocked,
+      metadata: { review: { status: "blocked", risk: "critical", reason: { code: "rated" }, rationale: "English." } },
+    }),
+    "It rated this action critical risk.",
+  );
   // A person's reject, a success, and an older server's results are not blocks.
   assert.equal(
     reviewBlock({ output: "The user rejected this action.", is_error: true, metadata: null }),

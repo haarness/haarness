@@ -7492,6 +7492,141 @@ async fn auto_turning_on_keeps_the_cards_focus_and_a_re_announce_keeps_every_car
     assert_eq!(focused(&app), PermissionChoice::Once);
 }
 
+/// A server that answers each request by its path: `POST
+/// /v1/permissions/…` with `permission`, `PUT …/approval-mode` with Auto.
+/// It hands back the request lines it saw.
+async fn answering_server(
+    thread: ThreadId,
+    permission: &'static str,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let mut expected = None;
+            while expected.is_none_or(|length| request.len() < length) {
+                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if expected.is_none()
+                    && let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    expected = Some(end + 4 + length);
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let line = text.lines().next().unwrap_or_default().to_owned();
+            log.lock().unwrap().push(line.clone());
+            let (status, body) = if line.starts_with("POST /v1/permissions/") {
+                match permission {
+                    "settled" => (
+                        "404 Not Found",
+                        serde_json::json!({"code": "not_found", "message": "not found: permission perm-1", "retryable": false}).to_string(),
+                    ),
+                    _ => ("404 Not Found", "<html>proxy</html>".to_owned()),
+                }
+            } else if line.contains("/approval-mode") {
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "threadId": thread,
+                        "mode": "auto",
+                        "sourceThreadId": thread,
+                        "explicit": true,
+                        "revision": "r2",
+                    })
+                    .to_string(),
+                )
+            } else {
+                ("200 OK", "[]".to_owned())
+            };
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+    (
+        crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap(),
+        seen,
+    )
+}
+
+#[tokio::test]
+async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_auto_on() {
+    let thread = fixture_thread();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    // Allow once on a card the reviewer settled meanwhile.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.approval_server = true;
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-1"));
+    app.permission_focus = true;
+    let (client, seen) = answering_server(thread.id, "settled").await;
+    crate::input::handle_key(&mut app, key(KeyCode::Char('y')), &client)
+        .await
+        .unwrap();
+    assert!(app.pending_permissions.is_empty());
+    assert_eq!(app.notice, "Already answered");
+    assert!(!app.auto_permissions);
+
+    // Once + Auto on one: the card goes and the chat still turns to Auto.
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-2"));
+    app.permission_focus = true;
+    crate::input::handle_key(&mut app, key(KeyCode::Char('u')), &client)
+        .await
+        .unwrap();
+    crate::input::handle_key(&mut app, key(KeyCode::Enter), &client)
+        .await
+        .unwrap();
+    assert!(app.pending_permissions.is_empty());
+    assert!(app.auto_permissions, "{:?}", seen.lock().unwrap());
+    assert_eq!(app.notice, "Already answered");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("PUT ") && line.contains("/approval-mode"))
+    );
+
+    // Any other 404 (an older server, a proxy) is a failure: the card stays.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-3"));
+    app.permission_focus = true;
+    let (client, _) = answering_server(thread.id, "proxy").await;
+    crate::input::handle_key(&mut app, key(KeyCode::Char('y')), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(
+        app.notice.starts_with("Could not answer permission"),
+        "{}",
+        app.notice
+    );
+}
+
 #[tokio::test]
 async fn in_a_chat_already_in_auto_u_types_instead_of_staging_auto() {
     let thread = fixture_thread();
