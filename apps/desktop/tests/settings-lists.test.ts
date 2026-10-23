@@ -60,12 +60,13 @@ test("tools group by source, and built-in tools by the catalog's groups with fam
     tool("memory_save", "native", "", ["memory", "Memory"]),
     tool("memory_list", "native", "", ["memory", "Memory"]),
     tool("agent_manage", "native", "", ["agents", "Agents"]),
+    tool("mcp_manage", "native", "", ["extensions", "Extensions"]),
     ...browser,
   ]);
   assert.deepEqual(
     groups.map((group) => [group.key, group.kind, group.name, group.tools.length]),
     [
-      ["builtin", "builtin", "", 10],
+      ["builtin", "builtin", "", 11],
       ["mcp:docs", "mcp", "docs", 2],
       ["mcp:weather", "mcp", "weather", 1],
       ["extension:lint", "extension", "lint", 1],
@@ -78,6 +79,8 @@ test("tools group by source, and built-in tools by the catalog's groups with fam
       ["builtin/core", "Core", undefined, ["apply_patch", "write"]],
       ["builtin/browser", "Browser", "browser", ["browser_back", "browser_click", "browser_cpu_analyze", "browser_fill", "browser_tabs_open"]],
       ["builtin/agents", "Agents", undefined, ["agent_manage"]],
+      // The tools that manage extensions are not the extensions beside Built-in.
+      ["builtin/extensions", "Manage extensions", undefined, ["mcp_manage"]],
       ["builtin/memory", "Memory", undefined, ["memory_list", "memory_save"]],
     ],
   );

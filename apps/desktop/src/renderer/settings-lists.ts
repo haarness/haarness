@@ -49,8 +49,13 @@ export interface ToolGroup {
   prefix?: string;
 }
 
-/** Groups this size and smaller start open; larger ones start folded. */
+/** Groups this size and smaller start open; larger ones start folded. The
+ * parts of Built-in always start folded, so their headers read as an index. */
 export const OPEN_GROUP_LIMIT = 6;
+/** A catalog group whose title would read as something else here: the
+ * built-in tools that manage MCP servers, plugins and skills are not the
+ * extensions listed beside Built-in. */
+const PART_TITLES: Record<string, string> = { extensions: "Manage extensions" };
 /** Tools of one catalog group sharing a name prefix this often are their own part. */
 const FAMILY_SIZE = 5;
 
@@ -74,7 +79,7 @@ function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
   const buckets = new Map<string, { title: string; tools: ToolCatalogEntry[] }>();
   for (const tool of tools) {
     const key = tool.group || "core";
-    const bucket = buckets.get(key) ?? { title: tool.groupTitle || key, tools: [] };
+    const bucket = buckets.get(key) ?? { title: PART_TITLES[key] ?? (tool.groupTitle || key), tools: [] };
     bucket.tools.push(tool);
     buckets.set(key, bucket);
   }
