@@ -1583,7 +1583,7 @@ function Tools() {
   const expanded = (group: ToolGroup) =>
     needle()
       ? !closedInSearch()[group.key]
-      : (opened()[group.key] ?? group.tools.length <= OPEN_GROUP_LIMIT);
+      : (opened()[group.key] ?? (!group.key.startsWith("builtin/") && group.tools.length <= OPEN_GROUP_LIMIT));
   const toggle = (group: ToolGroup) => {
     const open = !expanded(group);
     if (needle()) setClosedInSearch((state) => ({ ...state, [group.key]: !open }));

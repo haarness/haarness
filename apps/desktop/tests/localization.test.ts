@@ -208,7 +208,7 @@ test("keys translated through a variable are in the catalog", () => {
     // Settings → Tools names the catalog's tool groups (`classify` in
     // haarness-core) and the browser tools' family.
     "Core", "Browser", "Agents", "Planning", "Memory", "Goals", "Cloud agents",
-    "Sessions", "Automation", "Web", "Media", "Extensions",
+    "Sessions", "Automation", "Web", "Media", "Manage extensions",
     // Refusals of a screenshot pick, translated in the main process.
     "The screenshots changed. Open Screenshots again.",
     "Choose up to 20 screenshots from the list.",
