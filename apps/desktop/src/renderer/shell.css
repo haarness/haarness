@@ -329,6 +329,18 @@
   background: var(--sidebar);
   border-radius: 0;
 }
+/* Rows passing under it fade out rather than being cut at a hard edge. The
+   fade fits the gap above a list's first row, so it shows only on rows
+   scrolled under the heading. */
+.project-list .project-row::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  inset-inline: 0;
+  height: var(--s0);
+  background: linear-gradient(var(--sidebar), transparent);
+  pointer-events: none;
+}
 /* Rows brought into view (a chat chosen, a row walked to) stop below it. */
 .project-group .session-row {
   scroll-margin-block: 34px var(--s1);
