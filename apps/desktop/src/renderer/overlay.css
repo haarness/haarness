@@ -1732,14 +1732,25 @@ dialog .notifications {
   flex-direction: column;
   align-items: flex-end;
   gap: var(--s1);
-  flex: none;
+  /* The caption wraps rather than widen the column: the setting's own words
+     keep the room a row's label always has. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(45%, 300px);
 }
 .input-settings-scope {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s1);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 0 var(--s1);
   font-size: var(--ui-sm);
   color: var(--muted);
+  text-align: end;
+}
+.input-settings-scope > button.settings-link {
+  white-space: normal;
+  text-align: end;
 }
 @media (max-width: 650px) {
   /* Stacked, the controls need the row's full gap back, not the tighter one
@@ -1751,6 +1762,14 @@ dialog .notifications {
   }
   .input-settings-controls {
     align-items: flex-start;
+    max-width: none;
+  }
+  .input-settings-scope {
+    justify-content: flex-start;
+    text-align: start;
+  }
+  .input-settings-scope > button.settings-link {
+    text-align: start;
   }
 }
 /* Two or three exclusive choices side by side, one of them chosen. */
