@@ -650,7 +650,20 @@ pub struct ForkThreadRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionReply {
+    /// The answer. `once` allows this call; `always` allows it and what its
+    /// rule covers until the server stops (in this chat only for a Chrome
+    /// site, whose rule names the chat); `always_workspace`
+    /// also persists the rule for this workspace, and `always_repository`
+    /// for every worktree of its Git repository (both act as `always` for a
+    /// request only a person answers); `reject` is a person's no, which also
+    /// rejects the other requests waiting in the same conversation, with
+    /// `feedback` as their words. `refuse` is for unattended runners only
+    /// (a run nobody can answer): it ends this one request, leaves the
+    /// others waiting, and the agent's error is worded as Haarness's, with
+    /// `feedback` as the reason.
     pub decision: PermissionReplyDecision,
+    /// For `reject`, what the person said; for `refuse`, why nobody could
+    /// answer. Ignored for the allowing answers.
     pub feedback: Option<String>,
 }
 
