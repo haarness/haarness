@@ -1054,7 +1054,9 @@ fn selector_footer(app: &App, start: usize, end: usize, total: usize) -> String 
         OptionsKind::ConnectApiKey => {
             language.hints(&["enter connect", "ctrl+u clear", "esc back"])
         }
-        OptionsKind::ConnectMethod => range(&["enter choose", "esc back"]),
+        OptionsKind::ConnectMethod | OptionsKind::SessionActions => {
+            range(&["enter choose", "esc back"])
+        }
         OptionsKind::ConnectProvider => range(&["enter connect", "type to filter"]),
         _ => range(&["\u{2191}\u{2193} navigate", "enter select"]),
     }

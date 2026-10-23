@@ -14714,8 +14714,8 @@ async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_cha
     assert_eq!(session_rows(&app)[2], ("Current chat".into(), "●".into()));
 }
 
-#[test]
-fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
+#[tokio::test]
+async fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
     let now = Utc::now();
     let mut current = fixture_thread();
     current.title = "Current work".into();
@@ -14786,6 +14786,41 @@ fn session_catalog_is_recent_first_truthful_and_exposes_safe_actions() {
         labels.iter().all(|label| !label.contains("Delete")),
         "the reversible API must not imply permanent deletion"
     );
+
+    // ← and Esc back out one level: to the list, on the same session, with
+    // the filter it had.
+    for key in [KeyCode::Left, KeyCode::Esc] {
+        app.open_overlay(crate::state::Overlay::Threads);
+        app.overlay_filter = "re".into();
+        app.selection = app
+            .filtered_threads()
+            .iter()
+            .position(|thread| thread.id == recent.id)
+            .unwrap();
+        app.open_selected_session_actions();
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(key, KeyModifiers::NONE),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(app.overlay, crate::state::Overlay::Threads),
+            "{key:?}"
+        );
+        assert_eq!(app.overlay_filter, "re");
+        assert_eq!(app.filtered_threads()[app.selection].id, recent.id);
+    }
+    // Esc in the list itself closes it.
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
 }
 
 #[tokio::test]
