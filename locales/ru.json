@@ -2774,5 +2774,9 @@
   "not read": "не прочитан",
   "agents · files · resources": "агенты · файлы · ресурсы",
   "files · agents · resources": "файлы · агенты · ресурсы",
-  "Files, agents and resources": "Файлы, агенты и ресурсы"
+  "Files, agents and resources": "Файлы, агенты и ресурсы",
+  "a rule keeps this resource from the model": "правило не допускает модель к этому ресурсу",
+  "did not answer within {seconds} s": "не ответил за {seconds} с",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Этот сервер не может читать ресурсы MCP. Удалите их из сообщения или обновите сервер.",
+  "Sent again as it was read.": "Отправляется снова в том виде, в каком был прочитан."
 }

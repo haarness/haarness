@@ -1,20 +1,22 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page, type Locator } from "@playwright/test";
 import { Haarness } from "@haarness/sdk";
-import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 // `@` mentions of MCP resources: the composer's `@` list asks the project's MCP servers for their resources the
-// first time it opens and reuses the answer, lists them after agents and files with their server, and a pick is a
-// chip that is read by the server when the message is sent, into a block of the sent message (images as
-// attachments, one that cannot be read named in it). Two servers expose the same resources, so each URI is two
-// mentions. A remote project lists and reads them through the same API.
+// first time it opens and reuses the answer, lists them after agents and files with their server (leaving out a
+// server the rules take away), and a pick is a chip that is read by the server when the message is sent, into a
+// block of the sent message (images as attachments, one that cannot be read or that a rule keeps from the chat
+// named in it). Two servers expose the same resources, so each URI is two mentions. Undo and a queued message's
+// edit bring a resource back as a chip holding what was read, sent again without reading. A remote project lists
+// and reads them through the same API.
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page, client: Haarness;
 let temporary: string, workspace: string, binary: string, env: Record<string, string>;
-let thread = "";
+let thread = "", reads = "";
 const errors: string[] = [];
 const fixtures = resolve("../../crates/haarness-mcp/tests/fixtures");
 const shots = process.env.HAARNESS_SCREENSHOTS;
@@ -25,11 +27,23 @@ test.beforeAll(async () => {
   workspace = join(temporary, "workspace");
   await mkdir(join(workspace, ".haarness"), { recursive: true });
   await writeFile(join(workspace, "settings.md"), "A file whose name the `@set` query also finds.\n");
-  const server = { command: "python3", args: [join(fixtures, "resources.py")] };
+  reads = join(temporary, "requests.log");
+  const server = { command: "python3", args: [join(fixtures, "resources.py")], env: { REQUEST_LOG: reads } };
   await writeFile(
     join(workspace, ".haarness/haarness.json"),
-    JSON.stringify({ model: "echo/echo-1", mcp: { docs: server, wiki: server } }, null, 2),
+    JSON.stringify(
+      {
+        model: "echo/echo-1",
+        // `closed` lends the model none of its tools, so none of its resources either; one wiki page is kept from it.
+        permission: { mcp_resource_read: { "wiki:docs://logo": "deny" }, "mcp__closed__*": "deny" },
+        mcp: { docs: server, wiki: server, closed: server },
+      },
+      null,
+      2,
+    ),
   );
+  // A Git project keeps snapshots, which Undo needs.
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: workspace });
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
     ...(process.env as Record<string, string>),
@@ -73,7 +87,7 @@ test.beforeAll(async () => {
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect
     .poll(async () => Object.fromEntries((await client.mcpServers()).map((server) => [server.name, server.status])), { timeout: 30000 })
-    .toEqual({ docs: "connected", wiki: "connected" });
+    .toEqual({ docs: "connected", wiki: "connected", closed: "connected" });
   thread = (await client.createThread({ title: "Resource mentions", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "Resource mentions", exact: true }).click();
 });
@@ -102,6 +116,9 @@ const row = (name: string, server: string) =>
 const chips = () => page.getByLabel("Attached context", { exact: true }).locator(".prompt-context-item");
 const listings = () =>
   app.evaluate(() => ((globalThis as any).apiCalls as string[]).filter((method) => method === "mcpResources").length);
+/** How many resources the MCP servers were asked to read. */
+const readsSoFar = async () =>
+  (await readFile(reads, "utf8").catch(() => "")).split("\n").filter((line) => line === "resources/read").length;
 async function settled() {
   await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
 }
@@ -134,9 +151,11 @@ test("the @ list asks for resources the first time it opens, then lists them aft
   await page.waitForTimeout(500);
   expect(await listings()).toBe(0);
   await input().fill("@");
+  // `closed` is left out: the rules take all its tools, and so its resources, away.
   await expect(rows()).toHaveCount(4);
+  await expect(rows().locator(".mention-kind", { hasText: "closed" })).toHaveCount(0);
   // One listing per connected server, asked at once.
-  expect(await listings()).toBe(2);
+  expect(await listings()).toBe(3);
   await expect(row("setup", "docs")).toContainText("Setup guide");
   await expect(row("setup", "docs").locator(".mention-kind")).toHaveText("docs");
   await expect(row("logo", "wiki").locator("small").first()).toHaveText("docs://logo");
@@ -163,7 +182,7 @@ test("the @ list asks for resources the first time it opens, then lists them aft
   await page.locator(".sessions").getByRole("button", { name: "Other chat", exact: true }).click();
   await input().fill("@lo");
   await expect(rows()).toHaveCount(2);
-  expect(await listings()).toBe(2);
+  expect(await listings()).toBe(3);
   await input().fill("");
   await client.updateThread(other.id, { archived: true });
   await page.locator(".sessions").getByRole("button", { name: "Resource mentions", exact: true }).click();
@@ -234,12 +253,14 @@ test("a picked resource is a chip that the server reads when the message is sent
   await expect(chips()).toHaveCount(0);
 });
 
-test("an image resource is attached, and one its server cannot read is named in the message", async () => {
+test("an image resource is attached, and one its server cannot read or a rule keeps is named in the message", async () => {
   await input().fill("Look @logo");
   await row("logo", "docs").click();
   await input().pressSequentially("@set");
   await row("setup", "wiki").click();
-  await expect(chips()).toHaveCount(2);
+  await input().pressSequentially("@logo");
+  await row("logo", "wiki").click();
+  await expect(chips()).toHaveCount(3);
   // The wiki server is gone by the time the message is sent.
   await client.disconnectMcp("wiki");
   await input().press("Enter");
@@ -249,21 +270,81 @@ test("an image resource is attached, and one its server cannot read is named in 
   expect(message.attachments).toHaveLength(1);
   expect(message.attachments![0]).toMatch(/^data:image\/png/);
   expect(message.text).toContain("<summary>MCP resource: logo · docs:docs://logo</summary>\n\n```\n[image/png attachment: docs://logo]\n```");
-  expect(message.text).toContain("<summary>MCP resource: setup · wiki:docs://setup (not read)</summary>\n\n```\nCould not read MCP resource wiki:docs://setup: ");
+  expect(message.text).toContain("<summary>MCP resource: setup · wiki:docs://setup (not read)</summary>\n\n```\nMCP server wiki is not connected\n```");
+  expect(message.text).toContain("<summary>MCP resource: logo · wiki:docs://logo (not read)</summary>\n\n```\na rule keeps this resource from the model\n```");
   const bubble = page.locator(".transcript .message.user").last();
   const unread = bubble.locator(".sent-resource.failed");
-  await expect(unread).toHaveCount(1);
-  await expect(unread.locator(".sent-resource-unread")).toContainText("@setup");
-  await expect(unread.locator(".sent-resource-unread")).toContainText("not read");
-  await expect(unread.locator(".sent-resource-reason")).toHaveText(
-    "Could not read MCP resource wiki:docs://setup: MCP server wiki is not connected",
-  );
+  await expect(unread).toHaveCount(2);
+  await expect(unread.locator(".sent-resource-unread").first()).toContainText("@setup");
+  await expect(unread.locator(".sent-resource-unread").first()).toContainText("not read");
+  // The reason alone: the row already names the resource.
+  await expect(unread.locator(".sent-resource-reason")).toHaveText([
+    "MCP server wiki is not connected",
+    "a rule keeps this resource from the model",
+  ]);
+  await expect(page.locator(".permission")).toHaveCount(0);
   await expect(bubble.locator(".sent-resource:not(.failed) .sent-resource-label > span")).toHaveText("@logo");
   // A quiet line in the message, never a dialog or a banner.
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(page.locator(".error-banner")).toHaveCount(0);
   await pictures(bubble, "resource-not-read");
   await client.reconnectMcp("wiki");
+});
+
+test("Undo brings a resource back as a chip holding what was read, sent again without reading it", async () => {
+  await settled();
+  await input().fill("Undo me @set");
+  await row("setup", "docs").click();
+  await input().press("Enter");
+  await expect.poll(async () => (await sent()).at(-1)?.text.startsWith("Undo me")).toBe(true);
+  await settled();
+  const count = (await sent()).length;
+  const sentBefore = (await sent()).at(-1)!.text;
+  const before = await readsSoFar();
+  await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Undo last turn", exact: true }).click();
+  await expect(input()).toHaveValue("Undo me");
+  await expect(chips()).toHaveCount(1);
+  await expect(chips().locator("summary")).toHaveText("@setup");
+  await chips().locator("summary").click();
+  await expect(chips().locator(".prompt-context-preview pre")).toHaveText("# Setup\nRun the fixture.");
+  await expect(chips().locator(".prompt-context-preview")).toContainText("Sent again as it was read.");
+  await pictures([chips().locator(".prompt-context-preview"), page.locator(".composer")], "resource-chip-undone");
+  await page.keyboard.press("Escape");
+  await input().press("Enter");
+  // The undone message is gone, and the one sent in its place is the same.
+  await expect.poll(async () => (await sent()).length).toBe(count);
+  await expect.poll(async () => (await sent()).at(-1)?.text).toBe(sentBefore);
+  await settled();
+  expect(await readsSoFar()).toBe(before);
+});
+
+test("a queued message's edit keeps its resource as a chip and offers no new ones", async () => {
+  await settled();
+  await input().fill("!linger 15000 slow work");
+  await input().press("Enter");
+  await expect(page.locator(".composer")).toHaveClass(/running/);
+  await input().fill("Queued note @set");
+  await row("setup", "docs").click();
+  await input().press("Alt+Enter");
+  const queued = page.locator(".input-queue-row").first();
+  await expect(queued.locator(".input-queue-text")).toHaveText("Queued note · @setup");
+  await queued.getByRole("button", { name: "Edit queued message" }).click();
+  await expect(input()).toHaveValue("Queued note");
+  await expect(chips()).toHaveCount(1);
+  await expect(chips().locator("summary")).toHaveText("@setup");
+  // Saving keeps text only, so no new resource is offered meanwhile.
+  await input().fill("Queued note, edited @set");
+  await expect(list().or(page.getByRole("listbox", { name: "Files and agents", exact: true }))).toBeVisible();
+  await expect(page.locator('.mention-options [role="option"][data-kind="resource"]')).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await input().fill("Queued note, edited");
+  await page.getByRole("button", { name: "Save queued message", exact: true }).click();
+  await expect(queued.locator(".input-queue-text")).toHaveText("Queued note, edited · @setup");
+  const pending = (await client.inputQueue(thread)).items[0];
+  expect(pending.text).toContain("<summary>MCP resource: setup · docs:docs://setup</summary>\n\n```\n# Setup\nRun the fixture.\n```");
+  await page.getByRole("button", { name: "Stop response", exact: true }).click().catch(() => {});
+  await settled();
 });
 
 test("a remote project lists and reads resources through the same API", async () => {

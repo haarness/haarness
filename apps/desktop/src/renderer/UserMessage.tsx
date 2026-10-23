@@ -12,7 +12,7 @@ import {
 import { Markdown } from "./Markdown";
 import { Icon } from "./icons";
 import { Button } from "./ui";
-import { pasteLabel } from "./PromptContext";
+import { pasteLabel, unreadReason } from "./PromptContext";
 import { commandPrompt, countLines, sentParts, type SentPart } from "./prompt-context";
 import { isOpen, setOpen } from "./disclosure";
 import "./user-message.css";
@@ -47,7 +47,7 @@ function SentResource(props: {
               {label()}
               <small>{t("not read")}</small>
             </div>
-            <p class="sent-resource-reason">{props.part.content}</p>
+            <p class="sent-resource-reason">{unreadReason(props.part.content)}</p>
           </>
         }
       >

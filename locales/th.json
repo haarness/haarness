@@ -2774,5 +2774,9 @@
   "not read": "อ่านไม่ได้",
   "agents · files · resources": "เอเจนต์ · ไฟล์ · ทรัพยากร",
   "files · agents · resources": "ไฟล์ · เอเจนต์ · ทรัพยากร",
-  "Files, agents and resources": "ไฟล์ เอเจนต์ และทรัพยากร"
+  "Files, agents and resources": "ไฟล์ เอเจนต์ และทรัพยากร",
+  "a rule keeps this resource from the model": "กฎกันทรัพยากรนี้ไว้จากโมเดล",
+  "did not answer within {seconds} s": "ไม่ตอบกลับภายใน {seconds} วินาที",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "เซิร์ฟเวอร์นี้อ่านทรัพยากร MCP ไม่ได้ นำออกจากข้อความ หรืออัปเดตเซิร์ฟเวอร์",
+  "Sent again as it was read.": "ส่งอีกครั้งตามที่อ่านไว้"
 }

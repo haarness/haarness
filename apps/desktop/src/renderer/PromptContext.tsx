@@ -22,16 +22,19 @@ import {
   mentionAgents,
   pasteSize,
   RESOURCE_MENTIONS,
+  sentParts,
   type PromptContext,
   type ResourceContext,
 } from "./prompt-context";
 import { shortPage, type ElementContext } from "./element-context";
 import {
-  cachedResources,
   listResources,
+  resourceEntry,
   searchResources,
+  type Entry,
   type ResourceOption,
 } from "./resource-mentions";
+import type * as T from "@haarness/sdk";
 import "./prompt-context.css";
 
 type Option =
@@ -70,8 +73,21 @@ function chipTitle(item: PromptContext) {
     .filter(Boolean)
     .join("\n");
 }
-/** A mentioned resource: what it is and where the server reads it from. */
+/** Why the server left a mentioned resource unread, in the person's
+ * language when Haarness wrote the reason (an MCP server's own words stay
+ * as they are). */
+export function unreadReason(reason: string) {
+  if (reason === "a rule keeps this resource from the model") return t("a rule keeps this resource from the model");
+  const late = /^did not answer within (\d+) s$/.exec(reason);
+  return late ? t("did not answer within {seconds} s", { seconds: late[1] }) : reason;
+}
+/** A mentioned resource: what it is and where the server reads it from;
+ * one brought back from a sent message, what was read then. */
 function ResourcePreview(props: { item: ResourceContext }) {
+  const read = () => {
+    const part = props.item.block === undefined ? undefined : sentParts(props.item.block)[0];
+    return part?.kind === "resource" ? part : undefined;
+  };
   return (
     <>
       <small>{t("MCP resource · {server}", { server: props.item.server })}</small>
@@ -85,9 +101,28 @@ function ResourcePreview(props: { item: ResourceContext }) {
           <dd dir="auto">{props.item.description}</dd>
         </Show>
       </dl>
-      <p class="prompt-context-note">
-        {t("Read from {server} when the message is sent.", { server: props.item.server })}
-      </p>
+      <Show
+        when={read()}
+        fallback={
+          <p class="prompt-context-note">
+            {t("Read from {server} when the message is sent.", { server: props.item.server })}
+          </p>
+        }
+      >
+        {(part) => (
+          <Show
+            when={!part().failed}
+            fallback={
+              <p class="prompt-context-note">
+                {t("not read")}: {unreadReason(part().content)}
+              </p>
+            }
+          >
+            <pre>{part().content}</pre>
+            <p class="prompt-context-note">{t("Sent again as it was read.")}</p>
+          </Show>
+        )}
+      </Show>
     </>
   );
 }
@@ -125,6 +160,12 @@ export function PromptContextControls(props: {
   /** Text into the message box at its caret, as typing it would. */
   insert: (text: string) => void;
   disabled: boolean;
+  /** Whether new MCP resources may be picked (not while a queued message,
+   * whose edit saves text only, is edited). */
+  resources?: boolean;
+  /** The chat (or, before one exists, the agent) whose rules decide which
+   * servers' resources are left out. */
+  chat?: { threadId?: string; agent?: string };
 }) {
   const app = useApp();
   const [caret, setCaret] = createSignal(0),
@@ -140,28 +181,38 @@ export function PromptContextControls(props: {
   const open = () =>
     !!mention() && dismissed() !== signature() && !props.disabled;
   /** The connection's MCP resources, asked for the first time `@` opens
-   * there (`resource-mentions.ts`); an older server reads none. */
-  const [resources, setResources] = createSignal<{ connection: string; list: ResourceOption[] }>();
+   * there (`resource-mentions.ts`), and the servers this chat's rules take
+   * away; an older server reads none. */
+  const [resources, setResources] = createSignal<{ connection: string; entry: Entry; off: Set<string> }>();
   const offersResources = () =>
-    !!app.state.connection?.info.capabilities.includes(RESOURCE_MENTIONS);
-  // Only opening the list (or a project switch) asks; typing in it does not.
+    props.resources !== false && !!app.state.connection?.info.capabilities.includes(RESOURCE_MENTIONS);
+  // Only opening the list (or a project or chat switch) asks; typing in it does not.
   const opened = createMemo(open);
   createEffect(() => {
     const connection = app.state.connection?.id;
+    const chat = props.chat ?? {};
     if (!opened() || !connection || !offersResources()) return;
-    void cachedResources(connection, () => listResources(connection))
-      .then((list) => {
-        // An answer for a project left meanwhile waits in the cache.
+    void window.haarness
+      .api<T.McpServerInfo[]>(connection, "mcpServers", [chat])
+      .then((servers) => {
+        // An answer for a project left meanwhile is not shown.
         if (app.state.connection?.id !== connection) return;
-        if (resources()?.connection === connection && resources()?.list === list) return;
-        setResources({ connection, list });
+        setResources({
+          connection,
+          entry: resourceEntry(connection, (add) => listResources(connection, servers, add)),
+          off: new Set(servers.filter((server) => server.turnedOff).map((server) => server.name)),
+        });
       })
       .catch(() => undefined);
   });
-  const resourceRows = (query: string): Option[] => {
+  const shownResources = () => {
     const known = resources();
-    if (!known || known.connection !== app.state.connection?.id) return [];
-    return searchResources(query, known.list).map((item) => ({ kind: "resource" as const, ...item }));
+    return known && known.connection === app.state.connection?.id && offersResources() ? known : undefined;
+  };
+  const resourceRows = (query: string): Option[] => {
+    const known = shownResources();
+    if (!known) return [];
+    return searchResources(query, known.entry.rows(), known.off).map((item) => ({ kind: "resource" as const, ...item }));
   };
   const options = (): Option[] => {
     if (!open()) return [];
@@ -491,7 +542,7 @@ export function PromptContextControls(props: {
             id="prompt-mentions"
             role="listbox"
             aria-label={
-              resources()?.connection === app.state.connection?.id && resources()?.list.length
+              shownResources()?.entry.rows().length
                 ? t("Files, agents and resources")
                 : t("Files and agents")
             }

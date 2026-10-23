@@ -2774,5 +2774,9 @@
   "not read": "未读取",
   "agents · files · resources": "智能体 · 文件 · 资源",
   "files · agents · resources": "文件 · 智能体 · 资源",
-  "Files, agents and resources": "文件、智能体与资源"
+  "Files, agents and resources": "文件、智能体与资源",
+  "a rule keeps this resource from the model": "规则禁止模型使用此资源",
+  "did not answer within {seconds} s": "{seconds} 秒内未响应",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "此服务器无法读取 MCP 资源。请将其从消息中移除，或更新服务器。",
+  "Sent again as it was read.": "按读取时的内容再次发送。"
 }

@@ -2774,5 +2774,9 @@
   "not read": "not read",
   "agents · files · resources": "agents · files · resources",
   "files · agents · resources": "files · agents · resources",
-  "Files, agents and resources": "Files, agents and resources"
+  "Files, agents and resources": "Files, agents and resources",
+  "a rule keeps this resource from the model": "a rule keeps this resource from the model",
+  "did not answer within {seconds} s": "did not answer within {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "This server cannot read MCP resources. Remove them from the message, or update the server.",
+  "Sent again as it was read.": "Sent again as it was read."
 }

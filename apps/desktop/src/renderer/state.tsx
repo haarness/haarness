@@ -1809,7 +1809,7 @@ function createApp(saved?: Preferences) {
     const resources = resourceMentions(context);
     if (resources.length && !state.connection?.info.capabilities.includes(RESOURCE_MENTIONS))
       throw new Error(
-        "This server cannot read MCP resources. Remove them from the message, or update the server.",
+        t("This server cannot read MCP resources. Remove them from the message, or update the server."),
       );
     const mentioned = resources.length ? { resources } : {};
     // Resolve against this captured project immediately before admission.
