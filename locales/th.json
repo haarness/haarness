@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "พับคำสั่งและผลลัพธ์เครื่องมือไว้จนกว่าคุณจะเปิด",
   "Keep long lines within the editor width.": "ตัดบรรทัดยาวให้อยู่ภายในความกว้างของตัวแก้ไข",
   "Keyboard shortcuts": "ทางลัดแป้นพิมพ์",
+  "Shortcuts not applied: {names} · /keybinds": "ปุ่มลัดที่ไม่ได้ใช้: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "ภาษา",
   "Language changes the interface only. English is the default.": "เปลี่ยนเฉพาะภาษาอินเทอร์เฟซ ภาษาเริ่มต้นคือภาษาอังกฤษ",

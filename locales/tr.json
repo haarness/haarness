@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "Komutları ve araç çıktılarını açılana kadar daraltılmış tut.",
   "Keep long lines within the editor width.": "Uzun satırları düzenleyici genişliğine sığdır.",
   "Keyboard shortcuts": "Klavye kısayolları",
+  "Shortcuts not applied: {names} · /keybinds": "Uygulanmayan kısayollar: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "Dil",
   "Language changes the interface only. English is the default.": "Yalnızca arayüzü değiştirir. Varsayılan dil İngilizcedir.",

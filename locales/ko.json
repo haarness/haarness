@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "명령과 도구 출력을 열 때까지 접어 둡니다.",
   "Keep long lines within the editor width.": "긴 줄을 편집기 너비에 맞춥니다.",
   "Keyboard shortcuts": "키보드 단축키",
+  "Shortcuts not applied: {names} · /keybinds": "적용되지 않은 단축키: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "언어",
   "Language changes the interface only. English is the default.": "인터페이스 언어만 변경합니다. 기본 언어는 영어입니다.",

@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "命令和工具輸出保持摺疊，直到你展開它們。",
   "Keep long lines within the editor width.": "將長行限制在編輯器寬度內。",
   "Keyboard shortcuts": "鍵盤快速鍵",
+  "Shortcuts not applied: {names} · /keybinds": "未套用的快捷鍵：{names} · /keybinds",
   "LSP": "LSP",
   "Language": "語言",
   "Language changes the interface only. English is the default.": "僅變更介面語言。預設語言為英語。",

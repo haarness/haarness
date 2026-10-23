@@ -677,6 +677,9 @@ pub struct App {
     pub(crate) pending_server: Option<Box<crate::servers::Connection>>,
     pub(crate) original_client: Option<crate::api::ApiClient>,
     pub(crate) keybindings: std::collections::BTreeMap<String, String>,
+    /// Shortcut settings left out at launch (unknown, unbindable, or a key
+    /// taken by another shortcut), said once on the status line.
+    pub(crate) keybindings_skipped: Vec<String>,
     pub(crate) management: crate::management::Management,
     pub(crate) connect: crate::connect::ConnectFlow,
     /// `/remote-control`: whether this chat is shared through Haarness Cloud.
@@ -1031,6 +1034,7 @@ impl App {
         providers: Vec<ProviderInfo>,
         agents: Vec<AgentProfile>,
     ) -> Self {
+        let (keybindings, keybindings_skipped) = crate::keybindings::load();
         let agent_index = agents
             .iter()
             .position(|agent| agent.id == thread.agent)
@@ -1135,7 +1139,8 @@ impl App {
             side: crate::side_chat::SideChats::default(),
             pending_server: None,
             original_client: None,
-            keybindings: crate::keybindings::load().unwrap_or_default(),
+            keybindings,
+            keybindings_skipped,
             model_favorites: crate::config::load_state().model_favorites,
             model_recents: crate::config::load_state().model_recents,
             theme: Theme::default(),

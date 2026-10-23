@@ -127,6 +127,7 @@
   "Keep commands and tool output folded until you open them.": "コマンドとツール出力を、開くまで折りたたみます。",
   "Keep long lines within the editor width.": "長い行をエディターの幅に収めます。",
   "Keyboard shortcuts": "キーボードショートカット",
+  "Shortcuts not applied: {names} · /keybinds": "適用されなかったショートカット: {names} · /keybinds",
   "LSP": "LSP",
   "Language": "言語",
   "Language changes the interface only. English is the default.": "表示言語のみを変更します。既定は英語です。",
