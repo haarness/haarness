@@ -1084,18 +1084,29 @@ pub(crate) fn editor_rows(
             display.push((String::new(), cursor_here.then_some(0)));
             continue;
         }
+        // Rows break after the last space that fits, as prose wraps; a word
+        // longer than a row (a path, a URL) breaks where it reaches the edge.
+        // Every byte stays in exactly one row, so the cursor maps exactly.
         let mut start = 0;
         let mut cells = 0;
+        let mut after_space: Option<(usize, usize)> = None;
         for (index, character) in row.char_indices() {
             let character_width = character.width().unwrap_or(0);
-            if index > start && cells + character_width > inner_width {
-                let segment = row[start..index].to_owned();
-                let holds_cursor = cursor_here && cursor_byte >= start && cursor_byte < index;
+            while index > start && cells + character_width > inner_width {
+                let (cut, cut_cells) = after_space
+                    .take()
+                    .filter(|(cut, _)| *cut > start)
+                    .unwrap_or((index, cells));
+                let segment = row[start..cut].to_owned();
+                let holds_cursor = cursor_here && cursor_byte >= start && cursor_byte < cut;
                 display.push((segment, holds_cursor.then(|| cursor_byte - start)));
-                start = index;
-                cells = 0;
+                start = cut;
+                cells -= cut_cells;
             }
             cells += character_width;
+            if character == ' ' {
+                after_space = Some((index + 1, cells));
+            }
         }
         {
             let end = row.len();
@@ -1116,11 +1127,21 @@ pub(crate) fn editor_rows(
 
     let mut lead = lead;
     let mut lines = Vec::new();
+    let last = start + visible - 1;
     for (index, (row, cursor_column)) in display.iter().enumerate() {
-        if index < start || index >= start + visible {
+        if index < start || index > last {
             continue;
         }
-        let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
+        // Rows of the draft out of the window above or below are marked in
+        // the margin, where they cost no room.
+        let margin = if index == start && start > 0 {
+            "↑ "
+        } else if index == last && last + 1 < display.len() {
+            "↓ "
+        } else {
+            "  "
+        };
+        let mut spans = vec![Span::new(margin, theme.muted)];
         if index == start {
             spans.extend(lead.take());
         }
