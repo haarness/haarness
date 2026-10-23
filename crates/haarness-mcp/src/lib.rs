@@ -1466,9 +1466,16 @@ fn spawn_worker(
         let apps = client.service().apps.clone();
         let done = client.waiting();
         tokio::pin!(done);
+        // The answers being waited for, each on a task of its own.
+        let mut calls = tokio::task::JoinSet::new();
+        let mut ended = false;
         loop {
             let command = tokio::select! {
-                _ = &mut done => break,
+                _ = &mut done => {
+                    ended = true;
+                    break;
+                }
+                Some(_) = calls.join_next(), if !calls.is_empty() => continue,
                 command = rx.recv() => match command { Some(command) => command, None => break },
             };
             // A queued operation must not escape through an old authenticated client.
@@ -1491,6 +1498,7 @@ fn spawn_worker(
                     // as it always has: it may change something.
                     dispatch(
                         &peer,
+                        &mut calls,
                         request,
                         reply,
                         limit.clone(),
@@ -1547,6 +1555,7 @@ fn spawn_worker(
                     // closed client) the server is told to stop.
                     dispatch(
                         &peer,
+                        &mut calls,
                         request,
                         reply,
                         limit.clone(),
@@ -1586,6 +1595,7 @@ fn spawn_worker(
                     );
                     dispatch(
                         &peer,
+                        &mut calls,
                         request,
                         reply,
                         limit.clone(),
@@ -1601,6 +1611,16 @@ fn spawn_worker(
                 }
             }
         }
+        // A disconnect, reconnect or reload drops the client: the requests
+        // in flight run to their end first, as they did when each was
+        // awaited in turn. Once the server is gone they end at once, saying
+        // why.
+        loop {
+            tokio::select! {
+                _ = &mut done, if !ended => ended = true,
+                next = calls.join_next() => if next.is_none() { break },
+            }
+        }
     });
     tx
 }
@@ -1611,6 +1631,7 @@ fn spawn_worker(
 /// to stop once nobody waits for the answer.
 async fn dispatch<T: Send + 'static>(
     peer: &rmcp::service::Peer<RoleClient>,
+    calls: &mut tokio::task::JoinSet<()>,
     request: rmcp::model::ClientRequest,
     mut reply: oneshot::Sender<CoreResult<T>>,
     limit: Option<Arc<Limit>>,
@@ -1631,7 +1652,7 @@ async fn dispatch<T: Send + 'static>(
         }
     };
     let peer = peer.clone();
-    tokio::spawn(async move {
+    calls.spawn(async move {
         let id = handle.id.clone();
         let result = if cancel {
             tokio::select! {
@@ -4389,6 +4410,29 @@ mod recovery_tests {
         .expect("the server was not told the read was cancelled");
         registry.disconnect("docs").await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_call_in_flight_runs_to_its_end_when_its_server_is_disconnected() {
+        let log = std::env::temp_dir().join(format!("haarness-mcp-{}", uuid::Uuid::now_v7()));
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure("fixture", config(&log, "0"))
+            .await
+            .unwrap();
+        let (called, disconnected) = tokio::join!(
+            registry.call(
+                "fixture",
+                "mcp__fixture__wait",
+                serde_json::json!({"seconds": 1})
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                registry.disconnect("fixture").await
+            },
+        );
+        disconnected.unwrap();
+        assert_eq!(called.unwrap().text, "waited");
     }
 
     #[tokio::test]
