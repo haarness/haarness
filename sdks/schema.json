@@ -3846,7 +3846,8 @@
           "always",
           "always_workspace",
           "always_repository",
-          "reject"
+          "reject",
+          "refuse"
         ],
         "type": "string"
       },
@@ -4748,6 +4749,25 @@
               "code": {
                 "enum": [
                   "unnamed_deletion"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command deletes `path` (as written: a variable, what `xargs`\npasses, a path after a directory change), which Haarness cannot place\nand the person's messages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unplaced_deletion"
                 ],
                 "type": "string"
               },
