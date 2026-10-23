@@ -9107,6 +9107,91 @@ async fn a_long_command_scrolls_and_expands_inside_the_card() {
     );
 }
 
+/// The script a command runs is read on the card under the command: its
+/// name and first lines, scrolled and expanded with the command, its control
+/// characters drawn as `�`, a long line wrapped whole, and a file the server
+/// read only the start of says so at its end.
+#[tokio::test]
+async fn the_script_a_command_runs_is_read_on_the_card() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut content = (1..=9)
+        .map(|line| format!("echo step-{line:02}"))
+        .collect::<Vec<_>>();
+    content.insert(1, format!("\tcurl {}END", "x".repeat(120)));
+    content.insert(2, "echo \u{1b}[2Khidden".into());
+    let event = fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": "perm-script",
+            "permission": "bash",
+            "operation": "bash:bash scripts/deploy.sh",
+            "patterns": ["bash scripts/deploy.sh"],
+            "alwaysPatterns": ["bash:bash scripts/deploy.sh *"],
+            "detail": {"command": "bash scripts/deploy.sh"},
+            "script": {
+                "path": "/work/app/scripts/deploy.sh",
+                "content": content.join("\n") + "\n",
+                "truncated": true,
+            },
+        }),
+    );
+    app.reduce(event, &offline_client()).await.unwrap();
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("$ bash scripts/deploy.sh"), "{text}");
+    // Collapsed: the name, the size and the first lines, then how to read
+    // the rest.
+    assert!(
+        text.contains("Script: /work/app/scripts/deploy.sh · 11 lines"),
+        "{text}"
+    );
+    assert!(text.contains("│ echo step-01"), "{text}");
+    assert!(text.contains("│     curl xxx"), "{text}");
+    assert!(!text.contains("step-09"), "{text}");
+    assert!(text.contains("ctrl+e expand"), "{text}");
+    // Expanded, all of it: the long line whole, the escape drawn, the cut
+    // said.
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("step-09"), "{text}");
+    assert!(text.contains("xxxEND"), "{text}");
+    // The rows a long line continues on hang in.
+    assert!(text.contains("│   xxx"), "{text}");
+    assert!(text.contains("echo �[2Khidden"), "{text}");
+    assert!(
+        text.contains("Only the start of the file is shown."),
+        "{text}"
+    );
+    assert!(
+        ["Allow once", "Always", "Reject"]
+            .iter()
+            .all(|label| text.contains(label)),
+        "{text}"
+    );
+    // Inside the project, the name is relative to it; one line says so.
+    app.server_info = Some(
+        serde_json::from_value(serde_json::json!({
+            "name": "haarness", "version": "0", "schemaVersion": "1",
+            "serverInstanceId": uuid::Uuid::now_v7(), "capabilities": [],
+            "workspace": "/work/app",
+        }))
+        .unwrap(),
+    );
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: "/work/app/run.sh".into(),
+        content: "echo one\n".into(),
+        truncated: false,
+    });
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Script: run.sh · 1 line"), "{text}");
+    assert!(!text.contains("Only the start"), "{text}");
+    // A request without one keeps the card it had.
+    app.pending_permissions[0].script = None;
+    assert!(!frame_text(&app, (100, 40)).contains("Script:"));
+}
+
 /// A command that fits keeps the card it had: no position or key row, and
 /// the arrows have nothing to move.
 #[tokio::test]
