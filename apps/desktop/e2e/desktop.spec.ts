@@ -3896,6 +3896,10 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
     .getByRole("button", { name: "Disconnect", exact: true })
     .click();
   await expect(block).toHaveCount(0);
+  // The keyboard moves on to another provider's row, or to Connect a provider.
+  await expect
+    .poll(() => page.evaluate(() => !!document.activeElement?.closest(".provider-row, .providers-hero")))
+    .toBe(true);
   expect(
     (await client.providers()).find((provider) => provider.id === "openai")
       ?.authenticated,

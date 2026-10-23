@@ -71,27 +71,39 @@ export function Settings() {
         `[data-setting="${CSS.escape(target)}"]`,
       );
       if (!element) return;
-      marked = element;
-      element.classList.add("setting-search-target");
-      element.scrollIntoView({ block: "center", behavior: "instant" });
-      // A choice of options takes the keyboard on the option that is chosen.
+      if (marked !== element) {
+        marked = element;
+        element.classList.add("setting-search-target");
+        element.scrollIntoView({ block: "center", behavior: "instant" });
+        clearTimeout(timer);
+        timer = setTimeout(
+          () => element.classList.remove("setting-search-target"),
+          2500,
+        );
+      }
+      // The keyboard lands on the place's own action (`data-search-focus`),
+      // the option a choice has chosen, or its first control that works.
+      const usable = ":not(:disabled)";
       const control =
-        element.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]:not(:disabled)') ??
+        element.querySelector<HTMLElement>(`[data-search-focus]${usable}`) ??
+        element.querySelector<HTMLElement>(`[role="radio"][aria-checked="true"]${usable}`) ??
         element.querySelector<HTMLElement>(
-          "input:not(:disabled), button:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
-        ) ?? element;
-      if (control === element) element.tabIndex = -1;
-      control.focus({ preventScroll: true });
+          ["input", "button", "select", "textarea"].map((name) => name + usable).join(", "),
+        );
+      // Controls still disabled while the place loads are waited for.
+      if (!control && element.querySelector("input, button, select, textarea")) {
+        element.tabIndex = -1;
+        if (document.activeElement !== element) element.focus({ preventScroll: true });
+        return;
+      }
+      if (!control) element.tabIndex = -1;
+      (control ?? element).focus({ preventScroll: true });
       observer.disconnect();
-      timer = setTimeout(
-        () => element.classList.remove("setting-search-target"),
-        2500,
-      );
     };
     const observer = new MutationObserver(focus);
     queueMicrotask(() => {
       if (!disposed && content?.isConnected) {
-        observer.observe(content, { childList: true, subtree: true });
+        observer.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled"] });
         focus();
       }
     });
@@ -1028,9 +1040,24 @@ function Providers() {
     return extra ? [...connected(), extra] : connected();
   };
   const count = (models: number) => (models === 1 ? t("1 model") : t("{count} models", { count: models }));
+  let page!: HTMLDivElement;
+  // The row goes once its provider is disconnected: the keyboard moves on to
+  // the next row (or the one before), else to Connect a provider.
+  async function disconnect(provider: (typeof app.state.providers)[number]) {
+    const list = rows();
+    const index = list.findIndex((item) => item.id === provider.id);
+    const next = list[index + 1] ?? list[index - 1];
+    await app.run(async () => {
+      if (!(await disconnectProvider(app, provider))) return;
+      queueMicrotask(() => {
+        const row = next && page.parentElement?.querySelector<HTMLElement>(`[data-setting="${CSS.escape("provider:" + next.id)}"] [data-search-focus]`);
+        (row ?? page.querySelector<HTMLElement>("button.primary"))?.focus();
+      });
+    });
+  }
   return (
     <>
-      <div class="setting-block providers-hero" data-setting="Connect a provider">
+      <div ref={page} class="setting-block providers-hero" data-setting="Connect a provider">
         <header>
           <div>
             <h3>
@@ -1110,23 +1137,20 @@ function Providers() {
                   <Show
                     when={provider.id !== "haarness"}
                     fallback={
-                      <button onClick={() => window.dispatchEvent(new Event("haarness:account"))}>
+                      <button data-search-focus onClick={() => window.dispatchEvent(new Event("haarness:account"))}>
                         {provider.authenticated ? t("Haarness account") : t("Sign in to Haarness")}
                       </button>
                     }
                   >
                     <button
+                      data-search-focus
                       onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
                     >
                       {provider.authenticated ? t("Reconnect") : t("Connect")}
                     </button>
                   </Show>
                   <Show when={provider.authenticated && provider.id !== "haarness"}>
-                    <button
-                      onClick={() =>
-                        app.run(() => disconnectProvider(app, provider))
-                      }
-                    >
+                    <button onClick={() => void disconnect(provider)}>
                       {t("Disconnect")}
                     </button>
                   </Show>
