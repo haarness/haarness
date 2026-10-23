@@ -7,6 +7,7 @@ import {
   describeTool,
   errorRecovery,
   permissionCommand,
+  permissionScript,
   shortPath,
   toolChanges,
   toolTarget,
@@ -453,6 +454,23 @@ test("a permission shows its command, and falls back to the raw payload", () => 
   assert.equal(permissionCommand({ path: "/tmp/x" }), "/tmp/x");
   assert.equal(permissionCommand({ nothing: 1 }), "");
   assert.equal(permissionCommand(null), "");
+});
+
+test("a shell permission shows the script its command runs, and nothing when there is none", () => {
+  const script = { path: "/work/app/scripts/x.sh", content: "echo hi\necho there\n", truncated: false };
+  assert.deepEqual(permissionScript({ permission: "bash", script }, "/work/app"), {
+    path: "scripts/x.sh",
+    lines: ["echo hi", "echo there"],
+    truncated: false,
+  });
+  // Outside the project, the path stays whole.
+  assert.equal(permissionScript({ permission: "bash", script }, "/work/other")?.path, "/work/app/scripts/x.sh");
+  assert.equal(permissionScript({ permission: "bash", script: { ...script, truncated: true } })?.truncated, true);
+  assert.deepEqual(permissionScript({ permission: "bash", script: { ...script, content: "" } })?.lines, []);
+  assert.equal(permissionScript({ permission: "bash" }), undefined);
+  assert.equal(permissionScript({ permission: "bash", script: "echo hi" }), undefined);
+  assert.equal(permissionScript({ permission: "bash", script: { path: 1, content: "x" } }), undefined);
+  assert.equal(permissionScript({ permission: "read", script }), undefined);
 });
 
 test("credential failures offer the setting that fixes them", () => {
