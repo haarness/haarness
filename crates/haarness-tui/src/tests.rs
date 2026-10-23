@@ -11588,6 +11588,14 @@ async fn ctrl_b_toggles_sidebar_silently_in_root_and_child_views() {
         .unwrap();
         assert_eq!(root.sidebar_open, expected);
         assert_eq!(root.notice, "existing status");
+        // Where it docks, the choice is kept for the next launch.
+        assert_eq!(crate::config::load_sidebar(), expected);
+    }
+    // Opening it over a narrow terminal's conversation is a passing look.
+    root.lines((80, 30));
+    for _ in 0..2 {
+        root.toggle_sidebar();
+        assert_eq!(crate::config::load_sidebar(), initial);
     }
 
     let (mut child, _, _, _) = child_navigation_fixture();
