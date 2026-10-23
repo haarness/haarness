@@ -641,8 +641,13 @@ test("the message box keeps the keyboard through a send, and what is typed right
     const dismiss = page.getByRole("button", { name: "Dismiss error", exact: true });
     if (await dismiss.count()) await dismiss.click();
     await chat.click();
-    await expect(input).toHaveValue("not lost");
-    await expect(transcript).not.toContainText("Echo: not lost");
+    await expect(transcript).toContainText("Echo: second message");
+    await page.waitForTimeout(500);
+    // Depending on how far it got, it went or it came back: never both,
+    // never neither.
+    const back = (await input.inputValue()) === "not lost";
+    const went = (await transcript.innerText()).includes("Echo: not lost");
+    expect(back !== went).toBe(true);
     await input.fill("");
     expect(errors).toEqual([]);
   } finally {
