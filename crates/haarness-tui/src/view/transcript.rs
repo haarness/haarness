@@ -487,6 +487,13 @@ fn patch_argument(arguments: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// A question's answer as the person gave it: one choice or custom line, or
+/// the picks of a multiple-choice question, which travel as a JSON list.
+fn question_answer(output: &str) -> String {
+    serde_json::from_str::<Vec<String>>(output.trim())
+        .map_or_else(|_| output.trim().to_owned(), |answers| answers.join(", "))
+}
+
 /// A tool result that only says the user turned the request down. The
 /// server words it for the model ("…take a different approach…").
 fn rejected_by_user(output: &str) -> bool {
@@ -826,11 +833,13 @@ fn render_question(
     let active = app
         .first_pending_question()
         .is_some_and(|pending| pending.question_id == question.id);
-    transcript.push(line(
-        format!(
-            "  ? {}",
-            single_line(question.prompt, width.saturating_sub(6))
-        ),
+    // The whole question, wrapped under its mark: its last words are often
+    // the ones that decide the answer.
+    transcript.extend(wrap_spans(
+        &[Span::new(question.prompt.replace('\r', ""), theme.accent)],
+        width.saturating_sub(2),
+        "  ? ",
+        "    ",
         theme.accent,
     ));
     if active && app.pending_questions.len() > 1 {
@@ -839,12 +848,15 @@ fn render_question(
             theme.muted,
         ));
     }
-    if active && question.multiple {
+    if active && !question.choices.is_empty() {
         transcript.push(line(
-            if question.custom {
-                "    ↑↓ move · space toggle · enter confirm · type custom"
-            } else {
-                "    ↑↓ move · space toggle · enter confirm"
+            match (question.multiple, question.custom) {
+                (true, true) => {
+                    "    ↑↓ move · space toggle · enter confirm · type custom · esc cancels"
+                }
+                (true, false) => "    ↑↓ move · space toggle · enter confirm · esc cancels",
+                (false, true) => "    ↑↓ move · enter choose · type custom · esc cancels",
+                (false, false) => "    ↑↓ move · enter choose · esc cancels",
             },
             theme.muted,
         ));
@@ -950,32 +962,85 @@ fn render_tool_result(
         TOOL_SUMMARY_ROWS
     };
     let cap = if expanded { usize::MAX } else { collapsed_cap };
-    let rows: Vec<&str> = output.lines().collect();
-    let collapsible = folds || rows.len() > collapsed_cap;
-    for row in rows.iter().take(cap) {
-        let row = gutter_row(row, width, color, theme);
-        if collapsible {
-            transcript.push_tagged(row, HitTarget::ToolToggle(item.id));
-        } else {
-            transcript.push(row);
+    // Output opened to be read, and a failure's, wraps under the gutter so
+    // every word of an error shows; a quiet preview keeps one row per line.
+    // The caps count rows on screen either way.
+    let wrap = expanded || failed;
+    let lines: Vec<Vec<Line>> = output
+        .lines()
+        .map(|source| {
+            if wrap {
+                gutter_rows(source, width, color, theme)
+            } else {
+                vec![gutter_row(source, width, color, theme)]
+            }
+        })
+        .collect();
+    let total_rows: usize = lines.iter().map(Vec::len).sum();
+    let collapsible = folds || total_rows > collapsed_cap;
+    let mut shown_rows = 0;
+    let mut whole_lines = 0;
+    for rows in &lines {
+        let room = cap.saturating_sub(shown_rows);
+        if room == 0 {
+            break;
         }
+        for row in rows.iter().take(room).cloned() {
+            if collapsible {
+                transcript.push_tagged(row, HitTarget::ToolToggle(item.id));
+            } else {
+                transcript.push(row);
+            }
+        }
+        shown_rows += rows.len().min(room);
+        whole_lines += usize::from(rows.len() <= room);
     }
-    if rows.len() > cap {
+    if total_rows > shown_rows {
         transcript.push_tagged(
             gutter_row(
-                &format!("… +{} more lines · click to expand", rows.len() - cap),
+                &more_lines_hint(app, lines.len() - whole_lines),
                 width,
                 theme.muted,
                 theme,
             ),
             HitTarget::ToolToggle(item.id),
         );
-    } else if expanded && rows.len() > TOOL_SUMMARY_ROWS {
+    } else if expanded && total_rows > TOOL_SUMMARY_ROWS {
         transcript.push_tagged(
-            gutter_row("… click to collapse", width, theme.muted, theme),
+            gutter_row(&collapse_hint(app), width, theme.muted, theme),
             HitTarget::ToolToggle(item.id),
         );
     }
+}
+
+/// `… +3 more lines · ctrl+r or click to expand`: what a fold hides, in the
+/// lines it was written in, and the ways to open it. The key is the one
+/// bound to opening folds, left out when the person unbound it.
+fn more_lines_hint(app: &App, hidden: usize) -> String {
+    let more = if hidden == 1 {
+        "… +1 more line".to_owned()
+    } else {
+        format!("… +{hidden} more lines")
+    };
+    match fold_key(app) {
+        Some(key) => format!("{more} · {key} or click to expand"),
+        None => format!("{more} · click to expand"),
+    }
+}
+
+fn collapse_hint(app: &App) -> String {
+    fold_key(app).map_or_else(
+        || "… click to collapse".to_owned(),
+        |key| format!("… {key} or click to collapse"),
+    )
+}
+
+/// The key that opens and closes the fold nearest the prompt, as bound.
+pub(crate) fn fold_key(app: &App) -> Option<&str> {
+    app.keybindings
+        .get(crate::keybindings::FOLD_ACTION)
+        .map(String::as_str)
+        .filter(|key| !key.is_empty() && *key != "none")
 }
 
 /// Anchor the first line of an assistant reply with a small identity mark,
@@ -1010,6 +1075,18 @@ pub(crate) fn user_block(
     language: crate::locale::Language,
     open: bool,
 ) -> Vec<Line> {
+    user_block_rows(text, width, theme, language, open).0
+}
+
+/// [`user_block`]'s rows, and where each line of the prompt ends among them
+/// (the row count up to and including its last row).
+fn user_block_rows(
+    text: &str,
+    width: usize,
+    theme: &Theme,
+    language: crate::locale::Language,
+    open: bool,
+) -> (Vec<Line>, Vec<usize>) {
     use crate::width::DisplayWidth as _;
     let inner = width.saturating_sub(4).max(10);
     let mut paragraphs: Vec<Vec<Span>> = vec![Vec::new()];
@@ -1074,6 +1151,7 @@ pub(crate) fn user_block(
         paragraphs.pop();
     }
     let mut lines = Vec::new();
+    let mut ends = Vec::new();
     for spans in paragraphs {
         let rows = if spans.iter().all(|span| span.text.trim().is_empty()) {
             vec![Line::new(Vec::new())]
@@ -1098,11 +1176,12 @@ pub(crate) fn user_block(
             );
             lines.push(Line::new(spans));
         }
+        ends.push(lines.len());
     }
     if lines.is_empty() {
         lines.push(Line::empty());
     }
-    lines
+    (lines, ends)
 }
 
 /// `Thought for 12s`: how long the model thought, or `Thought` for a record
@@ -1165,6 +1244,23 @@ fn gutter_row(text: &str, width: usize, color: haarness_opentui::Color, theme: &
         Span::new("  ▏ ", theme.hairline()),
         Span::new(single_line(text, width.saturating_sub(6)), color),
     ])
+}
+
+/// One output line wrapped under the gutter, word by word, with long
+/// unbroken runs (paths, URLs) broken where they reach the edge.
+fn gutter_rows(
+    text: &str,
+    width: usize,
+    color: haarness_opentui::Color,
+    theme: &Theme,
+) -> Vec<Line> {
+    wrap_spans(
+        &[Span::new(text.replace('\r', ""), color)],
+        width.saturating_sub(2),
+        "  ▏ ",
+        "  ▏ ",
+        theme.hairline(),
+    )
 }
 
 /// Older runtimes persisted every tool call as it streamed but buffered the
@@ -1385,6 +1481,45 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     let undone_after = app.thread.revert.as_ref().map(|revert| revert.sequence);
     let mut folded = false;
     let ordered = presentation_order(&app.items);
+    // The turn is waiting for a person: to answer a request, or a question.
+    let person_wait = app.phase.as_ref().filter(|phase| {
+        matches!(
+            phase.state.as_str(),
+            "waiting_permission" | "waiting_question"
+        )
+    });
+    let asks_approval = person_wait.is_some_and(|phase| phase.state == "waiting_permission");
+    // The call a person is asked about. No status names it (and the last
+    // tool status may name another call of a parallel batch), so it is the
+    // earliest call of the asking turn with no result yet; with that turn
+    // unknown, no call is marked waiting or queued.
+    let asked_call = person_wait
+        .and_then(|_| {
+            if asks_approval {
+                app.pending_permissions
+                    .iter()
+                    .find(|pending| pending.thread_id == app.thread.id)
+                    .and_then(|pending| pending.turn_id)
+            } else {
+                app.pending_questions
+                    .iter()
+                    .find(|pending| pending.thread_id == app.thread.id)
+                    .and_then(|pending| pending.turn_id)
+            }
+        })
+        .and_then(|turn| {
+            app.items.iter().find_map(|item| match &item.data {
+                ItemData::ToolCall { call_id, name, .. }
+                    if item.turn_id == Some(turn)
+                        && name != "task"
+                        && !call_id.trim().is_empty()
+                        && paired_result(app, item, call_id).is_none() =>
+                {
+                    Some(call_id.as_str())
+                }
+                _ => None,
+            })
+        });
     // Off screen, the sidebar leaves one row in its place: the plan's
     // progress where it last changed, which opens the sidebar.
     let plan_at = (app.plan_inline.get() && open_plan(app))
@@ -1446,21 +1581,24 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     .and_then(|line| crate::prompt_context::command_prompt(line, text));
                 // A long paste reads as its opening lines until asked for;
                 // the whole of it is still what was sent.
-                let rows = user_block(shown, width, theme, app.language, expanded);
+                let (rows, lines) = user_block_rows(shown, width, theme, app.language, expanded);
                 if rows.len() > USER_BLOCK_ROWS {
                     let shown = if expanded {
                         rows.len()
                     } else {
                         USER_PREVIEW_ROWS
                     };
-                    let hidden = rows.len() - shown;
+                    // What the fold hides, in the lines the prompt was
+                    // written in: a line cut part way counts as hidden.
+                    let hidden =
+                        lines.len() - lines.iter().take_while(|end| **end <= shown).count();
                     for row in rows.into_iter().take(shown) {
                         block.push_tagged(row, HitTarget::ToolToggle(item.id));
                     }
                     let toggle = if expanded {
-                        "… click to collapse".to_owned()
+                        collapse_hint(app)
                     } else {
-                        format!("… +{hidden} more lines · click to expand")
+                        more_lines_hint(app, hidden)
                     };
                     for row in quiet(&toggle) {
                         block.push_tagged(row, HitTarget::ToolToggle(item.id));
@@ -1522,12 +1660,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 }
                 if app.thinking == crate::state::ThinkingMode::Compact {
                     // One row that a click opens: the transcript keeps its
-                    // shape whatever the model thought.
+                    // shape whatever the model thought. Its disclosure mark
+                    // is hollow, so it never reads as a reply's ▸.
                     let open = app.expanded.contains(&item.id);
                     block.push_tagged(
                         Line::new(vec![
                             Span::new(REASONING_INDENT, theme.muted),
-                            Span::new(if open { "▾ " } else { "▸ " }, theme.muted),
+                            Span::new(if open { "▿ " } else { "▹ " }, theme.muted),
                             Span::new(thought_label(app.language, *duration_ms), theme.muted),
                         ]),
                         HitTarget::ToolToggle(item.id),
@@ -1624,20 +1763,31 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // A batch whose children are running is live work, never a
                 // call waiting its turn behind another tool; nor is one
                 // whose own step (`<call id>:N`) is the running tool.
-                let queued = name != "task"
-                    && !batch_active
-                    && status.is_none()
-                    && app.phase.as_ref().is_some_and(|phase| {
-                        matches!(phase.state.as_str(), "tool" | "reviewing")
-                            && phase.call_id.as_deref().is_some_and(|active| {
-                                active != call_id
-                                    && crate::state::batch_parent_call(active) != Some(call_id)
-                            })
-                    });
+                let unfinished = name != "task" && !batch_active && status.is_none();
+                let this_call = |active: &str| {
+                    active == call_id || crate::state::batch_parent_call(active) == Some(call_id)
+                };
+                // While a request waits for a person nothing runs: the call
+                // that asked waits still, and the calls after it queue.
+                let awaiting = unfinished && asked_call.is_some_and(this_call);
+                let queued = unfinished
+                    && !awaiting
+                    && app
+                        .phase
+                        .as_ref()
+                        .is_some_and(|phase| match phase.state.as_str() {
+                            "tool" | "reviewing" => phase
+                                .call_id
+                                .as_deref()
+                                .is_some_and(|active| !this_call(active)),
+                            "waiting_permission" | "waiting_question" => asked_call.is_some(),
+                            _ => false,
+                        });
                 let color = child_state.map_or_else(
                     || match status {
                         Some("failed") => theme.danger,
                         Some(_) => theme.muted,
+                        None if awaiting => theme.accent,
                         None if queued => theme.muted,
                         None => theme.accent,
                     },
@@ -1646,6 +1796,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // Running tools breathe: the dot becomes a spinner frame.
                 let marker = child_state.map_or_else(
                     || match status {
+                        None if awaiting && asks_approval => "  ⚠ ".into(),
+                        None if awaiting => "  ? ".into(),
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
@@ -1682,6 +1834,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         } else {
                             format!("  {lead}: {}", single_line(&reason, 160))
                         }
+                    }
+                    None if awaiting && asks_approval => {
+                        format!("  {}", app.language.text("waiting for approval"))
                     }
                     None if queued => "  queued".to_owned(),
                     _ => String::new(),
@@ -1746,8 +1901,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     if let Some(label) = empty_result_label(output) {
                         return format!("  ·  {label}");
                     }
-                    if compact_result.is_none() {
-                        return String::new();
+                    // An answered question's row says what was chosen.
+                    if name == "question" && compact_result.is_some() {
+                        return format!("  ·  {}", single_line(&question_answer(output), 48));
                     }
                     String::new()
                 });
@@ -1786,7 +1942,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     .saturating_sub(
                         lead + progress.chars().count()
                             + suffix.chars().count()
-                            + browser.chars().count(),
+                            + browser.chars().count()
+                            + disclosure.chars().count(),
                     )
                     .max(16);
                 let argument = if name == "workflow" {
@@ -1863,15 +2020,30 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         listed.len()
                     };
                     // The step running now: the turn's status names it as
-                    // `<call id>:N`, the batch's Nth step.
-                    let running = app
-                        .phase
-                        .as_ref()
-                        .filter(|phase| matches!(phase.state.as_str(), "tool" | "reviewing"))
-                        .and_then(|phase| phase.call_id.as_deref())
-                        .and_then(|active| active.strip_prefix(call_id.as_str()))
-                        .and_then(|rest| rest.strip_prefix(':'))
-                        .and_then(|index| index.parse::<usize>().ok());
+                    // `<call id>:N`, the batch's Nth step. While the batch
+                    // is the call a person is asked about, the waiting
+                    // status names nothing, and the step is the one the last
+                    // tool status named when that was a step of this batch.
+                    let step_of = |active: &str| {
+                        active
+                            .strip_prefix(call_id.as_str())
+                            .and_then(|rest| rest.strip_prefix(':'))
+                            .and_then(|index| index.parse::<usize>().ok())
+                    };
+                    let running = if awaiting {
+                        app.last_tool_call
+                            .as_deref()
+                            .filter(|active| {
+                                crate::state::batch_parent_call(active) == Some(call_id.as_str())
+                            })
+                            .and_then(step_of)
+                    } else {
+                        app.phase
+                            .as_ref()
+                            .filter(|phase| matches!(phase.state.as_str(), "tool" | "reviewing"))
+                            .and_then(|phase| phase.call_id.as_deref())
+                            .and_then(step_of)
+                    };
                     let mut push = |row: Line| match result {
                         Some(result) => block.push_tagged(row, HitTarget::ToolToggle(result.id)),
                         None => block.push(row),
@@ -1884,6 +2056,10 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 ("●".to_owned(), theme.muted)
                             }
                             (None, Some(_)) => ("⊘".to_owned(), theme.muted),
+                            (None, None) if running == Some(step.index) && awaiting => (
+                                if asks_approval { "⚠" } else { "?" }.to_owned(),
+                                theme.accent,
+                            ),
                             (None, None) if running == Some(step.index) => {
                                 (spinner(app.tick).to_string(), theme.accent)
                             }

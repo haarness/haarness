@@ -236,19 +236,20 @@ impl App {
             return self.finish_frame(lines, hits, height);
         }
         if width < 40 || height < 12 {
-            self.max_viewport_offset.set(0);
             self.transcript_messages.borrow_mut().clear();
             let mut hits = Vec::new();
             let mut lines = compact_frame(self, width, height, &mut hits);
             apply_dialog(self, &mut lines, &mut hits, width, height);
             // As in the full frame, the approval rows are the attention
-            // surface; a toast repeating them would cover them.
-            let toast_repeats_card = self.first_pending_permission().is_some()
-                && matches!(self.overlay, Overlay::None)
-                && self
-                    .notification_toast
-                    .as_ref()
-                    .is_some_and(|toast| toast.approval);
+            // surface, and a question at the end of the conversation is in
+            // view: a toast repeating either would cover it.
+            let question_shown =
+                self.first_pending_question().is_some() && self.effective_viewport_offset() == 0;
+            let toast_repeats_card = matches!(self.overlay, Overlay::None)
+                && self.notification_toast.as_ref().is_some_and(|toast| {
+                    (toast.approval && self.first_pending_permission().is_some())
+                        || (toast.question && question_shown)
+                });
             if !toast_repeats_card {
                 apply_toast(self, &mut lines, &mut hits, width, height);
             }
@@ -490,12 +491,17 @@ impl App {
         // The approval card is the attention surface whenever it is on
         // screen; a toast repeating it would only cover the conversation (or,
         // on a short terminal, the card itself).
-        let toast_repeats_card = card_shown
-            && matches!(self.overlay, Overlay::None)
-            && self
-                .notification_toast
-                .as_ref()
-                .is_some_and(|toast| toast.approval);
+        // So is a question shown in the conversation: it waits at the end of
+        // it, or its choices are in view.
+        let question_shown = self.first_pending_question().is_some()
+            && (offset == 0
+                || hits
+                    .iter()
+                    .any(|hit| matches!(hit.target, frame::HitTarget::QuestionChoice(_))));
+        let toast_repeats_card = matches!(self.overlay, Overlay::None)
+            && self.notification_toast.as_ref().is_some_and(|toast| {
+                (toast.approval && card_shown) || (toast.question && question_shown)
+            });
         if !toast_repeats_card {
             apply_toast(self, &mut lines, &mut hits, width, height);
         }
@@ -591,15 +597,20 @@ impl App {
     }
 
     /// Ctrl+B: show or hide the sidebar. Wide enough, it docks beside the
-    /// conversation; narrower, it opens over the conversation until hidden.
+    /// conversation, and the choice is kept for the next launch; narrower,
+    /// it opens over the conversation until hidden.
     pub fn toggle_sidebar(&mut self) {
-        let shown = if self.frame_width.get() >= SIDEBAR_DOCK_WIDTH {
+        let docks = self.frame_width.get() >= SIDEBAR_DOCK_WIDTH;
+        let shown = if docks {
             self.sidebar_open
         } else {
             self.sidebar_overlay
         };
         self.sidebar_open = !shown;
         self.sidebar_overlay = !shown;
+        if docks {
+            crate::config::save_sidebar(self.sidebar_open);
+        }
     }
 
     /// Ctrl+T: the next thinking display (Compact, Show, Hide), kept for the
@@ -624,6 +635,34 @@ impl App {
             && self.pending_questions.is_empty()
     }
 
+    /// Open or close the fold nearest the prompt among those on screen (a
+    /// tool's output, a long prompt, a thought), as a click on it would.
+    pub fn toggle_nearest_fold(&mut self) {
+        let nearest = self
+            .hit_rows
+            .borrow()
+            .iter()
+            .filter_map(|hit| match hit.target {
+                frame::HitTarget::ToolToggle(item) => Some((hit.row, item)),
+                _ => None,
+            })
+            .max_by_key(|(row, _)| *row)
+            .map(|(_, item)| item);
+        match nearest {
+            Some(item) => {
+                if !self.expanded.remove(&item) {
+                    self.expanded.insert(item);
+                }
+            }
+            // While a card waits the band keeps its summary; a notice set
+            // now would stay in its place.
+            None if self.pending_permissions.is_empty() => {
+                self.notice = "Nothing to expand on screen".into();
+            }
+            None => {}
+        }
+    }
+
     /// The click target at a screen cell, resolved against the last frame.
     pub fn hit_at(&self, row: usize, column: usize) -> Option<frame::HitTarget> {
         self.hit_rows
@@ -642,13 +681,50 @@ fn compact_frame(
     hits: &mut Vec<frame::HitRegion>,
 ) -> Vec<Line> {
     let mut lines = vec![Line::empty(); height];
+    app.max_viewport_offset.set(0);
     if height == 0 {
         return lines;
     }
-    lines[0] = Line::plain(single_line("haarness", width), app.theme.primary);
     // The keyboard may already answer a waiting request here, so it is never
     // hidden: its subject, its answers, and the hint in the status row.
     let card_owns_keys = app.permission_focus && app.first_pending_permission().is_some();
+    // Chrome goes first, the conversation last: the masthead, sidebar and
+    // band's segments are gone, and every row above the prompt (and the
+    // approval rows) reads the newest of the conversation, scrollable.
+    let card = app.first_pending_permission().is_some();
+    let reserved = match (height >= 3, card) {
+        (false, _) => height,
+        (true, false) => 3,
+        (true, true) if height >= 5 => 5,
+        (true, true) => 4,
+    };
+    let room = height.saturating_sub(reserved);
+    if app.is_home() || room == 0 {
+        lines[0] = Line::plain(single_line("haarness", width), app.theme.primary);
+    } else {
+        let body = transcript::transcript_lines(app, width);
+        let max_offset = body.lines.len().saturating_sub(room);
+        app.max_viewport_offset.set(max_offset);
+        app.transcript_rows.set(room);
+        let offset = app.effective_viewport_offset().min(max_offset);
+        app.set_effective_viewport_offset(offset);
+        let end = body.lines.len() - offset;
+        let start = end.saturating_sub(room);
+        for (row, line) in body.lines[start..end].iter().enumerate() {
+            lines[row] = line.clone();
+        }
+        for (row, target) in body.tags {
+            if row >= start && row < end {
+                hits.push(frame::HitRegion {
+                    row: row - start,
+                    start: 0,
+                    end: width,
+                    target,
+                    paint_hover: false,
+                });
+            }
+        }
+    }
     let notice = app.permission_notice();
     if height >= 3 {
         if !app.is_child_view() {
@@ -656,7 +732,7 @@ fn compact_frame(
                 app.language
                     .text("Answer the approval above · ctrl+g to type")
             } else if app.composer.is_empty() {
-                "Ask anything…"
+                app.language.text(composer::placeholder(app))
             } else {
                 app.composer.text()
             };
@@ -807,6 +883,10 @@ fn apply_dialog(
     let preferred = match app.overlay {
         Overlay::Models | Overlay::Diff(_) | Overlay::Workflow { .. } => 96,
         Overlay::Panel { .. } => 88,
+        // The command list (/help) reads each description whole where the
+        // terminal has the room, measured over every command so that
+        // filtering never changes its width.
+        Overlay::Commands => menu::commands_width(app).max(84),
         _ => 84,
     };
     // Below 80 columns a one-cell margin only shows a sliver of dimmed
@@ -840,7 +920,34 @@ fn apply_dialog(
     };
     let card_height = card.lines.len().min(height.saturating_sub(2));
     let left = width.saturating_sub(card_width) / 2;
-    let top = height.saturating_sub(card_height) / 2;
+    // A list being filtered keeps its top edge where it opened: it shortens
+    // from the bottom instead of jumping to stay centred.
+    let anchored = if app.overlay.is_filterable() {
+        // Which dialog this is: a list by its kind, an options dialog by its
+        // title (one kind opens many pages).
+        let key = match &app.overlay {
+            Overlay::Options { title, .. } => title.clone(),
+            Overlay::Commands => "commands".to_owned(),
+            Overlay::Threads => "sessions".to_owned(),
+            Overlay::Models => "models".to_owned(),
+            Overlay::Agents => "agents".to_owned(),
+            Overlay::Themes => "themes".to_owned(),
+            _ => String::new(),
+        };
+        let mut anchor = app.dialog_anchor.borrow_mut();
+        let tallest = match anchor.as_ref() {
+            Some((open, screen, tallest)) if *open == key && *screen == height => {
+                (*tallest).max(card_height)
+            }
+            _ => card_height,
+        };
+        *anchor = Some((key, height, tallest));
+        tallest
+    } else {
+        *app.dialog_anchor.borrow_mut() = None;
+        card_height
+    };
+    let top = height.saturating_sub(anchored) / 2;
     hits.clear();
     // A margin of a few cells shows only fragments of the dimmed screen
     // beside the card — the last digit of the version, half a word — so it

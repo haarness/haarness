@@ -8,7 +8,7 @@ use haarness_protocol::{InputDelivery, InputQueueAction, QueueInputRequest, Requ
 /// Why a save was refused, in the words the editing line shows.
 const ALREADY_GONE: &str = "Already sent or removed · Esc or click restores your draft";
 const CHANGED_ELSEWHERE: &str = "Changed elsewhere · Esc or click restores your draft";
-const QUEUE_MOVED: &str = "Queue changed elsewhere · Enter saves again · Click to cancel";
+const QUEUE_MOVED: &str = "Queue changed elsewhere · Enter saves again · Esc or click cancels";
 
 impl App {
     pub async fn defer_prompt(&mut self, text: String, client: &ApiClient) -> Result<bool> {
@@ -248,7 +248,9 @@ impl App {
         self.mention_suggestions.clear();
         self.autocomplete_hidden = true;
         self.selection = 0;
-        self.notice = "Editing queued message · Enter saves · Esc cancels".into();
+        // The strip says how to save and how to back out; the band does not
+        // say it a third time.
+        self.notice.clear();
         Ok(())
     }
     /// End an edit without saving and put the set-aside draft back. Returns

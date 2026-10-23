@@ -573,6 +573,27 @@ impl Composer {
         value
     }
 
+    /// Empty the prompt as Ctrl+C does, keeping the draft within reach: it
+    /// is one undo away and the newest history entry, so ↑ brings it back.
+    /// It is not saved to the history file. Returns whether there was text.
+    pub fn discard(&mut self) -> bool {
+        let snapshot = self.edit_snapshot();
+        let value = self.expanded_text();
+        self.clear();
+        if value.trim().is_empty() {
+            return false;
+        }
+        self.undo.push(snapshot);
+        if self.history.last() != Some(&value) {
+            self.history.retain(|entry| entry != &value);
+            self.history.push(value);
+            if self.history.len() > HISTORY_CAP {
+                self.history.remove(0);
+            }
+        }
+        true
+    }
+
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
