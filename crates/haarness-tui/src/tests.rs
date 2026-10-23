@@ -2429,6 +2429,7 @@ fn new_item_kinds_render_in_the_transcript() {
             permission_id: "p1".into(),
             operation: "bash:rm -rf target".into(),
             detail: serde_json::json!({"command": "rm -rf target"}),
+            script: None,
             permission: "bash".into(),
             patterns: vec!["rm -rf target".into()],
             always_patterns: vec!["bash:rm *".into()],
@@ -8292,6 +8293,7 @@ fn pending_permission_fixture(
         permission_id: id.into(),
         operation: "bash:git push origin main".into(),
         detail: serde_json::json!({"command": "git push origin main"}),
+        script: None,
         permission: "bash".into(),
         patterns: vec!["git push origin main".into()],
         always_patterns: vec!["bash:git push *".into()],
@@ -8503,6 +8505,7 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
             permission_id: "perm-external".into(),
             operation: format!("external_directory:{path}"),
             detail: serde_json::json!({}),
+            script: None,
             permission: "external_directory".into(),
             patterns: vec![path.into()],
             always_patterns: vec![format!("external_directory:{path}")],
@@ -9104,6 +9107,165 @@ async fn a_long_command_scrolls_and_expands_inside_the_card() {
     );
 }
 
+/// The script a command runs is read on the card under the command: its
+/// name and first lines, scrolled and expanded with the command, its control
+/// characters drawn as `�`, a long line wrapped whole, and a file the server
+/// read only the start of says so at its end.
+#[tokio::test]
+async fn the_script_a_command_runs_is_read_on_the_card() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut content = (1..=9)
+        .map(|line| format!("echo step-{line:02}"))
+        .collect::<Vec<_>>();
+    content.insert(1, format!("\tcurl {}END", "x".repeat(120)));
+    content.insert(2, "echo \u{1b}[2Khidden".into());
+    let event = fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": "perm-script",
+            "permission": "bash",
+            "operation": "bash:bash scripts/deploy.sh",
+            "patterns": ["bash scripts/deploy.sh"],
+            "alwaysPatterns": ["bash:bash scripts/deploy.sh *"],
+            "detail": {"command": "bash scripts/deploy.sh"},
+            "script": {
+                "path": "/work/app/scripts/deploy.sh",
+                "content": content.join("\n") + "\n",
+                "truncated": true,
+            },
+        }),
+    );
+    app.reduce(event, &offline_client()).await.unwrap();
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("$ bash scripts/deploy.sh"), "{text}");
+    // Collapsed: the name, the size and the first lines, then how to read
+    // the rest.
+    assert!(
+        text.contains("Script: /work/app/scripts/deploy.sh · first 11 lines"),
+        "{text}"
+    );
+    assert!(text.contains("│ echo step-01"), "{text}");
+    assert!(text.contains("│     curl xxx"), "{text}");
+    assert!(!text.contains("step-09"), "{text}");
+    assert!(text.contains("ctrl+e expand"), "{text}");
+    // The window counts screen rows (the script's long lines wrap), not the
+    // script's lines its header counts.
+    assert!(text.contains("rows 1–5 of "), "{text}");
+    assert!(!text.contains("lines 1–5"), "{text}");
+    // Expanded, all of it: the long line whole, the escape drawn, the cut
+    // said.
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("step-09"), "{text}");
+    assert!(text.contains("xxxEND"), "{text}");
+    // The rows a long line continues on hang in.
+    assert!(text.contains("│   xxx"), "{text}");
+    assert!(text.contains("echo �[2Khidden"), "{text}");
+    assert!(
+        text.contains("Only the start of the file is shown."),
+        "{text}"
+    );
+    assert!(
+        ["Allow once", "Always", "Reject"]
+            .iter()
+            .all(|label| text.contains(label)),
+        "{text}"
+    );
+    // Inside the project, the name is relative to it; one line says so.
+    app.server_info = Some(
+        serde_json::from_value(serde_json::json!({
+            "name": "haarness", "version": "0", "schemaVersion": "1",
+            "serverInstanceId": uuid::Uuid::now_v7(), "capabilities": [],
+            "workspace": "/work/app",
+        }))
+        .unwrap(),
+    );
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: "/work/app/run.sh".into(),
+        content: "echo one\n".into(),
+        truncated: false,
+        withheld: None,
+    });
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Script: run.sh · 1 line"), "{text}");
+    assert!(!text.contains("Only the start"), "{text}");
+    // One long line cut short is the start of the file, not "1 line".
+    if let Some(script) = app.pending_permissions[0].script.as_mut() {
+        script.truncated = true;
+    }
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("Script: run.sh · start of the file"),
+        "{text}"
+    );
+    // A long path gives way from its start; the name and size stay.
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: format!("/elsewhere/{}/tools/run.sh", "deep/".repeat(30)),
+        content: "echo one\n".into(),
+        truncated: false,
+        withheld: None,
+    });
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Script: …"), "{text}");
+    assert!(text.contains("/tools/run.sh · 1 line"), "{text}");
+    // Narrower, the size goes before the name is cut; narrower still, the
+    // path takes rows of its own. Never a bare "…".
+    let name = format!("{}.sh", "n".repeat(40));
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: format!("/elsewhere/{}{name}", "deep/".repeat(10)),
+        content: "echo one\n".into(),
+        truncated: false,
+        withheld: None,
+    });
+    let text = frame_text(&app, (60, 40));
+    assert!(text.contains("Script: …"), "{text}");
+    assert!(text.contains(&format!("/{name}")), "{text}");
+    assert!(!text.contains("1 line"), "{text}");
+    let long = format!("{}.sh", "n".repeat(70));
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: format!("/elsewhere/{long}"),
+        content: "echo one\n".into(),
+        truncated: false,
+        withheld: None,
+    });
+    let text = frame_text(&app, (60, 40));
+    assert!(text.contains("Script · 1 line"), "{text}");
+    assert!(text.contains("/elsewhere/nnnn"), "{text}");
+    // A script the command writes before it runs it: one quiet line, no
+    // text and no size.
+    app.pending_permissions[0].script = Some(haarness_protocol::PermissionScript {
+        path: "/work/app/gen.sh".into(),
+        content: String::new(),
+        truncated: false,
+        withheld: Some(haarness_protocol::ScriptWithheld::Written),
+    });
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains(
+            "This command writes gen.sh before running it, so its contents can't be shown."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Script:") && !text.contains("│ "), "{text}");
+    // After a step that may change it, a line of its own.
+    if let Some(script) = app.pending_permissions[0].script.as_mut() {
+        script.withheld = Some(haarness_protocol::ScriptWithheld::Changeable);
+    }
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains(
+            "An earlier step of this command can change gen.sh, so its contents aren't shown."
+        ),
+        "{text}"
+    );
+    // A request without one keeps the card it had.
+    app.pending_permissions[0].script = None;
+    assert!(!frame_text(&app, (100, 40)).contains("Script:"));
+}
+
 /// A command that fits keeps the card it had: no position or key row, and
 /// the arrows have nothing to move.
 #[tokio::test]
@@ -9262,6 +9424,7 @@ async fn a_compact_terminal_shows_the_waiting_request_and_its_answers() {
             permission_id: "perm-hydrated".into(),
             operation: "bash:rm -rf build".into(),
             detail: serde_json::json!({"command": "rm -rf build"}),
+            script: None,
             permission: "bash".into(),
             patterns: vec!["rm -rf build".into()],
             always_patterns: vec!["bash:rm -rf build".into()],
@@ -10174,6 +10337,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             permission_id: "permission-hover".into(),
             operation: "bash:echo hover".into(),
             detail: serde_json::json!({"command": "echo hover"}),
+            script: None,
             permission: "bash".into(),
             patterns: vec!["echo hover".into()],
             always_patterns: vec![],
@@ -15824,6 +15988,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         permission_id: id.into(),
         operation: "external_directory:/tmp/x".into(),
         detail: serde_json::Value::Null,
+        script: None,
         permission: "external_directory".into(),
         patterns: Vec::new(),
         always_patterns: Vec::new(),

@@ -14,7 +14,8 @@
 
 use crate::width::DisplayWidth as _;
 use haarness_opentui::{Line, Span, attr};
-use haarness_protocol::PendingPermissionInfo;
+use haarness_protocol::{PendingPermissionInfo, PermissionScript, ScriptWithheld};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::locale::Language;
 use crate::state::{App, PermissionChoice, SubjectFit};
@@ -33,6 +34,11 @@ const MAX_CHROME_ROWS: usize = 10;
 const MAX_ARGUMENT_CHARS: usize = 4000;
 /// Rows of a proposed file change shown before eliding the rest.
 const MAX_CHANGE_ROWS: usize = 8;
+/// Rows the collapsed card gives the script a command runs, under the
+/// command: its name and its first lines. The rest scrolls or expands.
+const SCRIPT_PREVIEW_ROWS: usize = 4;
+/// Columns a tab in a script stands for.
+const TAB_WIDTH: usize = 4;
 /// The same rail glyph user messages carry; here in the accent color.
 const RAIL: &str = "▎ ";
 
@@ -358,6 +364,164 @@ pub fn staged_lead(choice: char, pending: &PendingPermissionInfo) -> &'static st
     }
 }
 
+/// What one row under the card's title shows: the subject as sent, or the
+/// script its command runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Subject,
+    /// The script's name and size.
+    ScriptName,
+    /// One row of its text, behind a gutter.
+    Script,
+    /// It goes on past what the server read.
+    ScriptCut,
+}
+
+/// The rows of the script a command runs, each line wrapped whole to
+/// `width` (a long line must not hide its end): its name and size (inside
+/// the project, relative to it), its lines, and a note when the server
+/// read only its start.
+fn script_rows(
+    script: &PermissionScript,
+    workspace: Option<&str>,
+    width: usize,
+    language: Language,
+) -> Vec<(Row, String)> {
+    let path = workspace
+        .map(|root| root.trim_end_matches('/'))
+        .and_then(|root| script.path.strip_prefix(root)?.strip_prefix('/'))
+        .unwrap_or(&script.path);
+    // What is on disk now may not be what runs: one quiet line says why.
+    if let Some(reason) = script.withheld {
+        let note = match reason {
+            ScriptWithheld::Written => language.format(
+                "This command writes {path} before running it, so its contents can't be shown.",
+                &[("path", path)],
+            ),
+            ScriptWithheld::Changeable | ScriptWithheld::Unknown => language.format(
+                "An earlier step of this command can change {path}, so its contents aren't shown.",
+                &[("path", path)],
+            ),
+        };
+        return textwrap::wrap(&note, (width + 2).max(10))
+            .into_iter()
+            .map(|row| (Row::ScriptCut, row.into_owned()))
+            .collect();
+    }
+    let text = script.content.strip_suffix('\n').unwrap_or(&script.content);
+    let lines: Vec<&str> = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').collect()
+    };
+    // A cut file's count is of what was read, so it says so.
+    let count = lines.len().to_string();
+    let size = match (script.truncated, lines.len()) {
+        (true, 1) => language.text("start of the file").to_owned(),
+        (true, _) => language.format("first {count} lines", &[("count", &count)]),
+        (false, 1) => language.text("1 line").to_owned(),
+        (false, _) => language.format("{count} lines", &[("count", &count)]),
+    };
+    // A long path gives way from its start, never into the file's own name:
+    // then the size goes, and then the path takes rows of its own. The row
+    // has the gutter's two cells more.
+    let label = language.text("Script");
+    let suffix = format!(" · {size}");
+    let room = (width + 2).saturating_sub(label.width() + 2);
+    let mut rows = if let Some(path) = path_tail(path, room.saturating_sub(suffix.width())) {
+        vec![(Row::ScriptName, format!("{label}: {path}{suffix}"))]
+    } else if let Some(path) = path_tail(path, room) {
+        vec![(Row::ScriptName, format!("{label}: {path}"))]
+    } else {
+        let mut rows = vec![(Row::ScriptName, format!("{label}{suffix}"))];
+        rows.extend(
+            hard_wrap(path, (width + 2).max(1))
+                .into_iter()
+                .map(|part| (Row::ScriptName, part)),
+        );
+        rows
+    };
+    for line in lines {
+        for part in hard_wrap(&printable(line), width.max(1)) {
+            rows.push((Row::Script, part));
+        }
+    }
+    if script.truncated {
+        rows.push((
+            Row::ScriptCut,
+            language
+                .text("Only the start of the file is shown.")
+                .to_owned(),
+        ));
+    }
+    rows
+}
+
+/// `path` in at most `width` cells: whole, or its end after `…`, which
+/// always keeps the file's own name whole. `None` when even that does not
+/// fit.
+fn path_tail(path: &str, width: usize) -> Option<String> {
+    if path.width() <= width {
+        return Some(path.to_owned());
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut kept = Vec::new();
+    let mut used = 1;
+    for grapheme in path.graphemes(true).rev() {
+        let cells = grapheme.width();
+        if used + cells > width {
+            break;
+        }
+        kept.push(grapheme);
+        used += cells;
+    }
+    kept.reverse();
+    let tail = kept.concat();
+    (tail.len() >= name.len()).then(|| format!("…{tail}"))
+}
+
+/// A script line as the terminal can draw it: tabs as spaces to the next
+/// stop, any control character that is left as `�`.
+fn printable(line: &str) -> String {
+    let mut text = String::with_capacity(line.len());
+    let mut column = 0;
+    for grapheme in line.graphemes(true) {
+        if grapheme == "\t" {
+            let pad = TAB_WIDTH - column % TAB_WIDTH;
+            text.push_str(&" ".repeat(pad));
+            column += pad;
+        } else if grapheme.chars().any(char::is_control) {
+            text.push('\u{FFFD}');
+            column += 1;
+        } else {
+            text.push_str(grapheme);
+            column += grapheme.width();
+        }
+    }
+    text
+}
+
+/// `line` cut into rows of at most `width` cells, where they fall: code is
+/// not reflowed at spaces, so its indentation reads as written. The rows it
+/// continues on hang two cells in, so they do not read as lines of their own.
+fn hard_wrap(line: &str, width: usize) -> Vec<String> {
+    const HANG: &str = "  ";
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for grapheme in line.graphemes(true) {
+        let cells = grapheme.width();
+        if used + cells > width && used > HANG.len() {
+            rows.push(HANG.to_owned());
+            used = HANG.len();
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push_str(grapheme);
+        }
+        used += cells;
+    }
+    rows
+}
+
 /// The card, fitted to `max_rows` when the terminal is short: rows that only
 /// add detail give way first (the change preview, the spacer, the "always
 /// allows" row, the subject's later rows, the key hints), while the title,
@@ -391,9 +555,33 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let mut subject_rows = Vec::new();
     for paragraph in subject.iter().flat_map(|subject| subject.lines()) {
         for wrapped in textwrap::wrap(paragraph, inner.saturating_sub(2).max(10)) {
-            subject_rows.push(wrapped.into_owned());
+            subject_rows.push((Row::Subject, wrapped.into_owned()));
         }
     }
+    // The script the command runs, under it: approving `bash x.sh` approves
+    // what x.sh says, so it is read on the card, scrolled and expanded with
+    // the command.
+    let script = pending
+        .script
+        .as_ref()
+        .filter(|_| !subject_rows.is_empty() && pending.detail.get("command").is_some());
+    let subject_cap = match script {
+        Some(script) => {
+            let workspace = app
+                .server_info
+                .as_ref()
+                .and_then(|info| info.workspace.as_deref());
+            let command_rows = subject_rows.len().min(subject_cap);
+            subject_rows.extend(script_rows(
+                script,
+                workspace,
+                inner.saturating_sub(4).max(10),
+                language,
+            ));
+            command_rows + SCRIPT_PREVIEW_ROWS
+        }
+        None => subject_cap,
+    };
     // An edit is approved for what it changes, not for its file name.
     let change = change_preview(pending, inner.saturating_sub(2).max(10));
     // Staged, name exactly what the answer grants. The rule itself only earns
@@ -517,28 +705,45 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
         // With no row to say how to scroll, a subject cut short ends in an
         // ellipsis on the one row the terminal has for it.
         let truncated = !show_scroll && subject_count < subject_rows.len();
-        for (index, row) in subject_rows
+        for (index, (kind, row)) in subject_rows
             .iter()
             .enumerate()
             .skip(offset)
             .take(subject_count)
         {
-            let prefix = if command && index == 0 { "$ " } else { "  " };
-            let text = if truncated {
-                format!(
-                    "{prefix}{}",
-                    single_line(&format!("{row} …"), inner.saturating_sub(2))
-                )
-            } else {
-                format!("{prefix}{row}")
+            let spans = match kind {
+                Row::Subject => {
+                    let prefix = if command && index == 0 { "$ " } else { "  " };
+                    let text = if truncated {
+                        format!(
+                            "{prefix}{}",
+                            single_line(&format!("{row} …"), inner.saturating_sub(2))
+                        )
+                    } else {
+                        format!("{prefix}{row}")
+                    };
+                    vec![Span::new(text, theme.text).on(theme.overlay)]
+                }
+                Row::ScriptName | Row::ScriptCut => vec![
+                    Span::new(
+                        format!("  {}", single_line(row, inner.saturating_sub(2))),
+                        theme.muted,
+                    )
+                    .on(theme.overlay),
+                ],
+                Row::Script => {
+                    let row = if truncated && index + 1 == offset + subject_count {
+                        single_line(&format!("{row} …"), inner.saturating_sub(4))
+                    } else {
+                        row.clone()
+                    };
+                    vec![
+                        Span::new("  │ ", theme.muted).on(theme.overlay),
+                        Span::new(row, theme.text).on(theme.overlay),
+                    ]
+                }
             };
-            push_row(
-                &mut panel,
-                vec![Span::new(text, theme.text).on(theme.overlay)],
-                width,
-                theme,
-                focused,
-            );
+            push_row(&mut panel, spans, width, theme, focused);
         }
         if show_scroll {
             let hidden = subject_count < subject_rows.len();
@@ -546,6 +751,7 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
             spans.extend(scroll_hint(
                 app,
                 hidden.then(|| (offset + 1, offset + subject_count, subject_rows.len())),
+                script.is_some(),
                 fit.expandable,
                 expanded,
                 inner.saturating_sub(2),
@@ -709,6 +915,7 @@ fn spend(room: &mut usize, wanted: usize) -> usize {
 fn scroll_hint(
     app: &App,
     window: Option<(usize, usize, usize)>,
+    rows: bool,
     expandable: bool,
     expanded: bool,
     width: usize,
@@ -727,10 +934,18 @@ fn scroll_hint(
             pairs.push(("ctrl+e", "expand"));
         }
     }
+    // With a script on the card the window counts screen rows (its long
+    // lines wrap), while its header counts the script's lines: so it says
+    // rows.
+    let key = if rows {
+        "rows {from}–{to} of {total}"
+    } else {
+        "lines {from}–{to} of {total}"
+    };
     let position = window.map(|(from, to, total)| {
         single_line(
             &language.format(
-                "lines {from}–{to} of {total}",
+                key,
                 &[
                     ("from", &from.to_string()),
                     ("to", &to.to_string()),

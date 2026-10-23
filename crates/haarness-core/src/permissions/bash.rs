@@ -1740,6 +1740,894 @@ fn literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
     }
 }
 
+/// How many script files [`script_files`] names in one line.
+const MAX_SCRIPT_FILES: usize = 16;
+/// How many files earlier steps plainly write [`script_files`] keeps, to say
+/// a script is written before it runs.
+const MAX_WRITES: usize = 256;
+/// How many `cd`s [`script_files`] follows; past them the folder is unknown.
+const MAX_MOVES: usize = 64;
+/// How long a folder [`script_files`] lays may get: the system's own path
+/// limit, so a line of `cd`s cannot grow it further.
+const MAX_PLACED_BYTES: usize = 4096;
+
+/// A script file a command line runs, from [`script_files`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFile {
+    pub path: PathBuf,
+    /// Why its text must not be shown: what runs may not be what is on disk.
+    pub withheld: Option<haarness_protocol::ScriptWithheld>,
+    /// The literal files its own command sends output to, where the line
+    /// puts them: one that is the script itself (through a link) is written
+    /// before it runs.
+    pub outputs: Vec<PathBuf>,
+    /// What its `#!` line does as it runs.
+    pub shebang: Shebang,
+}
+
+/// What a script's `#!` line does as it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shebang {
+    /// Nothing: its interpreter (or `source`) reads the line as a comment.
+    Comment,
+    /// Run by its path, the system runs the program the line names, with
+    /// the script's path after the line's own words.
+    Followed,
+    /// Run by `perl`, which runs the program the line names instead, unless
+    /// the line says `perl`.
+    Perl,
+}
+
+/// The scripts `command` runs from `cwd`, in order, for the person answering
+/// a permission request (see `permissions::script`): it decides nothing.
+///
+/// A script is a file an interpreter runs (`bash x.sh`, `sh -e x.sh`,
+/// `python3 -u x.py`, `node x.js`, `perl x.pl`, `ruby x.rb`), a file
+/// `source` or `.` reads by a path with a slash, or a program run by its
+/// path (`./x.sh`), named by a step at the line's top level (or a stage of a
+/// pipeline there), through `sudo`, `env`, `timeout`, `nohup`, `command` or
+/// `exec`. One a wrapper runs in another folder (`env -C`, `sudo -D`,
+/// `sudo -i`) is not named, nor a relative one once the folder is unknown
+/// (after a `cd` the line does not spell out, or one that may have failed),
+/// nor any in a line the tree cannot read whole, nor one under `/proc` or
+/// `/dev`, which lead elsewhere in the server's process than in the shell's
+/// (`/proc/self/cwd`, `/dev/fd/3`). On Windows, whose `cmd` reads a line
+/// otherwise (quotes, `^`, `%CD%`, `\`, drives), none is named at all.
+///
+/// Its text may be shown only in the shape people run: the line's first
+/// statement, its steps before the script joined by `&&` and each a `cd` to
+/// a plain folder or a `chmod` with a literal mode on plain paths; the
+/// script's own command of literal words, through `sudo`, `nohup`,
+/// `timeout <duration>`, `command` or `exec` without options, with output
+/// sent only to literal files or descriptors; and, when it ends in `&`,
+/// nothing after it but `wait`. Anything else withholds it: `Written` where
+/// the line plainly writes it first (a redirect, `tee`, `cp`, `mv`,
+/// `install`, `ln`, `curl -o`, `wget -O` naming it, or a folder holding it,
+/// literally), `Changeable` otherwise. A `source`d script shows, and
+/// withholds everything after it.
+#[must_use]
+pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
+    if cfg!(windows) || command.len() > MAX_COMMAND_BYTES {
+        return Vec::new();
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(command, None) else {
+        return Vec::new();
+    };
+    // A line the tree cannot read whole may hold an `&` or a `cd` where the
+    // tree puts none (`a && cd sub <<EOF &`): no folder can be told.
+    if tree.root_node().has_error() {
+        return Vec::new();
+    }
+    let mut line = Line {
+        source: command,
+        folder: Some(cwd.to_path_buf()),
+        moves: 0,
+        trusted: true,
+        redefined: false,
+        steered: false,
+        writes: Vec::new(),
+        found: Vec::new(),
+    };
+    let statements = statements(tree.root_node());
+    for (index, statement) in statements.iter().enumerate() {
+        if line.found.len() >= MAX_SCRIPT_FILES {
+            break;
+        }
+        // After `;`, a line break or `&` comes a step whatever the one before
+        // did, or while it still runs.
+        if index > 0 {
+            line.trusted = false;
+        }
+        let alone = index == 0 && statements[1..].iter().all(|later| waits(later, command));
+        line.statement(statement, alone);
+    }
+    line.found
+}
+
+/// A statement at a line's top level, with what ends it.
+struct Statement<'t> {
+    /// Its steps, from [`steps`].
+    steps: Vec<(tree_sitter::Node<'t>, Vec<tree_sitter::Node<'t>>)>,
+    /// It ends in `&`: it runs in a subshell of its own, alongside the
+    /// statements after it.
+    background: bool,
+}
+
+/// The statements of a line at its top level, in order, each paired with
+/// the `;`, `&` or line break that ends it.
+fn statements(root: tree_sitter::Node<'_>) -> Vec<Statement<'_>> {
+    let mut statements: Vec<Statement<'_>> = Vec::new();
+    for child in root.children(&mut root.walk()) {
+        match child.kind() {
+            "&" => {
+                if let Some(statement) = statements.last_mut() {
+                    statement.background = true;
+                }
+            }
+            "comment" => {}
+            _ if child.is_named() => statements.push(Statement {
+                steps: steps(child),
+                background: false,
+            }),
+            _ => {}
+        }
+    }
+    statements
+}
+
+/// Whether a statement only waits for the jobs before it: `wait`.
+fn waits(statement: &Statement<'_>, source: &str) -> bool {
+    !statement.background
+        && match statement.steps.as_slice() {
+            [(node, redirects)] => {
+                node.kind() == "command"
+                    && redirects.is_empty()
+                    && words(*node, source)
+                        .iter()
+                        .map(|word| (word.literal, word.value.as_str()))
+                        .eq([(true, "wait")])
+            }
+            _ => false,
+        }
+}
+
+/// The steps of a statement, in order, each with the redirects that belong
+/// to it: its `&&` lists opened. A redirect the tree hangs on a whole list
+/// (`a && b > f <<EOF`) belongs to its last command. Anything else (an `||`
+/// list, a pipeline, a group, a loop …) is one step.
+fn steps(
+    statement: tree_sitter::Node<'_>,
+) -> Vec<(tree_sitter::Node<'_>, Vec<tree_sitter::Node<'_>>)> {
+    let and_list = |node: tree_sitter::Node<'_>| {
+        node.kind() == "list"
+            && node
+                .children(&mut node.walk())
+                .all(|child| child.kind() != "||")
+    };
+    let mut steps = Vec::new();
+    let mut stack = vec![(statement, Vec::new())];
+    while let Some((node, redirects)) = stack.pop() {
+        match node.kind() {
+            _ if and_list(node) => {
+                let mut children: Vec<_> = node.named_children(&mut node.walk()).collect();
+                let last = children.pop();
+                let mut opened: Vec<_> = children
+                    .into_iter()
+                    .map(|child| (child, Vec::new()))
+                    .collect();
+                opened.extend(last.map(|last| (last, redirects)));
+                opened.reverse();
+                stack.extend(opened);
+            }
+            "redirected_statement"
+                if !heredoc_holds_more(node)
+                    && node.child_by_field_name("body").is_some_and(and_list) =>
+            {
+                let mut own: Vec<_> = node
+                    .children_by_field_name("redirect", &mut node.walk())
+                    .collect();
+                own.extend(redirects);
+                if let Some(body) = node.child_by_field_name("body") {
+                    stack.push((body, own));
+                }
+            }
+            _ => steps.push((node, redirects)),
+        }
+    }
+    steps
+}
+
+/// [`script_files`] going through a line's top-level steps in order.
+struct Line<'s> {
+    source: &'s str,
+    /// Where the shell is: `None` once a step moved it somewhere the line
+    /// does not say, or may have.
+    folder: Option<PathBuf>,
+    /// How many `cd`s were followed.
+    moves: usize,
+    /// Every step so far keeps to the trusted shape.
+    trusted: bool,
+    /// A step may have redefined what a later command runs (a function, an
+    /// alias, a sourced file, `eval`): any later `cd` or program may move
+    /// the shell.
+    redefined: bool,
+    /// A step that is not a trusted one ran in the line's shell: it may have
+    /// set `CDPATH` or `HOME`, which lead a relative `cd` elsewhere.
+    steered: bool,
+    /// The files earlier steps plainly write, where the line puts them.
+    writes: Vec<PathBuf>,
+    found: Vec<ScriptFile>,
+}
+
+/// What a command's own words say it runs.
+enum Run {
+    Script(Script),
+    /// A script a wrapper runs in another folder: not named.
+    Elsewhere,
+}
+
+/// A script a command runs, as its words name it.
+struct Script {
+    file: PathBuf,
+    /// Its own command keeps to the trusted shape.
+    trusted: bool,
+    /// `source` or `.` of it: it runs in the line's own shell.
+    sourced: bool,
+    /// What its `#!` line does as it runs.
+    shebang: Shebang,
+}
+
+impl Line<'_> {
+    /// A statement at the line's top level; `alone` when nothing but `wait`
+    /// follows it. One that ends in `&` runs in a subshell alongside the
+    /// rest of the line: its `cd`s stay in it, and its scripts show only
+    /// when it is `alone`. After one that does not, the folder is unknown if
+    /// it moved: a `cd` may fail before `;`, and the next step runs anyway.
+    fn statement(&mut self, statement: &Statement<'_>, alone: bool) {
+        let before = self.folder.clone();
+        if statement.background && !alone {
+            self.trusted = false;
+        }
+        for (step, redirects) in &statement.steps {
+            if self.found.len() >= MAX_SCRIPT_FILES {
+                break;
+            }
+            self.step(*step, redirects);
+        }
+        if statement.background {
+            self.folder = before;
+        } else if self.folder != before {
+            self.folder = None;
+        }
+    }
+
+    fn step(&mut self, node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>]) {
+        match node.kind() {
+            // What follows `<<EOF` on its line runs too, hidden in the
+            // here-document's redirect (`./a.sh <<EOF && cd sub`).
+            "command" | "redirected_statement" if heredoc_holds_more(node) => {
+                self.note_redirects(outer);
+                self.untrusted(node);
+            }
+            "command" | "redirected_statement" => match statement(node, outer) {
+                (Some(command), redirects) => self.command(command, &redirects),
+                (None, redirects) => {
+                    self.note_redirects(&redirects);
+                    self.untrusted(node);
+                }
+            },
+            "pipeline" => {
+                // Its stages run together: a script in one is never shown.
+                self.trusted = false;
+                self.steered = true;
+                for stage in node.named_children(&mut node.walk()) {
+                    let (Some(command), redirects) = statement(stage, &[]) else {
+                        continue;
+                    };
+                    self.note_writes(command, &redirects);
+                    if let Some(Run::Script(script)) = self.runs(command, &redirects) {
+                        self.name(script, &redirects);
+                    }
+                }
+            }
+            "function_definition" => {
+                self.redefined = true;
+                self.trusted = false;
+            }
+            _ => {
+                self.note_redirects(outer);
+                self.untrusted(node);
+            }
+        }
+    }
+
+    /// A step that does not keep to the trusted shape. One that may move
+    /// the shell or redefine a command leaves the folder unknown (a
+    /// subshell's stay in it).
+    fn untrusted(&mut self, node: tree_sitter::Node<'_>) {
+        self.trusted = false;
+        self.steered = true;
+        if node.kind() != "subshell" && moves_shell(node, self.source) {
+            self.folder = None;
+            self.redefined = true;
+        }
+    }
+
+    fn command(&mut self, node: tree_sitter::Node<'_>, redirects: &[tree_sitter::Node<'_>]) {
+        match self.runs(node, redirects) {
+            Some(Run::Script(script)) => {
+                // It runs a program, which may change any file; a sourced one
+                // may also move the shell or redefine any command.
+                self.redefined |= script.sourced;
+                self.steered |= script.sourced;
+                self.name(script, redirects);
+                self.trusted = false;
+                self.note_redirects(redirects);
+            }
+            Some(Run::Elsewhere) => self.trusted = false,
+            None if self.trusted_step(node, redirects) => {}
+            None => {
+                self.note_writes(node, redirects);
+                self.trusted = false;
+                self.steered = true;
+                // A function or alias the line defined may be called here.
+                if self.redefined || moves_shell(node, self.source) {
+                    self.folder = None;
+                    self.redefined = true;
+                }
+            }
+        }
+    }
+
+    /// A script the line runs, named where the line puts it.
+    fn name(&mut self, script: Script, redirects: &[tree_sitter::Node<'_>]) {
+        let Some(path) = self.place(&script.file) else {
+            return;
+        };
+        let lexical = super::normalize_absolute(&path);
+        if in_system_folder(&lexical) {
+            return;
+        }
+        let outputs: Vec<PathBuf> = redirect_targets(redirects, self.source)
+            .into_iter()
+            .filter_map(|target| self.place(&target))
+            .collect();
+        // Its own redirect may write it before it runs (`./x.sh > x.sh`).
+        let own = outputs
+            .iter()
+            .any(|target| super::normalize_absolute(target) == lexical);
+        let withheld = if own
+            || self
+                .writes
+                .iter()
+                .any(|written| lexical.starts_with(written))
+        {
+            Some(haarness_protocol::ScriptWithheld::Written)
+        } else if !self.trusted
+            || !script.trusted
+            || outputs
+                .iter()
+                .any(|output| in_system_folder(&super::normalize_absolute(output)))
+        {
+            Some(haarness_protocol::ScriptWithheld::Changeable)
+        } else {
+            None
+        };
+        self.found.push(ScriptFile {
+            path,
+            withheld,
+            outputs,
+            shebang: script.shebang,
+        });
+    }
+
+    /// Where a file the line names is, from where the shell is.
+    fn place(&self, file: &Path) -> Option<PathBuf> {
+        if file.has_root() {
+            return Some(file.to_path_buf());
+        }
+        Some(self.folder.as_ref()?.join(file))
+    }
+
+    /// What `node`'s words say it runs, through the wrappers it may use:
+    /// trusted through `sudo`, `nohup`, `timeout <duration>`, `command` and
+    /// `exec` without options, never through `env`.
+    fn runs(
+        &self,
+        node: tree_sitter::Node<'_>,
+        redirects: &[tree_sitter::Node<'_>],
+    ) -> Option<Run> {
+        let source = self.source;
+        let words = words(node, source);
+        let mut trusted = node
+            .named_children(&mut node.walk())
+            .all(|child| child.kind() != "variable_assignment")
+            && !has_substitution(node)
+            && redirects
+                .iter()
+                .all(|redirect| outputs_to_literal(*redirect, source));
+        let mut elsewhere = false;
+        let mut rest = &words[..];
+        loop {
+            let (program, arguments) = rest.split_first()?;
+            if !program.literal {
+                return None;
+            }
+            let name = program_name(&program.value);
+            match name.as_str() {
+                "sudo" => {
+                    let options = Options::read(
+                        arguments,
+                        "ugpCDrtTU",
+                        "",
+                        &[
+                            "user",
+                            "group",
+                            "host",
+                            "prompt",
+                            "close-from",
+                            "chdir",
+                            "role",
+                            "type",
+                            "command-timeout",
+                            "other-user",
+                        ],
+                    );
+                    // `-e` edits files, `-l` and `-V` list.
+                    if options.flags.contains(['e', 'l', 'V']) {
+                        return None;
+                    }
+                    elsewhere |= options.flags.contains('i')
+                        || options
+                            .value("D")
+                            .or_else(|| options.value("chdir"))
+                            .is_some();
+                    rest = after_assignments(options.rest);
+                    trusted &= rest.len() == arguments.len();
+                }
+                "env" => {
+                    let options = Options::read(
+                        arguments,
+                        "uCPSa",
+                        "",
+                        &["unset", "chdir", "split-string", "argv0"],
+                    );
+                    // `env -S` runs text.
+                    if options
+                        .value("S")
+                        .or_else(|| options.value("split-string"))
+                        .is_some()
+                    {
+                        return None;
+                    }
+                    elsewhere |= options
+                        .value("C")
+                        .or_else(|| options.value("chdir"))
+                        .is_some();
+                    rest = after_assignments(options.rest);
+                    // It sets, clears or searches for what runs.
+                    trusted = false;
+                }
+                "timeout" => {
+                    let options = Options::read(arguments, "sk", "", &["signal", "kill-after"]);
+                    // The first word after the options is the duration.
+                    let (duration, after) = options.rest.split_first()?;
+                    trusted &= options.rest.len() == arguments.len()
+                        && duration.literal
+                        && is_duration(&duration.value);
+                    rest = after;
+                }
+                "nohup" => rest = arguments,
+                "command" => {
+                    let options = Options::read(arguments, "", "", &[]);
+                    // `command -v` and `-V` only say what a name is.
+                    if options.flags.contains(['v', 'V']) {
+                        return None;
+                    }
+                    trusted &= options.rest.len() == arguments.len();
+                    rest = options.rest;
+                }
+                "exec" => {
+                    let options = Options::read(arguments, "a", "", &[]);
+                    trusted &= options.rest.len() == arguments.len();
+                    rest = options.rest;
+                }
+                _ => {
+                    let (word, sourced, shebang) = if matches!(name.as_str(), "source" | ".") {
+                        (
+                            arguments.first().filter(|word| word.value.contains('/')),
+                            true,
+                            Shebang::Comment,
+                        )
+                    } else if let Some(plain) = interpreter(&name) {
+                        let shebang = if name == "perl" {
+                            Shebang::Perl
+                        } else {
+                            Shebang::Comment
+                        };
+                        (interpreter_script(plain, arguments), false, shebang)
+                    } else if program.value.contains('/') {
+                        (Some(program), false, Shebang::Followed)
+                    } else {
+                        (None, false, Shebang::Comment)
+                    };
+                    let word = word.filter(|word| {
+                        let value = word.value.as_str();
+                        word.literal
+                            && !value.is_empty()
+                            && value != "-"
+                            && !value.contains(['*', '?', '['])
+                    })?;
+                    if elsewhere {
+                        return Some(Run::Elsewhere);
+                    }
+                    trusted &= rest.iter().all(|word| word.literal);
+                    let file = home_expansion(&word.raw, &word.value)
+                        .unwrap_or_else(|| PathBuf::from(&word.value));
+                    return Some(Run::Script(Script {
+                        file,
+                        trusted,
+                        sourced,
+                        shebang,
+                    }));
+                }
+            }
+        }
+    }
+
+    /// Whether a command that runs no script is a step the trusted shape
+    /// takes before one: `cd` to a plain folder, which it follows, or
+    /// `chmod` with a literal mode on plain paths; no redirect, assignment
+    /// or substitution.
+    fn trusted_step(
+        &mut self,
+        node: tree_sitter::Node<'_>,
+        redirects: &[tree_sitter::Node<'_>],
+    ) -> bool {
+        let words = words(node, self.source);
+        let plain = redirects.is_empty()
+            && !has_substitution(node)
+            && node
+                .named_children(&mut node.walk())
+                .all(|child| child.kind() != "variable_assignment");
+        // The builtins by name: `/usr/bin/cd` moves nothing.
+        match words.as_slice() {
+            [program, target]
+                if plain && program.literal && program.value == "cd" && plain_path(target) =>
+            {
+                // After a redefinition `cd` may not be the builtin.
+                if self.redefined || self.steered && !target.value.starts_with('/') {
+                    self.folder = None;
+                } else {
+                    self.move_to(target);
+                }
+                true
+            }
+            [program, mode, paths @ ..] if plain && program.literal && program.value == "chmod" => {
+                mode.literal
+                    && is_mode(&mode.value)
+                    && !paths.is_empty()
+                    && paths.iter().all(plain_path)
+            }
+            _ => false,
+        }
+    }
+
+    /// A `cd` to a plain folder, followed while [`MAX_MOVES`] and
+    /// [`MAX_PLACED_BYTES`] allow.
+    fn move_to(&mut self, target: &Word<'_>) {
+        self.moves += 1;
+        let target = home_expansion(&target.raw, &target.value)
+            .unwrap_or_else(|| PathBuf::from(&target.value));
+        // A rooted folder is where it says, also from an unknown one.
+        let folder = if target.has_root() {
+            Some(target)
+        } else {
+            self.folder.take().map(|folder| folder.join(target))
+        };
+        self.folder = folder
+            .filter(|_| self.moves <= MAX_MOVES)
+            .filter(|folder| folder.as_os_str().len() <= MAX_PLACED_BYTES);
+    }
+
+    /// The files a step that is not trusted plainly writes: its redirects,
+    /// and what `tee`, `cp`, `mv`, `install`, `ln`, `curl -o` and `wget -O`
+    /// write, where the words are literal.
+    fn note_writes(&mut self, node: tree_sitter::Node<'_>, redirects: &[tree_sitter::Node<'_>]) {
+        self.note_redirects(redirects);
+        let words = words(node, self.source);
+        let Some((program, arguments)) = words.split_first() else {
+            return;
+        };
+        let plain: Vec<&Word<'_>> = arguments
+            .iter()
+            .filter(|word| !word.value.starts_with('-'))
+            .collect();
+        // The word after an option given on its own (`-o file`), or at the
+        // end of a cluster (`-fsSLo file`).
+        let after = |short: char, long: &str| -> Vec<&Word<'_>> {
+            arguments
+                .windows(2)
+                .filter(|pair| {
+                    let option = pair[0].value.as_str();
+                    option == long
+                        || option.strip_prefix('-').is_some_and(|cluster| {
+                            !cluster.starts_with('-') && cluster.ends_with(short)
+                        })
+                })
+                .map(|pair| &pair[1])
+                .collect()
+        };
+        let written: Vec<&Word<'_>> = match program_name(&program.value).as_str() {
+            "tee" => plain,
+            "cp" | "mv" | "install" | "ln" => plain.last().copied().into_iter().collect(),
+            "curl" => after('o', "--output"),
+            "wget" => after('O', "--output-document"),
+            _ => Vec::new(),
+        };
+        for word in written.into_iter().filter(|word| word.literal) {
+            let file = home_expansion(&word.raw, &word.value)
+                .unwrap_or_else(|| PathBuf::from(&word.value));
+            self.note_write(&file);
+        }
+    }
+
+    fn note_redirects(&mut self, redirects: &[tree_sitter::Node<'_>]) {
+        for file in redirect_targets(redirects, self.source) {
+            self.note_write(&file);
+        }
+    }
+
+    /// A file an earlier step writes, within [`MAX_WRITES`]: past them a
+    /// script is still withheld, only not said to be written.
+    fn note_write(&mut self, file: &Path) {
+        if self.writes.len() < MAX_WRITES
+            && let Some(path) = self.place(file)
+        {
+            self.writes.push(super::normalize_absolute(&path));
+        }
+    }
+}
+
+/// A statement's command, when its body is one, and every redirect that
+/// belongs to it: the statement's, the command's own (a here-string), and
+/// `outer`'s.
+fn statement<'t>(
+    node: tree_sitter::Node<'t>,
+    outer: &[tree_sitter::Node<'t>],
+) -> (Option<tree_sitter::Node<'t>>, Vec<tree_sitter::Node<'t>>) {
+    let mut redirects: Vec<_> = node
+        .children_by_field_name("redirect", &mut node.walk())
+        .collect();
+    let command = match node.kind() {
+        "command" => Some(node),
+        "redirected_statement" => node
+            .child_by_field_name("body")
+            .filter(|body| body.kind() == "command"),
+        _ => None,
+    };
+    if let Some(command) = command.filter(|command| command.id() != node.id()) {
+        redirects.extend(command.children_by_field_name("redirect", &mut command.walk()));
+    }
+    redirects.extend_from_slice(outer);
+    (command, redirects)
+}
+
+/// Whether anything under `node` is a command or process substitution.
+fn has_substitution(node: tree_sitter::Node<'_>) -> bool {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "command_substitution" | "process_substitution") {
+            return true;
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    false
+}
+
+/// Whether a here-document's redirect in `node` holds more of the line than
+/// the here-document: the tree hangs what follows `<<EOF` on its line
+/// (`&& b`, `| sh`) inside it.
+fn heredoc_holds_more(node: tree_sitter::Node<'_>) -> bool {
+    node.children_by_field_name("redirect", &mut node.walk())
+        .filter(|redirect| redirect.kind() == "heredoc_redirect")
+        .any(|redirect| {
+            redirect.named_children(&mut redirect.walk()).any(|child| {
+                !matches!(
+                    child.kind(),
+                    "heredoc_start" | "heredoc_body" | "heredoc_end" | "file_redirect"
+                )
+            })
+        })
+}
+
+/// Whether a command under `node` may move the shell, or redefine one that
+/// does: `cd`, `pushd`, `popd`, `eval`, `source`, `.`, `builtin`, `command`,
+/// `alias`, or a function definition.
+fn moves_shell(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "function_definition"
+            || node.kind() == "command"
+                && node.child_by_field_name("name").is_some_and(|name| {
+                    matches!(
+                        program_name(&literal(name, source).0).as_str(),
+                        "cd" | "pushd"
+                            | "popd"
+                            | "eval"
+                            | "source"
+                            | "."
+                            | "builtin"
+                            | "command"
+                            | "alias"
+                    )
+                })
+        {
+            return true;
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    false
+}
+
+/// A redirect's operator.
+fn operator(redirect: tree_sitter::Node<'_>, source: &str) -> String {
+    redirect
+        .children(&mut redirect.walk())
+        .filter(|child| !child.is_named())
+        .map(|child| node_text(child, source))
+        .collect()
+}
+
+/// Whether a redirect only sends output to a literal file or another
+/// descriptor: what a trusted script's own command may do.
+fn outputs_to_literal(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    redirect.kind() == "file_redirect"
+        && matches!(
+            operator(redirect, source).as_str(),
+            ">" | ">>" | "&>" | "&>>" | ">|" | ">&"
+        )
+        && redirect
+            .child_by_field_name("destination")
+            .is_some_and(|destination| {
+                let (value, complete) = literal(destination, source);
+                complete && !value.is_empty() && !value.contains(['*', '?', '['])
+            })
+}
+
+/// A `cd` folder or `chmod` path the trusted shape takes: a literal of
+/// plain path characters, with no leading `-`, no `$`, `` ` ``, `*`, `?`,
+/// `[`, `{` or `\`, no control character, no `~user` (a leading `~` is the
+/// home folder) and no `..` part, which the shell takes off the folder's
+/// name where a file is read through its links.
+fn plain_path(word: &Word<'_>) -> bool {
+    let value = word.value.as_str();
+    word.literal
+        && !value.is_empty()
+        && !value.starts_with('-')
+        && !value.contains(['$', '`', '*', '?', '[', '{', '\\'])
+        && !value.chars().any(char::is_control)
+        && (!value.starts_with('~') || value == "~" || value.starts_with("~/"))
+        && Path::new(value)
+            .components()
+            .all(|part| part != Component::ParentDir)
+}
+
+/// Whether a path (lexical, absolute) is under `/proc` or `/dev`, where the
+/// server's process and the shell's see different files (`/proc/self/cwd`,
+/// `/dev/fd/3`, `/dev/stdin`).
+pub(super) fn in_system_folder(path: &Path) -> bool {
+    path.starts_with("/proc") || path.starts_with("/dev")
+}
+
+/// A `chmod` mode: octal digits, or symbolic clauses (`+x`, `u=rwx,go-w`).
+fn is_mode(mode: &str) -> bool {
+    let octal = (1..=4).contains(&mode.len()) && mode.bytes().all(|b| (b'0'..=b'7').contains(&b));
+    octal
+        || !mode.is_empty()
+            && mode.split(',').all(|clause| {
+                let actions = clause.trim_start_matches(['u', 'g', 'o', 'a']);
+                actions.starts_with(['+', '-', '='])
+                    && actions.chars().all(|c| "+-=rwxXstugo".contains(c))
+            })
+}
+
+/// A `timeout` duration: a number, with `s`, `m`, `h` or `d` after it.
+fn is_duration(value: &str) -> bool {
+    let number = value.strip_suffix(['s', 'm', 'h', 'd']).unwrap_or(value);
+    number.bytes().any(|b| b.is_ascii_digit())
+        && number.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && number.bytes().filter(|&b| b == b'.').count() <= 1
+}
+
+/// The literal files redirects write (not `/dev/…` or a descriptor).
+fn redirect_targets(redirects: &[tree_sitter::Node<'_>], source: &str) -> Vec<PathBuf> {
+    redirects
+        .iter()
+        .filter(|redirect| {
+            redirect.kind() == "file_redirect"
+                && matches!(
+                    operator(**redirect, source).as_str(),
+                    ">" | ">>" | "&>" | "&>>" | ">|" | ">&" | "<>"
+                )
+        })
+        .filter_map(|redirect| {
+            let destination = redirect.child_by_field_name("destination")?;
+            let (value, complete) = literal(destination, source);
+            let descriptor = value == "-" || value.chars().all(|c| c.is_ascii_digit());
+            (complete && !value.is_empty() && !descriptor && !value.starts_with("/dev/")).then(
+                || {
+                    home_expansion(&node_text(destination, source), &value)
+                        .unwrap_or_else(|| PathBuf::from(value))
+                },
+            )
+        })
+        .collect()
+}
+
+/// Interpreters that run a script file named after their options, with a
+/// test for the options that take no value and run no inline code. Past
+/// any other option (`-c`, `-e`, `-m`, `-W`, `--require`, `-o name` …) the
+/// next word may be the option's value or the code itself, so no script is
+/// claimed. fish's options differ, and are not read.
+fn interpreter(name: &str) -> Option<fn(&str) -> bool> {
+    fn cluster(option: &str, letters: &str) -> bool {
+        option
+            .strip_prefix('-')
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| letters.contains(c)))
+    }
+    match name {
+        "bash" | "sh" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" | "posh" => {
+            Some(|option| {
+                cluster(option, "abefhnuvxC")
+                    || matches!(option, "--norc" | "--noprofile" | "--posix")
+            })
+        }
+        "node" => Some(|option| option == "--no-warnings"),
+        "perl" => Some(|option| cluster(option, "wWTt")),
+        "ruby" => Some(|option| cluster(option, "wW")),
+        name if name
+            .strip_prefix("python")
+            .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.')) =>
+        {
+            Some(|option| cluster(option, "uBEsSOIq"))
+        }
+        _ => None,
+    }
+}
+
+/// The word an interpreter runs as its script: the first after the options
+/// `plain` accepts (and a `--`).
+fn interpreter_script<'s, 't>(
+    plain: fn(&str) -> bool,
+    arguments: &'s [Word<'t>],
+) -> Option<&'s Word<'t>> {
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        let value = word.value.as_str();
+        if !word.literal {
+            return None;
+        }
+        if value == "--" {
+            return words.next();
+        }
+        if !value.starts_with('-') || value == "-" {
+            return Some(word);
+        }
+        if !plain(value) {
+            return None;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2598,5 +3486,625 @@ mod readings {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// [`script_files`]: which file a command line runs as a script, and when
+/// its text may be shown.
+#[cfg(all(test, not(windows)))]
+mod scripts {
+    use super::*;
+    use haarness_protocol::ScriptWithheld::{Changeable, Written};
+
+    fn cwd() -> PathBuf {
+        PathBuf::from("/project")
+    }
+
+    /// `path` in `/project`, compared as paths (by their parts), so the
+    /// tests read the same on Windows.
+    fn at(path: &str) -> PathBuf {
+        cwd().join(path)
+    }
+
+    /// The script files `command` runs from `/project`.
+    fn found(command: &str) -> Vec<PathBuf> {
+        script_files(command, &cwd())
+            .into_iter()
+            .map(|file| file.path)
+            .collect()
+    }
+
+    fn first(command: &str) -> Option<PathBuf> {
+        found(command).into_iter().next()
+    }
+
+    /// Why the first script `command` runs is not shown, if it is not.
+    fn withheld(command: &str) -> Option<haarness_protocol::ScriptWithheld> {
+        script_files(command, &cwd())
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no script in {command}"))
+            .withheld
+    }
+
+    /// Why the last script `command` runs is not shown, if it is not.
+    fn withheld_last(command: &str) -> Option<haarness_protocol::ScriptWithheld> {
+        script_files(command, &cwd())
+            .pop()
+            .unwrap_or_else(|| panic!("no script in {command}"))
+            .withheld
+    }
+
+    #[test]
+    fn finds_the_file_an_interpreter_runs() {
+        for (command, file) in [
+            ("bash /tmp/x.sh", "/tmp/x.sh"),
+            ("sh -e x.sh arg", "x.sh"),
+            ("zsh -- x.sh", "x.sh"),
+            ("bash --norc -x x.sh", "x.sh"),
+            ("/bin/bash x.sh", "x.sh"),
+            ("dash x.sh", "x.sh"),
+            ("python3 -u x.py", "x.py"),
+            ("python3.12 x.py", "x.py"),
+            ("python x.py", "x.py"),
+            ("node x.js", "x.js"),
+            ("node --no-warnings x.js", "x.js"),
+            ("perl -w x.pl", "x.pl"),
+            ("ruby x.rb", "x.rb"),
+            ("source ./env.sh", "env.sh"),
+            (". ./env.sh", "env.sh"),
+            ("\"bash\" 'my script.sh'", "my script.sh"),
+            ("./x.sh a", "x.sh"),
+            ("/tmp/x.sh", "/tmp/x.sh"),
+            ("../bin/x", "../bin/x"),
+        ] {
+            assert_eq!(first(command), Some(at(file)), "{command}");
+        }
+        if let Some(home) = haarness_protocol::home_dir() {
+            assert_eq!(first("bash ~/x.sh"), Some(home.join("x.sh")));
+        }
+    }
+
+    #[test]
+    fn claims_nothing_when_no_script_file_is_named() {
+        for command in [
+            "bash -c 'echo hi'",
+            "bash -lc 'echo hi'",
+            "bash -s x.sh",
+            "bash -o posix x.sh",
+            "python3 -c 'print(1)'",
+            "python3 -m http.server",
+            "python3 -W ignore x.py",
+            "node -e 1",
+            "node --require x y.js",
+            "bash",
+            "python3 -",
+            "bash *.sh",
+            "bash \"$SCRIPT\"",
+            "bash $DIR/x.sh",
+            "bash <(curl -s example.com)",
+            "source /dev/stdin <<<'echo hi'",
+            "fish x.fish",
+            "ls -la",
+            "git status",
+            "cat x.sh",
+            "cd sub",
+            "echo ./x.sh",
+            "bash -c 'bash x.sh'",
+            "eval ./x.sh",
+            // A `source` name without a slash, or not literal.
+            "source env.sh",
+            ". env.sh",
+            "source \"$X\"",
+            "source <(make env)",
+            // Wrappers a trusted line does not use.
+            "time ./x.sh",
+            "nice -n 5 ./x.sh",
+            "xargs ./x.sh",
+            "sudo -e x.sh",
+        ] {
+            assert_eq!(first(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn the_lines_people_run_show_their_script() {
+        for (command, file) in [
+            ("./run.sh", "run.sh"),
+            ("bash run.sh a b", "run.sh"),
+            ("sh run.sh", "run.sh"),
+            ("sh -e run.sh", "run.sh"),
+            ("python3 x.py", "x.py"),
+            ("sudo ./run.sh", "run.sh"),
+            ("nohup ./run.sh", "run.sh"),
+            ("timeout 5 ./run.sh", "run.sh"),
+            ("timeout 1.5m ./run.sh", "run.sh"),
+            ("command ./run.sh", "run.sh"),
+            ("exec ./run.sh", "run.sh"),
+            ("sudo nohup ./run.sh", "run.sh"),
+            ("cd dir && ./run.sh", "dir/run.sh"),
+            ("cd \"my dir\" && ./run.sh", "my dir/run.sh"),
+            ("cd a && cd b && ./run.sh", "a/b/run.sh"),
+            ("cd a..b && ./run.sh", "a..b/run.sh"),
+            ("chmod +x run.sh && ./run.sh", "run.sh"),
+            ("chmod 755 run.sh bin/x && ./run.sh", "run.sh"),
+            ("chmod u+x,go-w run.sh && ./run.sh", "run.sh"),
+            ("cd d && chmod +x run.sh && ./run.sh", "d/run.sh"),
+            ("./run.sh > log 2>&1", "run.sh"),
+            ("./run.sh >> out/log", "run.sh"),
+            ("./run.sh > /dev/null 2>&1", "run.sh"),
+            ("source .venv/bin/activate", ".venv/bin/activate"),
+            (". ./env.sh", "env.sh"),
+            // What runs after it does not change it.
+            ("./run.sh; echo x > run.sh", "run.sh"),
+            ("./run.sh && make", "run.sh"),
+            // Started with `&`, with nothing but `wait` after it.
+            ("nohup ./run.sh &", "run.sh"),
+            ("nohup ./run.sh > out.log 2>&1 &", "run.sh"),
+            ("./run.sh & wait", "run.sh"),
+            ("./run.sh &\nwait\nwait", "run.sh"),
+            ("cd d && ./run.sh &", "d/run.sh"),
+        ] {
+            assert_eq!(first(command), Some(at(file)), "{command}");
+            assert_eq!(withheld(command), None, "{command}");
+        }
+        assert_eq!(
+            first("cd /tmp && ./run.sh"),
+            Some(PathBuf::from("/tmp/run.sh"))
+        );
+        assert_eq!(withheld("cd /tmp && ./run.sh"), None);
+        if let Some(home) = haarness_protocol::home_dir() {
+            for command in ["cd ~/proj && ./run.sh", "cd ~ && cd proj && ./run.sh"] {
+                assert_eq!(first(command), Some(home.join("proj/run.sh")), "{command}");
+                assert_eq!(withheld(command), None, "{command}");
+            }
+        }
+    }
+
+    /// Lines that showed their script before the shape was narrowed (October
+    /// 23): named now, with the line saying an earlier step can change it.
+    #[test]
+    fn lines_outside_the_narrow_shape_are_named_and_withheld() {
+        for command in [
+            "export X=1 && ./run.sh",
+            "export X=1 Y=two; ./run.sh",
+            "X=1; ./run.sh",
+            "X=1 && ./run.sh",
+            "FOO=1 ./run.sh",
+            "set -euo pipefail; ./run.sh",
+            "set -e && ./run.sh",
+            "unset X && ./run.sh",
+            "true && ./run.sh",
+            ": && ./run.sh",
+            "echo start && ./run.sh",
+            "printf x && ./run.sh",
+            "test -f run.sh && ./run.sh",
+            "[ -x run.sh ] && ./run.sh",
+            "[[ -x run.sh ]] && ./run.sh",
+            "mkdir -p out && ./run.sh > out/log",
+            "chmod +x run.sh; ./run.sh",
+            "chmod -R +x . && ./run.sh",
+            "chmod --reference=a run.sh && ./run.sh",
+            "chmod +x *.sh && ./run.sh",
+            "source .venv/bin/activate && ./x.sh",
+            "source ./env.sh && ./run.sh",
+            "env X=1 ./run.sh",
+            "env ./run.sh",
+            "env -P /tmp ./run.sh",
+            "env -u PATH bash run.sh",
+            "sudo -u bob ./run.sh",
+            "sudo -E ./run.sh",
+            "sudo X=1 ./run.sh",
+            "timeout -s KILL 5 ./run.sh",
+            "timeout 5x ./run.sh",
+            "command -p ./run.sh",
+            "exec -a name ./run.sh",
+            "exec -c ./run.sh",
+            "./run.sh > \"$OUT\"",
+            "./run.sh > r*.log",
+        ] {
+            assert!(first(command).is_some(), "{command}");
+            assert_eq!(withheld_last(command), Some(Changeable), "{command}");
+        }
+        // The sourced file shows; the script after it does not.
+        let files = script_files("source ./env.sh && ./run.sh", &cwd());
+        assert_eq!(files[0].path, at("env.sh"));
+        assert_eq!(files[0].withheld, None);
+        assert_eq!(files[1].path, at("run.sh"));
+        assert_eq!(files[1].withheld, Some(Changeable));
+    }
+
+    #[test]
+    fn a_script_the_line_writes_before_it_runs_is_written() {
+        for command in [
+            "cat > gen.sh <<'EOF'\necho NEW\nEOF\nbash gen.sh",
+            "echo 'echo hi' > run.sh && ./run.sh",
+            "echo 'echo hi' >> run.sh; sh run.sh",
+            "printf x &> run.sh; sh run.sh",
+            "printf x >| run.sh; sh run.sh",
+            "./run.sh > run.sh",
+            "./run.sh >> ./run.sh",
+            "tee run.sh < new.sh && sh run.sh",
+            "cp new.sh run.sh && ./run.sh",
+            "mv -f new.sh run.sh && ./run.sh",
+            "install -m 755 new.sh run.sh && ./run.sh",
+            "ln -sf other.sh run.sh && ./run.sh",
+            "cp new.sh bin/ && bin/new.sh",
+            "cp -r tmpl/ build && ./build/run.sh",
+            "cp new.sh . && ./new.sh",
+            "curl -fsSL -o run.sh https://example.test/run.sh && bash run.sh",
+            "curl -fsSLo run.sh https://example.test/run.sh && bash run.sh",
+            "wget -O run.sh https://example.test/x && sh run.sh",
+            "cd sub && cat > x.sh <<EOF\necho\nEOF\ncd /project && sh sub/x.sh",
+            "curl -fsSL https://example.test/x | tee run.sh; sh run.sh",
+        ] {
+            assert_eq!(withheld(command), Some(Written), "{command}");
+        }
+        if let Some(home) = haarness_protocol::home_dir() {
+            let files = script_files("cp run.sh ~/bin/ && ~/bin/run.sh", &cwd());
+            assert_eq!(files[0].path, home.join("bin/run.sh"));
+            assert_eq!(files[0].withheld, Some(Written));
+        }
+        // Its own outputs go with it, for the reader to tell a link to it.
+        let files = script_files("./run.sh > log 2>&1", &cwd());
+        assert_eq!(files[0].outputs, [at("log")]);
+    }
+
+    /// Every way of changing a script, or the file a name leads to, that
+    /// the reviews found: the script is named, its text withheld.
+    #[test]
+    fn anything_else_before_the_script_or_in_its_command_withholds_it() {
+        for command in [
+            // Programs and shells that may write anything.
+            "make && ./run.sh",
+            "npm install && ./run.sh",
+            "git checkout -- run.sh && ./run.sh",
+            "tar -xzf a.tgz && ./run.sh",
+            "rsync -a src/ ./ && ./run.sh",
+            "dd if=new.sh of=run.sh && ./run.sh",
+            "patch -p1 < fix.diff && ./run.sh",
+            "python3 -c 'open(\"run.sh\", \"w\")' && ./run.sh",
+            "bash -c 'printf x > run.sh' && ./run.sh",
+            "bash <<EOF\nprintf x > run.sh\nEOF\n./run.sh",
+            "eval \"$X\"; /tmp/run.sh",
+            "sed -i -e 's/a/b/e' f && ./run.sh",
+            r"find . -name x -exec sh {} \; && ./run.sh",
+            "curl -K config https://example.test && ./run.sh",
+            "time -o log ls && ./run.sh",
+            // Expansions inside steps that look harmless.
+            ": ${X:=1} && ./run.sh",
+            ": ${CDPATH:=/tmp} && /tmp/run.sh",
+            ": $((PATH=0)) && ./run.sh",
+            "[[ a[$(cp evil.sh run.sh)] -eq 0 ]] && ./run.sh",
+            "[[ X -eq 0 ]] && ./run.sh",
+            "a[X]=1 && ./run.sh",
+            "printf -v PATH %s /evil && ./run.sh",
+            "set -a && BASH_ENV=./evil.sh && bash run.sh",
+            "set -k && bash run.sh BASH_ENV=./evil.sh",
+            "set -k; node x.js NODE_OPTIONS=--require=./evil.js",
+            // Loops, groups, subshells, `||`, pipelines.
+            "for f in a; do make; done; ./run.sh",
+            "while false; do :; done; ./run.sh",
+            "{ make; }; ./run.sh",
+            "(make); ./run.sh",
+            "make || true; ./run.sh",
+            "if true; then make; fi; ./run.sh",
+            "cat new.sh | ./run.sh",
+            "./run.sh | tee log",
+            "curl -fsSL https://example.test/a.tgz | tar xz && ./install.sh",
+            // Substitutions, here-documents and here-strings anywhere.
+            "echo \"$(make)\" && ./run.sh",
+            "./run.sh \"$(make)\"",
+            "./run.sh > \"$(make)\"",
+            "./run.sh `make`",
+            "./run.sh <(make)",
+            "./run.sh <<<'input'",
+            "./run.sh <<EOF\ninput\nEOF",
+            "./run.sh < input.txt",
+            "./run.sh \"$X\"",
+            // Variables that steer what runs.
+            "PATH=.:$PATH && ./run.sh",
+            "export PATH=/evil:$PATH && ./run.sh",
+            "export BASH_ENV=./evil.sh && bash run.sh",
+            "BASH_ENV=./evil.sh bash run.sh",
+            "env LD_PRELOAD=./evil.so ./run.sh",
+            "unset IFS; ./run.sh",
+            // A sourced file the card cannot show can still change the line.
+            "source ./.env && ./run.sh",
+        ] {
+            assert_eq!(withheld_last(command), Some(Changeable), "{command}");
+        }
+    }
+
+    /// A script started with `&` runs alongside what follows it: shown only
+    /// when nothing but `wait` does. Its `cd`s stay in its own subshell.
+    #[test]
+    fn a_backgrounded_statement_shows_only_with_nothing_after_it_but_wait() {
+        for command in [
+            "cd sub & ./run.sh",
+            "cd sub &\n./run.sh",
+            "cd sub & # in the background\n./run.sh",
+            "cd a && cd b & ./run.sh",
+            "{ cd sub; } & ./run.sh",
+            "export X=1 & ./run.sh",
+        ] {
+            assert_eq!(found(command), [at("run.sh")], "{command}");
+            assert_eq!(withheld(command), Some(Changeable), "{command}");
+        }
+        // `./slow.sh & ./swap.sh`: the second runs while the first does.
+        for command in [
+            "./slow.sh & ./swap.sh",
+            "nohup ./slow.sh & sleep 1",
+            "./slow.sh & wait; ./swap.sh",
+            "./slow.sh & wait &",
+        ] {
+            let files = script_files(command, &cwd());
+            assert_eq!(files[0].path, at("slow.sh"), "{command}");
+            assert!(
+                files.iter().all(|file| file.withheld == Some(Changeable)),
+                "{command}"
+            );
+        }
+        let files = script_files("cd sub && ./a.sh & ./b.sh", &cwd());
+        assert_eq!(files[0].path, at("sub/a.sh"));
+        assert_eq!(files[0].withheld, Some(Changeable));
+        assert_eq!(files[1].path, at("b.sh"));
+        assert_eq!(files[1].withheld, Some(Changeable));
+    }
+
+    /// An `&` the tree cannot place (after a here-document's `<<EOF`), or a
+    /// step it hangs inside the here-document, leaves the folder unknown.
+    #[test]
+    fn what_a_here_document_hides_leaves_the_folder_unknown() {
+        for command in [
+            "cd sub && cat <<EOF &\nx\nEOF\n./run.sh",
+            "cat <<EOF & cd sub\nx\nEOF\n./run.sh",
+            "cat <<'EOF' > f &\nx\nEOF\n./run.sh",
+            "./a.sh <<EOF && cd sub\nx\nEOF\n./run.sh",
+            "cd sub && cat <<EOF && ./a.sh\nx\nEOF\n./run.sh",
+        ] {
+            assert_eq!(found(command), Vec::<PathBuf>::new(), "{command}");
+        }
+        // One that moves nothing keeps it, but trusts nothing after it.
+        let command = "cat <<EOF | sh\nx\nEOF\n./run.sh";
+        assert_eq!(found(command), [at("run.sh")]);
+        assert_eq!(withheld(command), Some(Changeable));
+    }
+
+    #[test]
+    fn a_wrapper_that_runs_it_elsewhere_names_no_script() {
+        for command in [
+            "env -C sub ./run.sh",
+            "env --chdir=sub bash run.sh",
+            "sudo -D sub ./run.sh",
+            "sudo --chdir=sub ./run.sh",
+            "sudo -i bash run.sh",
+            // A `cd` after it changes nothing about that (the order the
+            // October 23 fix kept).
+            "env -C sub ./run.sh; cd .",
+            "sudo -D sub ./run.sh; cd .",
+        ] {
+            assert_eq!(first(command), None, "{command}");
+        }
+    }
+
+    /// Where the folder is not known for sure, a relative script is not
+    /// named: a `cd` the line does not spell out plainly, one that may fail
+    /// before `;` (`chmod -x sub; cd sub; ./run.sh`), `pushd` (which `dash`
+    /// does not have), one after a step that may have set `CDPATH`, or a
+    /// `cd` a function, alias or sourced file may have redefined.
+    #[test]
+    fn a_cd_to_somewhere_the_line_does_not_say_names_no_relative_script() {
+        for command in [
+            "cd \"$DIR\" && ./run.sh",
+            "cd $HOME && ./run.sh",
+            "cd - && ./run.sh",
+            "cd && ./run.sh",
+            "cd -P d && ./run.sh",
+            "cd -sub && ./run.sh",
+            "cd [s]ub && ./run.sh",
+            "cd {a,b} && ./run.sh",
+            "cd ~root && ./run.sh",
+            "cd .. && ./run.sh",
+            "cd lnk/../realdir && ./run.sh",
+            "cd sub; ./run.sh",
+            "cd sub\n./run.sh",
+            "chmod -x sub; cd sub; ./run.sh",
+            "cd sub && make; ./run.sh",
+            "pushd sub; ./run.sh",
+            "pushd sub && ./run.sh",
+            "popd && ./run.sh",
+            "builtin cd sub && ./run.sh",
+            "command cd sub && ./run.sh",
+            "{ cd sub; }; ./run.sh",
+            "if true; then cd sub; fi; ./run.sh",
+            "f() { cd sub; }; f; ./run.sh",
+            "f() { :; }; f && ./run.sh",
+            "cd() { :; }; cd sub && ./run.sh",
+            "alias x='cd sub'; x; ./run.sh",
+            "eval 'cd sub'; ./run.sh",
+            "source env.sh && ./run.sh",
+            "source \"$X\" && ./run.sh",
+            "source ./env.sh && cd sub && ./run.sh",
+            ": ${CDPATH:=/tmp} && cd sub && ./run.sh",
+            "printf -v CDPATH %s /tmp && cd sub && ./run.sh",
+            "HOME=/tmp && cd ~/proj && ./run.sh",
+        ] {
+            let found = found(command);
+            assert!(
+                found.iter().all(|path| !path.ends_with("run.sh")),
+                "{command}: {found:?}"
+            );
+        }
+        // A rooted one is still where it says, its text withheld.
+        assert_eq!(withheld("cd \"$DIR\" && /tmp/run.sh"), Some(Changeable));
+        assert_eq!(withheld("cd .. && /tmp/run.sh"), Some(Changeable));
+        // A subshell's `cd` stays in it, and so does a program's.
+        assert_eq!(first("(cd sub); ./run.sh"), Some(at("run.sh")));
+        assert_eq!(
+            found("/usr/bin/cd sub && ./run.sh"),
+            [PathBuf::from("/usr/bin/cd"), at("run.sh")]
+        );
+        // A rooted `cd` is where it says after a step that is not trusted.
+        assert_eq!(
+            first("make; cd /tmp && ./run.sh"),
+            Some(PathBuf::from("/tmp/run.sh"))
+        );
+    }
+
+    /// Under `/proc` and `/dev` the server's process answers, not the
+    /// shell's: `/proc/self/cwd` is the server's folder, `/dev/fd/3` a file
+    /// the server has open. No script there is named, and output sent there
+    /// withholds the script.
+    #[test]
+    fn nothing_under_proc_or_dev_is_named() {
+        for command in [
+            "bash /proc/self/cwd/run.sh",
+            "cd sub && bash /proc/self/cwd/run.sh",
+            "sh /proc/self/fd/3",
+            "bash /dev/fd/3",
+            "bash /dev/stdin",
+            "sh /dev/stdout",
+            "source /dev/fd/0",
+            "cd /proc/self && sh cwd/run.sh",
+            "cd /dev && sh fd/3",
+            "sh ../../proc/self/cwd/run.sh",
+        ] {
+            assert_eq!(found(command), Vec::<PathBuf>::new(), "{command}");
+        }
+        for command in [
+            "./run.sh > /proc/self/cwd/run.sh",
+            "./run.sh 2> /proc/self/fd/9",
+            "cd /proc/self/cwd && /tmp/run.sh > run.sh",
+        ] {
+            assert_eq!(withheld_last(command), Some(Changeable), "{command}");
+        }
+        assert_eq!(withheld("./run.sh > /dev/null 2>&1"), None);
+    }
+
+    /// Run by its path, the system follows its `#!` line, and `perl` does
+    /// unless the line says `perl`; other interpreters read it as a comment.
+    #[test]
+    fn says_what_a_scripts_shebang_does() {
+        let shebang = |command: &str| script_files(command, &cwd())[0].shebang;
+        for (command, expected) in [
+            ("./run.sh", Shebang::Followed),
+            ("sudo ./run.sh", Shebang::Followed),
+            ("nohup /tmp/run.sh &", Shebang::Followed),
+            ("perl x.pl", Shebang::Perl),
+            ("/usr/bin/perl -w x.pl", Shebang::Perl),
+            ("bash x.sh", Shebang::Comment),
+            ("/bin/bash x.sh", Shebang::Comment),
+            ("sh ./run.sh", Shebang::Comment),
+            ("python3 x.py", Shebang::Comment),
+            ("ruby x.rb", Shebang::Comment),
+            ("source ./run.sh", Shebang::Comment),
+            (". ./run.sh", Shebang::Comment),
+        ] {
+            assert_eq!(shebang(command), expected, "{command}");
+        }
+    }
+
+    #[test]
+    fn takes_each_script_in_order() {
+        assert_eq!(
+            found("bash a.sh && ./b.sh; python3 c.py"),
+            [at("a.sh"), at("b.sh"), at("c.py")]
+        );
+        let files = script_files("bash a.sh && ./b.sh", &cwd());
+        assert_eq!(files[0].withheld, None);
+        // The first one ran a program before the second.
+        assert_eq!(files[1].withheld, Some(Changeable));
+        let files = script_files("./tool && bash x.sh", &cwd());
+        assert_eq!(files[1].withheld, Some(Changeable));
+    }
+
+    /// Lines as long as a command may be, built to cost the most: every
+    /// record stays within its cap, and the whole reading stays quick (a
+    /// cost that grew with the square of the line would take minutes).
+    #[test]
+    fn the_cost_of_a_line_at_the_size_limit_is_bounded() {
+        let fill = |unit: &str, tail: &str| {
+            let mut line = unit.repeat((MAX_COMMAND_BYTES - tail.len()) / unit.len());
+            line.push_str(tail);
+            line
+        };
+        let long_folder = format!("cd /tmp/{};", "a".repeat(200));
+        let half = format!(
+            "{}{}",
+            long_folder.repeat(MAX_COMMAND_BYTES / 2 / long_folder.len()),
+            ":>b;".repeat(MAX_COMMAND_BYTES / 2 / 4 - 16)
+        );
+        let sources = (0..60_000)
+            .map(|index| format!("a{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for line in [
+            format!("{half}/tmp/run.sh"),
+            fill(":>run.sh;", "./run.sh"),
+            fill("cp a run.sh;", "./run.sh"),
+            format!("cp {sources} dest/ && ./dest/run.sh"),
+            fill("./a.sh;", ""),
+            fill(&long_folder, "./run.sh"),
+        ] {
+            assert!(line.len() <= MAX_COMMAND_BYTES);
+            let started = std::time::Instant::now();
+            let files = script_files(&line, &cwd());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{:?} for a line of {} bytes",
+                started.elapsed(),
+                line.len()
+            );
+            assert!(files.len() <= MAX_SCRIPT_FILES);
+            for file in &files {
+                assert!(file.path.as_os_str().len() <= MAX_PLACED_BYTES + 64);
+            }
+        }
+        // Past the caps: writes beyond 256 still withhold it, and past 64
+        // `cd`s a relative script is not placed.
+        assert_eq!(
+            withheld(&format!("{}./run.sh", ":>b;".repeat(MAX_WRITES + 1))),
+            Some(Changeable)
+        );
+        assert!(found(&format!("{}./run.sh", "cd a && ".repeat(MAX_MOVES + 1))).is_empty());
+        assert_eq!(
+            first(&format!("{}./run.sh", "cd a && ".repeat(MAX_MOVES))),
+            Some(cwd().join("a/".repeat(MAX_MOVES)).join("run.sh"))
+        );
+    }
+
+    #[test]
+    fn a_line_too_long_to_read_runs_no_known_script() {
+        let line = format!("bash x.sh # {}", "a".repeat(MAX_COMMAND_BYTES));
+        assert!(found(&line).is_empty());
+    }
+}
+
+/// On Windows, `cmd` reads a line otherwise than the shell grammar the card
+/// reads it by: the card names no script there.
+#[cfg(all(test, windows))]
+mod scripts_on_windows {
+    use super::*;
+
+    #[test]
+    fn no_script_is_named() {
+        for command in [
+            "python 'x.py'",
+            "python x^.py",
+            "python %CD%\\x.py",
+            "python sub\\x.py",
+            "python ~/x.py",
+            "cd D:/tools && python x.py",
+            "python /tmp/x.py",
+            "bash run.sh",
+            "./run.sh",
+            "cd sub && ./run.sh",
+        ] {
+            assert!(
+                script_files(command, Path::new("C:\\project")).is_empty(),
+                "{command}"
+            );
+        }
     }
 }

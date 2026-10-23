@@ -1,6 +1,7 @@
 import { keepsRowsAbove, measureRow } from "./measure-row";
 import { toastAnchor } from "./toast-anchors";
-import { t, splitAround, parseLanguage } from "./i18n";
+import { t, splitAround, parseLanguage, formatNumber } from "./i18n";
+import { isOpen, setOpen } from "./disclosure";
 import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
 import {
@@ -108,6 +109,7 @@ import {
   describeTool,
   errorRecovery,
   permissionCommand,
+  permissionScript,
   shortPath,
   toolActivity,
   toolChanges,
@@ -2969,6 +2971,13 @@ function Permission(props: {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     return typeof value.__readLimit === "string" ? value.__readLimit : undefined;
   };
+  // The script the command runs, as the server read it when it asked. Shut
+  // until asked for, so a short card stays short, and held open by request
+  // so a refresh of the list never closes it under the reader.
+  const script = () =>
+    permissionScript(props.permission, app.state.connection?.workspace ?? "");
+  const scriptKey = () => `permission:${props.permission.permissionId}:script`;
+  const scriptBody = `permission-script-${props.permission.permissionId}`;
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
   const changes = () =>
@@ -3058,6 +3067,67 @@ function Permission(props: {
           <pre class="prompt-subject approval-command">
             {permissionCommand(props.permission.detail)}
           </pre>
+        </Show>
+        <Show when={script()?.withheld ? script() : undefined}>
+          {(item) => (
+            <p class="approval-script-note">
+              {splitAround(
+                item().withheld === "written"
+                  ? t("This command writes {path} before running it, so its contents can't be shown.")
+                  : t("An earlier step of this command can change {path}, so its contents aren't shown."),
+                () => <bdi><code>{item().path}</code></bdi>,
+                "{path}",
+              )}
+            </p>
+          )}
+        </Show>
+        <Show when={script()?.withheld ? undefined : script()}>
+          {(item) => (
+            <div class="approval-script" classList={{ open: isOpen(scriptKey()) }}>
+              <button
+                type="button"
+                class="approval-script-toggle"
+                aria-expanded={isOpen(scriptKey())}
+                aria-controls={scriptBody}
+                onClick={() => setOpen(scriptKey(), !isOpen(scriptKey()))}
+              >
+                <Icon name="chevron" size="xs" class="approval-script-chevron" />
+                <span>
+                  {isOpen(scriptKey()) ? t("Hide script") : scriptLabel(item())}
+                </span>
+              </button>
+              <Show when={isOpen(scriptKey())}>
+                {/* Inside the card's alert, opening it is not news: a screen
+                    reader reads it when asked, not 30 KB at once. */}
+                <div
+                  class="change-preview approval-script-body"
+                  id={scriptBody}
+                  aria-live="off"
+                >
+                  <div class="change-path" title={item().path}>
+                    <bdi dir="ltr">{item().path}</bdi>
+                  </div>
+                  <div
+                    class="change-lines"
+                    tabindex="0"
+                    role="region"
+                    aria-label={t("Script")}
+                  >
+                    <For each={item().lines}>
+                      {(line) => (
+                        <div class="diff-line">
+                          <code>{line || " "}</code>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                  <Show when={item().truncated}>
+                    <p class="change-more">{t("Only the start of the file is shown.")}</p>
+                  </Show>
+                </div>
+              </Show>
+            </div>
+          )}
         </Show>
         <For each={linkTargets()}>
           {(target) => (
@@ -3175,6 +3245,18 @@ function Permission(props: {
       </Show>
     </section>
   );
+}
+/** The closed script toggle: its size, which for a cut file counts only
+ * what was read. */
+function scriptLabel(script: { lines: string[]; truncated: boolean }) {
+  const count = script.lines.length;
+  if (script.truncated)
+    return count === 1
+      ? t("View script · start of the file")
+      : t("View script · first {count} lines", { count: formatNumber(count) });
+  return count === 1
+    ? t("View script · 1 line")
+    : t("View script · {count} lines", { count: formatNumber(count) });
 }
 /** What an explicit Chrome request lets the agent do, with `{origin}` left
  * for the caller to isolate (an origin is a Latin run in any language). */
