@@ -68,8 +68,8 @@ pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 
 /// The variable that names the chat an agent's shell command runs for. The
 /// shell tool sets it for each command the agent runs (see
-/// [`ExecutionSettings::person_shell`]); no other process the server starts
-/// inherits it (see [`private_env_names`]).
+/// [`ExecutionSettings::person_shell`]); the other processes the server
+/// starts leave it out (see [`private_env_names`]).
 pub const SESSION_ID_ENV: &str = "HAARNESS_SESSION_ID";
 
 /// The `AI_AGENT` the shell tool gives a command the agent runs, unless an
@@ -93,13 +93,14 @@ pub fn own_agent_markers(ai_agent: Option<&std::ffi::OsStr>) -> Vec<&'static str
 }
 
 /// Variables a process the server starts for the agent, a terminal, a hook, an
-/// MCP server or an extension must not inherit: the server's own credentials,
-/// the OpenTelemetry settings (`OTEL_EXPORTER_OTLP_HEADERS` usually holds a
-/// collector key, and instrumented programs would export into the user's
-/// collector), and [`SESSION_ID_ENV`], which a server started by an agent's
-/// command inherits from that command and which names none of its own chats.
-/// Configured environments (`shell.env` hooks, MCP `env`) can still set them
-/// explicitly.
+/// MCP server, an extension, a language server, a formatter or Git must not
+/// inherit: the server's own credentials, the OpenTelemetry settings
+/// (`OTEL_EXPORTER_OTLP_HEADERS` usually holds a collector key, and
+/// instrumented programs would export into the user's collector), and
+/// [`SESSION_ID_ENV`], which a server started by an agent's command inherits
+/// from that command and which names none of its own chats. Configured
+/// environments (`shell.env` hooks, MCP `env`, a language server's
+/// `environment`) can still set them explicitly.
 #[must_use]
 pub fn private_env_names() -> Vec<std::ffi::OsString> {
     std::env::vars_os()
