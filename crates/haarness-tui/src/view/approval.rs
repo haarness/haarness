@@ -417,15 +417,25 @@ fn script_rows(
         (false, 1) => language.text("1 line").to_owned(),
         (false, _) => language.format("{count} lines", &[("count", &count)]),
     };
-    // A long path gives way from its start: the file's own name and the
-    // size stay in view. The row has the gutter's two cells more.
-    let label = format!("{}: ", language.text("Script"));
+    // A long path gives way from its start, never into the file's own name:
+    // then the size goes, and then the path takes rows of its own. The row
+    // has the gutter's two cells more.
+    let label = language.text("Script");
     let suffix = format!(" · {size}");
-    let room = (width + 2).saturating_sub(label.width() + suffix.width());
-    let mut rows = vec![(
-        Row::ScriptName,
-        format!("{label}{}{suffix}", path_tail(path, room)),
-    )];
+    let room = (width + 2).saturating_sub(label.width() + 2);
+    let mut rows = if let Some(path) = path_tail(path, room.saturating_sub(suffix.width())) {
+        vec![(Row::ScriptName, format!("{label}: {path}{suffix}"))]
+    } else if let Some(path) = path_tail(path, room) {
+        vec![(Row::ScriptName, format!("{label}: {path}"))]
+    } else {
+        let mut rows = vec![(Row::ScriptName, format!("{label}{suffix}"))];
+        rows.extend(
+            hard_wrap(path, (width + 2).max(1))
+                .into_iter()
+                .map(|part| (Row::ScriptName, part)),
+        );
+        rows
+    };
     for line in lines {
         for part in hard_wrap(&printable(line), width.max(1)) {
             rows.push((Row::Script, part));
@@ -442,11 +452,14 @@ fn script_rows(
     rows
 }
 
-/// `path` in at most `width` cells: whole, or its end after `…`.
-fn path_tail(path: &str, width: usize) -> String {
+/// `path` in at most `width` cells: whole, or its end after `…`, which
+/// always keeps the file's own name whole. `None` when even that does not
+/// fit.
+fn path_tail(path: &str, width: usize) -> Option<String> {
     if path.width() <= width {
-        return path.to_owned();
+        return Some(path.to_owned());
     }
+    let name = path.rsplit('/').next().unwrap_or(path);
     let mut kept = Vec::new();
     let mut used = 1;
     for grapheme in path.graphemes(true).rev() {
@@ -458,7 +471,8 @@ fn path_tail(path: &str, width: usize) -> String {
         used += cells;
     }
     kept.reverse();
-    format!("…{}", kept.concat())
+    let tail = kept.concat();
+    (tail.len() >= name.len()).then(|| format!("…{tail}"))
 }
 
 /// A script line as the terminal can draw it: tabs as spaces to the next
