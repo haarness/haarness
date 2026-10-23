@@ -51,6 +51,22 @@ test("translations preserve every interpolation field in every language", () => 
   }
 });
 
+// A text rewritten in English while its old translation was kept under the new
+// key ("Do anything, or @ to add files and agents" still read "Ask anything…")
+// usually loses what the new text tells the reader to type.
+test("translations keep the @ and / a text tells the reader to type", () => {
+  // The word after a slash ("/name") may be translated; the slash may not.
+  const typed = (text: string, mark: string) =>
+    text.match(/(?<![\p{L}\p{M}\p{N}/])[@/](?![@/])/gu)?.filter((found) => found === mark).length ?? 0;
+  for (const [key, english] of Object.entries(dictionaries.en))
+    for (const mark of ["@", "/"]) {
+      const count = typed(english, mark);
+      if (!count) continue;
+      for (const { code } of languages)
+        assert.ok(typed(dictionaries[code][key], mark) >= count, `${code}: ${key} lacks ${mark}`);
+    }
+});
+
 // A literal that never reaches a catalog shows English in all 17 languages, so
 // the renderer's own t() keys are checked here rather than found in the UI.
 // Native menus and dialogs are translated in the main process through `say()`
