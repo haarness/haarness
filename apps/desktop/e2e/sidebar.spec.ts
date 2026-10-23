@@ -100,7 +100,6 @@ async function pin(name: string, pinned = true) {
 }
 async function layout(name: "By project" | "In one list") {
   await page.getByRole("button", { name: "Project list options", exact: true }).click();
-  await item("Organize sidebar").click();
   await page.getByRole("menuitemradio", { name, exact: true }).click();
 }
 async function reload() {
@@ -284,7 +283,10 @@ test("sidebar direct Electron input reorders sessions from text, status and arch
       ['button[aria-label="Archive chat One"]', "Two", ["Three", "Two", "One"]],
     ] as const) {
       const row = list.locator(".session-row").filter({ has: page.getByRole("button", { name: "One", exact: true }) });
-      await electronDrag(row.locator(handle), list.getByRole("button", { name: destination, exact: true }));
+      // The chip under the pointer carries the title alone, not the row's age.
+      await electronDrag(row.locator(handle), list.getByRole("button", { name: destination, exact: true }), {
+        inspect: () => expect(page.locator(".order-drag-preview")).toHaveText("One"),
+      });
       await expect(list.locator(".session-title")).toHaveText([...expected]);
       await expect(list.getByRole("button", { name: "Two", exact: true })).toHaveAttribute("aria-current", "true");
       await expect(page.locator(".order-drag-preview, [data-order-source], [data-drop-position]")).toHaveCount(0);
@@ -570,8 +572,8 @@ test("sidebar section menus rename, merge, cancel removal, and retain project me
   await createSection("gamma", "Personal");
   await pin("beta");
   await options("alpha");
-  await item("Edit").click();
-  const edit = page.getByRole("dialog", { name: "Edit project", exact: true });
+  await item("Rename…").click();
+  const edit = page.getByRole("dialog", { name: "Rename project", exact: true });
   await edit.getByLabel("Name", { exact: true }).fill("Client app");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
   await section("Clients").getByRole("button", { name: "Section options for Clients", exact: true }).click();
@@ -1026,6 +1028,19 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
   const quiet = project("alpha").getByRole("button", { name: "Quiet chat", exact: true });
   await expect(quiet.locator(".session-age")).toHaveText("now");
   await expect(quiet.locator(".session-age")).toHaveAttribute("aria-hidden", "true");
+  // The archive button keeps no room until the row is hovered; then it takes
+  // the age's place and the title stays where it was.
+  const title = quiet.locator(".session-title");
+  const before = (await title.boundingBox())!;
+  const archive = project("alpha").getByRole("button", { name: "Archive chat Quiet chat", exact: true });
+  await quiet.hover();
+  await expect(archive).toHaveCSS("opacity", "1");
+  await expect(quiet.locator(".session-age")).toHaveCSS("visibility", "hidden");
+  expect(await title.boundingBox()).toEqual(before);
+  const age = (await quiet.locator(".session-age").boundingBox())!;
+  const button = (await archive.boundingBox())!;
+  expect(button.x).toBeLessThanOrEqual(age.x + 1);
+  expect(button.x + button.width).toBeGreaterThanOrEqual(age.x + age.width - 1);
   const run = await alpha.createThread({
     title: "Scheduled run", provider: "echo", model: "echo-1",
     schedule: { id: crypto.randomUUID(), name: "Nightly" },

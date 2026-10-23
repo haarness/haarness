@@ -1766,10 +1766,10 @@ test("the project menu pins, renames, files under a section, reveals, archives c
   const headings = page.locator(".project-list .project-heading");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 
-  // Edit: a custom display name replaces the folder name wherever the project is shown.
+  // Rename: a custom display name replaces the folder name wherever the project is shown.
   await options("workspace").click();
-  await item("Edit").click();
-  const edit = page.getByRole("dialog", { name: "Edit project", exact: true });
+  await item("Rename…").click();
+  const edit = page.getByRole("dialog", { name: "Rename project", exact: true });
   await expect(edit.getByLabel("Folder")).toHaveAttribute("readonly", "");
   await edit.getByLabel("Name").fill("Client app");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
@@ -1863,7 +1863,7 @@ test("the project menu pins, renames, files under a section, reveals, archives c
 
   // An empty name restores the folder name, so later scenarios keep addressing "workspace".
   await options("Client app").click();
-  await item("Edit").click();
+  await item("Rename…").click();
   await edit.getByLabel("Name").fill("");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
   const original = page.getByRole("region", { name: "Project workspace", exact: true });
@@ -2017,7 +2017,6 @@ test("sidebar sections keep drag and keyboard ordering inside and across groups,
   const thread = await client.createThread({ title: "Flat list row", provider: "echo", model: "echo-1" });
   const layout = async (choice: "In one list" | "By project") => {
     await page.getByRole("button", { name: "Project list options", exact: true }).click();
-    await item("Organize sidebar").click();
     await page.getByRole("menuitemradio", { name: choice, exact: true }).click();
   };
   await layout("In one list");

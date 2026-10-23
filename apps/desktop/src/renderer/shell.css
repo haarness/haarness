@@ -191,6 +191,10 @@
   inherits: true;
   initial-value: 0%;
 }
+/* The scrollbar's gutter is kept whether or not the list overflows, so
+   expanding a project never shifts the rows sideways. It lies in the
+   sidebar's own padding (its outer edge, the thumb's transparent border, is
+   cut off there), so rows still end on the column of the menus above. */
 .sidebar-lists {
   --sidebar-scrollbar-opacity: 0%;
   transition: --sidebar-scrollbar-opacity 240ms ease-out;
@@ -199,9 +203,15 @@
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding-bottom: var(--s2);
-  margin: 0 calc(var(--s1) * -1);
-  padding-inline: var(--s1);
+  margin-inline: calc(var(--s1) * -1) -11px;
+  padding-inline: var(--s1) 0;
+}
+/* With no padding at the list's end, its rows draw their keyboard ring inside
+   (base.css draws it, outside, with the same selector). */
+:root:not([data-pointer-focus]) .sidebar-lists button:focus-visible {
+  outline-offset: -2px;
 }
 .sidebar-lists.is-scrolling {
   --sidebar-scrollbar-opacity: 35%;
@@ -559,9 +569,11 @@ html[data-order-dragging] * {
   color: var(--muted);
   flex: none;
 }
-.session-row:hover .session-waiting,
-.session-row:focus-within .session-waiting {
-  display: none;
+/* On hover or focus the row's archive button takes the place of its age or
+   waiting label, which keeps its room so the title does not move. */
+.session-row:hover :is(.session-waiting, .session-age),
+.session-row:focus-within :is(.session-waiting, .session-age) {
+  visibility: hidden;
 }
 /* Select chats: a tick box in place of the status dot (rows keep their own
    backgrounds, so the open chat still stands out), and the bar of actions
@@ -632,17 +644,24 @@ html[data-order-dragging] * {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-/* Row-trailing controls share one column with the project and checkout menus. */
+/* The row's archive button shares one column with the project and checkout
+   menus. Until the row is hovered or focused it is out of sight and takes no
+   room, so the title gets the width; then it lies over the row's end. */
 .session-row > .icon-button {
+  position: absolute;
+  top: 1px;
+  inset-inline-end: 0;
   width: 26px;
   min-width: 26px;
   height: 28px;
   display: inline-flex;
   opacity: 0;
+  pointer-events: none;
 }
 .session-row:hover > .icon-button,
 .session-row:focus-within > .icon-button {
   opacity: 1;
+  pointer-events: auto;
 }
 .session-row.selected {
   background: var(--selected);
@@ -734,6 +753,10 @@ html[data-order-dragging] * {
 .resize-handle:focus-visible,
 .resize-handle.dragging {
   background: var(--primary);
+}
+/* With the keyboard on it, the divider thickens to a 3px bar. */
+.resize-handle:focus-visible {
+  box-shadow: 0 0 0 1px var(--primary);
 }
 .resize-handle.horizontal {
   width: auto;

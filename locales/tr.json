@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "Arşivlenen sohbetler kenar çubuğundan kalkar. Arama onları bulmaya devam eder ve her biri geri yüklenebilir.",
   "Remove project": "Projeyi kaldır",
   "Edit project": "Projeyi düzenle",
+  "Rename…": "Yeniden adlandır…",
+  "Rename project": "Projeyi yeniden adlandır",
   "An empty name restores the folder name.": "Boş ad, klasör adını geri getirir.",
   "Next agent": "Sonraki aracı",
   "Previous agent": "Önceki aracı",

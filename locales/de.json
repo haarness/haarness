@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "Archivierte Chats verschwinden aus der Seitenleiste. Die Suche findet sie weiterhin, und jeder lässt sich wiederherstellen.",
   "Remove project": "Projekt entfernen",
   "Edit project": "Projekt bearbeiten",
+  "Rename…": "Umbenennen…",
+  "Rename project": "Projekt umbenennen",
   "An empty name restores the folder name.": "Ein leerer Name stellt den Ordnernamen wieder her.",
   "Next agent": "Nächster Agent",
   "Previous agent": "Vorheriger Agent",

@@ -1136,10 +1136,9 @@ export function App() {
           />
         </div>
         <div class="titlebar-session">
-          <Show
-            when={state.connection}
-            fallback={<span class="titlebar-caption">{t("Haarness")}</span>}
-          >
+          {/* Nothing before a project opens: the sidebar's wordmark already
+              names the app. */}
+          <Show when={state.connection}>
             <Icon name="folder" size="sm" />
             <span class="titlebar-caption">
               {app.currentProject()?.label ?? app.project()?.label}
@@ -1280,27 +1279,26 @@ export function App() {
                 label={t("Open another project")}
                 onClick={() => app.run(open)}
               />
-              <MenuButton
-                icon="more"
-                label={t("Project list options")}
-                items={[
-                  {
-                    label: t("Organize sidebar"),
-                    submenu: [
-                      {
-                        label: t("By project"),
-                        checked: sidebarLayout() === "project",
-                        run: () => setSidebarLayout("project"),
-                      },
-                      {
-                        label: t("In one list"),
-                        checked: sidebarLayout() === "flat",
-                        run: () => setSidebarLayout("flat"),
-                      },
-                    ],
-                  },
-                ]}
-              />
+              {/* With no project yet there is nothing to organize. */}
+              <Show when={projects.ordered().length}>
+                <MenuButton
+                  icon="more"
+                  label={t("Project list options")}
+                  items={[
+                    {
+                      heading: t("Organize sidebar"),
+                      label: t("By project"),
+                      checked: sidebarLayout() === "project",
+                      run: () => setSidebarLayout("project"),
+                    },
+                    {
+                      label: t("In one list"),
+                      checked: sidebarLayout() === "flat",
+                      run: () => setSidebarLayout("flat"),
+                    },
+                  ]}
+                />
+              </Show>
             </div>
           </div>
           <div
@@ -1310,18 +1308,9 @@ export function App() {
             onScroll={showSidebarScrollbar}
           >
             <div class="project-list" {...unfiledDrop}>
-              <Show
-                when={projects.ordered().length}
-                fallback={
-                  <button
-                    class="project-heading"
-                    onClick={() => app.run(open)}
-                  >
-                    <Icon name="folder" size="md" />
-                    <span>{t("Open project")}</span>
-                  </button>
-                }
-              >
+              {/* With no project yet, Home's Open project (and the + above)
+                  is the way in; the list stays empty rather than repeat it. */}
+              <Show when={projects.ordered().length}>
                 <Show
                   when={sidebarLayout() === "project"}
                   fallback={<SessionList />}

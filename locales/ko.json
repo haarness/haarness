@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "보관된 채팅은 사이드바에서 사라집니다. 검색으로 계속 찾을 수 있으며 각각 복원할 수 있습니다.",
   "Remove project": "프로젝트 제거",
   "Edit project": "프로젝트 편집",
+  "Rename…": "이름 바꾸기…",
+  "Rename project": "프로젝트 이름 바꾸기",
   "An empty name restores the folder name.": "이름을 비우면 폴더 이름으로 되돌아갑니다.",
   "Next agent": "다음 에이전트",
   "Previous agent": "이전 에이전트",

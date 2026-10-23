@@ -108,9 +108,10 @@ function ProjectGroup(props: {
       },
     ];
   };
-  async function editProject() {
+  /** A name of the reader's own; the folder is shown, not changed. */
+  async function renameProject() {
     const input = await ask(
-      t("Edit project"),
+      t("Rename project"),
       [
         {
           name: "name",
@@ -258,9 +259,9 @@ function ProjectGroup(props: {
                 ),
             },
             {
-              label: t("Edit"),
-              icon: "settings",
-              run: () => void app.run(editProject),
+              label: t("Rename…"),
+              icon: "edit",
+              run: () => void app.run(renameProject),
             },
             {
               divider: true,
@@ -827,7 +828,7 @@ export function SessionList(props: {
                   <PickBox picked={picked()} />
                 </Show>
                 <span class="session-label">
-                  <span class="session-title">
+                  <span class="session-title" data-order-title>
                     {chatTitle(row().thread.title)}
                   </span>
                   <Show when={place()}>
