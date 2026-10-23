@@ -252,31 +252,34 @@ input::placeholder,
 textarea::placeholder {
   color: var(--muted);
 }
-/* A search field never shows the engine's own blue clear mark; where clearing
-   helps, the field puts the shared clear button at its end (.search-field). */
-input[type="search"] {
-  appearance: none;
-}
-input[type="search"]::-webkit-search-cancel-button,
+/* A search field keeps its one-click clear, drawn as the shared X in the
+   theme's colours instead of the engine's blue mark: a mask of the icon in
+   currentColor, a target as wide as an icon button's glyph, quieter until
+   hovered. Keyboard users clear with Escape, as the field always did. */
 input[type="search"]::-webkit-search-decoration {
   appearance: none;
-  display: none;
 }
-.search-field {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-width: 0;
+input[type="search"]::-webkit-search-cancel-button {
+  appearance: none;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-inline: var(--s1) calc(var(--s1) * -1);
+  padding: 2px;
+  border-radius: var(--r-xs);
+  background-color: var(--muted);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E")
+    center / 14px 14px no-repeat;
+  cursor: pointer;
+  opacity: 0.8;
+  transition:
+    background-color var(--fast) var(--ease),
+    opacity var(--fast) var(--ease);
 }
-.search-field > input {
-  flex: 1;
-  width: 100%;
-  /* The clear button's place is kept, so text never runs under it. */
-  padding-inline-end: calc(var(--icon-button) + var(--s1));
-}
-.search-field > .icon-button {
-  position: absolute;
-  inset-inline-end: 2px;
+input[type="search"]::-webkit-search-cancel-button:hover,
+input[type="search"]:focus-visible::-webkit-search-cancel-button {
+  background-color: var(--text);
+  opacity: 1;
 }
 input:focus,
 textarea:focus,
