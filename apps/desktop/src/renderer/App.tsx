@@ -111,6 +111,7 @@ import { Review } from "./Review";
 import { chatTitle } from "./chat-title";
 import { tabOrderScope } from "./chat-tabs";
 import { revealInStrip } from "./reveal";
+import { chatRowSelector, rovingRows, rowAfter } from "./roving-rows";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -525,9 +526,7 @@ export function App() {
   /** The chat rows the sidebar draws, top to bottom: rows inside a collapsed
    * project, checkout or schedule are not drawn and are passed over. */
   const chatRows = () => [
-    ...document.querySelectorAll<HTMLButtonElement>(
-      ".sidebar .session-row > button[aria-current]",
-    ),
+    ...document.querySelectorAll<HTMLButtonElement>(".sidebar " + chatRowSelector),
   ];
   /** Opens the chat `offset` rows from the open one, wrapping. The keyboard
    * goes back to the message box when the step started there. */
@@ -556,14 +555,43 @@ export function App() {
     const location = app.project();
     if (location && app.state.expandedLocations[location.id] === false)
       await app.expandLocation(location.id, true);
-    setTimeout(() => {
-      const row =
-        chatRows().find((row) => row.getAttribute("aria-current") === "true") ??
-        chatRows()[0] ??
-        document.querySelector<HTMLElement>(".sidebar-lists button");
-      row?.focus();
-      row?.scrollIntoView({ block: "nearest" });
-    });
+    // The rows of a project just expanded are drawn by then.
+    await new Promise((resolve) => setTimeout(resolve));
+    const row =
+      chatRows().find((row) => row.getAttribute("aria-current") === "true") ??
+      chatRows()[0] ??
+      document.querySelector<HTMLElement>(".sidebar-lists button");
+    // Asked for by a key or a command, the row shows its keyboard ring even
+    // when a click came last (Search picked with the pointer).
+    document.documentElement.removeAttribute("data-pointer-focus");
+    row?.focus({ focusVisible: true } as FocusOptions);
+    row?.scrollIntoView({ block: "nearest" });
+  }
+  /** Delete or Backspace on a chat row archives it, as its archive button
+   * does (an open chat stays on screen with its Restore line), and leaves the
+   * keyboard on the row below. Select chats has its own Archive. */
+  function archiveRow(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+    if ((event.key !== "Delete" && event.key !== "Backspace") || selection()) return false;
+    const rows = chatRows();
+    const row = document.activeElement as HTMLButtonElement;
+    const archive = rows.includes(row)
+      ? row.parentElement?.querySelector<HTMLButtonElement>(":scope > .icon-button")
+      : undefined;
+    if (!archive) return false;
+    const next = rowAfter(rows, row);
+    archive.click();
+    let frames = 120;
+    const land = () => {
+      if (row.isConnected) {
+        if (frames-- > 0) requestAnimationFrame(land);
+        return;
+      }
+      const focused = document.activeElement;
+      if (!focused || focused === document.body) next?.focus();
+    };
+    requestAnimationFrame(land);
+    return true;
   }
   /** On a chat row that has the keyboard, ↑ and ↓ move it to the row above
    * or below, and Home and End to the first or last, as in a list; Enter
@@ -590,7 +618,7 @@ export function App() {
   onMount(() => {
     const keys = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;
-      if (walkRows(event)) return void event.preventDefault();
+      if (walkRows(event) || archiveRow(event)) return void event.preventDefault();
       const { chatPrev, chatNext, focusSidebar: focus } = state.preferences.shortcuts;
       const offset =
         chatNext && matchesShortcut(event, chatNext, state.platform)
@@ -1234,6 +1262,7 @@ export function App() {
           </div>
           <div
             class="sidebar-lists"
+            ref={(element) => onMount(() => onCleanup(rovingRows(element)))}
             classList={{ "is-scrolling": sidebarScrolling() }}
             onScroll={showSidebarScrollbar}
           >
