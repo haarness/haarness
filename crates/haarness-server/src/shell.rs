@@ -209,7 +209,7 @@ fn mark_agent(command: &mut std::process::Command, thread: ThreadId, env: &[(&St
         .env("HAARNESS", "1")
         .env(haarness_core::SESSION_ID_ENV, &id);
     if !outer {
-        command.env("AI_AGENT", "haarness");
+        command.env("AI_AGENT", haarness_core::AI_AGENT_VALUE);
     }
     // The values themselves are not logged: neither the outer marker kept nor
     // the id replaced.

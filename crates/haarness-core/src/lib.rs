@@ -72,6 +72,26 @@ pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 /// inherits it (see [`private_env_names`]).
 pub const SESSION_ID_ENV: &str = "HAARNESS_SESSION_ID";
 
+/// The `AI_AGENT` the shell tool gives a command the agent runs, unless an
+/// outer agent already set its own.
+pub const AI_AGENT_VALUE: &str = "haarness";
+
+/// The variables of Haarness's own agent markers, as an agent's shell command
+/// gets them, in an environment whose `AI_AGENT` is `ai_agent`: `AGENT`,
+/// `HAARNESS`, [`SESSION_ID_ENV`], and `AI_AGENT` when it is
+/// [`AI_AGENT_VALUE`]. A server started from such a command leaves them out:
+/// it outlives that command and serves a person's own `!` commands and
+/// terminals too, and its own agent commands are marked again. An outer
+/// agent's `AI_AGENT` (any other value) is kept.
+#[must_use]
+pub fn own_agent_markers(ai_agent: Option<&std::ffi::OsStr>) -> Vec<&'static str> {
+    let mut names = vec!["AGENT", "HAARNESS", SESSION_ID_ENV];
+    if ai_agent.is_some_and(|value| value == AI_AGENT_VALUE) {
+        names.push("AI_AGENT");
+    }
+    names
+}
+
 /// Variables a process the server starts for the agent, a terminal, a hook, an
 /// MCP server or an extension must not inherit: the server's own credentials,
 /// the OpenTelemetry settings (`OTEL_EXPORTER_OTLP_HEADERS` usually holds a
@@ -115,7 +135,19 @@ fn is_private_env_name(name: &str, any_case: bool) -> bool {
 
 #[cfg(test)]
 mod private_env_tests {
-    use super::is_private_env_name;
+    use super::{is_private_env_name, own_agent_markers};
+
+    #[test]
+    fn a_server_leaves_out_haarness_s_own_markers_and_keeps_an_outer_agent_s() {
+        let own = ["AGENT", "HAARNESS", "HAARNESS_SESSION_ID"];
+        assert_eq!(own_agent_markers(None), own);
+        assert_eq!(own_agent_markers(Some("outer-agent".as_ref())), own);
+        assert_eq!(own_agent_markers(Some("".as_ref())), own);
+        assert_eq!(
+            own_agent_markers(Some("haarness".as_ref())),
+            ["AGENT", "HAARNESS", "HAARNESS_SESSION_ID", "AI_AGENT"]
+        );
+    }
 
     #[test]
     fn the_server_s_credentials_are_private_in_any_case_where_names_ignore_case() {
