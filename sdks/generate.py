@@ -18,8 +18,32 @@ BASE = Path(__file__).resolve().parent
 # TypeScript method still accepts options there (`splitQuery`), which works
 # only while no query key is also an option key.
 LATE_QUERIES = {"mcp_servers"}
-# The keys of the TypeScript transport's `RequestOptions`.
-REQUEST_OPTION_KEYS = {"signal", "timeoutMs", "headers"}
+
+
+def request_option_keys():
+    """The keys of the TypeScript transport's `RequestOptions`, read from
+    `transport.ts`, which must also be the keys its `splitQuery` moves."""
+    source = (BASE / "typescript/src/transport.ts").read_text()
+    interface = re.search(
+        r"export interface RequestOptions \{(.*?)\n\}", source, re.S
+    ).group(1)
+    keys = set(re.findall(r"^\s*(\w+)\??:", interface, re.M))
+    moved = set(
+        re.findall(
+            r'"(\w+)"',
+            re.search(
+                r"const REQUEST_OPTIONS = new Set\(\[(.*?)\]\)", source, re.S
+            ).group(1),
+        )
+    )
+    assert keys and keys == moved, (
+        f"transport.ts: RequestOptions has {sorted(keys)}, "
+        f"REQUEST_OPTIONS moves {sorted(moved)}"
+    )
+    return keys
+
+
+REQUEST_OPTION_KEYS = request_option_keys()
 
 
 def ref(name):
