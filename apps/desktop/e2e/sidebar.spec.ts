@@ -1017,6 +1017,21 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
     .getByRole("button", { name: de["Archive chats"], exact: true }).click();
   await expect(page.locator(".toast")).toHaveText(de["Archived {count} chats"].replace("{count}", "2"));
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  // With every chat archived, the project says so and how many it archived;
+  // the count opens Search on just those chats.
+  const empty = project("alpha").locator(".sessions-empty");
+  await expect(empty).toHaveText("No open chats · 2 archived");
+  await empty.getByRole("button", { name: "2 archived", exact: true }).click();
+  const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
+  await expect(search).toHaveAttribute("placeholder", "Search archived chats in alpha…");
+  const options = page.getByRole("dialog", { name: "Universal search" }).getByRole("option");
+  await expect(options).toHaveCount(2);
+  for (const name of ["Quiet chat", "Scheduled run"])
+    await expect(page.getByRole("option", { name, exact: true })).toBeVisible();
+  await search.fill("quiet");
+  await expect(options).toHaveCount(1);
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".archived-notice")).toContainText("This chat is archived.");
 });
 
 test("sidebar Select chats archives several chats at once, notes a chat still working, and Escape leaves it", async () => {

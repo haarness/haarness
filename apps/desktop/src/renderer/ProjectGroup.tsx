@@ -23,6 +23,7 @@ import { createFileDrop } from "./file-drop";
 import { chatTitle } from "./chat-title";
 import { relativeAge } from "./relative-age";
 import { revealInList } from "./reveal";
+import { searchArchived } from "./UniversalSearch";
 import {
   drawnChats,
   emptySelection,
@@ -692,6 +693,17 @@ export function SessionList(props: {
     availableLocations().filter(
       (location) => !!app.indexes()[location.id]?.error,
     );
+  /** Chats of this list the reader archived, which Search still finds. */
+  const archived = () =>
+    app
+      .conversations(props.project?.id)
+      .filter(
+        ({ thread, location }) =>
+          thread.archived &&
+          !thread.isSubagent &&
+          location.checkout?.exists !== false &&
+          (!props.location || location.id === props.location.id),
+      ).length;
   return (
     <div
       class="sessions"
@@ -860,11 +872,26 @@ export function SessionList(props: {
       <ScheduledSessions rows={rows()} />
       <Show when={!order.ordered().length && !split().groups.length}>
         <p class="sessions-empty" role="status">
-          {failures().length
-            ? ""
-            : loading()
-              ? t("Opening…")
-              : t("No chats yet.")}
+          {failures().length ? (
+            ""
+          ) : loading() ? (
+            t("Opening…")
+          ) : archived() ? (
+            <>
+              {t("No open chats")}
+              <span aria-hidden="true"> · </span>
+              {/* Search, on just these archived chats. */}
+              <button
+                class="sessions-archived"
+                aria-haspopup="dialog"
+                onClick={() => searchArchived(props.project?.id)}
+              >
+                {t("{count} archived", { count: archived() })}
+              </button>
+            </>
+          ) : (
+            t("No chats yet.")
+          )}
         </p>
       </Show>
       <For each={failures()}>
