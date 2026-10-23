@@ -11,6 +11,7 @@ import {
   fits,
   fold,
   markAt,
+  plainLine,
   promptTitle,
   readingMark,
   rowAt,
@@ -107,4 +108,21 @@ test("a prompt's title is its first written line, not its attached context", () 
     "a.png",
   );
   assert.equal(promptTitle("", [], name, "Attachment"), "Attachment");
+});
+
+test("a prompt's title reads as text, not as the Markdown it was typed in", () => {
+  const name = (value: string) => value;
+  assert.equal(promptTitle("**Fix** the `parser` bug\nmore", [], name, ""), "Fix the parser bug");
+  assert.equal(plainLine("Explain [the docs](https://example.com) _briefly_"), "Explain the docs briefly");
+  assert.equal(plainLine("# Heading prompt"), "Heading prompt");
+  assert.equal(plainLine("- [ ] a task"), "a task");
+  assert.equal(plainLine("1. first step"), "first step");
+  assert.equal(plainLine("> quoted *word* here"), "quoted word here");
+  assert.equal(plainLine("~~old~~ new"), "old new");
+  assert.equal(plainLine("![chart](out/chart.png) explained"), "chart explained");
+  // Words and arithmetic that only look like markup stay as written.
+  assert.equal(plainLine("rename snake_case_name"), "rename snake_case_name");
+  assert.equal(plainLine("compute 2*3*4"), "compute 2*3*4");
+  // A line that is nothing but marks keeps them rather than going blank.
+  assert.equal(plainLine("**"), "**");
 });

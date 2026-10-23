@@ -304,6 +304,21 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 .markdown li::marker {
   color: var(--faint);
 }
+/* A task list's box takes the bullet's place; it shows, it does not take
+   clicks. */
+.markdown li.task-item {
+  list-style: none;
+}
+.markdown .task-box {
+  margin-block: 0;
+  margin-inline: calc(-1 * var(--s5) + 2px) var(--s2);
+  vertical-align: -2px;
+  cursor: default;
+}
+.markdown .task-box:checked {
+  background: var(--muted);
+  border-color: var(--muted);
+}
 .markdown h1,
 .markdown h2,
 .markdown h3,
@@ -414,6 +429,15 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   display: block;
   overflow: auto;
   margin: var(--s3) 0;
+}
+/* A reply's table heads its columns in the reply's own words and case;
+   the app's own tables keep their small capitals (base.css). */
+.markdown th {
+  color: var(--text);
+  font-size: inherit;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
 }
 .markdown hr {
   margin: var(--s5) 0;
