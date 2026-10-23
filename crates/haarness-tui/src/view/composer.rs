@@ -907,6 +907,10 @@ fn child_lifecycle(app: &App, compact: bool) -> (String, Color) {
     }
 }
 
+/// How long Auto's reviewer runs before the activity text says so: a quick
+/// review never flashes a word.
+const REVIEW_NOTICE_MS: u128 = 800;
+
 /// Human phrase for the turn's current phase, with per-phase elapsed time.
 fn phase_text(app: &App) -> String {
     let turn_elapsed = app
@@ -918,7 +922,17 @@ fn phase_text(app: &App) -> String {
     let elapsed = phase.elapsed_seconds();
     match phase.state.as_str() {
         "responding" => format!("{}   {turn_elapsed}s", app.language.text("writing")),
-        "tool" => {
+        // A quick review shows as the tool it is about; a slow one says so,
+        // with its seconds once there is a whole one to show.
+        "reviewing" if phase.heard_millis() >= REVIEW_NOTICE_MS => {
+            let seconds = phase.heard_millis() / 1000;
+            if seconds == 0 {
+                app.language.text("reviewing…").to_owned()
+            } else {
+                format!("{}   {seconds}s", app.language.text("reviewing…"))
+            }
+        }
+        "tool" | "reviewing" => {
             let tool = phase.tool.as_deref().unwrap_or("tool");
             let agents = if app.is_child_view() {
                 0

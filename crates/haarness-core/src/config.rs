@@ -93,6 +93,8 @@ pub struct RuntimeConfig {
     pub custom_agents: Vec<CustomAgent>,
     /// Disabled profiles stay installed but cannot admit new turns.
     pub disabled_agents: Vec<String>,
+    /// How Auto reviews eligible requests (`auto_review`).
+    pub auto_review: crate::AutoReviewSettings,
 }
 
 impl RuntimeConfig {

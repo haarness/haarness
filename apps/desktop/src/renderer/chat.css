@@ -1972,6 +1972,17 @@ html[dir="rtl"] .tool-target {
 .approval-target code {
   font-family: var(--mono);
 }
+/* Why Auto's reviewer left the request to the person: quieter than the
+   request itself, which is what is being decided. */
+.approval-review {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
+  /* The note mixes the interface's language with the reviewer's own words
+     and paths: each run keeps its own direction. */
+  unicode-bidi: plaintext;
+}
 /* The script a command runs: a quiet toggle under the command, the file in
    the change style once opened, scrolling inside its own short box so the
    answers and the composer stay in view. */
@@ -2083,6 +2094,18 @@ html[dir="rtl"] .tool-target {
 }
 .prompt-actions .prompt-always {
   gap: var(--s1);
+}
+/* Apart from the answers, so they stay put when it goes. */
+.prompt-actions .prompt-auto {
+  margin-inline-end: auto;
+}
+/* A card answered elsewhere: one quiet line where its buttons were, at
+   their height, so nothing moves. */
+.approval-settled {
+  margin: 0;
+  min-height: var(--control-sm);
+  color: var(--muted);
+  font-size: var(--ui-sm);
 }
 .prompt-actions input {
   flex: 1;

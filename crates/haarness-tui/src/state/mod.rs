@@ -81,6 +81,11 @@ impl PermissionChoice {
         {
             choices.insert(3, Self::Repository);
         }
+        // A chat already in Auto (its reviewer left this one to a person)
+        // has nothing to switch to.
+        if app.auto_permissions {
+            choices.retain(|choice| *choice != Self::Auto);
+        }
         choices
     }
 
@@ -346,19 +351,32 @@ fn durable_todos(items: &[Item], through: Option<u64>) -> Vec<haarness_protocol:
         .unwrap_or_default()
 }
 
-/// A batch result's entries as (tool, failed), in step order.
-pub type BatchOutcomes = std::rc::Rc<[(String, bool)]>;
+/// A batch result's entry: its tool, whether it failed, and, when Auto's
+/// reviewer refused it, the reason it gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchOutcome {
+    pub tool: String,
+    pub failed: bool,
+    /// Auto's reviewer refused the step, with its note.
+    pub blocked: Option<haarness_protocol::PermissionReview>,
+}
+
+/// A batch result's entries, in step order.
+pub type BatchOutcomes = std::rc::Rc<[BatchOutcome]>;
 
 /// What the running turn is doing right now, mirrored from `turn.status`
 /// events — the status line renders this instead of a stale free-text notice.
 #[derive(Clone, Default)]
 pub struct PhaseInfo {
-    /// thinking | responding | tool | waiting_permission | waiting_question |
-    /// child_tasks | compacting | done
+    /// thinking | responding | tool | reviewing (Auto's reviewer) |
+    /// waiting_permission | waiting_question | child_tasks | compacting | done
     pub state: String,
     pub tool: Option<String>,
     pub call_id: Option<String>,
     pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this client heard of the phase: a delay before saying what it
+    /// is runs on this clock, never the server's.
+    pub received: Option<std::time::Instant>,
 }
 
 /// What a chat waits on from a person. An approval outranks a question.
@@ -407,6 +425,12 @@ impl PhaseInfo {
     pub fn elapsed_seconds(&self) -> i64 {
         self.since
             .map_or(0, |since| (chrono::Utc::now() - since).num_seconds().max(0))
+    }
+
+    /// How long ago this client heard of the phase.
+    pub fn heard_millis(&self) -> u128 {
+        self.received
+            .map_or(0, |received| received.elapsed().as_millis())
     }
 }
 
@@ -776,6 +800,8 @@ pub struct App {
     pub auto_permissions_seen: std::collections::HashMap<String, bool>,
     /// The server applies Auto itself, for every client.
     pub approval_server: bool,
+    /// The server's Auto asks a reviewer model (`approval-review.v1`).
+    pub approval_reviewer: bool,
     /// Launched with `--yolo`: this TUI answers every request its open
     /// conversation raises once, and its turns approve their own. The server
     /// is not a yolo server, so other clients' chats still ask.
@@ -1104,6 +1130,7 @@ impl App {
             children,
             pending_permissions: Vec::new(),
             auto_permissions: false,
+            approval_reviewer: false,
             auto_permissions_seen: std::collections::HashMap::new(),
             approval_server: false,
             yolo: false,
@@ -1996,7 +2023,7 @@ impl App {
     pub fn cached_batch_results(
         &self,
         id: ItemId,
-        read: impl FnOnce() -> Vec<(String, bool)>,
+        read: impl FnOnce() -> Vec<BatchOutcome>,
     ) -> BatchOutcomes {
         self.batch_results
             .borrow_mut()
@@ -3152,12 +3179,48 @@ fn relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
 impl App {
     /// The permission prompt y/a/w/n answer next: oldest pending.
     pub fn set_auto_permissions(&mut self, enabled: bool) {
-        self.auto_permissions = enabled;
+        self.keep_permission_choice(|app| app.auto_permissions = enabled);
         self.notice = if enabled {
             "Auto on for this TUI launch · new requests allowed once · pending requests stay manual · ctrl+y to review"
         } else {
             "Review mode · permission requests need approval · ctrl+y to switch"
         }.into();
+    }
+
+    /// Change what the card offers (the chat's mode) and keep the answer it
+    /// had in focus: the same choice where it is still offered, otherwise
+    /// Allow once, never whichever neighbour slid into its place. Once + Auto
+    /// staged in a chat that is now in Auto has nothing left to confirm.
+    pub(crate) fn keep_permission_choice(&mut self, change: impl FnOnce(&mut Self)) {
+        // While an answer is staged the selection is confirm or cancel.
+        let before = PermissionChoice::available(self);
+        let focused = before
+            .get(
+                self.permission_selection
+                    .min(before.len().saturating_sub(1)),
+            )
+            .copied()
+            .filter(|_| self.confirm_always.is_none());
+        change(self);
+        if self.first_pending_permission().is_none() {
+            return;
+        }
+        if let Some(staged) = self.confirm_always {
+            if !(self.auto_permissions && staged == PermissionChoice::Auto.key()) {
+                return;
+            }
+            self.confirm_always = None;
+            self.update_permission_notice();
+        }
+        let after = PermissionChoice::available(self);
+        self.permission_selection = focused
+            .and_then(|choice| after.iter().position(|item| *item == choice))
+            .or_else(|| {
+                after
+                    .iter()
+                    .position(|item| *item == PermissionChoice::Once)
+            })
+            .unwrap_or(0);
     }
 
     pub fn first_pending_permission(&self) -> Option<&PendingPermissionInfo> {

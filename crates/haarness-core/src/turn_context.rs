@@ -70,6 +70,16 @@ pub fn reminder(
     (!blocks.is_empty()).then(|| blocks.join(SEPARATOR))
 }
 
+pub use haarness_protocol::{AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX};
+
+/// Whether `text` is a message another agent sent (another chat's, or a
+/// Haarness agent's to a Cloud session), not the person's.
+#[must_use]
+pub fn is_session_message(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with(SESSION_MESSAGE_PREFIX) || text.starts_with(AGENT_MESSAGE_PREFIX)
+}
+
 /// Whether `text` is a hidden message made by [`reminder`]: it only tells the
 /// model about the date, the memory index or hook context, and asks for
 /// nothing, so a scripted test provider answers the prompt before it.

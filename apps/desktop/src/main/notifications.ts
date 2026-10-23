@@ -36,6 +36,22 @@ export function createNotifications(input: {
   const claimed = new Set<string>();
   const visible = new Map<NativeNotification, string>();
   const revisions = new Map<string, number>();
+  // A request is announced again when Auto turns on with its card shown (the
+  // reviewer is deciding it) and when the reviewer leaves it to the person.
+  // Only its first announce, or one that needs the person again after a
+  // review, asks for attention; a review in progress never does.
+  const requests = new Map<string, "reviewing" | "person">();
+  const announce = (connection: string, event: EventEnvelope, payload: Record<string, unknown>) => {
+    const review = payload.review as { status?: unknown } | null | undefined;
+    const reviewing = review?.status === "reviewing";
+    if (typeof payload.permissionId !== "string") return !reviewing;
+    const key = JSON.stringify([connection, event.serverInstanceId, payload.permissionId]);
+    const before = requests.get(key);
+    requests.delete(key);
+    requests.set(key, reviewing ? "reviewing" : "person");
+    if (requests.size > 500) requests.delete(requests.keys().next().value!);
+    return !reviewing && before !== "person";
+  };
   // Completions waiting out COMPLETION_GRACE_MS, one per root conversation
   // (keyed by connection and root). Ending a wait with `false` drops its
   // banner: the conversation picked up again, stopped or failed, a newer
@@ -93,6 +109,7 @@ export function createNotifications(input: {
     if (disposed || claimed.has(key)) return;
     claimed.add(key);
     if (claimed.size > 500) claimed.delete(claimed.values().next().value!);
+    if (event.type === "permission.requested" && !announce(connection, event, payload)) return;
     const completed = title === "Task finished";
     const conversationKey = JSON.stringify([connection, root]);
     // The conversation picked up again (the next queued prompt, a stop's

@@ -136,3 +136,83 @@ test("a slash command's message shows what the command expanded to, live and aft
   const landed = landItems([message("/review src")], [event("item.updated", message("Review src carefully."))], "thread");
   assert.equal(landed[0].data.type === "user_message" && landed[0].data.text, "Review src carefully.");
 });
+
+test("a review runs from its reviewing status until any other status or the turn's end", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  let eventId = 0;
+  const event = (type: string, payload: unknown) =>
+    reduceEvent(state, set, {
+      eventId: ++eventId,
+      type,
+      payload,
+      threadId: "thread",
+      turnId: "turn",
+      serverInstanceId: "instance",
+    } as EventEnvelope);
+  // Read through a function: an assertion would narrow the store's field.
+  const review = () => state.reviews?.turn;
+  event("turn.status", { state: "tool", tool: "bash", callId: "call-1" });
+  assert.equal(review(), undefined);
+  const before = Date.now();
+  event("turn.status", { state: "reviewing", tool: "bash", callId: "call-1" });
+  assert.equal(review()?.callId, "call-1");
+  const at = review()!.at;
+  assert.ok(at >= before);
+  // A repeated status keeps the time the review started.
+  event("turn.status", { state: "reviewing", tool: "bash", callId: "call-1" });
+  assert.equal(review()?.at, at);
+  event("turn.status", { state: "waiting_permission" });
+  assert.equal(review(), undefined);
+  event("turn.status", { state: "reviewing", tool: "bash", callId: "call-2" });
+  assert.equal(review()?.callId, "call-2");
+  event("turn.finished", { id: "turn", status: "completed" });
+  assert.equal(review(), undefined);
+});
+
+test("requests announced again are each updated where they stand in the queue", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  let eventId = 0;
+  const event = (type: string, payload: unknown) =>
+    reduceEvent(state, set, {
+      eventId: ++eventId,
+      type,
+      payload,
+      threadId: "thread",
+      turnId: "turn",
+      serverInstanceId: "instance",
+    } as EventEnvelope);
+  for (const id of ["first", "second", "third"])
+    event("permission.requested", { permissionId: id, threadId: "thread" });
+  // Auto turns on: every waiting card says the reviewer is deciding it.
+  for (const id of ["third", "first", "second"])
+    event("permission.requested", { permissionId: id, threadId: "thread", review: { status: "reviewing" } });
+  const order = () => state.permissions.map((item) => item.permissionId);
+  const statuses = () => state.permissions.map((item) => item.review?.status);
+  assert.deepEqual(order(), ["first", "second", "third"]);
+  assert.deepEqual(statuses(), ["reviewing", "reviewing", "reviewing"]);
+  // The reviewer leaves two to the person and allows one.
+  event("permission.requested", { permissionId: "second", threadId: "thread", review: { status: "asked", rationale: "Two." } });
+  event("permission.resolved", { permissionId: "third" });
+  event("permission.requested", { permissionId: "first", threadId: "thread", review: { status: "asked", rationale: "One." } });
+  assert.deepEqual(order(), ["first", "second"]);
+  assert.deepEqual(
+    state.permissions.map((item) => item.review?.rationale),
+    ["One.", "Two."],
+  );
+});

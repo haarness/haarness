@@ -48,7 +48,13 @@ import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
-import { canAutoApprove, describeAlwaysRule } from "./approval-mode";
+import {
+  alreadySettled,
+  autoApprovalHint,
+  canAutoApprove,
+  describeAlwaysRule,
+  reviewNoteParts,
+} from "./approval-mode";
 import {
   chromeApproval,
   chromeApprovalLines,
@@ -120,6 +126,8 @@ import {
 /* The plan already has a home above the composer, so its bookkeeping calls do
    not also belong in the transcript. */
 const PLAN_TOOLS = ["todo", "todowrite", "todoread"];
+/** How long Auto's reviewer runs before the activity line says so. */
+const REVIEW_NOTICE_MS = 800;
 
 /** Four openings for a conversation in the selected project. */
 interface Starter {
@@ -191,9 +199,12 @@ export function Session() {
   // command, and browser sites ask only when Settings → Browser says so.
   const approvalModeHint = () =>
     app.isAutoApproval()
-      ? state.selected
-        ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
-        : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
+      ? autoApprovalHint(
+          !!state.selected,
+          // A server that asks a reviewer in Auto says so in its capabilities.
+          !!state.connection?.info.capabilities.includes("approval-review.v1"),
+          t,
+        )
       : state.selected
         ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
         : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
@@ -1291,6 +1302,9 @@ export function Session() {
     undefined,
     { equals: (a, b) => a?.permissionId === b?.permissionId },
   );
+  // A request announced again (Auto's reviewer took it up, or left it to the
+  // person) keeps its card; only the note follows.
+  const currentReview = () => visiblePermissions()[0]?.review;
   const currentQuestion = createMemo(
     () => (visiblePermissions().length ? undefined : visibleQuestions()[0]),
     undefined,
@@ -1679,6 +1693,7 @@ export function Session() {
       ? latestThought(stream()?.reasoning ?? "")
       : "",
   );
+  const [reviewClock, setReviewClock] = createSignal(0);
   const activity = createMemo(() => {
     const turn = active();
     if (!turn) return "";
@@ -1695,8 +1710,23 @@ export function Session() {
     const tool = tools.at(-1)?.data as
       | Extract<T.ItemData, { type: "tool_call" }>
       | undefined;
+    // Auto's reviewer deciding a request: said only once it takes a moment,
+    // so a quick review never flashes a word.
+    const review = state.reviews?.[turn.id];
+    if (review && reviewClock() - review.at >= REVIEW_NOTICE_MS)
+      return t("Reviewing…");
     if (tool) return toolActivity(tool.name, tool.arguments);
     return stream()?.text ? t("Writing a reply") : t("Thinking");
+  });
+  // Re-read the activity when a running review reaches the notice delay.
+  createEffect(() => {
+    const turn = active();
+    const review = turn ? state.reviews?.[turn.id] : undefined;
+    if (!review) return;
+    const wait = REVIEW_NOTICE_MS - (Date.now() - review.at);
+    if (wait <= 0) return setReviewClock(Date.now());
+    const timer = setTimeout(() => setReviewClock(Date.now()), wait);
+    onCleanup(() => clearTimeout(timer));
   });
   /**
    * Where the next message will run. Each choice says which checkout it is and
@@ -2055,6 +2085,7 @@ export function Session() {
                 {(permission) => (
                   <Permission
                     permission={permission}
+                    review={currentReview()}
                     queued={visiblePermissions().length}
                   />
                 )}
@@ -2890,6 +2921,8 @@ const permissionTitles: Record<string, string> = {
  */
 function Permission(props: {
   permission: T.PendingPermissionInfo;
+  /** Its review note as announced last (it can change while it is shown). */
+  review?: T.PermissionReview | null;
   /** How many requests wait for this conversation, this one included. */
   queued: number;
 }) {
@@ -2920,6 +2953,23 @@ function Permission(props: {
       ...Object.fromEntries(Object.entries(value).filter(([key]) => key !== "__browser")),
     });
   };
+  let allowOnce: HTMLButtonElement | undefined;
+  // Settled already (Auto's reviewer, another window): one quiet line takes
+  // the buttons' place, at their height, until the card goes. No toast: the
+  // person's answer did nothing, and nothing else needs saying.
+  const [settled, setSettled] = createSignal<{ height: number; focused: boolean }>();
+  let settledTimer: ReturnType<typeof setTimeout> | undefined;
+  let footer: HTMLElement | undefined;
+  onCleanup(() => clearTimeout(settledTimer));
+  const showSettled = () => {
+    // The line holds the buttons' height, a second row of them included,
+    // and keeps the keyboard where it was.
+    setSettled({
+      height: footer?.offsetHeight ?? 0,
+      focused: !!footer?.contains(document.activeElement),
+    });
+    settledTimer = setTimeout(() => void app.refresh(), SETTLED_NOTE_MS);
+  };
   const decide = (decision: string) => {
     if (answered()) return;
     const connection = app.state.connection!.id;
@@ -2927,13 +2977,16 @@ function Permission(props: {
     setAnswered(true);
     void app.run(async () => {
       try {
-        if (decision === "auto") await app.allowOnceAndAuto(props.permission);
-        else
+        // Once + Auto still turns Auto on.
+        if (decision === "auto") {
+          if (await app.allowOnceAndAuto(props.permission)) return showSettled();
+        } else
           await app.api("replyPermission", props.permission.permissionId, {
             decision,
           });
         await app.refresh();
       } catch (error) {
+        if (alreadySettled(error)) return showSettled();
         setAnswered(false);
         app.recordPermissionError(connection, id, error);
         throw error;
@@ -3068,6 +3121,31 @@ function Permission(props: {
             {permissionCommand(props.permission.detail)}
           </pre>
         </Show>
+        {/* Why Auto's reviewer left this to the person: one quiet line under
+            the command, there from the card's first paint, above the script. */}
+        <Show when={reviewNoteParts(props.review, t)}>
+          {(note) => (
+            <p class="approval-review">
+              {note().lead}
+              <Show when={note().rule}>
+                {(rule) => (
+                  <>
+                    {" · "}
+                    <bdi>{rule()}</bdi>
+                  </>
+                )}
+              </Show>
+              <Show when={note().reason}>
+                {(reason) => (
+                  <>
+                    {": "}
+                    <bdi>{reason()}</bdi>
+                  </>
+                )}
+              </Show>
+            </p>
+          )}
+        </Show>
         <Show when={script()?.withheld ? script() : undefined}>
           {(item) => (
             <p class="approval-script-note">
@@ -3167,8 +3245,23 @@ function Permission(props: {
           {app.permissionError(props.permission.permissionId)}
         </p>
       </Show>
-      <Show when={explicit()}>
-        <footer class="prompt-actions">
+      <Show when={settled()}>
+        {(state) => (
+          <p
+            class="prompt-actions approval-settled"
+            role="status"
+            tabindex={state().focused ? -1 : undefined}
+            style={{ "min-height": state().height ? `${state().height}px` : undefined }}
+            ref={(line) => {
+              if (state().focused) queueMicrotask(() => line.focus());
+            }}
+          >
+            {t("Already answered")}
+          </p>
+        )}
+      </Show>
+      <Show when={explicit() && !settled()}>
+        <footer class="prompt-actions" ref={footer}>
           <button
             class="ghost"
             disabled={answered()}
@@ -3189,8 +3282,26 @@ function Permission(props: {
           </button>
         </footer>
       </Show>
-      <Show when={!explicit()}>
-        <footer class="prompt-actions">
+      <Show when={!explicit() && !settled()}>
+        <footer class="prompt-actions" ref={footer}>
+          {/* At the start, apart from the answers: when Auto turns on and it
+              goes, nothing else moves, and its focus passes to Allow once. */}
+          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+            <button
+              class="prompt-auto"
+              ref={(button) =>
+                onCleanup(() => {
+                  if (document.activeElement === button)
+                    queueMicrotask(() => allowOnce?.focus());
+                })
+              }
+              disabled={answered()}
+              onClick={() => decide("auto")}
+              title={t("Allow this request once and enable Auto for this chat and its agents")}
+            >
+              {t("Allow once + Auto")}
+            </button>
+          </Show>
           <button
             class="ghost"
             disabled={answered()}
@@ -3225,17 +3336,9 @@ function Permission(props: {
               />
             </Show>
           </Show>
-          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
-            <button
-              disabled={answered()}
-              onClick={() => decide("auto")}
-              title={t("Allow this request once and enable Auto for this chat and its agents")}
-            >
-              {t("Allow once + Auto")}
-            </button>
-          </Show>
           <button
             class="primary"
+            ref={allowOnce}
             disabled={answered()}
             onClick={() => decide("once")}
           >
@@ -3272,6 +3375,8 @@ function chromeRequestText(category: ChromeField) {
       return t("Run scripts on {origin} in Chrome");
   }
 }
+/** How long a card answered elsewhere says so before it goes. */
+const SETTLED_NOTE_MS = 1500;
 /** Enter that confirms an input method's composition belongs to the input method. */
 const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 

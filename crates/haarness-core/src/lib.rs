@@ -3,6 +3,7 @@
 mod agents;
 mod approval_mode;
 pub mod attachments;
+pub mod auto_review;
 mod background;
 mod config;
 pub mod definitions;
@@ -33,6 +34,7 @@ pub use agents::{
     SystemPromptContext, ULTRACODE_SYSTEM_SECTION, builtin_profiles, system_prompt_for,
     system_prompt_with_context,
 };
+pub use auto_review::AutoReviewSettings;
 pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
 pub use events::{
@@ -58,7 +60,9 @@ pub use stream_limits::{
     stream_stall_silence,
 };
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
-pub use turn_context::is_turn_reminder;
+pub use turn_context::{
+    AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
+};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 
 /// The `tracing` target for events that may be exported with OpenTelemetry

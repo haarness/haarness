@@ -1,8 +1,15 @@
 import { taskKey, type TaskProgress } from "./agent-tasks";
 import type * as T from "@haarness/sdk";
 import type { SetStoreFunction } from "solid-js/store";
+/** Auto's reviewer is deciding a request of this turn, since `at` (local time). */
+export interface TurnReview {
+  callId?: string;
+  at: number;
+}
 export interface Live {
   tasks?: Record<string, TaskProgress>;
+  /** By turn: the review running now, from `turn.status`. */
+  reviews?: Record<string, TurnReview>;
   threads: T.Thread[];
   turns: T.Turn[];
   permissions: T.PendingPermissionInfo[];
@@ -123,6 +130,22 @@ export function reduceEvent<S extends Live>(
       [key]: stream[key] + String(payload.delta ?? ""),
     });
   }
+  // Any other status of the turn ends its review. The time is this window's,
+  // so a remote host's clock never shortens the wait before "Reviewing…".
+  if (event.type === "turn.status" && event.turnId) {
+    const turn = event.turnId;
+    if (payload.state === "reviewing") {
+      if (!state.reviews) update("reviews", {});
+      if (!state.reviews?.[turn])
+        update("reviews", turn, {
+          callId: typeof payload.callId === "string" ? payload.callId : undefined,
+          at: Date.now(),
+        });
+    } else if (state.reviews?.[turn]) {
+      // A store merges objects, so a key goes away only when set undefined.
+      update("reviews", turn, undefined as unknown as TurnReview);
+    }
+  }
   if (event.type === "turn.started" && payload.id)
     update("turns", (items) => merge(items, payload as T.Turn));
   if (event.type === "turn.finished" && event.turnId) {
@@ -130,12 +153,21 @@ export function reduceEvent<S extends Live>(
       items.filter((item) => item.id !== event.turnId),
     );
     update("streams", event.turnId, { text: "", reasoning: "" });
+    if (state.reviews?.[event.turnId])
+      update("reviews", event.turnId, undefined as unknown as TurnReview);
   }
+  // Announced again (Auto's reviewer took up a request already shown, or
+  // left it to the person): the card is replaced where it stands.
   if (event.type === "permission.requested" && payload.permissionId)
-    update("permissions", (items) => [
-      ...items.filter((item) => item.permissionId !== payload.permissionId),
-      payload as T.PendingPermissionInfo,
-    ]);
+    update("permissions", (items) =>
+      items.some((item) => item.permissionId === payload.permissionId)
+        ? items.map((item) =>
+            item.permissionId === payload.permissionId
+              ? (payload as T.PendingPermissionInfo)
+              : item,
+          )
+        : [...items, payload as T.PendingPermissionInfo],
+    );
   if (event.type === "permission.resolved")
     update("permissions", (items) =>
       items.filter((item) => item.permissionId !== payload.permissionId),
