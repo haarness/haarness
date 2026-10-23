@@ -20278,9 +20278,26 @@ async fn notices_go_when_they_stop_being_true() {
         app.notice
     );
 
+    // A notice that took the refused one's place is not cleared with it.
+    app.composer.set_text("/hepl".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.notice = "Copied the last reply".into();
+    app.open_overlay(crate::state::Overlay::Commands);
+    assert_eq!(app.notice, "Copied the last reply");
+    app.close_overlay();
+    app.composer.clear();
+
     let viewing = "Viewing assistant message · #3 · Ctrl+End returns to latest".to_owned();
-    app.notice.clone_from(&viewing);
-    app.scrolled_notice = Some(viewing.clone());
+    app.notice_lasting(
+        viewing.clone(),
+        crate::state::NoticeLasts::WhileScrolledBack,
+    );
     app.viewport_offset = 12;
     app.expire_notice(std::time::Instant::now());
     assert_eq!(app.notice, viewing, "true while scrolled back");

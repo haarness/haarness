@@ -1247,7 +1247,8 @@ pub async fn handle_key_at(
                 let line = app.composer.set_aside();
                 app.selection = 0;
                 let action = app.execute_command(&raw, client).await;
-                if (action.is_err() || app.command_refused) && app.composer.is_empty() {
+                let refused = app.shows_notice_lasting(crate::state::NoticeLasts::UntilNextCommand);
+                if (action.is_err() || refused) && app.composer.is_empty() {
                     app.composer.restore(line);
                 }
                 app.return_undo_draft();
