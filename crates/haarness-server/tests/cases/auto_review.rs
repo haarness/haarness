@@ -1133,3 +1133,90 @@ async fn a_step_the_reviewer_blocks_inside_a_batch_keeps_its_note() {
     assert!(!workspace.0.join("batch.txt").exists());
     assert!(workspace.0.join("fine.txt").exists());
 }
+
+#[tokio::test]
+async fn turning_auto_on_with_a_card_shown_says_so_and_keeps_the_note() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&bash("printf a > kept.txt", "ask")))
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    assert!(asked.review.is_none());
+    let mut events = runtime.events().subscribe(None).receiver;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    reviewing(&provider, 1).await;
+    // The reviewer leaves it to the person: the card is announced again,
+    // first as being reviewed, then with the note, and the listing agrees.
+    for _ in 0..500 {
+        if runtime.pending_permissions()[0]
+            .review
+            .as_ref()
+            .is_some_and(|review| review.status == Status::Asked)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let listed = runtime.pending_permissions();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].permission_id, asked.permission_id);
+    assert_eq!(
+        listed[0].review.as_ref().unwrap().rationale.as_deref(),
+        Some("Test verdict: ask.")
+    );
+    let mut announced = Vec::new();
+    let mut states = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event.event_type.as_str() {
+            "permission.requested" => {
+                assert_eq!(event.payload["permissionId"], asked.permission_id.as_str());
+                announced.push(event.payload["review"]["status"].clone());
+            }
+            "turn.status" => states.push(event.payload["state"].clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(announced, [json!("reviewing"), json!("asked")]);
+    assert!(states.contains(&json!("reviewing")), "{states:?}");
+    assert_eq!(
+        states.last(),
+        Some(&json!("waiting_permission")),
+        "{states:?}"
+    );
+    reply(&runtime, &asked.permission_id, Reply::Once).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+
+    // Approved by the reviewer, the card goes; a person's late click finds
+    // nothing, which clients take as already settled.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf b > late.txt", "allow")),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let late = runtime
+        .reply_permission(
+            &asked.permission_id,
+            PermissionReply {
+                decision: Reply::Reject,
+                feedback: None,
+            },
+        )
+        .await;
+    assert!(matches!(late, Err(CoreError::NotFound(_))), "{late:?}");
+    assert!(workspace.0.join("late.txt").exists());
+}
