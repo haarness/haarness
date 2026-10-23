@@ -355,6 +355,163 @@ test("two images coming in at once above the view still move nothing being read"
   expect(errors).toEqual([]);
 });
 
+/** Scrolls the transcript with the wheel until `placed` (an offset from the view's top, or null) is within [0, 200). */
+async function scrollUntil(placed: () => Promise<number | null>) {
+  const list = page.locator(".transcript");
+  await list.hover();
+  for (let step = 0, at = await placed(); step < 80 && !(at !== null && at > 0 && at < 200); step++, at = await placed()) {
+    await page.mouse.wheel(0, at !== null && at >= 200 ? 100 : -150);
+    await page.waitForTimeout(40);
+  }
+}
+
+const frames = (count = 2) =>
+  page.evaluate(
+    (count) =>
+      new Promise((done) => {
+        const next = (left: number) => (left ? requestAnimationFrame(() => next(left - 1)) : done(undefined));
+        next(count);
+      }),
+    count,
+  );
+
+test("an image in a closed compaction summary holds up no correction for a reply above the view", async () => {
+  await writeFile(join(workspace, "out/shared.png"), chart(480, 160, [60, 140, 200]));
+  // A chat whose history starts with a compaction summary (a closed disclosure) showing the image.
+  const source = await client.createThread({ title: "Compaction source", provider: "echo", model: "echo-1" });
+  const archive = await client.exportSessionArchive(source.id);
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  archive.rootThreadId = id;
+  archive.threads[0].thread.id = id;
+  archive.threads[0].thread.title = "Compacted with images";
+  const message = (text: string) => ({ type: "assistant_message" as const, text });
+  const datas = [
+    { type: "compaction" as const, summary: "Earlier work made a chart.\n\n![Shared](out/shared.png)", files_touched: [], outstanding: [] },
+    message("Before the chart.\n\n![Shared](out/shared.png)\n\nRead on from here."),
+    ...Array.from({ length: 6 }, (_, index) => message(`Part ${index}.\n\n` + "Context paragraph. ".repeat(60))),
+  ];
+  archive.threads[0].items = datas.map((data, index) => ({
+    id: crypto.randomUUID(), threadId: id, turnId: null, sequence: index + 1, createdAt: now, data,
+  }));
+  await client.importSessionArchive({ archive });
+  await page.locator(".sessions").getByRole("button", { name: "Compacted with images", exact: true }).click();
+  const reply = page.locator(`[data-item-id="${archive.threads[0].items[1].id}"]`);
+  const list = page.locator(".transcript");
+  await scrollUntil(() =>
+    list.evaluate((element, row) => {
+      const image = element.querySelector(`[data-item-id="${row}"] img.project-image-loaded`);
+      return image ? image.getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+    }, archive.threads[0].items[1].id),
+  );
+  await expect(reply.locator("img.project-image-loaded")).toHaveJSProperty("naturalHeight", 160);
+  // The reply's image just above the view; its text below at the top.
+  await list.evaluate((element, row) => {
+    const image = element.querySelector(`[data-item-id="${row}"] img.project-image-loaded`)!;
+    element.scrollTop += image.getBoundingClientRect().bottom - element.getBoundingClientRect().top + 4;
+  }, archive.threads[0].items[1].id);
+  const text = reply.getByText("Read on from here.");
+  const where = () =>
+    text.evaluate((element) => Math.round(element.getBoundingClientRect().top - element.closest(".transcript")!.getBoundingClientRect().top));
+  await frames();
+  const before = await where();
+  expect(before).toBeGreaterThan(0);
+  // The agent remakes the chart and its turn ends: both copies are read again, the hidden one first.
+  await writeFile(join(workspace, "out/shared.png"), chart(480, 320, [200, 140, 60]));
+  const turn = await client.startTurn(id, { requestId: crypto.randomUUID(), text: "Done." });
+  await client.waitTurn(turn.id);
+  await expect(reply.locator("img.project-image-loaded")).toHaveJSProperty("naturalHeight", 320);
+  await page.waitForTimeout(300);
+  expect(Math.abs((await where()) - before)).toBeLessThanOrEqual(1);
+  await page.locator(".sessions").getByRole("button", { name: "Images", exact: true }).click();
+  expect(errors).toEqual([]);
+});
+
+test("a correction no measure answers is given up after two frames, so the next image is still corrected", async () => {
+  await writeFile(join(workspace, "out/one.png"), chart(480, 120, [90, 90, 200]));
+  await writeFile(join(workspace, "out/two.png"), chart(480, 140, [200, 90, 90]));
+  await app.evaluate(() => {
+    (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads = new Set(["out/one.png", "out/two.png"]);
+  });
+  const message = await reply("Two charts in turn.\n\n![One](out/one.png)\n\n![Two](out/two.png)\n\nRead on from here.");
+  const id = await message.evaluate((element) => element.closest("[data-item-id]")!.getAttribute("data-item-id"));
+  for (let index = 0; index < 3; index++)
+    await reply(Array.from({ length: 8 }, (_, line) => `Line ${index}.${line} keeps the reader busy for a while.`).join("\n\n"));
+  const list = page.locator(".transcript");
+  const holder = (index: number) =>
+    list.evaluate(
+      (element, [row, at]) => {
+        const holders = element.querySelectorAll(`[data-item-id="${row}"] .project-image`);
+        return holders[at as number] ? holders[at as number].getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+      },
+      [id, index] as const,
+    );
+  await scrollUntil(() => holder(1));
+  await list.evaluate((element, row) => {
+    const holders = element.querySelectorAll(`[data-item-id="${row}"] .project-image`);
+    element.scrollTop += holders[1].getBoundingClientRect().bottom - element.getBoundingClientRect().top + 4;
+  }, id);
+  const text = message.getByText("Read on from here.");
+  const where = () =>
+    text.evaluate((element) => Math.round(element.getBoundingClientRect().top - element.closest(".transcript")!.getBoundingClientRect().top));
+  await frames();
+  // A measure that never comes, as for text the window skips: the first image is not corrected.
+  await page.evaluate(() => {
+    const real = window.ResizeObserver;
+    (window as unknown as { realResizeObserver: typeof ResizeObserver }).realResizeObserver = real;
+    window.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  });
+  await app.evaluate(() => (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads?.delete("out/one.png"));
+  await expect(message.locator("img.project-image-loaded")).toHaveCount(1);
+  await page.evaluate(() => {
+    window.ResizeObserver = (window as unknown as { realResizeObserver: typeof ResizeObserver }).realResizeObserver;
+  });
+  await frames(3);
+  const after = await where();
+  // Two frames on, the waiting correction is given up: the second image is corrected.
+  await app.evaluate(() => (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads?.clear());
+  await expect(message.locator("img.project-image-loaded")).toHaveCount(2);
+  await page.waitForTimeout(300);
+  // Within a pixel: the view's offset is whole pixels, the text's place is not.
+  expect(Math.abs((await where()) - after)).toBeLessThanOrEqual(1);
+  expect(errors).toEqual([]);
+});
+
+test("when a tall code block fills the view, an image coming in above it in two replies moves nothing", async () => {
+  await writeFile(join(workspace, "out/both.png"), chart(480, 220, [120, 180, 90]));
+  await app.evaluate(() => {
+    (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads = new Set(["out/both.png"]);
+  });
+  await reply("Here first: ![Both](out/both.png)");
+  const code = Array.from({ length: 80 }, (_, line) => `const line${line} = ${line};`).join("\n");
+  const message = await reply("And here: ![Both](out/both.png)\n\n```ts\n" + code + "\n```");
+  const id = await message.evaluate((element) => element.closest("[data-item-id]")!.getAttribute("data-item-id"));
+  const list = page.locator(".transcript");
+  const top = () =>
+    list.evaluate((element, row) => {
+      const block = element.querySelector(`[data-item-id="${row}"] pre`);
+      return block ? block.getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+    }, id);
+  await scrollUntil(top);
+  // The code block starts just above the view and fills it: no text starts inside the view.
+  await list.evaluate((element, row) => {
+    const block = element.querySelector(`[data-item-id="${row}"] pre`)!;
+    element.scrollTop += block.getBoundingClientRect().top - element.getBoundingClientRect().top + 30;
+  }, id);
+  await frames();
+  const before = await top();
+  expect(before).toBeLessThan(0);
+  await app.evaluate(() => (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads?.clear());
+  await expect(message.locator("img.project-image-loaded")).toHaveJSProperty("naturalHeight", 220);
+  await page.waitForTimeout(300);
+  expect(Math.abs((await top())! - before!)).toBeLessThanOrEqual(1);
+  expect(errors).toEqual([]);
+});
+
 test("scrolling up through replies that finish drawing above the view moves only by the scroll", async () => {
   // A long chat drawn for the first time: each reply measures, then grows as its text is drawn.
   const long = await client.createThread({ title: "Long scroll", provider: "echo", model: "echo-1" });

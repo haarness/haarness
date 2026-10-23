@@ -63,7 +63,7 @@ const correcting = new WeakMap<HTMLElement, object>();
  * that moved. One correction waits per transcript: images coming in while it
  * waits, in this reply or another (your own message showing the same image),
  * are counted in it; if no measure comes within two frames, it is given up.
- * Text with no box (inside a closed disclosure) moves nothing, so it is just
+ * Text not shown (inside a closed disclosure) moves nothing, so it is just
  * changed. The image is decoded before it comes in, so it takes its final
  * size at once.
  */
@@ -73,8 +73,11 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   if (
     !list ||
     !view ||
-    !host.getClientRects().length ||
-    !element.getClientRects().length ||
+    // Inside a closed disclosure (the compaction summary) text keeps a box
+    // but is skipped, and its size is never observed.
+    !host.checkVisibility() ||
+    !element.checkVisibility() ||
+    element.closest("details:not([open])") ||
     element.getBoundingClientRect().top >= view.top ||
     correcting.has(list)
   )
