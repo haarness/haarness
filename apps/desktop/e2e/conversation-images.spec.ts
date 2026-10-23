@@ -519,6 +519,71 @@ test("when a tall code block fills the view, an image coming in above it in two 
   expect(errors).toEqual([]);
 });
 
+/**
+ * Sends `text` with the read of `path` held, scrolls so that the `index`th
+ * image placeholder of its reply is just above the view, lets the read go, and
+ * gives back how far "Read on from here." moved once the images came in.
+ */
+async function movedByHeldImage(markdown: string, path: string, index: number) {
+  await app.evaluate((_electron, held) => {
+    (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads = new Set([held]);
+  }, path);
+  const message = await reply(markdown);
+  const id = await message.evaluate((element) => element.closest("[data-item-id]")!.getAttribute("data-item-id"));
+  for (let part = 0; part < 3; part++)
+    await reply(Array.from({ length: 8 }, (_, line) => `Part ${part}.${line} keeps the reader busy for a while.`).join("\n\n"));
+  const list = page.locator(".transcript");
+  const holder = () =>
+    list.evaluate(
+      (element, [row, at]) => {
+        const holders = element.querySelectorAll(`[data-item-id="${row}"] .project-image`);
+        return holders[at as number] ? holders[at as number].getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+      },
+      [id, index] as const,
+    );
+  await scrollUntil(holder);
+  await list.evaluate(
+    (element, [row, at]) => {
+      const holders = element.querySelectorAll(`[data-item-id="${row}"] .project-image`);
+      element.scrollTop += holders[at as number].getBoundingClientRect().bottom - element.getBoundingClientRect().top + 4;
+    },
+    [id, index] as const,
+  );
+  const text = message.getByText("Read on from here.");
+  const where = () =>
+    text.evaluate((element) => element.getBoundingClientRect().top - element.closest(".transcript")!.getBoundingClientRect().top);
+  await frames();
+  const before = await where();
+  expect(before).toBeGreaterThan(0);
+  await app.evaluate(() => (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads?.clear());
+  await expect(message.locator("img.project-image-loaded").first()).toBeAttached();
+  await page.waitForTimeout(300);
+  return (await where()) - before;
+}
+
+test("the same image hidden in a closed disclosure and shown above the view moves nothing being read", async () => {
+  await writeFile(join(workspace, "out/dual.png"), chart(480, 200, [70, 150, 210]));
+  const moved = await movedByHeldImage(
+    // One HTML block, so the image is inside the disclosure (Markdown draws each block on its own).
+    'Dual.\n\n<details><summary>Earlier</summary><img src="out/dual.png" alt="Hidden"></details>\n\n![Shown](out/dual.png)\n\nRead on from here.',
+    "out/dual.png",
+    1,
+  );
+  expect(Math.abs(moved)).toBeLessThanOrEqual(1);
+  expect(errors).toEqual([]);
+});
+
+test("an image in a closed disclosure's summary, which is drawn, moves nothing being read", async () => {
+  await writeFile(join(workspace, "out/summary.png"), chart(480, 200, [210, 150, 70]));
+  const moved = await movedByHeldImage(
+    '<details><summary><img src="out/summary.png" alt="Summary"> The summary</summary>Body.</details>\n\nRead on from here.',
+    "out/summary.png",
+    0,
+  );
+  expect(Math.abs(moved)).toBeLessThanOrEqual(1);
+  expect(errors).toEqual([]);
+});
+
 test("scrolling up through replies that finish drawing above the view moves only by the scroll", async () => {
   // A long chat drawn for the first time: each reply measures, then grows as its text is drawn.
   const long = await client.createThread({ title: "Long scroll", provider: "echo", model: "echo-1" });

@@ -47,6 +47,17 @@ function readingAnchor(list: HTMLElement, view: DOMRect): { element: HTMLElement
   return row && list.contains(row) ? { element: row, edge: "bottom" } : undefined;
 }
 
+/**
+ * Whether an element is drawn: not skipped by the window, and not inside a
+ * closed disclosure (the compaction summary), whose content keeps a box but
+ * whose size is never observed; a closed disclosure's own summary is drawn.
+ */
+function drawn(element: HTMLElement) {
+  if (!element.checkVisibility()) return false;
+  const closed = element.closest("details:not([open])");
+  return !closed || !!closed.querySelector(":scope > summary")?.contains(element);
+}
+
 /** Each transcript's correction of the reading position that waits for its rows to be measured. */
 const correcting = new WeakMap<HTMLElement, object>();
 
@@ -73,11 +84,8 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   if (
     !list ||
     !view ||
-    // Inside a closed disclosure (the compaction summary) text keeps a box
-    // but is skipped, and its size is never observed.
     !host.checkVisibility() ||
-    !element.checkVisibility() ||
-    element.closest("details:not([open])") ||
+    !drawn(element) ||
     element.getBoundingClientRect().top >= view.top ||
     correcting.has(list)
   )
@@ -233,7 +241,8 @@ export function Markdown(props: {
       (element) => madeHere(element) && element.dataset.projectPath === path,
     );
     if (!elements.length) return;
-    keepReading(elements[0], host, () => {
+    // Decided by the first copy drawn: one in a closed disclosure moves nothing.
+    keepReading(elements.find(drawn) ?? elements[0], host, () => {
       for (const element of elements) {
         if (shown.data === undefined) {
           if (!(element instanceof HTMLImageElement)) noteImage(element, shown.note, projectLabels(), path);
