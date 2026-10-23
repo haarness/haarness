@@ -5272,7 +5272,10 @@ impl RunWatch {
             let decision = if pending.explicit {
                 self.ask_explicit(&request, &permission_arguments(&pending))
                     .await?
-            } else if self.ask(&request).await? {
+            } else if self
+                .ask(&request, script_preview(pending.script.as_ref()).as_deref())
+                .await?
+            {
                 PermissionReplyDecision::Once
             } else {
                 PermissionReplyDecision::Reject
@@ -5291,9 +5294,12 @@ impl RunWatch {
         Ok(())
     }
 
-    async fn ask(&self, request: &str) -> Result<bool> {
+    async fn ask(&self, request: &str, script: Option<&str>) -> Result<bool> {
         let _paused = self.activity.as_ref().map(RunActivity::pause);
-        eprint!("The agent asks to {request}.\nAllow it once? [y/N] ");
+        eprint!(
+            "The agent asks to {request}.\n{}Allow it once? [y/N] ",
+            script.unwrap_or_default()
+        );
         let _ = io::stderr().flush();
         let answer = tokio::task::spawn_blocking(|| {
             let mut line = String::new();
@@ -5547,6 +5553,31 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
 /// built from the rules an **Always** answer would add. `None` for requests
 /// no rule should settle: an agent switch names one chat, and allowing the
 /// loop guard would turn it off.
+/// What a shell request's script says, for the terminal prompt: its path
+/// and first lines, indented, or that the command writes it before it runs
+/// it. The server has already made its text safe for a terminal.
+fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
+    const LINES: usize = 6;
+    let script = script?;
+    if script.rewritten {
+        return Some(format!(
+            "It writes {} before running it, so its contents can't be shown.\n",
+            script.path
+        ));
+    }
+    let lines: Vec<&str> = script.content.lines().collect();
+    let mut text = format!("It runs {}:\n", script.path);
+    for line in lines.iter().take(LINES) {
+        text.push_str("    ");
+        text.push_str(line);
+        text.push('\n');
+    }
+    if lines.len() > LINES || script.truncated {
+        text.push_str("    …\n");
+    }
+    Some(text)
+}
+
 fn allow_rule_example(pending: &haarness_protocol::PendingPermissionInfo) -> Option<String> {
     let rules: Vec<String> = if pending.always_patterns.is_empty() {
         pending
@@ -11646,6 +11677,31 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_terminal_prompt_shows_the_start_of_the_script_a_command_runs() {
+        let script = |content: &str, truncated, rewritten| haarness_protocol::PermissionScript {
+            path: "/work/run.sh".into(),
+            content: content.into(),
+            truncated,
+            rewritten,
+        };
+        assert_eq!(super::script_preview(None), None);
+        assert_eq!(
+            super::script_preview(Some(&script("echo a\necho b\n", false, false))).as_deref(),
+            Some("It runs /work/run.sh:\n    echo a\n    echo b\n")
+        );
+        let long = (1..=8)
+            .map(|line| format!("echo {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = super::script_preview(Some(&script(&long, false, false))).unwrap();
+        assert!(preview.ends_with("    echo 6\n    …\n"), "{preview}");
+        assert_eq!(
+            super::script_preview(Some(&script("", false, true))).as_deref(),
+            Some("It writes /work/run.sh before running it, so its contents can't be shown.\n")
+        );
+    }
+
     /// Run in a process of its own (it installs the process's panic hook):
     /// a server's stderr whose reader stopped held a panicking thread in the
     /// message the default hook writes there, and so it goes on without it;
