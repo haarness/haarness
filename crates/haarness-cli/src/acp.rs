@@ -471,18 +471,18 @@ impl Service {
         let call = asked_call(calls, child.map(|child| child.id), &detail)
             .unwrap_or_else(|| asked.id.clone());
         let options = permission_options(payload);
+        let mut fields = ToolCallUpdateFields::new()
+            .title(child.map_or_else(|| operation.clone(), |child| child.titled(&operation)))
+            .status(ToolCallStatus::Pending)
+            .raw_input(detail);
+        // The script the command runs, for the person answering; the call's
+        // result replaces it once it runs.
+        if let Some(text) = script_content(payload) {
+            fields = fields.content(vec![ContentBlock::Text(TextContent::new(text)).into()]);
+        }
         let request = RequestPermissionRequest::new(
             session.clone(),
-            ToolCallUpdate::new(
-                call,
-                ToolCallUpdateFields::new()
-                    .title(
-                        child.map_or_else(|| operation.clone(), |child| child.titled(&operation)),
-                    )
-                    .status(ToolCallStatus::Pending)
-                    .raw_input(detail),
-            )
-            .meta(child.map(Child::meta)),
+            ToolCallUpdate::new(call, fields).meta(child.map(Child::meta)),
             options,
         )
         .meta(child.map(Child::meta));
@@ -838,6 +838,30 @@ fn asked_call(calls: &Calls, chat: Option<ThreadId>, detail: &Value) -> Option<S
         .iter()
         .find(|(_, (owner, input))| *owner == chat && input == detail)
         .map(|(call, _)| call.clone())
+}
+
+/// The script a shell request's command runs (`script` on the request), as
+/// Markdown: its path, then its text in a fence longer than any run of
+/// backticks in it.
+fn script_content(payload: &Value) -> Option<String> {
+    let script = &payload["script"];
+    let path = script["path"].as_str()?;
+    let content = script["content"].as_str()?;
+    let mut longest = 0;
+    let mut run = 0;
+    for character in content.chars() {
+        run = if character == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest.max(2) + 1);
+    let mut text = format!(
+        "Script: {path}\n\n{fence}\n{}\n{fence}",
+        content.strip_suffix('\n').unwrap_or(content)
+    );
+    if script["truncated"] == true {
+        text.push_str("\n\nOnly the start of the file is shown.");
+    }
+    Some(text)
 }
 
 /// What the client may answer. A request that may only be allowed once
@@ -1311,6 +1335,28 @@ mod tests {
         // A second read changes nothing.
         approvals.refresh(vec![asked("waiting"), asked("missed")]);
         assert_eq!(approvals.waiting.len(), 2);
+    }
+
+    #[test]
+    fn a_shell_request_shows_the_script_its_command_runs() {
+        assert_eq!(script_content(&json!({"detail": {"command": "ls"}})), None);
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/x.sh", "content": "echo hi\n", "truncated": false,
+            }}))
+            .as_deref(),
+            Some("Script: /work/x.sh\n\n```\necho hi\n```")
+        );
+        // A fence inside the script cannot close the block early.
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/x.sh", "content": "cat <<'EOF'\n````\nEOF", "truncated": true,
+            }}))
+            .as_deref(),
+            Some(
+                "Script: /work/x.sh\n\n`````\ncat <<'EOF'\n````\nEOF\n`````\n\nOnly the start of the file is shown."
+            )
+        );
     }
 
     #[test]
