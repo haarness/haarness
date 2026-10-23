@@ -23,6 +23,23 @@ import { ReviewCache } from "./review-cache";
 import { reviewProblem } from "./review-problem";
 import { sessionKey } from "../projects";
 import { lines, split, patchText, type DiffLine } from "./diff";
+/** A file a step's Show in Review asked for, which the panel selects once
+ * its changes are read. */
+const [reviewRequest, setReviewRequest] = createSignal<{ connection: string; path: string }>();
+export function requestReview(connection: string, path: string) {
+  setReviewRequest({ connection, path });
+}
+/** The changed file (relative to the repository) a step named as it wrote
+ * it, relative to the project or absolute: the same path, else the one it
+ * ends (a project inside a larger repository). */
+function requestedFile(files: FileDiff[], path: string, workspace: string) {
+  const root = workspace.replace(/\/+$/, "") + "/";
+  const relative = path.startsWith(root) ? path.slice(root.length) : path.replace(/^\.\//, "");
+  return (
+    files.find((file) => file.file === relative) ??
+    files.find((file) => file.file.endsWith("/" + relative))
+  );
+}
 export function Review(props: { compact?: boolean } = {}) {
   const app = useApp();
   let root!: HTMLElement;
@@ -109,6 +126,14 @@ export function Review(props: { compact?: boolean } = {}) {
       );
       if (!data.some((file) => file.file === selected()))
         setSelected(data[0]?.file ?? "");
+      const request = reviewRequest();
+      if (request && request.connection === connection) {
+        const found = requestedFile(data, request.path, app.state.connection?.workspace ?? "");
+        // Not among these changes: the working tree has them.
+        if (!found && source !== "working") return void setMode("working");
+        setReviewRequest(undefined);
+        if (found) chooseFile(found.file);
+      }
       if (scroll()) scroll()!.scrollTop = 0;
     } catch (error) {
       if (id !== generation) return;
@@ -162,6 +187,12 @@ export function Review(props: { compact?: boolean } = {}) {
     context();
     untrack(() => void refresh());
   });
+  // Asked again while open: the step has just written, so read again.
+  createEffect(
+    on(reviewRequest, (request) => {
+      if (request) void refresh();
+    }, { defer: true }),
+  );
   const filtered = createMemo(() =>
     files().filter((file) =>
       file.file.toLowerCase().includes(filter().toLowerCase()),
@@ -290,6 +321,11 @@ export function Review(props: { compact?: boolean } = {}) {
       !data.error && data() ? lines(data()!) : [],
     );
     const paired = createMemo(() => split(parsed()));
+    // A file added or deleted has one side only: it reads in one column,
+    // whatever the layout, instead of beside an empty half.
+    const splitLayout = () =>
+      app.state.preferences.diffLayout === "split" &&
+      !["added", "deleted"].includes(data()?.status ?? props.metadata.status);
     const reveal = createMemo(() => {
       if (!active()) return undefined;
       const [path, side, line] = JSON.parse(active()) as [
@@ -298,7 +334,7 @@ export function Review(props: { compact?: boolean } = {}) {
         number,
       ];
       if (path !== props.metadata.file) return undefined;
-      return app.state.preferences.diffLayout === "split"
+      return splitLayout()
         ? paired().findIndex((row) =>
             side === "original"
               ? row.left?.old === line
@@ -407,7 +443,7 @@ export function Review(props: { compact?: boolean } = {}) {
                   fallback={<p class="notice-inline">{t("Binary file changed.")}</p>}
                 >
                   <Show
-                    when={app.state.preferences.diffLayout === "split"}
+                    when={splitLayout()}
                     fallback={
                       <div class="diff-lines">
                         <ReviewRows

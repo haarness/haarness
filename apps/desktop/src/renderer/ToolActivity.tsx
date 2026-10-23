@@ -24,6 +24,7 @@ import {
 } from "./project-images";
 import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
+import { requestReview } from "./Review";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
 import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
@@ -35,9 +36,10 @@ import {
   batchTarget,
   describeTool,
   toolChanges,
+  exitStatus,
+  resultText,
   toolInput,
   toolName,
-  toolOutput,
   toolTitle,
   toolFailed,
   toolVerb,
@@ -125,10 +127,14 @@ export function ToolActivity(props: {
   const stats = createMemo(() => changeStats(changes()));
   const input = createMemo(() => toolInput(props.name, props.args));
   const output = createMemo(
-    () =>
-      props.result &&
-      (blocked() || toolOutput(props.name, props.result.output)),
+    () => props.result && (blocked() || resultText(props.name, props.result)),
   );
+  const exit = () => exitStatus(props.name, props.result);
+  // A question's answer, after it: the row then says what was asked and
+  // what came back, in the reader's own type.
+  const question = () => toolName(props.name) === "question";
+  const answer = () =>
+    question() && props.result && !props.result.is_error ? props.result.output.trim() : "";
   // An MCP tool whose server pairs it with a page: the page shows under the
   // row, once its server's apps are known to be on. With them off the row is
   // the plain tool, also for a result from before they were turned off.
@@ -183,6 +189,7 @@ export function ToolActivity(props: {
       classList={{
         "tool-child": props.nested,
         "tool-batch": !!batch().length,
+        "tool-question": question(),
       }}
       data-status={status()}
       open={open()}
@@ -202,10 +209,19 @@ export function ToolActivity(props: {
         {/* A step in motion sweeps like the activity line and the agent card;
             a finished one simply rests. The word stays for screen readers. */}
         <Shimmer class="tool-label" active={live()}>
-          <strong>{verb()}</strong>
+          {/* Held for approval, it has not started: no verb says it runs.
+              The icon still says what kind of step it is. */}
+          <Show when={!waiting()}>
+            <strong>{verb()}</strong>
+          </Show>
           <span class="tool-target" title={toolTitle(props.args, shape().target)}>
             {shape().target}
           </span>
+          <Show when={answer()}>
+            <span class="tool-answer" title={answer()}>
+              {answer()}
+            </span>
+          </Show>
           <Show when={stats()}>
             {(count) => (
               <span class="tool-stats">
@@ -219,6 +235,9 @@ export function ToolActivity(props: {
             )}
           </Show>
         </Shimmer>
+        <Show when={exit()}>
+          {(code) => <span class="tool-chip tool-exit">{t("exit {code}", { code: String(code()) })}</span>}
+        </Show>
         <Show when={ranInChrome(props.name, props.args, props.result)}>
           <span class="tool-chip">{t("Chrome")}</span>
         </Show>
@@ -285,6 +304,16 @@ export function ToolActivity(props: {
                       <ChangePreview
                         change={change}
                         showPath={index() > 0 || changes().length > 1}
+                        review={
+                          // Once the change is made, the whole file is a
+                          // click away in Review.
+                          props.result && !props.result.is_error && change.path
+                            ? () => {
+                                requestReview(connection(), change.path);
+                                store.set("panel", "diff");
+                              }
+                            : undefined
+                        }
                       />
                     )}
                   </For>
@@ -415,7 +444,12 @@ function ReadImage(props: { image: { data: string } | { path: string; size?: num
     </Show>
   );
 }
-export function ChangePreview(props: { change: Change; showPath?: boolean }) {
+export function ChangePreview(props: {
+  change: Change;
+  showPath?: boolean;
+  /** Opens the change's file in Review. */
+  review?: () => void;
+}) {
   const rows = createMemo(() => changeRows(props.change));
   const shown = () => rows().slice(0, CHANGE_PREVIEW_LINES);
   const hidden = () => rows().length - shown().length;
@@ -428,15 +462,36 @@ export function ChangePreview(props: { change: Change; showPath?: boolean }) {
         <For each={shown()}>
           {(row) => (
             <div class={"diff-line " + row.kind}>
+              {/* A quiet gutter says what colour alone would: added or
+                  removed. It is left out of a copied selection. */}
+              <span class="diff-sign">
+                {row.kind === "add" ? "+" : row.kind === "remove" ? "−" : " "}
+              </span>
               <code>{row.text || " "}</code>
             </div>
           )}
         </For>
       </div>
-      <Show when={hidden() > 0}>
-        <p class="change-more">
-          {t("{count} more lines · open Review to see all", { count: hidden() })}
-        </p>
+      <Show
+        when={props.review}
+        fallback={
+          <Show when={hidden() > 0}>
+            <p class="change-more">
+              {t("{count} more lines · open Review to see all", { count: hidden() })}
+            </p>
+          </Show>
+        }
+      >
+        {(review) => (
+          <p class="change-more change-review">
+            <Show when={hidden() > 0}>
+              <span>{t("{count} more lines", { count: hidden() })}</span>
+            </Show>
+            <button type="button" class="change-review-link" onClick={() => review()()}>
+              {t("Show in Review")}
+            </button>
+          </p>
+        )}
       </Show>
     </div>
   );

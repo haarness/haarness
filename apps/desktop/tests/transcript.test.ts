@@ -29,6 +29,10 @@ import {
   toolVerb,
   toolVerbKey,
   toolVerbKeys,
+  toolKind,
+  toolWords,
+  resultText,
+  exitStatus,
 } from "../src/renderer/transcript";
 import { lines } from "../src/renderer/diff";
 import { applyLanguage } from "../src/renderer/i18n";
@@ -286,6 +290,45 @@ test("an unknown tool is named rather than described", () => {
     describeTool("github_search_code", { query: "x" }).verb,
     "Searched",
   );
+});
+
+test("a tool's family comes from whole words of its name, never from letters inside one", () => {
+  assert.deepEqual(toolWords("mcp__github__searchIssues"), ["mcp", "github", "search", "issues"]);
+  assert.deepEqual(toolWords("read-file.v2"), ["read", "file", "v2"]);
+  // "frobnicate" holds "cat", "catalog" holds "cat", "spawning" holds "spawn".
+  for (const name of ["frobnicate", "frobnicate_widgets", "catalog_sync", "spawning_pool", "lists2csv"]) {
+    assert.equal(toolKind(name), "other", name);
+    assert.equal(describeTool(name, { target: "alpha" }).verb, name);
+  }
+  assert.equal(toolKind("mcp__fs__read_text_file"), "read");
+  assert.equal(toolKind("readFile"), "read");
+  assert.equal(toolKind("github_search_code"), "search");
+  assert.equal(toolKind("run_shell_command"), "run");
+  assert.equal(toolKind("str_replace_editor"), "edit");
+  assert.equal(toolKind("http_get"), "web");
+  // Haarness's own family tools keep theirs, though their names are one word.
+  for (const [name, kind] of [["multiedit", "edit"], ["webfetch", "web"], ["apply_patch", "edit"], ["bash", "run"]])
+    assert.equal(toolKind(name), kind, name);
+  // An unknown tool's running line names it too.
+  assert.equal(toolActivity("frobnicate_widgets"), "Using frobnicate_widgets");
+  // Only an edit family shows a change preview.
+  assert.deepEqual(toolChanges("frobnicate", { path: "a.ts", content: "x" }), []);
+  assert.equal(toolChanges("notebook_edit", { path: "a.ts", content: "x" }).length, 1);
+});
+
+test("a result reads without the engine's category, the system's error number or the exit line", () => {
+  assert.equal(
+    resultText("read", { output: "tool error: No such file or directory (os error 2)", is_error: true }),
+    "No such file or directory",
+  );
+  assert.equal(resultText("bash", { output: "exit: 0\ntotal 8\n.\n", is_error: false, metadata: { exit: 0 } }), "total 8\n.\n");
+  assert.equal(resultText("bash", { output: "exit: 3\nboom", is_error: false, metadata: { exit: 3 } }), "boom");
+  // Output that only mentions those words keeps them.
+  assert.equal(resultText("read", { output: "exit: 0\ntool error: x", is_error: false }), "exit: 0\ntool error: x");
+  assert.equal(exitStatus("bash", { output: "", is_error: false, metadata: { exit: 3 } }), 3);
+  assert.equal(exitStatus("bash", { output: "", is_error: false, metadata: { exit: 0 } }), undefined);
+  assert.equal(exitStatus("read", { output: "", is_error: false, metadata: { exit: 3 } }), undefined);
+  assert.equal(exitStatus("bash", undefined), undefined);
 });
 
 test("the target is the one argument a reader scans for", () => {

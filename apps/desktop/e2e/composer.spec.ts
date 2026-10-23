@@ -512,3 +512,35 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
     await close();
   }
 });
+
+
+test("an edit's preview opens its file in Review, and an added file reads in one column", async ({}, info) => {
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await writeFile(join(workspace, "src", "kept.ts"), "export const kept = 1;\n");
+    gitCheckout(workspace);
+  });
+  try {
+    await page.evaluate(() => window.haarness.preferences({ diffLayout: "split" } as never));
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    for (const path of ["src/first.ts", "src/second.ts"]) {
+      await input.fill('!tool write {"path":"' + path + '","content":"export const value = 1;\\n"}');
+      await input.press("Enter");
+      await expect(page.locator(".tool-call").filter({ hasText: path })).toHaveAttribute("data-status", "done");
+    }
+    const row = page.locator(".tool-call").filter({ hasText: "src/first.ts" });
+    if ((await row.getAttribute("open")) === null) await row.locator(":scope > summary").click();
+    // The preview's gutter says added, beside the code.
+    await expect(row.locator(".diff-line.add .diff-sign").first()).toHaveText("+");
+    await row.getByRole("button", { name: "Show in Review", exact: true }).click();
+    const file = page.locator('.diff-file[data-file="src/first.ts"]');
+    await expect(file).toBeVisible();
+    // Added, it has one side: no empty half beside it, though the layout is Split.
+    await expect(file.locator(".split-row")).toHaveCount(0);
+    await expect(file.locator(".diff-line.add")).toHaveCount(1);
+    await page.screenshot({ path: info.outputPath("show-in-review.png") });
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
