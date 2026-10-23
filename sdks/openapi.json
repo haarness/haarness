@@ -4331,6 +4331,7 @@
           "failed",
           "paused",
           "blocked",
+          "reviewing",
           "unknown"
         ],
         "type": "string"

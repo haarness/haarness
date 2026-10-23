@@ -71,6 +71,9 @@ pub enum PermissionReviewStatus {
     Paused,
     /// The reviewer refused the call (tool results only).
     Blocked,
+    /// The reviewer is deciding a request already shown: Auto turned on
+    /// while it waited. A person may still answer it.
+    Reviewing,
     /// A status a newer server sends.
     #[serde(other)]
     Unknown,

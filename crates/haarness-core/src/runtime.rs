@@ -4798,6 +4798,17 @@ impl AgentRuntime {
                     let abort = CancellationToken::new();
                     entry.stage = ReviewStage::Reviewing;
                     entry.review_abort = Some(abort.clone());
+                    // The card says the reviewer is deciding it, and the
+                    // turn reads `reviewing`.
+                    entry.review = Some(haarness_protocol::PermissionReview {
+                        status: haarness_protocol::PermissionReviewStatus::Reviewing,
+                        risk: None,
+                        rule: None,
+                        rationale: None,
+                        reason: None,
+                    });
+                    publish_requested(&self.events, &permission_id, &entry);
+                    publish_review_status(&self.events, &entry, true);
                     drop(entry);
                     tokio::spawn(review_waiting(
                         Arc::clone(&self.permissions),
@@ -5563,6 +5574,7 @@ impl AgentRuntime {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
+            reviews_running: std::sync::atomic::AtomicUsize::new(0),
             prefix_warmup: self.prefix_warmup.clone(),
             run_stances: self.run_stances.clone(),
             unattended,
@@ -5986,6 +5998,9 @@ struct RunnerTask {
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
+    /// Auto's reviews deciding this turn's requests now: the turn reads
+    /// `reviewing` from the first until the last ends.
+    reviews_running: std::sync::atomic::AtomicUsize,
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
     run_stances: Arc<RunStances>,
     /// A turn nobody can answer: a schedule's run and the subagents and
@@ -6380,6 +6395,58 @@ fn publish_permission_resolved(
     );
 }
 
+/// One of a turn's reviews: the turn reads `reviewing` while any runs, and
+/// its tool again once the last one ends.
+struct TurnReviews<'a> {
+    task: &'a RunnerTask,
+    tool: (&'a str, &'a str),
+    ended: bool,
+}
+
+impl<'a> TurnReviews<'a> {
+    fn start(task: &'a RunnerTask, tool: (&'a str, &'a str)) -> Self {
+        if task
+            .reviews_running
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            task.set_status("reviewing", Some(tool));
+        }
+        Self {
+            task,
+            tool,
+            ended: false,
+        }
+    }
+
+    /// The review ended; with `restore`, the last one puts the turn's
+    /// status back to its tool.
+    fn end(mut self, restore: bool) {
+        self.finish(restore);
+    }
+
+    fn finish(&mut self, restore: bool) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        let last = self
+            .task
+            .reviews_running
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            == 1;
+        if last && restore {
+            self.task.set_status("tool", Some(self.tool));
+        }
+    }
+}
+
+impl Drop for TurnReviews<'_> {
+    fn drop(&mut self) {
+        // Stopped: the turn's end sets its status.
+        self.finish(false);
+    }
+}
+
 /// How a review of a registered, not yet announced request ended.
 enum Reviewed {
     /// Settled without a prompt: approved once by the reviewer, or answered
@@ -6500,13 +6567,18 @@ async fn review_waiting(
                 feedback: None,
                 review: Some(review),
             },
-            Some(crate::auto_review::Outcome::Ask(_)) if auto => {
-                entry.stage = ReviewStage::Reviewed;
-                return;
-            }
-            // The chat left Auto: the request stays the person's.
-            _ => {
-                entry.stage = ReviewStage::Unreviewed;
+            // Left to the person, with the reviewer's note; or the chat left
+            // Auto, and the card is plain again. Either way it is announced
+            // again, so every client shows what holds now.
+            outcome => {
+                (entry.stage, entry.review) = match outcome {
+                    Some(crate::auto_review::Outcome::Ask(note)) if auto => {
+                        (ReviewStage::Reviewed, Some(note))
+                    }
+                    _ => (ReviewStage::Unreviewed, None),
+                };
+                publish_requested(&events, &id, &entry);
+                publish_review_status(&events, &entry, false);
                 return;
             }
         };
@@ -6517,6 +6589,47 @@ async fn review_waiting(
         }
         return;
     }
+}
+
+/// Announces `pending` again with what holds for it now (its review note):
+/// clients replace the card they show by its id.
+fn publish_requested(events: &EventBus, id: &str, pending: &PendingPermission) {
+    let mut payload = json!(pending.info(id));
+    payload["allowAlways"] = json!(!pending.forced);
+    events.publish_scoped(
+        "permission.requested",
+        Some(pending.thread_id),
+        Some(pending.root_thread_id),
+        pending.turn_id,
+        None,
+        payload,
+    );
+}
+
+/// The status of the turn a shown request waits in, while Auto's reviewer
+/// takes it up (`reviewing`) and once it leaves it to the person again.
+fn publish_review_status(events: &EventBus, pending: &PendingPermission, reviewing: bool) {
+    let Some(turn) = pending.turn_id else {
+        return;
+    };
+    let tool = pending
+        .reviewer
+        .as_ref()
+        .and_then(|reviewer| reviewer.request.tool.clone())
+        .filter(|_| reviewing);
+    events.publish_scoped(
+        "turn.status",
+        Some(pending.thread_id),
+        Some(pending.root_thread_id),
+        Some(turn),
+        None,
+        json!({
+            "state": if reviewing { "reviewing" } else { "waiting_permission" },
+            "tool": tool.as_ref().map(|(name, _)| name),
+            "callId": tool.as_ref().map(|(_, call_id)| call_id),
+            "startedAt": Utc::now(),
+        }),
+    );
 }
 
 /// A rule about a whole tool (`"bash": "ask"`, `"*": "ask"`): it says how
@@ -9933,7 +10046,11 @@ impl RunnerTask {
         // The review runs with no lock held: a mode change, a reply to
         // another request or a Stop is never held up by a model call.
         if let Some(reviewer) = reviewer.as_ref().filter(|_| review_now) {
-            self.set_status("reviewing", Some(tool));
+            // Several calls of one turn can be reviewed at once (parallel
+            // reads, a batch): the turn reads `reviewing` from the first
+            // until the last one ends, so a client's delay before it says so
+            // starts once.
+            let running = TurnReviews::start(self, tool);
             let settled = review_registered(
                 &self.permissions,
                 &self.approval_modes,
@@ -9943,10 +10060,11 @@ impl RunnerTask {
                 &self.cancel,
                 &mut receiver,
             )
-            .await?;
-            match settled {
+            .await;
+            // A prompt shown next sets the turn's status itself.
+            running.end(!matches!(settled, Ok(Reviewed::Show)));
+            match settled? {
                 Reviewed::Resolved(resolution) => {
-                    self.set_status("tool", Some(tool));
                     if resolution.allowed && resolution.review.is_none() {
                         tracing::info!(
                             thread = %self.thread.id,
@@ -9957,7 +10075,6 @@ impl RunnerTask {
                     return Ok(resolution);
                 }
                 Reviewed::Blocked(review) => {
-                    self.set_status("tool", Some(tool));
                     return Err(CoreError::ReviewBlocked(Box::new(review)));
                 }
                 Reviewed::Show => {}
@@ -10044,6 +10161,9 @@ impl RunnerTask {
                 allowed = resolution.allowed,
                 "permission resolved"
             );
+            // Answered (by a person, or by Auto's reviewer once Auto turned
+            // on): the turn is back on its call.
+            self.set_status("tool", Some(tool));
         }
         self.publish_task_update("running");
         resolution
@@ -10725,6 +10845,7 @@ impl RunnerTask {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
+            reviews_running: std::sync::atomic::AtomicUsize::new(0),
             prefix_warmup: self.prefix_warmup.clone(),
             run_stances: self.run_stances.clone(),
             unattended: self.unattended,
