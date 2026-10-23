@@ -370,6 +370,15 @@ test("a read that returned an image shows it once its row is open", async () => 
   // Closing the row takes the image away again.
   await wide.row.locator("summary").click();
   await expect(wide.row.locator(".tool-image")).toHaveCount(0);
+
+  // A file changed since the read is not passed off as what the agent read.
+  await writeFile(join(workspace, "out/fresh.png"), chart(200, 100, [90, 90, 200]));
+  const fresh = await read("out/fresh.png");
+  await writeProjectFile("out/fresh.png", chart(300, 150, [200, 90, 90]));
+  await fresh.row.locator("summary").click();
+  await expect(fresh.row.locator(".tool-console")).toBeVisible();
+  await page.waitForTimeout(400);
+  await expect(fresh.row.locator(".tool-image")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
