@@ -190,9 +190,12 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
         return Some(withheld(file, ScriptWithheld::Written));
     }
     let mut bytes = read_bytes(&real)?;
-    if follows_shebang(script.shebang, &bytes) && runs_another_file(&bytes)
-        || declares_another_encoding(&bytes)
-    {
+    let another = match script.shebang {
+        Shebang::Comment => false,
+        Shebang::Followed => runs_another_file(&bytes),
+        Shebang::Perl => perl_runs_another_program(&bytes),
+    };
+    if another || declares_another_encoding(&bytes) {
         return None;
     }
     let seal = Seal {
@@ -247,16 +250,31 @@ fn shebang_line(bytes: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
     Some(String::from_utf8_lossy(line))
 }
 
-/// Whether what runs the script runs the program its `#!` line names:
-/// the system, for a script run by its path, and `perl`, unless the line
-/// says `perl` (or `indir`).
-fn follows_shebang(shebang: Shebang, bytes: &[u8]) -> bool {
-    match shebang {
-        Shebang::Comment => false,
-        Shebang::Followed => true,
-        Shebang::Perl => shebang_line(bytes)
-            .is_some_and(|line| !line.contains("perl") && !line.contains("indir")),
+/// Whether `perl` runs another program instead of the script: one its
+/// first line names with `#!` without saying `perl` or `indir`, found as
+/// perl finds it (after a UTF-8 byte order mark, spaces, tabs and carriage
+/// returns, and one `:`), the line ending at a line feed, form feed,
+/// vertical tab or carriage return. Real Perl scripts say `perl`, so the
+/// program is not judged.
+fn perl_runs_another_program(bytes: &[u8]) -> bool {
+    let start = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let at = start
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r'))
+        .unwrap_or(start.len());
+    let mut start = &start[at..];
+    if start.starts_with(b":") && !start.starts_with(b"::") {
+        start = &start[1..];
     }
+    let Some(line) = start.strip_prefix(b"#!") else {
+        return false;
+    };
+    let line = line
+        .split(|byte| matches!(byte, b'\n' | b'\x0c' | b'\x0b' | b'\r'))
+        .next()
+        .unwrap_or_default();
+    let line = String::from_utf8_lossy(line);
+    !line.contains("perl") && !line.contains("indir")
 }
 
 /// Whether a script's `#!` line, followed, runs another file too: an
@@ -865,11 +883,34 @@ mod tests {
                 "{command}"
             );
         }
+        // Found as perl finds it, a `#!` line that does not say `perl` shows
+        // nothing, whatever program it names.
+        for first in [
+            "#!/bin/sh",
+            "#!/bin/sh -c",
+            "#!/opt/homebrew/bin/python3 -m",
+            " #!/bin/sh evil.sh",
+            "\t#!/bin/sh evil.sh",
+            "\r#!/bin/sh evil.sh",
+            ":#!/bin/sh evil.sh",
+            "\u{FEFF}#!/bin/sh evil.sh",
+            "#!/bin/sh evil.sh\x0cperl",
+            "#!/bin/sh evil.sh\x0bperl",
+            "#!/bin/sh evil.sh\rperl",
+        ] {
+            fixture.write("x.pl", format!("{first}\nprint \"body\\n\";\n"));
+            assert!(
+                bash_script("perl x.pl", &fixture.0, |_| true).is_none(),
+                "{first:?}"
+            );
+        }
         // Saying `perl`, the line is perl's own; a shell ignores it.
         for (first, command) in [
             ("#!/usr/bin/perl -w", "perl x.pl"),
             ("#!/usr/bin/env perl", "perl x.pl"),
-            ("#!/bin/sh", "perl x.pl"),
+            ("#!/bin/sh evil.sh perl", "perl x.pl"),
+            ("::#!/bin/sh evil.sh", "perl x.pl"),
+            ("use strict;", "perl x.pl"),
             ("#!/bin/sh evil.sh", "sh x.pl"),
             ("#!/bin/sh evil.sh", "python3 x.pl"),
         ] {
