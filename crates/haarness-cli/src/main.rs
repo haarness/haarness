@@ -5197,7 +5197,73 @@ struct RunWatch {
     /// `--format json`: each refusal is also a `refused` record on stdout.
     json: bool,
     refusals: std::sync::Mutex<Refusals>,
+    /// The calls that succeed in the run, from its event stream, once a
+    /// `--auto` run with nobody to ask starts counting.
+    progress: std::sync::OnceLock<Progress>,
     activity: Option<RunActivity>,
+}
+
+/// Calls that succeeded in a run, counted from the server's events as they
+/// come: no listing of chats or transcripts on each refusal.
+struct Progress {
+    succeeded: Arc<std::sync::atomic::AtomicUsize>,
+    /// The stream was lost or replayed since the last refusal: the count may
+    /// have missed some.
+    lost: Arc<std::sync::atomic::AtomicBool>,
+    tasks: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl Progress {
+    /// Count the successful tool results of the run under `root`, its own
+    /// chat's and its agents'.
+    fn follow(client: &haarness_tui::api::ApiClient, root: ThreadId) -> Self {
+        use std::sync::atomic::Ordering;
+        let succeeded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut events, follower) = client.subscribe(None);
+        let reader = tokio::spawn({
+            let (succeeded, lost) = (succeeded.clone(), lost.clone());
+            async move {
+                while let Some(event) = events.recv().await {
+                    match event {
+                        haarness_tui::api::SubscriptionEvent::Event(event) => {
+                            let data = &event.payload["data"];
+                            if event.event_type == "item.created"
+                                && event.root_thread_id.is_none_or(|chat| chat == root)
+                                && data["type"] == "tool_result"
+                                && data["is_error"] == false
+                            {
+                                succeeded.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        haarness_tui::api::SubscriptionEvent::Reconnected => {}
+                        _ => lost.store(true, Ordering::SeqCst),
+                    }
+                }
+                lost.store(true, Ordering::SeqCst);
+            }
+        });
+        Self {
+            succeeded,
+            lost,
+            tasks: [follower, reader],
+        }
+    }
+
+    /// Calls that succeeded so far, or `None` when the count may have
+    /// missed some since it was last read.
+    fn read(&self) -> Option<usize> {
+        use std::sync::atomic::Ordering;
+        (!self.lost.swap(false, Ordering::SeqCst)).then(|| self.succeeded.load(Ordering::SeqCst))
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 /// What a `--auto` run with nobody to ask refused.
@@ -5213,36 +5279,21 @@ struct Refusals {
 
 impl Refusals {
     /// Count a refusal, `succeeded` calls having succeeded in the whole run
-    /// so far (when known); true once [`REFUSALS_IN_A_ROW`] came with no call
-    /// succeeding anywhere in between.
+    /// so far; true once [`REFUSALS_IN_A_ROW`] came with no call succeeding
+    /// anywhere in between. A count that may have missed some (`None`) never
+    /// moves the run toward a stop.
     fn count(&mut self, succeeded: Option<usize>) -> bool {
         self.total += 1;
-        let progressed = self
-            .succeeded
-            .zip(succeeded)
-            .is_some_and(|(before, now)| now > before);
-        if succeeded.is_some() {
-            self.succeeded = succeeded;
-        }
+        let Some(now) = succeeded else {
+            self.succeeded = None;
+            self.in_a_row = 0;
+            return false;
+        };
+        let progressed = self.succeeded.is_some_and(|before| now > before);
+        self.succeeded = Some(now);
         self.in_a_row = if progressed { 1 } else { self.in_a_row + 1 };
         self.in_a_row >= REFUSALS_IN_A_ROW
     }
-}
-
-/// `root` and every chat under it (its agents, theirs, …).
-fn run_tree(root: ThreadId, threads: &[haarness_protocol::Thread]) -> Vec<ThreadId> {
-    let mut tree = vec![root];
-    let mut index = 0;
-    while let Some(&parent) = tree.get(index) {
-        let children: Vec<ThreadId> = threads
-            .iter()
-            .filter(|thread| thread.parent_id == Some(parent) && !tree.contains(&thread.id))
-            .map(|thread| thread.id)
-            .collect();
-        tree.extend(children);
-        index += 1;
-    }
-    tree
 }
 
 /// A `--auto` run with nobody to ask stops after this many refusals with no
@@ -5318,6 +5369,7 @@ impl RunWatch {
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: terminal.then(RunActivity::start),
         }
     }
@@ -5342,33 +5394,11 @@ impl RunWatch {
             .total
     }
 
-    /// Count a refusal in the run under `root`; true once
-    /// [`REFUSALS_IN_A_ROW`] were refused with no call succeeding anywhere in
-    /// the run in between, so agents working side by side never stop it.
-    async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> bool {
-        let succeeded = async {
-            let threads = client.threads_including_archived().await.ok()?;
-            let mut count = 0;
-            for thread in run_tree(root, &threads) {
-                count += client
-                    .items(thread)
-                    .await
-                    .ok()?
-                    .iter()
-                    .filter(|item| {
-                        matches!(
-                            item.data,
-                            ItemData::ToolResult {
-                                is_error: false,
-                                ..
-                            }
-                        )
-                    })
-                    .count();
-            }
-            Some(count)
-        }
-        .await;
+    /// Count a refusal; true once [`REFUSALS_IN_A_ROW`] were refused with
+    /// no call succeeding anywhere in the run in between, so agents working
+    /// side by side never stop it.
+    fn tally_refusal(&self) -> bool {
+        let succeeded = self.progress.get().and_then(Progress::read);
         self.refusals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5385,6 +5415,7 @@ impl RunWatch {
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         }
     }
@@ -5407,6 +5438,10 @@ impl RunWatch {
         resolve_noninteractive_questions_client(client, root, self).await?;
         if self.approver == Approver::OtherClients && !self.yolo {
             return Ok(());
+        }
+        // A run that refuses counts the calls that succeed in it from now on.
+        if self.auto && self.approver == Approver::Nobody {
+            self.progress.get_or_init(|| Progress::follow(client, root));
         }
         // One listing for both: a request that arrives after a separate
         // --yolo pass would otherwise reach the refusal below and stop a run
@@ -5480,17 +5515,16 @@ impl RunWatch {
                     review_note,
                 );
                 // Nobody's answer: it refuses this request alone, and the
-                // agent reads why in Haarness's words. A server older than
-                // `refuse` takes a rejection.
-                let feedback = refusal_feedback(pending.review.as_ref());
-                let refuse = |decision| PermissionReply {
-                    decision,
-                    feedback: Some(feedback.clone()),
-                };
+                // server frames the note as its own ("Haarness refused this
+                // request for an unattended run: <note>"). A server older
+                // than `refuse` takes a rejection, worded for the agent.
                 if let Err(error) = client
                     .reply_permission(
                         &pending.permission_id,
-                        refuse(PermissionReplyDecision::Refuse),
+                        PermissionReply {
+                            decision: PermissionReplyDecision::Refuse,
+                            feedback: Some(why.clone()),
+                        },
                     )
                     .await
                 {
@@ -5500,7 +5534,10 @@ impl RunWatch {
                     let _ = client
                         .reply_permission(
                             &pending.permission_id,
-                            refuse(PermissionReplyDecision::Reject),
+                            PermissionReply {
+                                decision: PermissionReplyDecision::Reject,
+                                feedback: Some(refusal_feedback(pending.review.as_ref())),
+                            },
                         )
                         .await;
                 }
@@ -5520,7 +5557,7 @@ impl RunWatch {
                         })
                     );
                 }
-                if self.tally_refusal(client, root).await {
+                if self.tally_refusal() {
                     let _ = client.interrupt_session(root, false).await;
                     anyhow::bail!(
                         "Stopped: {REFUSALS_IN_A_ROW} requests in a row needed a person, and nobody can answer in this run. Allow what the agent needs with permission rules, or run it at a terminal."
@@ -5726,7 +5763,10 @@ fn permission_arguments(pending: &haarness_protocol::PendingPermissionInfo) -> V
         let mut out = String::new();
         for c in text.chars() {
             if (c.is_control() && c != '\n')
-                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                || matches!(
+                    c,
+                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
             {
                 out.extend(c.escape_unicode());
             } else {
@@ -15050,6 +15090,7 @@ request_timeout = 0
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -15156,6 +15197,7 @@ request_timeout = 0
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         tokio::time::timeout(
@@ -15181,6 +15223,7 @@ request_timeout = 0
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -15204,6 +15247,7 @@ request_timeout = 0
             auto: true,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         tokio::time::timeout(
@@ -15305,6 +15349,7 @@ request_timeout = 0
             auto: true,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         headless.answer(&client, chat).await.unwrap();
@@ -15380,12 +15425,15 @@ request_timeout = 0
         }
         assert!(!refusals.count(Some(4)), "progress somewhere in the run");
         assert_eq!(refusals.in_a_row, 1);
-        assert!(!refusals.count(None), "unknown counts as no progress");
-        for _ in 0..2 {
+        // A count that may have missed some never moves the run toward a
+        // stop: the streak starts over from the next one.
+        assert!(!refusals.count(None));
+        assert_eq!(refusals.in_a_row, 0);
+        for _ in 0..4 {
             assert!(!refusals.count(Some(4)));
         }
         assert!(refusals.count(Some(4)));
-        assert_eq!(refusals.total, 9);
+        assert_eq!(refusals.total, 11);
 
         // Five agents side by side, each refused once while the others get
         // work done: never five in a row.
@@ -15555,6 +15603,7 @@ request_timeout = 0
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         }
         .answer(&client, root)
@@ -15567,6 +15616,7 @@ request_timeout = 0
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         }
         .answer(&client, root)
@@ -15638,14 +15688,14 @@ request_timeout = 0
             ]
         );
         pending.detail = serde_json::json!({
-            "url": "https://bank.example/transfer?to=x&amount=9\u{202e}",
+            "url": "https://bank.example/transfer?to=x&amount=9\u{202e}\u{061c}",
             "paths": ["report.pdf"],
             "text": "x".repeat(2_005),
         });
         let lines = super::permission_arguments(&pending);
         assert_eq!(
             lines[0],
-            "  url: https://bank.example/transfer?to=x&amount=9\\u{202e}"
+            "  url: https://bank.example/transfer?to=x&amount=9\\u{202e}\\u{61c}"
         );
         assert_eq!(lines[1], "  paths: [\"report.pdf\"]");
         assert!(
@@ -15743,6 +15793,7 @@ request_timeout = 0
             auto: false,
             json: false,
             refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
 

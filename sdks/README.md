@@ -149,7 +149,8 @@ for approvals, and `listQuestions`/`list_questions` and
 `reject` (a person's no, which also rejects the other requests waiting in the
 conversation) or `refuse`, which is for unattended runners only: it ends that
 one request, leaves the others waiting, and the agent reads `feedback` as
-Haarness's reason rather than a person's answer. No request is automatically
+Haarness's reason rather than a person's answer; an older server rejects
+`refuse`, so fall back to `reject`. No request is automatically
 retried, including a retryable error. For a deliberate turn retry, reuse the
 same `requestId`; generating a new one requests a new turn.
 
