@@ -1198,9 +1198,9 @@ pub(crate) fn editor_rows(
         // Rows of the draft out of the window above or below are marked in
         // the margin, where they cost no room.
         let margin = if index == start && start > 0 {
-            "↑ "
+            "▴ "
         } else if index == last && last + 1 < display.len() {
-            "↓ "
+            "▾ "
         } else {
             "  "
         };

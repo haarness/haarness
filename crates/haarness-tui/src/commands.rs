@@ -326,7 +326,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "keybinds",
         &["shortcuts"],
-        "Every key: configure shortcuts, see the fixed keys",
+        "Configure shortcuts and see the main fixed keys",
     ),
     command(
         "queue",
@@ -4949,7 +4949,6 @@ impl App {
     }
 }
 
-/// `30s` / `5m` / `2h` → seconds.
 /// `/status`'s language servers and formatters. One that is not installed
 /// says so as a server, with the files it would serve: "bash missing" read
 /// as if the shell were.
@@ -4996,6 +4995,7 @@ pub(crate) fn usage_cost(usage: &serde_json::Value) -> String {
     }
 }
 
+/// `30s` / `5m` / `2h` → seconds.
 fn parse_interval(value: &str) -> Option<u64> {
     let (number, unit) = value.split_at(value.len().checked_sub(1)?);
     let number: u64 = number.parse().ok()?;

@@ -851,10 +851,12 @@ fn render_question(
     if active && !question.choices.is_empty() {
         transcript.push(line(
             match (question.multiple, question.custom) {
-                (true, true) => "    ↑↓ move · space toggle · enter confirm · type custom",
-                (true, false) => "    ↑↓ move · space toggle · enter confirm",
-                (false, true) => "    ↑↓ move · enter choose · type custom",
-                (false, false) => "    ↑↓ move · enter choose",
+                (true, true) => {
+                    "    ↑↓ move · space toggle · enter confirm · type custom · esc cancels"
+                }
+                (true, false) => "    ↑↓ move · space toggle · enter confirm · esc cancels",
+                (false, true) => "    ↑↓ move · enter choose · type custom · esc cancels",
+                (false, false) => "    ↑↓ move · enter choose · esc cancels",
             },
             theme.muted,
         ));
