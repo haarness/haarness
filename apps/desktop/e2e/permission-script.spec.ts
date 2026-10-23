@@ -129,7 +129,7 @@ test("the card offers the script a command runs, closed until asked for, by mous
   const lines = body.locator(".change-lines .diff-line");
   await expect(lines).toHaveCount(12);
   await expect(lines.first()).toHaveText("#!/bin/sh");
-  await expect(lines.nth(6)).toHaveText('\tprintf "<h1>%s</h1>\\n" "$page" > "$out/$page.html"');
+  await expect(lines.nth(6)).toHaveText('    printf "<h1>%s</h1>\\n" "$page" > "$out/$page.html"');
   await expect(lines.last()).toHaveText("exit 0");
   await expect(body.locator(".change-more")).toHaveCount(0);
   // Its own short box: the answers stay in view below it.

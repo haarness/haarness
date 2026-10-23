@@ -1974,7 +1974,6 @@ html[dir="rtl"] .tool-target {
 .approval-script-body .change-lines {
   max-height: 200px;
   overflow-x: hidden;
-  tab-size: 4;
 }
 /* A long line wraps whole rather than run past the edge: what it does at its
    end is part of what is approved. */

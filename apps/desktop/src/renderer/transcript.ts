@@ -607,9 +607,19 @@ export function permissionScript(
   const root = workspace.replace(/\/+$/, "");
   return {
     path: root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path,
-    lines: text ? text.split("\n") : [],
+    lines: text ? text.split("\n").map(expandTabs) : [],
     truncated: truncated === true,
   };
+}
+
+/** A line with its tabs as spaces to the next stop of four, as the terminal
+ * UI draws them, so a wrapped line's hanging indent cannot shift them. */
+function expandTabs(line: string) {
+  if (!line.includes("\t")) return line;
+  let text = "";
+  for (const character of line)
+    text += character === "\t" ? " ".repeat(4 - (text.length % 4)) : character;
+  return text;
 }
 
 /**
