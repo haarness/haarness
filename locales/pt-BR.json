@@ -2534,6 +2534,7 @@
   "Previous tab": "Aba anterior",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "Nas conversas, no terminal, nos arquivos, no navegador ou no painel lateral que tem o teclado",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Anexe uma imagem, um PDF ou um arquivo de áudio ou vídeo. Para referenciar código-fonte, use o caminho dele no espaço de trabalho.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "Só é possível anexar imagens, PDFs, áudio e vídeo. Mencione um arquivo do projeto com @.",
   "Show and hide Haarness from any app": "Mostrar e ocultar o Haarness a partir de qualquer app",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Traz o Haarness para a frente a partir de qualquer app e o oculta de novo quando está na frente. Enquanto estiver ativado, os outros apps não recebem mais a combinação.",
   "Global shortcut": "Atalho global",

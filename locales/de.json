@@ -2534,6 +2534,7 @@
   "Previous tab": "Vorheriger Tab",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "In den Chats, im Terminal, in den Dateien, im Browser oder im Seitenbereich mit dem Tastaturfokus",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Hänge ein Bild, ein PDF oder eine Audio- oder Videodatei an. Um auf Quellcode zu verweisen, verwende seinen Pfad im Arbeitsbereich.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "Anhängen lassen sich nur Bilder, PDFs, Audio und Video. Eine Projektdatei erwähnst du mit @.",
   "Show and hide Haarness from any app": "Haarness aus jeder App ein- und ausblenden",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Holt Haarness aus jeder App in den Vordergrund und blendet es wieder aus, wenn es vorne ist. Solange dies aktiv ist, erhalten andere Apps diese Kombination nicht mehr.",
   "Global shortcut": "Globales Tastenkürzel",

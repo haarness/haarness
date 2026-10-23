@@ -2534,6 +2534,7 @@
   "Previous tab": "이전 탭",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "키보드 포커스가 있는 채팅, 터미널, 파일, 브라우저 또는 사이드 패널에서",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "이미지, PDF, 오디오 또는 동영상 파일을 첨부하세요. 소스 코드를 참조하려면 작업 공간의 경로를 사용하세요.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "이미지, PDF, 오디오, 동영상만 첨부할 수 있습니다. 프로젝트 파일은 @로 언급하세요.",
   "Show and hide Haarness from any app": "어떤 앱에서든 Haarness 표시 및 숨기기",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "어떤 앱에서든 Haarness를 앞으로 가져오고, 앞에 있을 때는 다시 숨깁니다. 켜져 있는 동안 다른 앱은 이 조합을 더 이상 받지 않습니다.",
   "Global shortcut": "전역 단축키",

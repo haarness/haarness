@@ -2534,6 +2534,7 @@
   "Previous tab": "前のタブ",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "キーボード操作中のチャット、ターミナル、ファイル、ブラウザ、またはサイドパネルで",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "画像、PDF、音声、または動画ファイルを添付してください。ソースコードを参照するには、ワークスペース内のパスを使用してください。",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "添付できるのは画像、PDF、音声、動画だけです。プロジェクトのファイルは @ で指定してください。",
   "Show and hide Haarness from any app": "どのアプリからでも Haarness を表示・非表示にする",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "どのアプリからでも Haarness を前面に表示し、前面にあるときは再び隠します。オンの間、他のアプリはこの組み合わせを受け取らなくなります。",
   "Global shortcut": "グローバルショートカット",

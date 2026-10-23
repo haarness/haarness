@@ -2534,6 +2534,7 @@
   "Previous tab": "Forrige fane",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "I chattene, terminalen, filene, nettleseren eller sidepanelet som har tastaturet",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Legg ved et bilde, en PDF eller en lyd- eller videofil. Bruk stien i arbeidsområdet for å vise til kildekode.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "Bare bilder, PDF-er, lyd og video kan legges ved. Nevn en prosjektfil med @.",
   "Show and hide Haarness from any app": "Vis og skjul Haarness fra hvilken som helst app",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Henter Haarness frem fra hvilken som helst app, og skjuler den igjen når den ligger foran. Mens det er på, mottar andre apper ikke lenger kombinasjonen.",
   "Global shortcut": "Global snarvei",

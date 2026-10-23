@@ -2534,6 +2534,7 @@
   "Previous tab": "علامة التبويب السابقة",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "في المحادثات أو المحطة الطرفية أو الملفات أو المتصفح أو اللوحة الجانبية التي تتلقى إدخال لوحة المفاتيح",
   "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "أرفق صورة أو ملف PDF أو ملفًا صوتيًا أو مرئيًا. للإشارة إلى شيفرة مصدرية، استخدم مسارها في مساحة العمل.",
+  "Only images, PDFs, audio and video can be attached. Mention a project file with @.": "يمكن إرفاق الصور وملفات PDF والصوت والفيديو فقط. اذكر ملفًا من المشروع بكتابة @.",
   "Show and hide Haarness from any app": "إظهار Haarness وإخفاؤه من أي تطبيق",
   "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "يعرض Haarness في المقدمة من أي تطبيق، ويخفيه مجددًا عندما يكون في المقدمة. أثناء تشغيله، لا تتلقى التطبيقات الأخرى هذا المزيج من المفاتيح.",
   "Global shortcut": "اختصار عام",
