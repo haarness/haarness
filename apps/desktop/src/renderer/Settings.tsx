@@ -18,7 +18,7 @@ import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
 import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
-import { definitionSource, type DefinitionRow } from "./settings-lists";
+import { definitionSource, OPEN_GROUP_LIMIT, toolGroupKey, toolGroups, toolSummary, toolTitle, type DefinitionRow } from "./settings-lists";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
 import { RouterConnectionDialog } from "./RouterConnectionDialog";
@@ -1478,7 +1478,11 @@ function Assets(props: { kind: string; cli: Cli }) {
 function Tools() {
   const app = useApp();
   const [catalog, setCatalog] = createSignal<T.ToolCatalogResponse>(),
-    [filter, setFilter] = createSignal("");
+    [filter, setFilter] = createSignal(""),
+    // Groups the reader opened or closed; the rest follow their size. A
+    // search opens every group it finds something in, until closed there.
+    [opened, setOpened] = createSignal<Record<string, boolean>>({}),
+    [closedInSearch, setClosedInSearch] = createSignal<Record<string, boolean>>({});
   async function refresh() {
     setCatalog(
       await app.api(
@@ -1491,6 +1495,44 @@ function Tools() {
     app.state.catalogVersion;
     void app.run(refresh);
   });
+  // A tool Search opened is shown in its group, which opens for it.
+  createEffect(() => {
+    const target = app.state.settingsTarget;
+    const tool = target?.startsWith("tool:")
+      ? catalog()?.tools.find((item) => "tool:" + item.id === target)
+      : undefined;
+    if (tool) setOpened((state) => ({ ...state, [toolGroupKey(tool)]: true }));
+  });
+  const needle = () => filter().trim().toLowerCase();
+  const groups = () =>
+    toolGroups(
+      (catalog()?.tools ?? []).filter(
+        (tool) =>
+          !needle() ||
+          `${tool.id} ${toolTitle(tool)} ${tool.description}`.toLowerCase().includes(needle()),
+      ),
+    );
+  const expanded = (group: ReturnType<typeof groups>[number]) =>
+    needle()
+      ? !closedInSearch()[group.key]
+      : (opened()[group.key] ?? group.tools.length <= OPEN_GROUP_LIMIT);
+  const toggle = (group: ReturnType<typeof groups>[number]) => {
+    const open = !expanded(group);
+    if (needle()) setClosedInSearch((state) => ({ ...state, [group.key]: !open }));
+    else setOpened((state) => ({ ...state, [group.key]: open }));
+  };
+  const groupTitle = (group: ReturnType<typeof groups>[number]) =>
+    group.kind === "builtin" ? t("Built-in") : group.name;
+  const groupMeta = (group: ReturnType<typeof groups>[number]) => {
+    const off = group.tools.filter((tool) => !tool.enabled).length;
+    return [
+      group.kind === "mcp" ? t("MCP server") : group.kind === "extension" ? t("Extension") : "",
+      group.tools.length === 1 ? t("1 tool") : t("{count} tools", { count: group.tools.length }),
+      off ? t("{count} turned off", { count: off }) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  };
   return (
     <>
       <Row
@@ -1512,46 +1554,79 @@ function Tools() {
           ]}
         />
       </Row>
-      <p class="muted">
-        {t("{advertised} advertised tokens · {saved} saved", {
-          advertised: catalog() ? formatNumber(catalog()!.estimatedAdvertisedTokens) : "",
-          saved: catalog() ? formatNumber(catalog()!.estimatedSavedTokens) : "",
-        })}
-      </p>
-      <input
-        aria-label={t("Search tools")}
-        placeholder={t("Find a tool…")}
-        onInput={(event) => setFilter(event.currentTarget.value)}
-      />
-      <For
-        each={catalog()?.tools.filter((tool) =>
-          tool.id.toLowerCase().includes(filter().toLowerCase()),
-        )}
-      >
-        {(tool) => (
-          <Row
-            title={tool.id}
-            description={tool.description}
-            target={"tool:" + tool.id}
-          >
-            <span class="badge">{tool.source}</span>
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label={t("Enable {name}", { name: tool.id })}
-              checked={tool.enabled}
-              onChange={(event) =>
-                app.run(async () =>
-                  setCatalog(
-                    await app.api("updateTool", tool.id, {
-                      enabled: event.currentTarget.checked,
-                    }),
-                  ),
-                )
-              }
-            />
-          </Row>
-        )}
+      <div class="toolbar tools-toolbar">
+        <input
+          aria-label={t("Search tools")}
+          placeholder={t("Find a tool…")}
+          onInput={(event) => {
+            setFilter(event.currentTarget.value);
+            setClosedInSearch({});
+          }}
+        />
+        <Show when={catalog()}>
+          {(current) => (
+            <span class="tools-tokens">
+              {t("{advertised} advertised tokens · {saved} saved", {
+                advertised: formatNumber(current().estimatedAdvertisedTokens),
+                saved: formatNumber(current().estimatedSavedTokens),
+              })}
+            </span>
+          )}
+        </Show>
+      </div>
+      <Show when={catalog() && needle() && !groups().length}>
+        <p class="muted">{t("No tool matches that search.")}</p>
+      </Show>
+      <For each={groups()}>
+        {(group) => {
+          const body = "tool-group-" + group.key.replace(/[^\w-]/g, "_");
+          return (
+            <div class="tool-group">
+              <button
+                type="button"
+                class="tool-group-toggle disclosure-toggle"
+                aria-expanded={expanded(group)}
+                aria-controls={body}
+                onClick={() => toggle(group)}
+              >
+                <Icon name="chevron" size="xs" />
+                <strong>{groupTitle(group)}</strong>
+                <span>{groupMeta(group)}</span>
+              </button>
+              <Show when={expanded(group)}>
+                <div id={body}>
+                  <For each={group.tools}>
+                    {(tool) => (
+                      <Row
+                        literal
+                        title={toolTitle(tool)}
+                        description={toolSummary(tool.description)}
+                        tag={<code class="setting-id">{tool.id}</code>}
+                        target={"tool:" + tool.id}
+                      >
+                        <input
+                          type="checkbox"
+                          role="switch"
+                          aria-label={t("Enable {name}", { name: tool.id })}
+                          checked={tool.enabled}
+                          onChange={(event) =>
+                            app.run(async () =>
+                              setCatalog(
+                                await app.api("updateTool", tool.id, {
+                                  enabled: event.currentTarget.checked,
+                                }),
+                              ),
+                            )
+                          }
+                        />
+                      </Row>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          );
+        }}
       </For>
     </>
   );

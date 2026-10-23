@@ -1831,11 +1831,57 @@ button.settings-link:hover:not(:disabled) {
   color: var(--muted);
   cursor: pointer;
 }
+.tools-tokens {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
 .models-elsewhere {
   font-size: var(--ui-sm);
   color: var(--muted);
 }
 
+/* Tools, by where they come from: a group's name once, its tools under it. */
+.tool-group {
+  border-bottom: 1px solid var(--hairline);
+}
+.tool-group-toggle {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  padding: var(--s3) 0;
+  color: var(--text);
+}
+.tool-group-toggle > .icon {
+  color: var(--muted);
+}
+.tool-group-toggle > strong {
+  font-size: var(--ui-lg);
+  font-weight: 600;
+}
+.tool-group-toggle > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  margin-inline-start: var(--s1);
+}
+.tool-group > div {
+  padding-inline-start: calc(12px + var(--s1));
+}
+.tool-group .setting-row {
+  padding: var(--s3) 0;
+}
+.tool-group .setting-row:last-child {
+  border-bottom: 0;
+}
+/* A tool's own id beside its title. Code keeps left to right, so its margin
+   is set on both sides rather than at an inline start that would flip. */
+.setting-row code.setting-id {
+  margin: 0 var(--s2);
+  font-size: var(--ui-xs);
+  color: var(--faint);
+}
 
 /* Native modality supplies initial focus, background inertness and restoration. */
  .settings-dialog {
