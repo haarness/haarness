@@ -427,7 +427,7 @@ impl App {
                     .filter(|phase| phase.state == state)
                     .and_then(|phase| phase.received)
                     .unwrap_or_else(std::time::Instant::now);
-                let mut phase = PhaseInfo {
+                let phase = PhaseInfo {
                     tool: event.payload["tool"].as_str().map(str::to_owned),
                     call_id: event.payload["callId"].as_str().map(str::to_owned),
                     since: event.payload["startedAt"]
@@ -436,26 +436,6 @@ impl App {
                     received: Some(received),
                     state,
                 };
-                // A turn waiting for a person (an approval, a question's
-                // answer) names no call: it is the one that was running (or
-                // under review) when it asked, so its row can wait still
-                // while the calls after it queue.
-                if matches!(
-                    phase.state.as_str(),
-                    "waiting_permission" | "waiting_question"
-                ) && phase.call_id.is_none()
-                {
-                    let previous = event
-                        .thread_id
-                        .and_then(|thread| self.live_threads.get(&thread))
-                        .and_then(|live| live.phase.as_ref())
-                        .or(self.phase.as_ref().filter(|_| on_current))
-                        .filter(|previous| matches!(previous.state.as_str(), "tool" | "reviewing"));
-                    if let Some(previous) = previous {
-                        phase.tool.clone_from(&previous.tool);
-                        phase.call_id.clone_from(&previous.call_id);
-                    }
-                }
                 if let Some(thread_id) = event.thread_id {
                     self.live_threads.entry(thread_id).or_default().phase = Some(phase.clone());
                 }
