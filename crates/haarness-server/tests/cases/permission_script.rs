@@ -246,3 +246,49 @@ async fn a_slash_command_shell_block_carries_its_script_too() {
         TurnStatus::Completed
     );
 }
+
+#[tokio::test]
+async fn a_script_the_chat_may_not_read_or_a_credential_file_is_not_shown() {
+    let fixture = Fixture::new();
+    for folder in ["secrets", "private", "open"] {
+        std::fs::create_dir_all(fixture.0.join(folder)).unwrap();
+        std::fs::write(fixture.0.join(folder).join("run.sh"), "echo run\n").unwrap();
+    }
+    std::fs::write(fixture.0.join(".envrc"), "export TOKEN=fixture-only\n").unwrap();
+    std::fs::create_dir_all(fixture.0.join("keys")).unwrap();
+    std::fs::write(fixture.0.join("keys/id_rsa"), "PRIVATE KEY\n").unwrap();
+    let mut config = RuntimeConfig::default();
+    for (pattern, decision) in [("read:secrets/*", D::Deny), ("read:private/*", D::Ask)] {
+        config.base_rules.push(PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        });
+    }
+    let runtime = runtime(&fixture.0, config);
+    let thread = echo_thread(&runtime).await;
+    let absolute = fixture.0.join("private/run.sh").display().to_string();
+    for (command, shown) in [
+        // A configured read deny, and an ask, by either spelling.
+        ("bash secrets/run.sh", false),
+        ("bash private/run.sh", false),
+        (absolute.as_str(), false),
+        // Credentials and the files that export them, whatever the rules.
+        ("source ./.envrc", false),
+        ("sh keys/id_rsa", false),
+        ("bash open/run.sh", true),
+    ] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&bash(json!({ "command": command }))),
+            )
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        assert_eq!(pending.script.is_some(), shown, "{command}");
+        assert_eq!(requested(&runtime)["script"].is_null(), !shown, "{command}");
+        answer(&runtime, &pending.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+}

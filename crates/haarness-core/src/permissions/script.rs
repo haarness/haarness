@@ -17,24 +17,78 @@ pub const MAX_SCRIPT_BYTES: usize = 30_000;
 /// x.sh`), and the next one is still worth showing.
 const MAX_TRIED: usize = 4;
 
+/// Files that hold credentials or export them (keys, tokens, shell
+/// profiles), by name: never shown, whatever the rules allow, since the
+/// request travels to every client that shows it.
+const CREDENTIAL_NAMES: &[&str] = &[
+    ".netrc",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    ".envrc",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+];
+/// Private key files, by the start of their name (`id_rsa`, `id_ed25519.old`).
+const KEY_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+/// Key and certificate stores, by extension.
+const KEY_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
+
 /// The first script `command` runs from `cwd` that reads as text (see
-/// [`super::bash::script_files`] for what counts). Nothing for a secret-named
-/// file (the built-in `read` rules), a binary, a folder, a device or a
-/// missing file.
+/// [`super::bash::script_files`] for what counts) and that `readable` lets
+/// this chat read. Nothing for a secret-named file (the built-in `read`
+/// rules), a credential file ([`is_credential`]), a binary, a folder, a
+/// device or a missing file.
 #[must_use]
-pub fn bash_script(command: &str, cwd: &Path) -> Option<PermissionScript> {
+pub fn bash_script(
+    command: &str,
+    cwd: &Path,
+    readable: impl Fn(&Path) -> bool,
+) -> Option<PermissionScript> {
     super::bash::script_files(command, cwd)
         .iter()
         .take(MAX_TRIED)
-        .find_map(|file| read(file))
+        .find_map(|file| read(file, &readable))
+}
+
+/// Whether `path` names a file that holds or exports credentials: a private
+/// key (`id_rsa*`, `*.pem`, `*.key`, `*.p12`), `.aws/credentials`,
+/// `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.envrc`, or a shell's
+/// rc or profile file.
+#[must_use]
+pub fn is_credential(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    let extension = Path::new(&name)
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned());
+    CREDENTIAL_NAMES.contains(&name.as_str())
+        || KEY_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        || extension.is_some_and(|extension| KEY_EXTENSIONS.contains(&extension.as_str()))
+        || (name == "credentials"
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|folder| folder.eq_ignore_ascii_case(".aws")))
 }
 
 /// `file` (absolute, as the command names it) read where it really is,
 /// links followed.
-fn read(file: &Path) -> Option<PermissionScript> {
+fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<PermissionScript> {
     let shown = super::normalize_absolute(file);
     let real = file.canonicalize().ok()?;
-    if super::is_secret_path(&shown) || super::is_secret_path(&real) {
+    if [&shown, &real]
+        .iter()
+        .any(|path| super::is_secret_path(path) || is_credential(path) || !readable(path))
+    {
         return None;
     }
     let file = open(&real).ok()?;
@@ -150,34 +204,38 @@ mod tests {
     fn reads_the_script_a_command_runs_from_its_folder() {
         let fixture = Fixture::new();
         fixture.write("x.sh", "echo hi\n");
-        let script = bash_script("bash x.sh", &fixture.0).unwrap();
+        let script = bash_script("bash x.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(script.path, fixture.0.join("x.sh").to_string_lossy());
         assert_eq!(script.content, "echo hi\n");
         assert!(!script.truncated);
         // A `cd` earlier in the line moves where it is looked for.
         fixture.write("sub/y.sh", "echo sub\n");
-        let script = bash_script("cd sub && ./y.sh", &fixture.0).unwrap();
+        let script = bash_script("cd sub && ./y.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(script.path, fixture.0.join("sub/y.sh").to_string_lossy());
         assert_eq!(script.content, "echo sub\n");
-        assert!(bash_script("echo hi", &fixture.0).is_none());
+        assert!(bash_script("echo hi", &fixture.0, |_| true).is_none());
     }
 
     #[test]
     fn cuts_a_long_script_and_says_so() {
         let fixture = Fixture::new();
         fixture.write("big.sh", "a".repeat(MAX_SCRIPT_BYTES + 10));
-        let script = bash_script("sh big.sh", &fixture.0).unwrap();
+        let script = bash_script("sh big.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(script.content.len(), MAX_SCRIPT_BYTES);
         assert!(script.truncated);
         // Exactly at the cap is whole.
         fixture.write("full.sh", "b".repeat(MAX_SCRIPT_BYTES));
-        assert!(!bash_script("sh full.sh", &fixture.0).unwrap().truncated);
+        assert!(
+            !bash_script("sh full.sh", &fixture.0, |_| true)
+                .unwrap()
+                .truncated
+        );
         // A character the cut splits is left out, not shown as `�`.
         fixture.write(
             "wide.sh",
             format!("{}é and more", "c".repeat(MAX_SCRIPT_BYTES - 1)),
         );
-        let script = bash_script("sh wide.sh", &fixture.0).unwrap();
+        let script = bash_script("sh wide.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(script.content, "c".repeat(MAX_SCRIPT_BYTES - 1));
         assert!(script.truncated);
     }
@@ -196,7 +254,10 @@ mod tests {
             "source prod.env",
             ". .env",
         ] {
-            assert!(bash_script(command, &fixture.0).is_none(), "{command}");
+            assert!(
+                bash_script(command, &fixture.0, |_| true).is_none(),
+                "{command}"
+            );
         }
     }
 
@@ -206,19 +267,80 @@ mod tests {
         let fixture = Fixture::new();
         let target = fixture.write("real/run.sh", "echo real\n");
         std::os::unix::fs::symlink(&target, fixture.0.join("run.sh")).unwrap();
-        let script = bash_script("./run.sh", &fixture.0).unwrap();
+        let script = bash_script("./run.sh", &fixture.0, |_| true).unwrap();
         // Named as the command names it, read where it leads.
         assert_eq!(script.path, fixture.0.join("run.sh").to_string_lossy());
         assert_eq!(script.content, "echo real\n");
         let secret = fixture.write("prod.env", "TOKEN=1\n");
         std::os::unix::fs::symlink(&secret, fixture.0.join("link.sh")).unwrap();
-        assert!(bash_script("bash link.sh", &fixture.0).is_none());
+        assert!(bash_script("bash link.sh", &fixture.0, |_| true).is_none());
         // A pipe is not read, and never blocks.
         let pipe = std::process::Command::new("mkfifo")
             .arg(fixture.0.join("pipe.sh"))
             .status();
         if pipe.is_ok_and(|status| status.success()) {
-            assert!(bash_script("bash pipe.sh", &fixture.0).is_none());
+            assert!(bash_script("bash pipe.sh", &fixture.0, |_| true).is_none());
+        }
+    }
+
+    #[test]
+    fn never_shows_a_credential_or_what_the_chat_may_not_read() {
+        let fixture = Fixture::new();
+        for name in [
+            ".ssh/id_rsa",
+            ".ssh/id_ed25519",
+            "certs/server.pem",
+            "certs/tls.KEY",
+            "certs/client.p12",
+            ".aws/credentials",
+            ".netrc",
+            ".git-credentials",
+            ".npmrc",
+            ".pypirc",
+            ".envrc",
+            ".zshrc",
+            ".bashrc",
+            ".bash_profile",
+            ".profile",
+            ".zprofile",
+            ".zshenv",
+        ] {
+            fixture.write(name, "export TOKEN=fixture-only\n");
+            assert!(is_credential(&fixture.0.join(name)), "{name}");
+            assert!(
+                bash_script(&format!("source {name}"), &fixture.0, |_| true).is_none(),
+                "{name}"
+            );
+        }
+        // A link with a harmless name to one is not shown either.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(fixture.0.join(".envrc"), fixture.0.join("setup.sh"))
+                .unwrap();
+            assert!(bash_script("source setup.sh", &fixture.0, |_| true).is_none());
+        }
+        for name in [
+            "credentials",
+            "aws/credentials",
+            "keys.txt",
+            "deploy.sh",
+            "profile.sh",
+        ] {
+            assert!(!is_credential(&fixture.0.join(name)), "{name}");
+        }
+        // What the chat may not read (a rule's deny or ask) is not shown,
+        // judged on the path named and on where it leads.
+        fixture.write("private/run.sh", "echo private\n");
+        let script = bash_script("bash private/run.sh", &fixture.0, |_| true);
+        assert_eq!(script.unwrap().content, "echo private\n");
+        let private = fixture.0.join("private");
+        let readable = |path: &Path| !path.starts_with(&private);
+        assert!(bash_script("bash private/run.sh", &fixture.0, readable).is_none());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(fixture.0.join("private/run.sh"), fixture.0.join("run.sh"))
+                .unwrap();
+            assert!(bash_script("./run.sh", &fixture.0, readable).is_none());
         }
     }
 
@@ -227,7 +349,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("tool", [0x7f, b'E', 0, 1]);
         fixture.write("x.sh", "echo second\n");
-        let script = bash_script("./tool && bash x.sh", &fixture.0).unwrap();
+        let script = bash_script("./tool && bash x.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(script.content, "echo second\n");
     }
 
@@ -238,7 +360,7 @@ mod tests {
             "x.sh",
             "echo a\r\necho \u{1b}[2Kb\recho\tc\u{202E}d\u{7f}\n\u{fffe}",
         );
-        let script = bash_script("bash x.sh", &fixture.0).unwrap();
+        let script = bash_script("bash x.sh", &fixture.0, |_| true).unwrap();
         assert_eq!(
             script.content,
             "echo a\necho \u{fffd}[2Kb\necho\tc\u{fffd}d\u{fffd}\n\u{fffe}"
@@ -246,7 +368,9 @@ mod tests {
         // Bytes that are not UTF-8 read as replacements too.
         fixture.write("latin.sh", b"echo caf\xe9\n");
         assert_eq!(
-            bash_script("bash latin.sh", &fixture.0).unwrap().content,
+            bash_script("bash latin.sh", &fixture.0, |_| true)
+                .unwrap()
+                .content,
             "echo caf\u{fffd}\n"
         );
     }
