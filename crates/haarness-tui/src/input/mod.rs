@@ -353,6 +353,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.attachments.clear();
             app.undo_draft = None;
             app.mention_suggestions.clear();
+            app.mention_resources.want = None;
             app.shell_mode = false;
             app.autocomplete_hidden = false;
             app.selection = 0;
@@ -507,6 +508,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         app.composer.clear();
         app.attachments.clear();
         app.mention_suggestions.clear();
+        app.mention_resources.want = None;
         app.shell_mode = false;
         app.autocomplete_hidden = false;
         app.selection = 0;
@@ -749,7 +751,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     }
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('p' | 'n'))
-        && (app.slash_suggestions().is_some() || !app.mention_suggestions.is_empty())
+        && (app.slash_suggestions().is_some() || !app.shown_mentions().is_empty())
     {
         app.move_selection(if key.code == KeyCode::Char('p') {
             -1
@@ -838,6 +840,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.selection_range = None;
             } else if !app.mention_suggestions.is_empty() || app.slash_suggestions().is_some() {
                 app.mention_suggestions.clear();
+                app.mention_resources.want = None;
                 app.autocomplete_hidden = true;
                 app.selection = 0;
             } else if app.shell_mode {
@@ -870,14 +873,14 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             }
         }
         KeyCode::Up => {
-            if app.slash_suggestions().is_some() || !app.mention_suggestions.is_empty() {
+            if app.slash_suggestions().is_some() || !app.shown_mentions().is_empty() {
                 app.move_selection(-1);
             } else if !app.composer.move_up() && app.composer.history_prev() {
                 app.selection = 0;
             }
         }
         KeyCode::Down => {
-            if app.slash_suggestions().is_some() || !app.mention_suggestions.is_empty() {
+            if app.slash_suggestions().is_some() || !app.shown_mentions().is_empty() {
                 app.move_selection(1);
             } else if !app.composer.move_down() {
                 app.composer.history_next();
@@ -1185,7 +1188,7 @@ pub(crate) fn unknown_slash_command(app: &App) -> Option<String> {
 
 /// Complete the selected @-mention, when suggestions are showing.
 pub(crate) fn apply_mention(app: &mut App) -> bool {
-    if app.mention_suggestions.is_empty() {
+    if app.shown_mentions().is_empty() {
         return false;
     }
     let Some((start, query)) = app.composer.mention_query() else {

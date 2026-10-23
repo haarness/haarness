@@ -438,7 +438,8 @@ impl App {
 
     /// Part of a listing asked off the loop has come. The open `@` list
     /// gains a server's rows below the others, so the row the cursor is on
-    /// stays put. A failed listing is asked for again at the next `@`.
+    /// stays put; a list Esc hid stays hidden. A failed listing is asked for
+    /// again at the next `@`.
     pub(crate) fn resources_arrived(&mut self, update: Update) {
         let listing = &mut self.mention_resources;
         match update {
@@ -462,7 +463,9 @@ impl App {
             }
             _ => return,
         }
-        if self.shell_mode || self.composer.text().starts_with('/') {
+        // A list Esc hid, a shell command or a slash command shows no rows:
+        // they wait for the next `@`.
+        if self.autocomplete_hidden || self.shell_mode || self.composer.text().starts_with('/') {
             return;
         }
         let Some((_, query)) = self.composer.mention_query() else {
@@ -1163,18 +1166,39 @@ mod tests {
         assert_eq!(bodies[0]["answer"], "Use @setup please");
     }
 
-    /// A server that answers `/v1/info` with `info` and anything else with
-    /// `[]`, until the test ends.
-    async fn answering(info: haarness_protocol::ServerInfo) -> String {
+    /// A server that answers `/v1/info` with `info`, a file search with a
+    /// project file named like the resource, a new turn with a turn, and
+    /// anything else with `[]`, until the test ends; with every request it
+    /// got, body included.
+    async fn answering(
+        info: haarness_protocol::ServerInfo,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let info = serde_json::to_string(&info).unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 4096];
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let complete = |request: &[u8]| {
+                    let text = String::from_utf8_lossy(request);
+                    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                        return false;
+                    };
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    body.len() >= length
+                };
+                while !complete(&request) {
                     let Ok(read) = socket.read(&mut chunk).await else {
                         break;
                     };
@@ -1183,11 +1207,28 @@ mod tests {
                     }
                     request.extend_from_slice(&chunk[..read]);
                 }
-                // A project file named like the resource, listed first.
-                let body = if request.starts_with(b"GET /v1/info") {
+                let text = String::from_utf8_lossy(&request).into_owned();
+                log.lock().unwrap().push(text.clone());
+                let body = if text.starts_with("GET /v1/info") {
                     info.clone()
-                } else if request.starts_with(b"GET /v1/files/search") {
+                } else if text.starts_with("GET /v1/files/search") {
                     r#"["setup.md"]"#.into()
+                } else if text.starts_with("POST /v1/threads/") && text.contains("/turns ") {
+                    let now = chrono::Utc::now();
+                    serde_json::to_string(&haarness_protocol::Turn {
+                        id: haarness_protocol::TurnId::new(),
+                        thread_id: haarness_protocol::ThreadId::new(),
+                        request_id: haarness_protocol::RequestId::new(),
+                        status: haarness_protocol::TurnStatus::Running,
+                        agent: "build".into(),
+                        provider: "echo".into(),
+                        model: "echo-1".into(),
+                        ultracode: false,
+                        error: None,
+                        created_at: now,
+                        updated_at: now,
+                    })
+                    .unwrap()
                 } else {
                     "[]".into()
                 };
@@ -1202,7 +1243,7 @@ mod tests {
                     .await;
             }
         });
-        format!("http://{address}")
+        (format!("http://{address}"), requests)
     }
 
     /// A pick this TUI does not know comes back as plain `@setup` with the
@@ -1230,7 +1271,7 @@ mod tests {
             "Explain {} in two lines",
             marker(&setup, "not-a-pick")
         ));
-        let client = ApiClient::new(&answering(capable).await, "token").unwrap();
+        let client = ApiClient::new(&answering(capable).await.0, "token").unwrap();
         let enter = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
@@ -1275,5 +1316,81 @@ mod tests {
             find(&app, &app.mention_suggestions[app.selection]).map(|row| row.uri.as_str()),
             Some("docs://setup")
         );
+
+        // Once the person moves in the list, even back to the first row, a
+        // late row no longer takes the highlight.
+        app.mention_resources.list.clear();
+        app.mention_resources.want = Some(key("docs", "docs://setup"));
+        app.mention_suggestions = vec!["setup.md".into(), "settings.md".into()];
+        app.selection = 0;
+        app.move_selection(1);
+        app.move_selection(-1);
+        assert!(app.mention_resources.want.is_none());
+        app.resources_arrived(Update::Rows {
+            asked,
+            rows: vec![resource("docs", "docs://setup", "setup")],
+        });
+        assert_eq!(app.selection, 0);
+    }
+
+    /// Esc hides the `@` list: a listing that comes afterwards does not fill
+    /// it again, so Enter sends the text as typed and nothing hidden is
+    /// picked or browsed. The rows wait for the next `@`.
+    #[tokio::test]
+    async fn a_listing_after_esc_leaves_the_list_hidden_and_enter_sends_the_text() {
+        let mut app = app();
+        app.providers = vec![haarness_protocol::ProviderInfo {
+            id: "echo".into(),
+            name: "Echo".into(),
+            authenticated: true,
+            models: Vec::new(),
+        }];
+        let capable = info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]);
+        app.server_info = Some(capable.clone());
+        let asked = Instant::now();
+        app.mention_resources.asked = Some(asked);
+        app.mention_resources.stale = true;
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned()));
+        app.mention_resources.want = Some(key("docs", "docs://setup"));
+        app.composer.set_text("@set".into());
+        app.mention_suggestions = vec!["settings.md".into()];
+        let (url, requests) = answering(capable).await;
+        let client = ApiClient::new(&url, "token").unwrap();
+        let press =
+            |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        crate::input::handle_key(&mut app, press(crossterm::event::KeyCode::Esc), &client)
+            .await
+            .unwrap();
+        assert!(app.autocomplete_hidden);
+        assert!(app.mention_resources.want.is_none());
+        app.resources_arrived(Update::Rows {
+            asked,
+            rows: vec![resource("docs", "docs://setup", "setup")],
+        });
+        assert!(app.mention_suggestions.is_empty());
+        assert_eq!(app.mention_resources.list.len(), 1);
+        // Whatever fills it, a hidden list is neither browsed nor picked.
+        app.mention_suggestions = vec![key("docs", "docs://setup"), "settings.md".into()];
+        app.move_selection(1);
+        assert_eq!(app.selection, 0);
+        assert!(
+            !crate::prompt_context::apply(&mut app, &client)
+                .await
+                .unwrap()
+        );
+        app.mention_suggestions.clear();
+        crate::input::handle_key(&mut app, press(crossterm::event::KeyCode::Enter), &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "");
+        let started = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.starts_with("POST /v1/threads/") && request.contains("/turns "))
+            .cloned()
+            .expect("Enter sent the text");
+        assert!(started.contains(r#""text":"@set""#), "{started}");
+        assert!(!started.contains("resources"), "{started}");
     }
 }

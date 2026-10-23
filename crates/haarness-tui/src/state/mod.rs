@@ -2439,6 +2439,11 @@ impl App {
     }
 
     pub fn move_selection(&mut self, direction: isize) {
+        if matches!(self.overlay, Overlay::None) {
+            // The person chose a row: a returned pick's row no longer takes
+            // the highlight when its listing comes.
+            self.mention_resources.want = None;
+        }
         let length = self.current_selection_length();
         if length == 0 {
             self.selection = 0;
@@ -2483,7 +2488,17 @@ impl App {
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
-                .map_or_else(|| self.mention_suggestions.len(), |commands| commands.len()),
+                .map_or_else(|| self.shown_mentions().len(), |commands| commands.len()),
+        }
+    }
+
+    /// The `@` list rows the composer shows: none while Esc hides the list,
+    /// so a listing that comes meanwhile is neither picked nor browsed.
+    pub(crate) fn shown_mentions(&self) -> &[String] {
+        if self.autocomplete_hidden {
+            &[]
+        } else {
+            &self.mention_suggestions
         }
     }
 
