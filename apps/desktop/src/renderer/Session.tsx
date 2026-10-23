@@ -609,7 +609,17 @@ export function Session() {
      as scrolling up would, and Jump to latest offers the way back; when
      closing it brings the end of the chat into view, following resumes. */
   let toggled:
-    | { control: Element; row: HTMLElement; top: number; height: number; until: number }
+    | {
+        control: Element;
+        row: HTMLElement;
+        top: number;
+        height: number;
+        /** The view as it was: its offset, its content's height and what lay below it. */
+        scrollTop: number;
+        scrollHeight: number;
+        below: number;
+        until: number;
+      }
     | undefined;
   function holdToggled(event: MouseEvent) {
     const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
@@ -620,8 +630,11 @@ export function Session() {
       row,
       top: control.getBoundingClientRect().top,
       height: row.offsetHeight,
+      scrollTop: scrolling.scrollTop,
+      scrollHeight: scrolling.scrollHeight,
+      below: scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight,
       // A click that opens nothing gives the view back soon.
-      until: performance.now() + 400,
+      until: performance.now() + 500,
     };
     cancelAnimationFrame(scrollFrame);
     scrollFrame = 0;
@@ -632,9 +645,12 @@ export function Session() {
     if (!held) return;
     const grown = held.row.isConnected ? held.row.offsetHeight - held.height : 0;
     // The body draws after the toggle event, and a thought's text after
-    // that (Markdown renders in a worker).
+    // that (Markdown renders in a worker); the list takes the row's new
+    // height a frame or more later still.
     const drawing =
-      !grown || !!held.row.querySelector('.markdown[data-markdown-ready="false"]');
+      !grown ||
+      !!held.row.querySelector('.markdown[data-markdown-ready="false"]') ||
+      (grown > 0 && scrolling.scrollHeight < held.scrollHeight + grown - 1);
     if (held.row.isConnected && drawing && performance.now() < held.until) {
       requestAnimationFrame(keepToggled);
       return;
@@ -654,7 +670,10 @@ export function Session() {
       if (lift > 0) scrolling.scrollTop += lift;
     }
     lastTop = scrolling.scrollTop;
-    const below = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
+    // What lies below the view now: what did before, pushed down by the
+    // row's growth, less what the view moved. Read from the row, not from
+    // the list's height, so a reply streaming meanwhile changes nothing.
+    const below = held.below + grown - (scrolling.scrollTop - held.scrollTop);
     if (grown > 0 && below > 4) setFollow(false);
     else if (below <= 4) setFollow(true);
     followLatest();
