@@ -130,11 +130,11 @@ export function markMade(node: Node) {
 /**
  * What the sanitizer keeps of an attribute a reply wrote: never the
  * `data-remote-*` and `data-project-*` attributes or the `remote-image*` and
- * `project-image*` classes placeholders use, so markup cannot dress as one.
- * Undefined drops the attribute.
+ * `project-image*` classes placeholders use, nor the mark of an image that
+ * opens larger, so markup cannot dress as one. Undefined drops the attribute.
  */
 export function replyAttribute(name: string, value: string): string | undefined {
-  if (/^data-(?:remote|project)-/i.test(name)) return undefined;
+  if (/^data-(?:remote|project)-|^data-image-open$/i.test(name)) return undefined;
   if (name.toLowerCase() !== "class") return value;
   const tokens = value.split(/\s+/).filter(Boolean);
   const kept = tokens.filter((token) => !/^(?:remote|project)-image/i.test(token));

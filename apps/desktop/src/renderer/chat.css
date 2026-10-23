@@ -346,6 +346,14 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   height: auto;
   object-fit: contain;
 }
+/* An image the conversation shows opens full size (ImageViewer.tsx). */
+.markdown img[data-image-open] {
+  cursor: zoom-in;
+}
+:root:not([data-pointer-focus]) .markdown img[data-image-open]:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
+}
 /* An image from another host waits for a click (remote-images.ts), and one
    from the project while it is read (project-images.ts): framed like inline
    code, sized to its text, and inline like the image it stands for, so a
@@ -1755,6 +1763,11 @@ html[dir="rtl"] .tool-target {
   height: auto;
   max-width: 180px;
   max-height: 120px;
+}
+/* An attached image opens full size. */
+.message .attachment-image {
+  min-height: 0;
+  cursor: zoom-in;
 }
 .dictation-status {
   color: var(--muted);

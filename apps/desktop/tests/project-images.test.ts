@@ -141,11 +141,13 @@ test("only raster types are read, and only bytes that start as one are shown", (
     assert.equal(fileImage(file), undefined, JSON.stringify(file));
 });
 
-test("a reply's own markup cannot dress as a project image", () => {
+test("a reply's own markup cannot dress as a project image or as one that opens larger", () => {
   assert.equal(replyAttribute("data-project-path", "../../etc/a.png"), undefined);
   assert.equal(replyAttribute("DATA-PROJECT-ALT", "x"), undefined);
+  assert.equal(replyAttribute("data-image-open", ""), undefined);
   assert.equal(replyAttribute("class", "project-image"), undefined);
   assert.equal(replyAttribute("class", "wide project-image-loaded Project-Image-note"), "wide");
+  assert.equal(replyAttribute("data-image-opener", "x"), "x");
 });
 
 test("a turn's end, the file API and a tool that writes say the project may have changed", () => {

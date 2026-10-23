@@ -79,6 +79,7 @@ import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
+import { openImage } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
@@ -2629,20 +2630,28 @@ function Message(props: {
                       .attachments
                   }
                 >
-                  {(attachment) => (
-                    <span class="attachment-chip">
-                      {attachment.startsWith("data:image/") ? (
+                  {(attachment) =>
+                    attachment.startsWith("data:image/") ? (
+                      // An attached image opens full size.
+                      <button
+                        type="button"
+                        class="attachment-chip attachment-image"
+                        data-image-open=""
+                        aria-haspopup="dialog"
+                        aria-label={t("Attached image")}
+                        onClick={(event) => openImage(event.currentTarget)}
+                      >
                         <img src={attachment} alt={t("Attached image")} />
-                      ) : (
-                        <>
-                          <Icon name="file" size="sm" />
-                          <span class="attachment-name">
-                            {attachmentName(attachment)}
-                          </span>
-                        </>
-                      )}
-                    </span>
-                  )}
+                      </button>
+                    ) : (
+                      <span class="attachment-chip">
+                        <Icon name="file" size="sm" />
+                        <span class="attachment-name">
+                          {attachmentName(attachment)}
+                        </span>
+                      </span>
+                    )
+                  }
                 </For>
               </UserMessageBody>
             </div>
