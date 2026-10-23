@@ -150,15 +150,46 @@ export function Markdown(props: {
   /** A read for this project settled: this reply's placeholders for the path show the image, or why not. */
   function projectSettled(connection: string, path: string, shown: ShownImage) {
     if (disposed || !host || connection !== app.state.connection?.id) return;
-    for (const element of Array.from(host.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded"))) {
-      if (!madeHere(element) || element.dataset.projectPath !== path) continue;
-      if (shown.data === undefined) {
-        if (!(element instanceof HTMLImageElement)) noteImage(element, shown.note, projectLabels(), path);
-      } else if (element instanceof HTMLImageElement) {
-        if (element.getAttribute("src") !== shown.data) element.src = shown.data;
-      } else element.replaceWith(projectImageElement(document, path, element.dataset.projectAlt ?? "", shown.data));
-    }
+    const elements = Array.from(host.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded")).filter(
+      (element) => madeHere(element) && element.dataset.projectPath === path,
+    );
+    if (!elements.length) return;
+    keepReading(elements[0], () => {
+      for (const element of elements) {
+        if (shown.data === undefined) {
+          if (!(element instanceof HTMLImageElement)) noteImage(element, shown.note, projectLabels(), path);
+        } else if (element instanceof HTMLImageElement) {
+          if (element.getAttribute("src") !== shown.data) element.src = shown.data;
+        } else element.replaceWith(projectImageElement(document, path, element.dataset.projectAlt ?? "", shown.data));
+      }
+    });
     markOpenImages(host, t("Image"));
+  }
+  /**
+   * Makes `change` to this text without moving what is being read below it
+   * when `element` is above the view and this text reaches into it. The
+   * transcript turns the browser's scroll anchoring off, and its virtualizer
+   * keeps a row in place only when the whole row is above the view; a row
+   * that reaches into it, or the live reply outside the rows, would move by
+   * as much as the image grew. So once the row is measured (the virtualizer's
+   * observer was made first, so it hears first) and before it is painted, the
+   * view moves by what this text's end moved. The image is decoded before it
+   * comes in, so it takes its final size at once and this happens once.
+   */
+  function keepReading(element: HTMLElement, change: () => void) {
+    const list = element.closest<HTMLElement>(".transcript");
+    const view = list?.getBoundingClientRect().top ?? 0;
+    if (!list || element.getBoundingClientRect().top >= view || host.getBoundingClientRect().bottom <= view)
+      return change();
+    const end = () => host.getBoundingClientRect().bottom - list.getBoundingClientRect().top;
+    const before = end();
+    change();
+    const measured = new ResizeObserver(() => {
+      measured.disconnect();
+      const moved = end() - before;
+      if (moved) list.scrollTop += moved;
+    });
+    measured.observe(host);
   }
   if (conversation) onCleanup(onProjectImageSettled(projectSettled));
   let host!: HTMLDivElement;

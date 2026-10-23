@@ -1173,6 +1173,11 @@ function installHandlers() {
         } as Record<string, string[]>
       )[action];
       if (!spec) throw new Error("Unknown file operation");
+      // End-to-end tests hold a read of a path in `haarnessHeldReads` until they let it go.
+      if (process.env.HAARNESS_DESKTOP_TEST === "1" && action === "read") {
+        const held = (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads;
+        while (held?.has(String(input.path))) await new Promise((done) => setTimeout(done, 20));
+      }
       const url = new URL(item.url + "/v1/files/" + spec[1]);
       if (spec[0] === "GET")
         for (const [key, value] of Object.entries(input))

@@ -264,6 +264,47 @@ test("a path out of the project, through a link or not, is never read and says w
   expect(errors).toEqual([]);
 });
 
+test("an image that arrives above the view moves nothing being read", async () => {
+  await writeFile(join(workspace, "out/late.png"), chart(480, 300, [200, 80, 160]));
+  // The test hook in the main process holds this read until it is let go.
+  await app.evaluate(() => {
+    (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads = new Set(["out/late.png"]);
+  });
+  const late = await reply("Before the late chart.\n\n![Late](out/late.png)\n\nRead on from here.");
+  const waiting = late.locator(".project-image");
+  await expect(waiting).toHaveCount(1);
+  const id = await late.evaluate((element) => element.closest("[data-item-id]")!.getAttribute("data-item-id"));
+  for (let index = 0; index < 3; index++)
+    await reply(Array.from({ length: 8 }, (_, line) => `Paragraph ${index}.${line} keeps the reader busy for a while.`).join("\n\n"));
+  // The person scrolls back up and reads just below the waiting image.
+  const list = page.locator(".transcript");
+  const placed = () =>
+    list.evaluate((element, row) => {
+      const holder = element.querySelector(`[data-item-id="${row}"] .project-image`);
+      return holder ? holder.getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+    }, id);
+  await list.hover();
+  for (let step = 0, at = await placed(); step < 80 && !(at !== null && at > 0 && at < 200); step++, at = await placed()) {
+    await page.mouse.wheel(0, at !== null && at >= 200 ? 100 : -150);
+    await page.waitForTimeout(40);
+  }
+  await list.evaluate((element, row) => {
+    const holder = element.querySelector(`[data-item-id="${row}"] .project-image`)!;
+    element.scrollTop += holder.getBoundingClientRect().bottom - element.getBoundingClientRect().top + 4;
+  }, id);
+  const text = late.getByText("Read on from here.");
+  const where = () =>
+    text.evaluate((element) => Math.round(element.getBoundingClientRect().top - element.closest(".transcript")!.getBoundingClientRect().top));
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const before = await where();
+  expect(before).toBeGreaterThan(0);
+  await app.evaluate(() => (globalThis as { haarnessHeldReads?: Set<string> }).haarnessHeldReads?.clear());
+  await expect(late.locator("img.project-image-loaded")).toHaveJSProperty("naturalWidth", 480);
+  await page.evaluate(() => new Promise((done) => setTimeout(done, 300)));
+  expect(await where()).toBe(before);
+  expect(errors).toEqual([]);
+});
+
 test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
   // Leaving the chat and coming back draws its replies anew: no placeholder appears in between.
