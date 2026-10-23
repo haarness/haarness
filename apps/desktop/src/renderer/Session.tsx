@@ -3042,21 +3042,48 @@ function Permission(props: {
     (props.permission.alwaysPatterns ?? []).map((rule) =>
       describeAlwaysRule(category(), rule, { t, shortPath }),
     );
+  const autoOffered = () => !app.isAutoApproval() && canAutoApprove(props.permission);
+  /* Deny, Always and Allow once share one line, even in a narrow chat:
+     every way of allowing more than this request waits in the Always menu,
+     Allow once + Auto included. */
   const alwaysChoices = (): MenuAction[] => [
-    {
-      label: t("Always for this folder"),
-      detail: alwaysRules().join(", ") || shortPath(app.state.connection?.workspace ?? ""),
-      icon: "folder",
-      run: () => decide("always_workspace"),
-    },
-    {
-      label: t("Always for this repository"),
-      detail: t("Every linked worktree of {repository}", {
-        repository: shortPath(props.permission.repositoryScope ?? ""),
-      }),
-      icon: "branch",
-      run: () => decide("always_repository"),
-    },
+    ...(props.permission.allowAlways !== false
+      ? [
+          {
+            label: t("Always for this folder"),
+            detail: middleTruncate(
+              alwaysRules().join(", ") || shortPath(app.state.connection?.workspace ?? ""),
+            ),
+            icon: "folder" as const,
+            run: () => decide("always_workspace"),
+          },
+          ...(props.permission.repositoryScope
+            ? [
+                {
+                  label: t("Always for this repository"),
+                  detail: middleTruncate(
+                    t("Every linked worktree of {repository}", {
+                      repository: shortPath(props.permission.repositoryScope),
+                    }),
+                  ),
+                  icon: "branch" as const,
+                  run: () => decide("always_repository"),
+                },
+              ]
+            : []),
+        ]
+      : []),
+    ...(autoOffered()
+      ? [
+          {
+            label: t("Allow once + Auto"),
+            detail: t("Then Auto decides for this chat"),
+            icon: "shield" as const,
+            divider: props.permission.allowAlways !== false,
+            run: () => decide("auto"),
+          },
+        ]
+      : []),
   ];
   return (
     <section
@@ -3284,9 +3311,11 @@ function Permission(props: {
       </Show>
       <Show when={!explicit() && !settled()}>
         <footer class="prompt-actions" ref={footer}>
-          {/* At the start, apart from the answers: when Auto turns on and it
-              goes, nothing else moves, and its focus passes to Allow once. */}
-          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+          {/* With nothing to allow always, Allow once + Auto keeps a button
+              of its own at the start, apart from the answers: when Auto
+              turns on and it goes, nothing else moves, and its focus passes
+              to Allow once. */}
+          <Show when={autoOffered() && props.permission.allowAlways === false}>
             <button
               class="prompt-auto"
               ref={(button) =>
@@ -3309,32 +3338,22 @@ function Permission(props: {
           >
             {t("Deny")}
           </button>
+          {/* Always a menu, whatever it holds, so the answers keep their
+              places when Auto comes or goes. */}
           <Show when={props.permission.allowAlways !== false}>
-            <Show
-              when={props.permission.repositoryScope}
-              fallback={
-                <button
-                  disabled={answered()}
-                  onClick={() => decide("always_workspace")}
-                  title={alwaysRules().join("\n")}
-                >
-                  {t("Always for this folder")}
-                </button>
+            <MenuButton
+              label={t("Always allow")}
+              content={
+                <>
+                  {t("Always allow")}
+                  <Icon name="down" size="xs" />
+                </>
               }
-            >
-              <MenuButton
-                label={t("Always allow")}
-                content={
-                  <>
-                    {t("Always allow")}
-                    <Icon name="down" size="xs" />
-                  </>
-                }
-                class="prompt-always"
-                title={alwaysRules().join("\n") || t("Always allow")}
-                items={alwaysChoices()}
-              />
-            </Show>
+              class="prompt-always"
+              disabled={answered()}
+              title={alwaysRules().join("\n") || t("Always allow")}
+              items={alwaysChoices()}
+            />
           </Show>
           <button
             class="primary"
@@ -3348,6 +3367,14 @@ function Permission(props: {
       </Show>
     </section>
   );
+}
+/** A menu line too long for the menu, with its start and its end kept (a
+ * command's start, a path's last folders) and the middle left out. */
+function middleTruncate(text: string, length = 34) {
+  const characters = Array.from(text);
+  if (characters.length <= length) return text;
+  const head = Math.ceil((length - 1) / 2);
+  return characters.slice(0, head).join("") + "…" + characters.slice(characters.length - (length - 1 - head)).join("");
 }
 /** The closed script toggle: its size, which for a cut file counts only
  * what was read. */

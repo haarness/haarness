@@ -1878,6 +1878,7 @@
   "Loop stopped": "ループを停止しました",
   "Shell finished": "シェルコマンドが完了しました",
   "Allow this request once and enable Auto for this chat and its agents": "このリクエストを1回許可し、このチャットとそのエージェントで自動承認を有効にします",
+  "Then Auto decides for this chat": "以降はこのチャットで自動承認が判断します",
   "Back to parent chat": "親のチャットに戻る",
   "Close find in chat": "チャット内検索を閉じる",
   "Chat history": "チャット履歴",

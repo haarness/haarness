@@ -1878,6 +1878,7 @@
   "Loop stopped": "Boucle arrêtée",
   "Shell finished": "Commande shell terminée",
   "Allow this request once and enable Auto for this chat and its agents": "Autoriser cette demande une fois et activer Auto pour cette discussion et ses agents",
+  "Then Auto decides for this chat": "Ensuite, Auto décide dans cette discussion",
   "Back to parent chat": "Revenir à la discussion parente",
   "Close find in chat": "Fermer la recherche dans la discussion",
   "Chat history": "Historique de la discussion",

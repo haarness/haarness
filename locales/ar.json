@@ -1878,6 +1878,7 @@
   "Loop stopped": "أُوقفت الحلقة",
   "Shell finished": "اكتمل أمر Shell",
   "Allow this request once and enable Auto for this chat and its agents": "اسمح بهذا الطلب مرة واحدة وفعّل الوضع التلقائي لهذه المحادثة ووكلائها",
+  "Then Auto decides for this chat": "ثم يقرر الوضع التلقائي في هذه المحادثة",
   "Back to parent chat": "العودة إلى المحادثة الأصلية",
   "Close find in chat": "إغلاق البحث في المحادثة",
   "Chat history": "سجل المحادثة",

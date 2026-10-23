@@ -1878,6 +1878,7 @@
   "Loop stopped": "Döngü durduruldu",
   "Shell finished": "Kabuk komutu tamamlandı",
   "Allow this request once and enable Auto for this chat and its agents": "Bu isteğe bir kez izin verin ve bu sohbet ile aracıları için Otomatik'i açın",
+  "Then Auto decides for this chat": "Ardından bu sohbette Otomatik karar verir",
   "Back to parent chat": "Üst sohbete dön",
   "Close find in chat": "Sohbette bulmayı kapat",
   "Chat history": "Sohbet geçmişi",
