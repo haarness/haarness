@@ -414,7 +414,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command(
         "loop",
-        &["look"],
+        &[],
         "Recurring prompt: /loop <interval> <prompt> | /loop stop",
     ),
     command("copy", &[], "Copy the last reply to the clipboard"),
@@ -1116,6 +1116,13 @@ impl App {
                 .any(|workflow| workflow.invocation.eq_ignore_ascii_case(name))
     }
 
+    /// Say why a command will not run as typed (a usage line, a name nothing
+    /// answers to). Typed at the prompt, its line stays there to be fixed.
+    pub(crate) fn refuse_command(&mut self, reason: impl Into<String>) {
+        self.notice = reason.into();
+        self.command_refused = true;
+    }
+
     /// The status-line answer to a command nothing answers to, naming the
     /// real one when the name reads as a typo of it.
     pub(crate) fn unknown_command_notice(&self, name: &str) -> String {
@@ -1134,36 +1141,42 @@ impl App {
     fn closest_command(&self, name: &str) -> Option<String> {
         let name = name.to_ascii_lowercase();
         let limit = if name.chars().count() <= 4 { 1 } else { 2 };
+        // An alias is matched like a name, but the suggestion is always the
+        // command's own name: that is what the palette and /help list.
         COMMANDS
             .iter()
-            .flat_map(|entry| std::iter::once(entry.name).chain(entry.aliases.iter().copied()))
-            .map(str::to_owned)
+            .flat_map(|entry| {
+                std::iter::once(entry.name)
+                    .chain(entry.aliases.iter().copied())
+                    .map(|candidate| (candidate.to_owned(), entry.name.to_owned()))
+            })
             .chain(
                 self.server_commands
                     .iter()
-                    .map(|command| command.name.clone()),
+                    .map(|command| (command.name.clone(), command.name.clone())),
             )
             .chain(
                 self.workflow_definitions
                     .iter()
-                    .map(|workflow| workflow.invocation.clone()),
+                    .map(|workflow| (workflow.invocation.clone(), workflow.invocation.clone())),
             )
-            .map(|candidate| {
+            .map(|(candidate, command)| {
                 (
                     edit_distance(&name, &candidate.to_ascii_lowercase()),
                     candidate,
+                    command,
                 )
             })
-            .filter(|(distance, _)| *distance <= limit)
+            .filter(|(distance, _, _)| *distance <= limit)
             // On a tie, a slip that kept the length (`/stauts`) meant the
             // name of that length (`/status`, not `/stats`).
-            .min_by_key(|(distance, candidate)| {
+            .min_by_key(|(distance, candidate, _)| {
                 (
                     *distance,
                     candidate.chars().count().abs_diff(name.chars().count()),
                 )
             })
-            .map(|(_, candidate)| candidate)
+            .map(|(_, _, command)| command)
     }
 
     fn open_tool_catalog(&mut self, mut catalog: haarness_protocol::ToolCatalogResponse) {
@@ -2268,6 +2281,7 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     pub async fn execute_command(&mut self, raw: &str, client: &ApiClient) -> Result<AppAction> {
+        self.command_refused = false;
         let command = raw.trim().trim_start_matches('/');
         let (name, arguments) = command
             .split_once(char::is_whitespace)
@@ -2304,7 +2318,8 @@ impl App {
                     .await?;
                 return Ok(AppAction::Continue);
             }
-            self.notice = self.unknown_command_notice(name);
+            let notice = self.unknown_command_notice(name);
+            self.refuse_command(notice);
             return Ok(AppAction::Continue);
         };
         match spec.name {
@@ -2328,7 +2343,7 @@ impl App {
                     self.change_approval_mode(!self.auto_permissions, client)
                         .await
                 }
-                _ => self.notice = "Usage: /permissions-mode [review|auto]".into(),
+                _ => self.refuse_command("Usage: /permissions-mode [review|auto]"),
             },
             "new" if self.is_untouched_session() => {
                 self.notice = "This session is already new · type to start".into();
@@ -2374,7 +2389,7 @@ impl App {
                     }
                     "open" | "switch" => {
                         if tail.is_empty() {
-                            self.notice = "Usage: /worktree open <name-or-id>".into();
+                            self.refuse_command("Usage: /worktree open <name-or-id>");
                         } else if !client.supports_local_workspace_switch() {
                             self.notice =
                                 "Folder switching is unavailable on attached clients".into();
@@ -2398,7 +2413,7 @@ impl App {
                                 retry,
                             }));
                         }
-                        Err(error) => self.notice = error,
+                        Err(error) => self.refuse_command(error),
                     },
                     "reset" => match parse_workspace_reset(tail) {
                         Ok((reference, request)) => {
@@ -2415,7 +2430,7 @@ impl App {
                                 selection,
                             }));
                         }
-                        Err(error) => self.notice = error,
+                        Err(error) => self.refuse_command(error),
                     },
                     "remove" | "rm" => match parse_workspace_remove(tail) {
                         Ok((reference, request)) => {
@@ -2431,10 +2446,10 @@ impl App {
                                 selection,
                             }));
                         }
-                        Err(error) => self.notice = error,
+                        Err(error) => self.refuse_command(error),
                     },
                     _ => {
-                        self.notice = "Use /worktree [list|open|create|reset|remove]".into();
+                        self.refuse_command("Use /worktree [list|open|create|reset|remove]");
                     }
                 }
             }
@@ -2586,14 +2601,14 @@ impl App {
             }
             "diff" => match crate::diffview::DiffSource::parse(&arguments.to_ascii_lowercase()) {
                 Some(source) => self.open_diff_viewer(source, client),
-                None => self.notice = "Usage: /diff [git|branch|last]".into(),
+                None => self.refuse_command("Usage: /diff [git|branch|last]"),
             },
             "terminal" => {
                 let create = match arguments.to_ascii_lowercase().as_str() {
                     "" => false,
                     "new" => true,
                     _ => {
-                        self.notice = "Usage: /terminal [new]".into();
+                        self.refuse_command("Usage: /terminal [new]");
                         return Ok(AppAction::Continue);
                     }
                 };
@@ -2681,7 +2696,7 @@ impl App {
             }
             "rename" => {
                 if arguments.is_empty() {
-                    self.notice = "Usage: /rename [session-id] <title>".into();
+                    self.refuse_command("Usage: /rename [session-id] <title>");
                 } else if self.matching_session_id(arguments).is_some() {
                     self.notice = "Type a title after the session ID".into();
                 } else {
@@ -2725,7 +2740,7 @@ impl App {
                     "on" | "enable" => true,
                     "off" | "disable" => false,
                     _ => {
-                        self.notice = "Usage: /ultracode [on|off]".into();
+                        self.refuse_command("Usage: /ultracode [on|off]");
                         return Ok(AppAction::Continue);
                     }
                 };
@@ -2816,7 +2831,7 @@ impl App {
                     let (action, target) = if action == "marketplace" {
                         let subcommand = words.next().unwrap_or_default();
                         if subcommand != "add" {
-                            self.notice = "Usage: /plugin marketplace add <path-or-url>".into();
+                            self.refuse_command("Usage: /plugin marketplace add <path-or-url>");
                             return Ok(AppAction::Continue);
                         }
                         ("marketplace", words.collect::<Vec<_>>().join(" "))
@@ -2922,7 +2937,7 @@ impl App {
                             self.open_tool_catalog(catalog);
                             self.notice = format!("Lazy tool loading: {}", mode.as_str());
                         }
-                        Err(error) => self.notice = error,
+                        Err(error) => self.refuse_command(error),
                     },
                     [action @ ("enable" | "disable" | "reset"), name] => {
                         let enabled = match *action {
@@ -2938,7 +2953,7 @@ impl App {
                         };
                     }
                     _ => {
-                        self.notice = "Usage: /tools [list|show|hide|lazy <auto|always|off|reset>|enable <tool>|disable <tool>|reset <tool>]".into();
+                        self.refuse_command("Usage: /tools [list|show|hide|lazy <auto|always|off|reset>|enable <tool>|disable <tool>|reset <tool>]");
                     }
                 }
             }
@@ -2992,7 +3007,7 @@ impl App {
                 } else if matches!(arguments, "open" | "topup" | "usage") {
                     self.open_billing_page(arguments);
                 } else {
-                    self.notice = "Usage: /billing [open|topup|usage]".into();
+                    self.refuse_command("Usage: /billing [open|topup|usage]");
                 }
             }
             "status" => {
@@ -3156,7 +3171,7 @@ impl App {
             }
             "loop" => {
                 if arguments.is_empty() {
-                    self.notice = "Usage: /loop <interval, e.g. 5m> <prompt> · /loop stop".into();
+                    self.refuse_command("Usage: /loop <interval, e.g. 5m> <prompt> · /loop stop");
                 } else if arguments == "stop" {
                     if client.get_loop(self.thread.id).await?.is_null() {
                         self.notice = "No loop is running".into();
@@ -3189,11 +3204,11 @@ impl App {
                                         "Looping every {interval}: runs after each turn                                          completes (7-day expiry) · /loop stop ends it"
                                     );
                                 }
-                                Err(error) => self.notice = format!("Loop failed: {error}"),
+                                Err(error) => self.refuse_command(format!("Loop failed: {error}")),
                             }
                         }
                         _ => {
-                            self.notice = "Usage: /loop <interval, e.g. 30s|5m|1h> <prompt>".into();
+                            self.refuse_command("Usage: /loop <interval, e.g. 30s|5m|1h> <prompt>");
                         }
                     }
                 }
@@ -3234,7 +3249,7 @@ impl App {
                     match arguments.parse::<uuid::Uuid>() {
                         Ok(child) => Some(haarness_protocol::ThreadId(child)),
                         Err(_) => {
-                            self.notice = "Usage: /background [running-child-thread-id]".into();
+                            self.refuse_command("Usage: /background [running-child-thread-id]");
                             return Ok(AppAction::Continue);
                         }
                     }
@@ -3674,7 +3689,7 @@ impl App {
         let command = match parse_workflow_command(arguments) {
             Ok(command) => command,
             Err(message) => {
-                self.notice = message;
+                self.refuse_command(message);
                 return Ok(());
             }
         };

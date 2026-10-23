@@ -19322,6 +19322,55 @@ fn a_typo_of_a_command_is_named_instead_of_sent() {
         app.unknown_command_notice("frobnicate"),
         "Unknown command /frobnicate · start with a space to send it as text"
     );
+    // A slip of an alias names the command itself, as the palette lists it.
+    assert_eq!(
+        app.unknown_command_notice("mdoel"),
+        "Unknown command /mdoel · did you mean /models?"
+    );
+    // `/look` is a word, not another name for `/loop`.
+    app.composer.set_text("/look at the logs".into());
+    assert_eq!(
+        crate::input::unknown_slash_command(&app).as_deref(),
+        Some("look")
+    );
+    assert_eq!(
+        app.unknown_command_notice("look"),
+        "Unknown command /look · did you mean /loop?"
+    );
+}
+
+/// A command that refuses what follows it (here an interval it cannot read)
+/// says how to use it and leaves the line in the prompt to fix.
+#[tokio::test]
+async fn a_command_that_refuses_its_arguments_keeps_the_line() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    for line in [
+        "/loop 5 minutes check the deploy",
+        "/permissions-mode sometimes",
+    ] {
+        app.composer.set_text(line.into());
+        // Nothing listens on the offline client: nothing may be sent.
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.composer.text(), line);
+        assert!(app.notice.starts_with("Usage: /"), "{}", app.notice);
+    }
+    // A command that runs takes its line.
+    app.composer.set_text("/tools show".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
 }
 
 #[tokio::test]
