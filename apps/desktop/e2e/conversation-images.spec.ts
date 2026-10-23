@@ -409,6 +409,25 @@ test("an earlier reply on screen takes the chart its chat remade once the turn e
   expect(errors).toEqual([]);
 });
 
+/** An 8x8 baseline JPEG, made once with macOS sips; the test below rewrites its frame header. */
+const SMALL_JPEG =
+  "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAACKADAAQAAAABAAAACAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgACAAIAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMABgYGBgYGCgYGCg4KCgoOEg4ODg4SFxISEhISFxwXFxcXFxccHBwcHBwcHCIiIiIiIicnJycnLCwsLCwsLCwsLP/bAEMBBwcHCwoLEwoKEy4fGh8uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLv/dAAQAAf/aAAwDAQACEQMRAD8AzNEtfu8V1X2X2rF0T+GuqrrxWQYP2j9078gqy+pxP//Z";
+
+test("an image whose header hides its size is measured by the window before decoding, and too large says so", async () => {
+  // Over a thousand comment segments before its frame, which the cheap header check gives up on;
+  // the frame says 8000x8000 pixels, 64 megapixels.
+  const bytes = Buffer.from(SMALL_JPEG, "base64");
+  const frame = bytes.indexOf(Buffer.from([0xff, 0xc0]));
+  bytes.writeUInt16BE(8000, frame + 5);
+  bytes.writeUInt16BE(8000, frame + 7);
+  const comments = Buffer.concat(Array.from({ length: 1100 }, () => Buffer.from([0xff, 0xfe, 0x00, 0x02])));
+  await writeFile(join(workspace, "out/huge.jpg"), Buffer.concat([bytes.subarray(0, 2), comments, bytes.subarray(2)]));
+  const message = await reply("![Huge](out/huge.jpg)");
+  await expect(message.locator(".project-image .project-image-note")).toHaveText("Too large to show");
+  await expect(message.locator("img")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
   await reply("The chart again: ![Weekly chart](out/chart.png)");
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
