@@ -351,8 +351,17 @@ fn durable_todos(items: &[Item], through: Option<u64>) -> Vec<haarness_protocol:
         .unwrap_or_default()
 }
 
-/// A batch result's entries as (tool, failed), in step order.
-pub type BatchOutcomes = std::rc::Rc<[(String, bool)]>;
+/// A batch result's entry: its tool, whether it failed, and, when Auto's
+/// reviewer refused it, the reason it gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchOutcome {
+    pub tool: String,
+    pub failed: bool,
+    pub blocked: Option<String>,
+}
+
+/// A batch result's entries, in step order.
+pub type BatchOutcomes = std::rc::Rc<[BatchOutcome]>;
 
 /// What the running turn is doing right now, mirrored from `turn.status`
 /// events — the status line renders this instead of a stale free-text notice.
@@ -1964,7 +1973,7 @@ impl App {
     pub fn cached_batch_results(
         &self,
         id: ItemId,
-        read: impl FnOnce() -> Vec<(String, bool)>,
+        read: impl FnOnce() -> Vec<BatchOutcome>,
     ) -> BatchOutcomes {
         self.batch_results
             .borrow_mut()

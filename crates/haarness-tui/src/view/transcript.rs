@@ -226,22 +226,29 @@ struct BatchStep<'a> {
     tool: &'a str,
     parameters: &'a serde_json::Value,
     failed: Option<bool>,
+    /// Auto's reviewer refused it, for this reason.
+    blocked: Option<String>,
 }
 
 /// Each entry of a batch result as (tool, failed). The metadata holds every
 /// step's whole output, so it is read in place, and the text output is parsed
 /// only for a result without it.
-fn batch_outcomes(output: &str, metadata: &serde_json::Value) -> Vec<(String, bool)> {
+fn batch_outcomes(output: &str, metadata: &serde_json::Value) -> Vec<crate::state::BatchOutcome> {
     let read = |results: &serde_json::Value| {
         results.as_array().map(|entries| {
             entries
                 .iter()
                 .map(|entry| {
                     let tool = entry.get("tool").and_then(serde_json::Value::as_str);
-                    (
-                        tool.unwrap_or_default().to_owned(),
-                        entry.get("error").is_some(),
-                    )
+                    let blocked = entry
+                        .get("metadata")
+                        .and_then(review_block)
+                        .map(str::to_owned);
+                    crate::state::BatchOutcome {
+                        tool: tool.unwrap_or_default().to_owned(),
+                        failed: entry.get("error").is_some() && blocked.is_none(),
+                        blocked,
+                    }
                 })
                 .collect()
         })
@@ -283,16 +290,16 @@ fn batch_steps<'a>(
         .enumerate()
         .filter_map(|(index, call)| {
             let tool = bare_tool(call.get("tool")?.as_str()?);
-            let failed = outcomes
+            let outcome = outcomes
                 .as_ref()
                 .and_then(|outcomes| outcomes.get(index))
-                .filter(|(name, _)| same_tool(name, tool))
-                .map(|(_, failed)| *failed);
+                .filter(|outcome| same_tool(&outcome.tool, tool));
             Some(BatchStep {
                 index: index + 1,
                 tool,
                 parameters: call.get("parameters").unwrap_or(&serde_json::Value::Null),
-                failed,
+                failed: outcome.map(|outcome| outcome.failed),
+                blocked: outcome.and_then(|outcome| outcome.blocked.clone()),
             })
         })
         .collect()
@@ -312,6 +319,8 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
         } => metadata.get("failures").and_then(serde_json::Value::as_u64),
         _ => None,
     });
+    // A step Auto's reviewer refused is its decision, not a failure.
+    let blocked = steps.iter().filter(|step| step.blocked.is_some()).count();
     reported.map_or_else(
         || {
             steps
@@ -319,7 +328,11 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
                 .filter(|step| step.failed == Some(true))
                 .count()
         },
-        |count| usize::try_from(count).unwrap_or(usize::MAX),
+        |count| {
+            usize::try_from(count)
+                .unwrap_or(usize::MAX)
+                .saturating_sub(blocked)
+        },
     )
 }
 
@@ -1835,6 +1848,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     };
                     for step in &listed[..shown] {
                         let (glyph, tone) = match (step.failed, status) {
+                            _ if step.blocked.is_some() => ("⊘".to_owned(), theme.muted),
                             (Some(true), _) => ("✗".to_owned(), theme.danger),
                             (Some(false), _) | (None, Some("done")) => {
                                 ("●".to_owned(), theme.muted)
@@ -1855,8 +1869,25 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         } else {
                             tool_target(app.language, step.tool, step.parameters)
                         };
-                        let budget = width.saturating_sub(7 + step.tool.chars().count()).max(12);
-                        push(Line::new(vec![
+                        // A refused step says so after its target, as a
+                        // call of its own does.
+                        let blocked = step.blocked.as_deref().map(|reason| {
+                            let lead = app.language.text("Blocked by Auto review");
+                            if reason.is_empty() {
+                                format!("  {lead}")
+                            } else {
+                                format!("  {lead}: {reason}")
+                            }
+                        });
+                        let budget = width
+                            .saturating_sub(
+                                7 + step.tool.chars().count()
+                                    + blocked
+                                        .as_ref()
+                                        .map_or(0, |text| text.chars().count().min(60)),
+                            )
+                            .max(12);
+                        let mut spans = vec![
                             Span::new(format!("    {glyph} "), tone),
                             Span::new(step.tool.to_owned(), theme.text),
                             Span::new(
@@ -1865,7 +1896,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 }),
                                 tone,
                             ),
-                        ]));
+                        ];
+                        if let Some(blocked) = blocked {
+                            spans.push(Span::new(single_line(&blocked, 80), theme.muted));
+                        }
+                        push(Line::new(spans));
                     }
                     if listed.len() > shown {
                         let more = app.language.format(
