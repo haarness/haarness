@@ -296,7 +296,8 @@ export function requestProjectImage(
             return (await decode(data)) ? { data } : { note: "failed" };
           },
           (error: unknown): ShownImage => ({ note: tooLarge(error) ? "large" : "failed" }),
-        );
+        )
+        .catch((): ShownImage => ({ note: "failed" }));
       void Promise.race([answer, deadline])
         .then((result) => {
           const shown: ShownImage = result === "late" ? { note: "failed" } : result;
