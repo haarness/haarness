@@ -2226,6 +2226,11 @@ html[dir="rtl"] .tool-target {
   font-weight: 400;
   text-align: end;
 }
+/* Rows keep their height and the list scrolls: in a column that has to fit,
+   flex would squash every row until its description was cut away. */
+.slash-suggestions > * {
+  flex-shrink: 0;
+}
 .slash-suggestions > button {
   display: flex;
   flex-direction: column;
