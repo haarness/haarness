@@ -658,7 +658,8 @@ html[data-order-dragging] * {
 }
 /* The row's archive button shares one column with the project and checkout
    menus. Until the row is hovered or focused it is out of sight and takes no
-   room, so the title gets the width; then it lies over the row's end. */
+   room, so the title gets the width; then it lies over the row's end. (A
+   pointer over it hovers the row, so it is never pressed unseen.) */
 .session-row > .icon-button {
   position: absolute;
   top: 1px;
@@ -668,12 +669,10 @@ html[data-order-dragging] * {
   height: 28px;
   display: inline-flex;
   opacity: 0;
-  pointer-events: none;
 }
 .session-row:hover > .icon-button,
 .session-row:focus-within > .icon-button {
   opacity: 1;
-  pointer-events: auto;
 }
 .session-row.selected {
   background: var(--selected);
