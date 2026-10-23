@@ -2768,5 +2768,7 @@
   "Ask about this chat without adding to it": "اسأل عن هذه المحادثة دون الإضافة إليها",
   "Hide side chat": "إخفاء الدردشة الجانبية",
   "Resize side chat": "تغيير حجم الدردشة الجانبية",
-  "This server answers each question on its own": "يجيب هذا الخادم عن كل سؤال على حدة"
+  "This server answers each question on its own": "يجيب هذا الخادم عن كل سؤال على حدة",
+  "Outside this project": "خارج هذا المشروع",
+  "Too large to show": "أكبر من أن تُعرض"
 }

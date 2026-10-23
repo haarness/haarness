@@ -21,6 +21,45 @@
   animation: fade-in var(--fast) var(--ease);
 }
 
+/* ------------------------------------------------------------ image viewer */
+/* A conversation's image, full size: the whole window is the dialog, so a
+   click anywhere but the image closes it. */
+.image-viewer[open] {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: var(--s7);
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+}
+.image-viewer::backdrop {
+  background: color-mix(in srgb, var(--scrim) 78%, transparent);
+  backdrop-filter: blur(6px);
+}
+/* At its own size, or scaled down to fit the room (ImageViewer.tsx); without a size yet it fits it. */
+.image-viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  animation: fade-in var(--fast) var(--ease);
+}
+.image-viewer-close {
+  position: absolute;
+  top: var(--s4);
+  inset-inline-end: var(--s4);
+  background: var(--raised);
+}
+
 /* ------------------------------------------------------------------ dialog */
 .dialog {
   background: var(--raised);

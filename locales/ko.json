@@ -2768,5 +2768,7 @@
   "Ask about this chat without adding to it": "이 채팅에 추가하지 않고 질문하기",
   "Hide side chat": "사이드 채팅 숨기기",
   "Resize side chat": "사이드 채팅 크기 조절",
-  "This server answers each question on its own": "이 서버는 질문마다 따로 답합니다"
+  "This server answers each question on its own": "이 서버는 질문마다 따로 답합니다",
+  "Outside this project": "이 프로젝트 밖에 있음",
+  "Too large to show": "너무 커서 표시할 수 없음"
 }
