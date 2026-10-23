@@ -1917,6 +1917,17 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
         {
             app.open_connect_picker(None, client).await?;
         }
+        KeyCode::Esc | KeyCode::Left
+            if matches!(
+                app.overlay,
+                Overlay::Options {
+                    kind: crate::state::OptionsKind::SessionActions,
+                    ..
+                }
+            ) =>
+        {
+            app.return_to_sessions();
+        }
         KeyCode::Esc => app.close_overlay(),
         KeyCode::Right | KeyCode::Tab if matches!(app.overlay, Overlay::Threads) => {
             app.open_selected_session_actions();

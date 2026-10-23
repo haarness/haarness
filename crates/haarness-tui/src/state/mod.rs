@@ -753,6 +753,9 @@ pub struct App {
     /// A notice true only while the conversation is scrolled back ("Viewing …
     /// Ctrl+End returns to latest"): it goes when the view returns.
     pub scrolled_notice: Option<String>,
+    /// The session whose actions are open, and the sessions list's filter,
+    /// for ← and Esc to return to.
+    pub session_return: Option<(ThreadId, String)>,
     /// What Enter does with a message while work runs, as last read from
     /// the project (`/input-mode`): steer it in, or queue it.
     pub input_delivery: Option<haarness_protocol::InputDelivery>,
@@ -1125,6 +1128,7 @@ impl App {
             undo_draft: None,
             command_refused: false,
             scrolled_notice: None,
+            session_return: None,
             input_delivery: None,
             custom_status_line: None,
             billing: haarness_account::billing::State::default(),
@@ -2933,6 +2937,7 @@ impl App {
             return;
         };
         let id = thread.id.to_string();
+        self.session_return = Some((thread.id, self.overlay_filter.clone()));
         let language = self.language;
         let text = |key: &str| language.text(key).to_owned();
         let mut entries = Vec::new();
@@ -2991,6 +2996,22 @@ impl App {
             kind: OptionsKind::SessionActions,
             entries,
         });
+    }
+
+    /// ← or Esc in a session's actions: back to the sessions list as it was,
+    /// its filter kept and that session selected.
+    pub fn return_to_sessions(&mut self) {
+        let Some((id, filter)) = self.session_return.take() else {
+            self.close_overlay();
+            return;
+        };
+        self.open_overlay(Overlay::Threads);
+        self.overlay_filter = filter;
+        self.selection = self
+            .filtered_threads()
+            .iter()
+            .position(|thread| thread.id == id)
+            .unwrap_or(0);
     }
 
     pub fn model_label(&self, qualified: &str) -> String {
