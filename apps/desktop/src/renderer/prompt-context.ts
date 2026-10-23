@@ -263,19 +263,17 @@ export const resourceMentions = (items: PromptContext[]) =>
   );
 /** What a sent or queued message's resource comes back as: a chip holding
  * the block as it was sent. Its address is `<server>:<uri>`; a server name
- * has no colon of its own in practice, and only the chip's look depends on
- * where it is split. */
+ * has no colon of its own in practice (its tools' names could not hold one). */
 export function carriedResource(part: Extract<SentPart, { kind: "resource" }>): ResourceContext {
+  return { ...resourceToRead(part), block: part.text };
+}
+/** A sent message's resource as a chip to read again when sent: what Undo
+ * brings back for one that could not be read. */
+export function resourceToRead(part: Extract<SentPart, { kind: "resource" }>): ResourceContext {
   const colon = part.address.indexOf(":");
   const server = colon < 0 ? part.address : part.address.slice(0, colon);
   const uri = colon < 0 ? part.address : part.address.slice(colon + 1);
-  return {
-    kind: "resource",
-    server,
-    uri,
-    name: part.name === part.address ? uri : part.name,
-    block: part.text,
-  };
+  return { kind: "resource", server, uri, name: part.name === part.address ? uri : part.name };
 }
 /** One piece of a sent message: what was typed (file snapshots, picked
  * page elements and delegations included, which Markdown shows as written),
