@@ -2767,5 +2767,9 @@
   "Ask about this chat without adding to it": "Спросите об этом чате, ничего в него не добавляя",
   "Hide side chat": "Скрыть побочный чат",
   "Resize side chat": "Изменить размер побочного чата",
-  "This server answers each question on its own": "Этот сервер отвечает на каждый вопрос отдельно"
+  "This server answers each question on its own": "Этот сервер отвечает на каждый вопрос отдельно",
+  "MCP resource · {server}": "Ресурс MCP · {server}",
+  "Read from {server} when the message is sent.": "Читается из {server} при отправке сообщения.",
+  "MCP server": "Сервер MCP",
+  "not read": "не прочитан"
 }

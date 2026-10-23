@@ -2767,5 +2767,9 @@
   "Ask about this chat without adding to it": "Bu sohbet hakkında ona bir şey eklemeden sorun",
   "Hide side chat": "Yan sohbeti gizle",
   "Resize side chat": "Yan sohbeti yeniden boyutlandır",
-  "This server answers each question on its own": "Bu sunucu her soruyu ayrı yanıtlar"
+  "This server answers each question on its own": "Bu sunucu her soruyu ayrı yanıtlar",
+  "MCP resource · {server}": "MCP kaynağı · {server}",
+  "Read from {server} when the message is sent.": "Mesaj gönderildiğinde {server} sunucusundan okunur.",
+  "MCP server": "MCP sunucusu",
+  "not read": "okunamadı"
 }

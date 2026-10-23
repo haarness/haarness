@@ -15,6 +15,7 @@ import {
   plainMessage,
   promptWithContext,
   readContext,
+  resourceMentions,
   sentParts,
 } from "../src/renderer/prompt-context";
 import { elementContext, elementLabel, shortPage } from "../src/renderer/element-context";
@@ -244,4 +245,56 @@ test("picked elements and pastes sit side by side: only non-paste items count to
   items = addContext(items, paste);
   assert.equal(items.length, 51);
   assert.throws(() => addContext(items, { kind: "agent", name: "one-more" }), /up to 50 context items/);
+});
+test("a resource mention travels as an address, one per server, and survives a stored draft", () => {
+  const docs = { kind: "resource" as const, server: "docs", uri: "docs://setup", name: "setup", description: "How to run it" };
+  const wiki = { ...docs, server: "wiki", description: undefined };
+  // Two servers with one URI are two chips; the same one again replaces it.
+  const items = addContext(addContext(addContext([], docs), wiki), { ...docs });
+  assert.deepEqual(items.map(contextLabel), ["@setup", "@setup"]);
+  assert.deepEqual(items.map((item) => item.kind === "resource" && item.server), ["wiki", "docs"]);
+  // Nothing of it is written into the text: the server reads it at send.
+  assert.equal(promptWithContext("Compare", items), "Compare");
+  assert.deepEqual(resourceMentions([{ kind: "agent", name: "helper" }, ...items]), [
+    { server: "wiki", uri: "docs://setup", name: "setup" },
+    { server: "docs", uri: "docs://setup", name: "setup" },
+  ]);
+  const stored = JSON.parse(JSON.stringify(items));
+  assert.deepEqual(readContext(stored), stored);
+  assert.deepEqual(readContext([{ kind: "resource", server: "docs", uri: "", name: "x" }]), []);
+  assert.deepEqual(readContext([{ kind: "resource", server: "docs", uri: "docs://a", name: "a", mimeType: 3 }]), []);
+});
+test("what the server read for a mentioned resource is one block of the sent message", () => {
+  const block =
+    "<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n````\n```sh\nrun\n```\n<details>\n<summary>Pasted text</summary>\n\n```\nnot a paste\n```\n\n</details>\n````\n\n</details>";
+  const paste = promptWithContext("", [{ kind: "paste", id: "p", text: "pasted" }]);
+  const unread =
+    "<details>\n<summary>MCP resource: wiki:docs://&lt;gone&gt; (not read)</summary>\n\n```\nCould not read MCP resource wiki:docs://<gone>: MCP server wiki is not connected\n```\n\n</details>";
+  const sent = `Compare\n\n${block}\n\n${paste}\n\n${unread}`;
+  // The paste-shaped text inside the resource stays part of it.
+  assert.deepEqual(sentParts(sent), [
+    { kind: "text", text: "Compare\n\n" },
+    {
+      kind: "resource",
+      text: block,
+      name: "setup",
+      address: "docs:docs://setup",
+      content:
+        "```sh\nrun\n```\n<details>\n<summary>Pasted text</summary>\n\n```\nnot a paste\n```\n\n</details>",
+      failed: false,
+    },
+    { kind: "text", text: "\n\n" },
+    { kind: "paste", text: "pasted" },
+    { kind: "text", text: "\n\n" },
+    {
+      kind: "resource",
+      text: unread,
+      name: "wiki:docs://<gone>",
+      address: "wiki:docs://<gone>",
+      content: "Could not read MCP resource wiki:docs://<gone>: MCP server wiki is not connected",
+      failed: true,
+    },
+  ]);
+  // Copy keeps the blocks as they were sent.
+  assert.equal(plainMessage(sent), `Compare\n\n${block}\n\npasted\n\n${unread}`);
 });

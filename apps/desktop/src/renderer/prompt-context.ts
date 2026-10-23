@@ -20,7 +20,21 @@ export type PromptContext =
   | { kind: "agent"; name: string }
   | ElementContext
   /** A long paste kept as one chip instead of flooding the message box. */
-  | { kind: "paste"; id: string; text: string };
+  | { kind: "paste"; id: string; text: string }
+  | ResourceContext;
+/** An MCP resource picked from the `@` list. Only its address travels with
+ * the message; the server reads it from `server` when the message is sent. */
+export type ResourceContext = {
+  kind: "resource";
+  server: string;
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+};
+/** What a server must say before Desktop sends it resource mentions: an
+ * older one would drop them without a word. */
+export const RESOURCE_MENTIONS = "mcp-resource-mentions.v1";
 const MAX_CONTEXT_BYTES = 128 * 1024;
 /** Enough for a page's worth of picked elements; the byte bound is the real limit. */
 const MAX_CONTEXT_ITEMS = 50;
@@ -35,9 +49,12 @@ export const contextKey = (item: PromptContext) =>
       ? elementKey(item)
       : item.kind === "paste"
         ? JSON.stringify([item.kind, item.id])
-        : JSON.stringify([item.kind, item.path, item.startLine, item.endLine]);
+        : item.kind === "resource"
+          ? // Two servers may expose one URI: each is its own mention.
+            JSON.stringify([item.kind, item.server, item.uri])
+          : JSON.stringify([item.kind, item.path, item.startLine, item.endLine]);
 export const contextLabel = (item: PromptContext) =>
-  item.kind === "agent"
+  item.kind === "agent" || item.kind === "resource"
     ? "@" + item.name
     : item.kind === "element"
       ? elementLabel(item)
@@ -120,6 +137,11 @@ export function readContext(value: unknown): PromptContext[] {
     if (item.kind === "agent")
       return typeof item.name === "string" && !!item.name;
     if (item.kind === "element") return isElementContext(item);
+    if (item.kind === "resource")
+      return (
+        [item.server, item.uri, item.name].every((value) => typeof value === "string" && !!value) &&
+        [item.description, item.mimeType].every((value) => value === undefined || typeof value === "string")
+      );
     if (item.kind === "paste")
       return (
         typeof item.id === "string" &&
@@ -205,8 +227,12 @@ const escapeHtml = (text: string) =>
  * fenced as data and inspectable in the saved user message. */
 export function promptWithContext(text: string, items: PromptContext[]) {
   checkContext(items);
-  if (!items.length) return text;
-  const parts = items.map((item) => {
+  // Resources travel as mentions (`resourceMentions`), read by the server.
+  const written = items.filter(
+    (item): item is Exclude<PromptContext, ResourceContext> => item.kind !== "resource",
+  );
+  if (!written.length) return text;
+  const parts = written.map((item) => {
     if (item.kind === "agent")
       return `Delegate the relevant work from this message and attached context using the task tool with agent ${JSON.stringify(item.name)}. Keep normal permissions in effect.`;
     if (item.kind === "element") return elementPrompt(item, escapeHtml);
@@ -221,17 +247,30 @@ export function promptWithContext(text: string, items: PromptContext[]) {
   });
   return [text.trimEnd(), ...parts].filter(Boolean).join("\n\n");
 }
+/** The resources a draft mentions, as the server reads them at send. */
+export const resourceMentions = (items: PromptContext[]) =>
+  items.flatMap((item) =>
+    item.kind === "resource" ? [{ server: item.server, uri: item.uri, name: item.name }] : [],
+  );
 /** One piece of a sent message: what was typed (file snapshots, picked
  * page elements and delegations included, which Markdown shows as written),
- * or a paste that was sent as a chip, with the text pasted. */
+ * a paste that was sent as a chip, with the text pasted, or what the server
+ * read for a resource mentioned with `@`: `text` is its whole block as sent,
+ * `content` what was read (or why it was not), `name` and `address` what
+ * its label says. */
 export type SentPart =
   | { kind: "text"; text: string }
-  | { kind: "paste"; text: string };
+  | { kind: "paste"; text: string }
+  | { kind: "resource"; text: string; name: string; address: string; content: string; failed: boolean };
+const RESOURCE = "MCP resource: ";
+const NOT_READ = " (not read)";
+const unescapeHtml = (text: string) =>
+  text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 const BLOCK_OPEN = "<details>\n<summary>";
 /**
  * The context block `message` holds at `start`, as `promptWithContext` (and
- * the TUI) write them: a paste, a file snapshot, a folder listing or a page
- * element, each fenced. Its end, and for a paste the text pasted; undefined
+ * the TUI) write them: a paste, a file snapshot, a folder listing, a page
+ * element or an MCP resource the server read, each fenced. Its end, and for a paste the text pasted; undefined
  * when the text there only looks like one.
  */
 function blockAt(message: string, start: number) {
@@ -241,9 +280,16 @@ function blockAt(message: string, start: number) {
   const summary = message.slice(from, close);
   const paste = summary.startsWith("Pasted text");
   const element = summary.startsWith("Page element: ");
+  const resource = summary.startsWith(RESOURCE);
   if (
     summary.includes("\n") ||
-    !(paste || element || summary.startsWith("File context: ") || summary.startsWith("Directory listing: "))
+    !(
+      paste ||
+      element ||
+      summary.startsWith("File context: ") ||
+      summary.startsWith("Directory listing: ") ||
+      resource
+    )
   )
     return undefined;
   const body = close + "</summary>\n\n".length;
@@ -263,16 +309,30 @@ function blockAt(message: string, start: number) {
   const end = message.indexOf(`\n${marks}\n\n</details>`, opened);
   if (end < 0) return undefined;
   const inner = body + marks.length + 1;
+  const content = message.slice(inner, Math.max(inner, end));
+  // `<name> · <server>:<uri>`, or the address alone; the server escapes it.
+  const label = unescapeHtml(summary.slice(RESOURCE.length));
+  const failed = label.endsWith(NOT_READ);
+  const named = failed ? label.slice(0, -NOT_READ.length) : label;
+  const split = named.lastIndexOf(" · ");
   return {
     end: end + `\n${marks}\n\n</details>`.length,
-    paste: paste ? message.slice(inner, Math.max(inner, end)) : undefined,
+    paste: paste ? content : undefined,
+    resource: resource
+      ? {
+          name: split < 0 ? named : named.slice(0, split),
+          address: split < 0 ? named : named.slice(split + 3),
+          content,
+          failed,
+        }
+      : undefined,
   };
 }
 /** The marker a typed line opens or closes a Markdown code fence with. */
 const fenceLine = (line: string) => /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 /**
- * A sent message split around its pastes, the inverse of `promptWithContext`
- * for them, read the way the TUI reads one (`prompt_context::parts`): a
+ * A sent message split around its pastes and the resources the server read
+ * into it, the inverse of `promptWithContext` for pastes, read the way the TUI reads one (`prompt_context::parts`): a
  * context block is taken whole, so a paste-shaped block inside a file
  * snapshot stays part of that file, and nothing inside a code fence the
  * person typed counts. Text that only looks like a paste stays text.
@@ -314,6 +374,10 @@ export function sentParts(message: string): SentPart[] {
     if (block.paste !== undefined) {
       if (typed < start) parts.push({ kind: "text", text: message.slice(typed, start) });
       parts.push({ kind: "paste", text: block.paste });
+      typed = block.end;
+    } else if (block.resource) {
+      if (typed < start) parts.push({ kind: "text", text: message.slice(typed, start) });
+      parts.push({ kind: "resource", text: message.slice(start, block.end), ...block.resource });
       typed = block.end;
     }
     at = block.end;

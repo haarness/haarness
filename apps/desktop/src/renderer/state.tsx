@@ -21,6 +21,8 @@ import {
   addContext,
   contextKey,
   promptWithContext,
+  RESOURCE_MENTIONS,
+  resourceMentions,
   keptContext,
   readContext,
   type PromptContext,
@@ -1803,6 +1805,13 @@ function createApp(saved?: Preferences) {
       );
     const targetApi = <V = unknown,>(method: string, ...args: unknown[]) =>
       window.haarness.api<V>(connection, method, args);
+    // The server reads mentioned resources when the message arrives.
+    const resources = resourceMentions(context);
+    if (resources.length && !state.connection?.info.capabilities.includes(RESOURCE_MENTIONS))
+      throw new Error(
+        "This server cannot read MCP resources. Remove them from the message, or update the server.",
+      );
+    const mentioned = resources.length ? { resources } : {};
     // Resolve against this captured project immediately before admission.
     // Commands always execute now; explicit delivery still wins for messages.
     const command = text.match(/^\/([^\s]+)\s*([\s\S]*)$/);
@@ -1849,6 +1858,7 @@ function createApp(saved?: Preferences) {
       JSON.stringify({
         text: promptWithContext(text, context),
         attachments,
+        ...mentioned,
         effort,
         delivery,
       }),
@@ -1895,6 +1905,7 @@ function createApp(saved?: Preferences) {
       tools: { preview: true },
       text: promptWithContext(text, context),
       attachments,
+      ...mentioned,
       requestId: pending.requestId,
       ...(effort ? { reasoningEffort: effort } : {}),
     };
@@ -1906,6 +1917,7 @@ function createApp(saved?: Preferences) {
           name: command[1],
           tools: { preview: true },
           arguments: promptWithContext(command[2], context),
+          ...mentioned,
           requestId: pending.requestId,
         },
       );

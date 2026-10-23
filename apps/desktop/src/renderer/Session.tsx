@@ -738,7 +738,7 @@ export function Session() {
       );
       const text = pastes.length
         ? parts
-            .flatMap((part) => (part.kind === "text" ? [part.text] : []))
+            .flatMap((part) => (part.kind === "paste" ? [] : [part.text]))
             .join("")
             .trimEnd()
         : parts.map((part) => part.text).join("");
