@@ -1031,6 +1031,17 @@ impl ApiClient {
     pub async fn mcp(&self) -> Result<Vec<McpServerInfo>> {
         self.get("/v1/mcp").await
     }
+    /// The MCP servers, each saying whether chat `thread` can reach it
+    /// under `agent` (`turned_off`).
+    pub async fn mcp_for(
+        &self,
+        thread: haarness_protocol::ThreadId,
+        agent: &str,
+    ) -> Result<Vec<McpServerInfo>> {
+        let agent: String = url::form_urlencoded::byte_serialize(agent.as_bytes()).collect();
+        self.get(&format!("/v1/mcp?threadId={thread}&agent={agent}"))
+            .await
+    }
     pub async fn configure_mcp(
         &self,
         name: &str,
@@ -2116,6 +2127,14 @@ impl std::fmt::Display for ApiRefusal {
 }
 
 impl std::error::Error for ApiRefusal {}
+
+/// The server's error code (`not_found`, …) of a refused request.
+#[must_use]
+pub fn refusal_code(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .and_then(|refusal| refusal.code.as_deref())
+}
 
 /// The HTTP status of a refused request, whichever way it was checked.
 #[must_use]

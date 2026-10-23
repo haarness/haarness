@@ -1008,6 +1008,7 @@ fn an_mcp_tool_with_an_app_says_its_app_opens_in_desktop() {
         scope: None,
         apps: Some(false),
         app_tools: None,
+        turned_off: None,
     }];
     let frame = frame_text(&app, (120, 30));
     assert_eq!(frame.matches(notice).count(), 0, "{frame}");

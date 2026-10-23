@@ -9,6 +9,7 @@ import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-contro
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
 import {
+  alreadySettled,
   autoApproval,
   approveAndEnable,
   canAutoApprove,
@@ -21,6 +22,8 @@ import {
   addContext,
   contextKey,
   promptWithContext,
+  RESOURCE_MENTIONS,
+  resourceMentions,
   keptContext,
   readContext,
   type PromptContext,
@@ -214,6 +217,7 @@ function createApp(saved?: Preferences) {
     questions: [],
     streams: {},
     tasks: {},
+    reviews: {},
     providers: [],
     agents: [],
     commands: [],
@@ -445,12 +449,15 @@ function createApp(saved?: Preferences) {
     });
     await saveApprovalModes();
   }
+  /** Allow `request` once and turn Auto on; true when the request had been
+   * answered already (Auto turns on all the same). */
   async function allowOnceAndAuto(request: T.PendingPermissionInfo) {
     const connection = state.connection?.id;
-    if (!connection || !canAutoApprove(request)) return;
+    if (!connection || !canAutoApprove(request)) return false;
     const revision = approvalRevision;
     const selected = state.selected;
-    await approveAndEnable({
+    return await approveAndEnable({
+      settled: alreadySettled,
       reply: () =>
         window.haarness.api(connection, "replyPermission", [
           request.permissionId,
@@ -1803,6 +1810,13 @@ function createApp(saved?: Preferences) {
       );
     const targetApi = <V = unknown,>(method: string, ...args: unknown[]) =>
       window.haarness.api<V>(connection, method, args);
+    // The server reads mentioned resources when the message arrives.
+    const resources = resourceMentions(context);
+    if (resources.length && !state.connection?.info.capabilities.includes(RESOURCE_MENTIONS))
+      throw new Error(
+        t("This server cannot read MCP resources. Remove them from the message, or update the server."),
+      );
+    const mentioned = resources.length ? { resources } : {};
     // Resolve against this captured project immediately before admission.
     // Commands always execute now; explicit delivery still wins for messages.
     const command = text.match(/^\/([^\s]+)\s*([\s\S]*)$/);
@@ -1849,6 +1863,7 @@ function createApp(saved?: Preferences) {
       JSON.stringify({
         text: promptWithContext(text, context),
         attachments,
+        ...mentioned,
         effort,
         delivery,
       }),
@@ -1895,6 +1910,7 @@ function createApp(saved?: Preferences) {
       tools: { preview: true },
       text: promptWithContext(text, context),
       attachments,
+      ...mentioned,
       requestId: pending.requestId,
       ...(effort ? { reasoningEffort: effort } : {}),
     };
@@ -1906,6 +1922,7 @@ function createApp(saved?: Preferences) {
           name: command[1],
           tools: { preview: true },
           arguments: promptWithContext(command[2], context),
+          ...mentioned,
           requestId: pending.requestId,
         },
       );
@@ -2131,7 +2148,9 @@ function createApp(saved?: Preferences) {
 
     if (item.type === "permission.resolved")
       retainPermissionErrors(state.connection!.id, state.permissions);
-    if (item.type === "assets.updated")
+    // A reloaded configuration can change models, agents, commands and the
+    // server's capabilities (Auto's reviewer turned on or off).
+    if (item.type === "assets.updated" || item.type === "configuration.reloaded")
       void catalogs().catch((error) => set("error", String(error)));
     if (
       ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(

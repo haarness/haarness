@@ -196,6 +196,25 @@ pub(super) fn change(
     Ok(queue)
 }
 
+/// Records that request `request` was steered into a running turn of
+/// `thread`: a tombstone no queue lists, so a retry of the same request is
+/// found (`has_input_admission`) and not delivered twice. False when the
+/// request was already recorded (steered, queued or removed).
+pub(super) fn record_steer(
+    db: &Connection,
+    thread: ThreadId,
+    request: RequestId,
+) -> CoreResult<bool> {
+    let inserted = db
+        .execute(
+            "INSERT INTO pending_inputs(id,thread_id,payload,position,state) VALUES(?1,?2,'{}',0,'steered')
+             ON CONFLICT(id) DO NOTHING",
+            params![request.to_string(), thread.to_string()],
+        )
+        .map_err(storage)?;
+    Ok(inserted == 1)
+}
+
 /// Keep a tombstone so retransmission cannot resurrect delivered/removed work.
 pub(super) fn consume(
     tx: &Transaction<'_>,
@@ -210,7 +229,8 @@ pub(super) fn consume(
         )
         .optional()
         .map_err(storage)?;
-    let Some((owner, state, payload)) = row else {
+    // A steer's record only answers a retry; it is no queued input.
+    let Some((owner, state, payload)) = row.filter(|(_, state, _)| state != "steered") else {
         return Ok(None);
     };
     if owner != thread.to_string() || state != "pending" {
@@ -460,5 +480,93 @@ mod tests {
         );
         drop(store);
         let _ = std::fs::remove_file(path);
+    }
+
+    fn turn_request(request: RequestId, text: &str) -> StartTurnRequest {
+        StartTurnRequest {
+            request_id: request,
+            text: text.into(),
+            attachments: Vec::new(),
+            resources: Vec::new(),
+            synthetic: false,
+            auto_approve: false,
+            agent: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            tools: None,
+            command: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_is_recorded_once_and_never_listed_promoted_or_taken_for_a_turn() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let (turn, _, _) = store
+            .start_turn(thread.id, turn_request(RequestId::new(), "running"))
+            .await
+            .unwrap();
+        let steer = RequestId::new();
+        let data = || ItemData::UserMessage {
+            text: "steered".into(),
+            attachments: Vec::new(),
+            queued: true,
+            synthetic: false,
+            command_line: None,
+        };
+        // Recorded with its item; the same request again appends nothing.
+        assert!(
+            store
+                .append_steered_input(thread.id, turn.id, steer, data())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .append_steered_input(thread.id, turn.id, steer, data())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.has_input_admission(thread.id, steer).await.unwrap());
+        // No queue lists it, so nothing promotes it.
+        let queue = store.input_queue(thread.id).await.unwrap();
+        assert!(queue.items.is_empty());
+        assert!(
+            store
+                .promote_input(thread.id, turn.id, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .promote_input(thread.id, turn.id, Some((steer, queue.revision)))
+                .await
+                .is_err()
+        );
+        // A turn started with its id is a turn of its own, as before.
+        let (_, prompt, created) = store
+            .start_turn(thread.id, turn_request(steer, "a turn"))
+            .await
+            .unwrap();
+        assert!(created);
+        assert!(
+            matches!(&prompt.data, ItemData::UserMessage { text, .. } if text == "a turn"),
+            "{prompt:?}"
+        );
+        let steered = store
+            .list_items(thread.id, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|item| matches!(&item.data, ItemData::UserMessage { text, .. } if text == "steered"))
+            .count();
+        assert_eq!(steered, 1);
     }
 }

@@ -150,6 +150,7 @@ async fn turn(runtime: &AgentRuntime, thread: ThreadId, agent: Option<&str>) {
                 request_id: RequestId::new(),
                 text: "Look at the project.".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
                 auto_approve: false,
                 agent: agent.map(str::to_owned),

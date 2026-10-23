@@ -1,16 +1,19 @@
 """MCP stdio fixture that declares resources: a text page, an image, a template, and a page that never answers.
 
 A read of `docs://slow` gets no answer; the cancellation the client sends for it is appended to CANCEL_LOG.
+With REQUEST_LOG set, the method of every request is appended to it. LIST_SLOW=1 lists `docs://slow` too.
+A listing waits LIST_DELAY seconds, or as many as the file LIST_DELAY_FILE holds while it exists.
 """
 import base64
 import json
 import os
 import sys
+import time
 
 PNG = base64.b64encode(
     bytes.fromhex(
         '89504e470d0a1a0a0000000d4948445200000001000000010806000000'
-        '1f15c4890000000d49444154789c6360f8cfc0f01f0005000201e5273de90000000049454e44ae426082'
+        '1f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082'
     )
 ).decode()
 
@@ -18,6 +21,8 @@ RESOURCES = [
     {'uri': 'docs://setup', 'name': 'setup', 'title': 'Setup guide', 'mimeType': 'text/markdown'},
     {'uri': 'docs://logo', 'name': 'logo', 'mimeType': 'image/png'},
 ]
+if os.environ.get('LIST_SLOW') == '1':
+    RESOURCES.append({'uri': 'docs://slow', 'name': 'slow'})
 
 
 def reply(request_id, result):
@@ -27,6 +32,9 @@ def reply(request_id, result):
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
+    if 'REQUEST_LOG' in os.environ:
+        with open(os.environ['REQUEST_LOG'], 'a') as file:
+            file.write('%s\n' % method)
     if method == 'notifications/cancelled':
         if 'CANCEL_LOG' in os.environ:
             with open(os.environ['CANCEL_LOG'], 'a') as file:
@@ -43,6 +51,11 @@ for line in sys.stdin:
     elif method == 'tools/list':
         reply(request['id'], {'tools': []})
     elif method == 'resources/list':
+        delay = os.environ.get('LIST_DELAY', '0')
+        if os.path.exists(os.environ.get('LIST_DELAY_FILE', '')):
+            with open(os.environ['LIST_DELAY_FILE']) as file:
+                delay = file.read().strip()
+        time.sleep(float(delay))
         reply(request['id'], {'resources': RESOURCES})
     elif method == 'resources/templates/list':
         reply(request['id'], {'resourceTemplates': [{'uriTemplate': 'docs://page/{id}', 'name': 'page'}]})

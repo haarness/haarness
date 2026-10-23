@@ -631,7 +631,12 @@ impl Cloud {
                         || session.get("configuration").unwrap_or(&session["agentSnapshot"]["configuration"])["reasoningEffort"].clone(),
                         |e| json!(e),
                     );
-                    remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":input.message,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_agent_session":false,"cloud_chat":false,"cloud_schedule":false}}))).await?
+                    // The agent's words, marked as an agent's: Auto's reviewer there never
+                    // reads them as the person's.
+                    let text = input.message.as_deref().map(|message| {
+                        format!("{}{message}", haarness_protocol::AGENT_MESSAGE_PREFIX)
+                    });
+                    remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":text,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_agent_session":false,"cloud_chat":false,"cloud_schedule":false}}))).await?
                 } else if let Some(turn) = input.turn_id {
                     remote.turn(thread, turn).await?
                 } else {

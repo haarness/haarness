@@ -3,7 +3,8 @@
 //! Events are kept when they belong to the current thread OR to the same
 //! root conversation — child-agent activity (progress, permission prompts)
 //! must reach the view even though it happens on other threads. Dropping
-//! everything else keeps unrelated threads from mutating this view.
+//! everything else keeps unrelated threads from mutating this view; only
+//! which chats wait for a person is followed everywhere, for the session list.
 
 use anyhow::Result;
 use haarness_protocol::{
@@ -12,7 +13,10 @@ use haarness_protocol::{
 };
 
 use crate::api::ApiClient;
-use crate::state::{App, ChildTask, PhaseInfo, ToastVariant, TurnEnd, task_runs_in_background};
+use crate::state::{
+    App, ChildTask, PhaseInfo, ToastVariant, TurnEnd, Waiting, WaitingRequest,
+    task_runs_in_background,
+};
 
 fn string_list(value: &serde_json::Value) -> Vec<String> {
     value
@@ -35,10 +39,13 @@ impl App {
         // the new chat's requests from here.
         match client.info().await {
             Ok(info) => {
-                self.approval_server = info
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY);
+                let has = |name: &str| {
+                    info.capabilities
+                        .iter()
+                        .any(|capability| capability == name)
+                };
+                self.approval_server = has(haarness_protocol::APPROVAL_MODE_CAPABILITY);
+                self.approval_reviewer = has(haarness_protocol::APPROVAL_REVIEW_CAPABILITY);
             }
             Err(error) => tracing::debug!(%error, "could not read the server's capabilities"),
         }
@@ -59,7 +66,7 @@ impl App {
                     .is_none_or(|info| info.thread_id != self.thread.id)
                 {
                     self.approval_mode = None;
-                    self.auto_permissions = false;
+                    self.keep_permission_choice(|app| app.auto_permissions = false);
                 }
             }
         }
@@ -69,7 +76,9 @@ impl App {
         if info.thread_id != self.thread.id {
             return;
         }
-        self.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        self.keep_permission_choice(|app| {
+            app.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        });
         self.approval_mode = Some(info);
     }
 
@@ -94,7 +103,9 @@ impl App {
         match client.set_approval_mode(self.thread.id, &request).await {
             Ok(info) => {
                 self.show_approval_mode(info);
-                self.notice = if enabled {
+                self.notice = if enabled && self.approval_reviewer {
+                    "Auto on for this chat · a reviewer model answers requests · ctrl+y to review"
+                } else if enabled {
                     "Auto on for this chat · requests are allowed once · ctrl+y to review"
                 } else {
                     "Review · asks before risky steps · ctrl+y for Auto"
@@ -194,6 +205,7 @@ impl App {
     ) {
         self.refresh_approval_mode(client).await;
         let mut pending = Vec::new();
+        let mut waiting = Vec::new();
         for request in requests {
             // Chrome site access always waits for a person, whatever this
             // client's yolo or Auto says.
@@ -215,14 +227,57 @@ impl App {
             {
                 continue;
             }
+            waiting.push((
+                request.permission_id.clone(),
+                request.thread_id,
+                request.root_thread_id,
+            ));
             if in_conversation {
                 pending.push(request);
             }
         }
+        self.hydrate_waiting(Waiting::Approval, waiting);
         self.pending_permissions = pending;
     }
 
     pub async fn reduce(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
+        // An event can reorder the session list under its cursor: the cursor
+        // keeps its chat.
+        let anchor = self.session_list_anchor();
+        let result = self.reduce_event(event, client).await;
+        self.keep_session_list_anchor(anchor);
+        result
+    }
+
+    /// Follow which chats wait for a person, in every chat on the server.
+    fn follow_waiting(&mut self, event: &EventEnvelope) {
+        let (kind, id) = match event.event_type.as_str() {
+            "permission.requested" | "permission.resolved" => {
+                (Waiting::Approval, event.payload["permissionId"].as_str())
+            }
+            "question.requested" | "question.resolved" => {
+                (Waiting::Answer, event.payload["questionId"].as_str())
+            }
+            _ => return,
+        };
+        let Some(id) = id else {
+            return;
+        };
+        if event.event_type.ends_with(".resolved") {
+            self.waiting.remove(id);
+        } else if let Some(thread_id) = event.thread_id {
+            self.waiting.insert(
+                id.to_owned(),
+                WaitingRequest {
+                    thread_id,
+                    root_thread_id: event.root_thread_id,
+                    kind,
+                },
+            );
+        }
+    }
+
+    async fn reduce_event(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
         if event.event_type == "approval_mode.changed" {
             if let Ok(info) = serde_json::from_value(event.payload.clone()) {
                 self.show_approval_mode(info);
@@ -248,6 +303,7 @@ impl App {
                 return Ok(());
             }
         }
+        self.follow_waiting(&event);
         let on_current = event.thread_id == Some(self.thread.id);
         let in_root = event.root_thread_id == Some(self.root_thread_id);
         // A workflow dashboard is a global run catalog, so keep its rows live
@@ -361,13 +417,23 @@ impl App {
                 }
             }
             "turn.status" => {
+                let state = event.payload["state"].as_str().unwrap_or("").to_owned();
+                // A review that goes on keeps the moment it was first heard of.
+                let received = event
+                    .thread_id
+                    .and_then(|thread| self.live_threads.get(&thread))
+                    .and_then(|live| live.phase.as_ref())
+                    .filter(|phase| phase.state == state)
+                    .and_then(|phase| phase.received)
+                    .unwrap_or_else(std::time::Instant::now);
                 let phase = PhaseInfo {
-                    state: event.payload["state"].as_str().unwrap_or("").to_owned(),
                     tool: event.payload["tool"].as_str().map(str::to_owned),
                     call_id: event.payload["callId"].as_str().map(str::to_owned),
                     since: event.payload["startedAt"]
                         .as_str()
                         .and_then(|value| value.parse().ok()),
+                    received: Some(received),
+                    state,
                 };
                 if let Some(thread_id) = event.thread_id {
                     self.live_threads.entry(thread_id).or_default().phase = Some(phase.clone());
@@ -463,11 +529,21 @@ impl App {
                 // Full metadata rides on the event, so prompts from child
                 // threads surface here without any extra fetch.
                 if let Some(id) = event.payload["permissionId"].as_str() {
-                    if !self
+                    // Announced again (Auto's reviewer took up a request
+                    // already shown, or left it to the person): the card
+                    // takes the new note in place, nothing else moves.
+                    let known = self
                         .pending_permissions
-                        .iter()
-                        .any(|pending| pending.permission_id == id)
-                    {
+                        .iter_mut()
+                        .find(|pending| pending.permission_id == id);
+                    let again = known.is_some();
+                    if let Some(known) = known {
+                        // Announced again (Auto turned on, the reviewer left
+                        // it to the person): its note and its script as they
+                        // are now.
+                        known.review = serde_json::from_value(event.payload["review"].clone()).ok();
+                        known.script = serde_json::from_value(event.payload["script"].clone()).ok();
+                    } else {
                         self.pending_permissions.push(PendingPermissionInfo {
                             allow_always: event.payload["allowAlways"].as_bool(),
                             explicit: event.payload["explicit"].as_bool().unwrap_or(false),
@@ -486,12 +562,20 @@ impl App {
                             patterns: string_list(&event.payload["patterns"]),
                             always_patterns: string_list(&event.payload["alwaysPatterns"]),
                             detail: event.payload["detail"].clone(),
+                            script: serde_json::from_value(event.payload["script"].clone())
+                                .ok()
+                                .flatten(),
                             thread_id: event.thread_id.unwrap_or(self.thread.id),
                             root_thread_id: event.root_thread_id,
                             turn_id: event.turn_id,
                             agent: event.payload["agent"].as_str().map(str::to_owned),
                             created_at: event.created_at,
+                            review: serde_json::from_value(event.payload["review"].clone()).ok(),
                         });
+                    }
+                    // Nothing new to point at: no focus change, no toast.
+                    if again {
+                        return Ok(());
                     }
                     if self.pending_permissions.len() == 1 {
                         // A fresh head prompt starts at the first chip, with
@@ -1179,6 +1263,7 @@ impl App {
             .map(|pending| (self.approval_notification(pending), pending.thread_id));
         self.pending_permissions
             .retain(|pending| pending.permission_id != id);
+        self.waiting.remove(id);
         self.confirm_always = None;
         self.permission_typed = None;
         self.permission_selection = 0;

@@ -496,6 +496,13 @@ impl Tool for BatchTool {
 fn batch_result(name: &str, result: CoreResult<ToolOutput>) -> Value {
     match result {
         Ok(output) => json!({"tool":name,"output":output.text,"metadata":output.metadata}),
+        // A step Auto's reviewer refused keeps its note, as a call of its own
+        // does, so clients tell it from a failure or a person's reject.
+        Err(CoreError::ReviewBlocked(review)) => json!({
+            "tool": name,
+            "error": CoreError::ReviewBlocked(review.clone()).to_string(),
+            "metadata": {"review": review},
+        }),
         Err(error) => json!({"tool":name,"error":error.to_string()}),
     }
 }
@@ -3248,6 +3255,7 @@ impl Tool for BuiltinTool {
                     &context.cancel,
                     &tool_output_dir(),
                     &context.execution.shell_env,
+                    (!context.execution.person_shell).then_some(context.thread_id),
                 )
                 .await
             }
@@ -7344,5 +7352,214 @@ mod webfetch_tests {
         .await
         .expect("Stop must end the call");
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+    }
+}
+
+/// What reaches the agent's shell from the skill tool and Code Mode: a
+/// skill's `!` block is marked as an agent's command, and Code Mode cannot
+/// run a shell command at all.
+#[cfg(all(test, unix))]
+mod agent_shell_tests {
+    use super::*;
+    use futures::stream;
+    use haarness_core::{
+        AgentRuntime, EventBus, ModelProvider, PermissionDecision, PermissionRule, ProviderEvent,
+        ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry,
+    };
+    use haarness_protocol::{
+        CreateThreadRequest, ItemData, ProviderInfo, RequestId, StartTurnRequest, TurnStatus,
+    };
+    use haarness_store::SqliteStore;
+    use tokio_util::sync::CancellationToken;
+
+    /// Loads the `marks` skill on the first round, then answers.
+    struct LoadsSkill;
+
+    #[async_trait]
+    impl ModelProvider for LoadsSkill {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: "fixture".into(),
+                name: "Skill fixture".into(),
+                authenticated: true,
+                models: vec![],
+            }
+        }
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+            _cancel: CancellationToken,
+        ) -> CoreResult<ProviderStream> {
+            let answered = request
+                .messages
+                .iter()
+                .any(|message| matches!(message, ProviderMessage::ToolResult { .. }));
+            let event = if answered {
+                ProviderEvent::TextDelta("done".into())
+            } else {
+                ProviderEvent::ToolCall {
+                    call_id: "skill-call".into(),
+                    name: "skill".into(),
+                    arguments: json!({"name": "marks"}),
+                    provider_metadata: Value::Null,
+                }
+            };
+            Ok(Box::pin(stream::iter([
+                Ok(event),
+                Ok(ProviderEvent::Finished {
+                    reason: "stop".into(),
+                }),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skill_s_block_is_marked_as_an_agent_s_command_and_names_the_chat() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-skill-markers-{}", uuid::Uuid::now_v7()));
+        let skills_root = workspace.join("skills");
+        tokio::fs::create_dir_all(skills_root.join("marks"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            skills_root.join("marks/SKILL.md"),
+            "---\ndescription: Shows the agent markers\n---\nMarks: !`printf '%s|%s|%s|%s' \"${AGENT-unset}\" \"${HAARNESS-unset}\" \"${AI_AGENT-unset}\" \"${HAARNESS_SESSION_ID-unset}\"`\n",
+        )
+        .await
+        .unwrap();
+        let registry = crate::FilesystemSkillRegistry::new(vec![(skills_root, true)]);
+        let infos = registry.discover().await.unwrap();
+        let tools = NativeToolRegistry::with_extras(
+            workspace.clone(),
+            None,
+            Some(Arc::new(registry)),
+            infos,
+        );
+        let mut config = RuntimeConfig::default();
+        for pattern in ["bash:*", "skill:*"] {
+            config.base_rules.push(PermissionRule {
+                pattern: pattern.into(),
+                decision: PermissionDecision::Allow,
+            });
+        }
+        let runtime = AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new([
+                Arc::new(LoadsSkill) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(tools),
+            EventBus::new(256),
+            workspace.clone(),
+            String::new(),
+            config,
+        );
+        let thread = runtime
+            .create_thread(CreateThreadRequest {
+                title: Some("Skill markers".into()),
+                provider: Some("fixture".into()),
+                model: Some("fixture".into()),
+                ..CreateThreadRequest::default()
+            })
+            .await
+            .unwrap();
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "load the skill".into(),
+                    attachments: vec![],
+                    synthetic: false,
+                    auto_approve: false,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    tools: None,
+                    command: None,
+                    resources: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let status = runtime.turn(turn.id).await.unwrap().status;
+                if !matches!(status, TurnStatus::Queued | TurnStatus::Running) {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn settles");
+        assert_eq!(status, TurnStatus::Completed);
+        // An `AI_AGENT` this test process has names its outer agent and is kept.
+        let ai_agent = std::env::var("AI_AGENT")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| haarness_core::AI_AGENT_VALUE.into());
+        let expected = format!("Marks: 1|1|{ai_agent}|{}", thread.id);
+        let items = runtime.items(thread.id, None).await.unwrap();
+        assert!(
+            items.iter().any(|item| matches!(&item.data,
+                ItemData::ToolResult { name, output, is_error: false, .. }
+                    if name == "skill" && output.contains(&expected))),
+            "no skill result carried {expected}: {items:?}"
+        );
+        let _ = tokio::fs::remove_dir_all(workspace).await;
+    }
+
+    /// Fails the test if Code Mode reaches the agent's tools at all.
+    struct NoTools;
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for NoTools {
+        async fn invoke(&self, name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            panic!("code mode invoked {name}");
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(true)
+        }
+    }
+
+    /// Code Mode's `execute` calls MCP and browser tools only: neither its
+    /// `shell()` nor `tool("bash")` reaches a shell, so it has no command to
+    /// mark.
+    #[tokio::test]
+    async fn code_mode_cannot_run_a_shell_command() {
+        let host = McpCodeHost {
+            invoker: Arc::new(NoTools),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            max_calls: 100,
+        };
+        let call = |method, params| HostCall {
+            run_id: "code".into(),
+            request_id: 1,
+            method,
+            params,
+            cancellation: CancellationToken::new(),
+        };
+        let shell = host
+            .request(call(HostRequestMethod::Shell, json!({"command": "env"})))
+            .await
+            .unwrap_err();
+        assert!(
+            shell
+                .to_string()
+                .contains("MCP and browser tool calls only"),
+            "{shell}"
+        );
+        let bash = host
+            .request(call(
+                HostRequestMethod::Tool,
+                json!({"name": "bash", "args": {"command": "env"}}),
+            ))
+            .await
+            .unwrap_err();
+        assert!(bash.to_string().contains("only mcp__-prefixed"), "{bash}");
     }
 }

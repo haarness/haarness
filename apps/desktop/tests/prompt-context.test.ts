@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 import {
   activeMention,
   addContext,
+  carriedResource,
   commandPrompt,
   contextLabel,
   countLines,
   fileContext,
+  fileScore,
   keptContext,
+  keptFiles,
   mentionAgents,
   pasteSize,
   pastedText,
@@ -15,6 +18,8 @@ import {
   plainMessage,
   promptWithContext,
   readContext,
+  resourceMentions,
+  resourceToRead,
   sentParts,
 } from "../src/renderer/prompt-context";
 import { elementContext, elementLabel, shortPage } from "../src/renderer/element-context";
@@ -244,4 +249,109 @@ test("picked elements and pastes sit side by side: only non-paste items count to
   items = addContext(items, paste);
   assert.equal(items.length, 51);
   assert.throws(() => addContext(items, { kind: "agent", name: "one-more" }), /up to 50 context items/);
+});
+test("a resource mention travels as an address, one per server, and survives a stored draft", () => {
+  const docs = { kind: "resource" as const, server: "docs", uri: "docs://setup", name: "setup", description: "How to run it" };
+  const wiki = { ...docs, server: "wiki", description: undefined };
+  // Two servers with one URI are two chips; the same one again replaces it.
+  const items = addContext(addContext(addContext([], docs), wiki), { ...docs });
+  assert.deepEqual(items.map(contextLabel), ["@setup", "@setup"]);
+  assert.deepEqual(items.map((item) => item.kind === "resource" && item.server), ["wiki", "docs"]);
+  // Nothing of it is written into the text: the server reads it at send.
+  assert.equal(promptWithContext("Compare", items), "Compare");
+  assert.deepEqual(resourceMentions([{ kind: "agent", name: "helper" }, ...items]), [
+    { server: "wiki", uri: "docs://setup", name: "setup" },
+    { server: "docs", uri: "docs://setup", name: "setup" },
+  ]);
+  const stored = JSON.parse(JSON.stringify(items));
+  assert.deepEqual(readContext(stored), stored);
+  assert.deepEqual(readContext([{ kind: "resource", server: "docs", uri: "", name: "x" }]), []);
+  assert.deepEqual(readContext([{ kind: "resource", server: "docs", uri: "docs://a", name: "a", mimeType: 3 }]), []);
+});
+test("what the server read for a mentioned resource is one block of the sent message", () => {
+  const block =
+    "<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n````\n```sh\nrun\n```\n<details>\n<summary>Pasted text</summary>\n\n```\nnot a paste\n```\n\n</details>\n````\n\n</details>";
+  const paste = promptWithContext("", [{ kind: "paste", id: "p", text: "pasted" }]);
+  const unread =
+    "<details>\n<summary>MCP resource: wiki:docs://&lt;gone&gt; (not read)</summary>\n\n```\nCould not read MCP resource wiki:docs://<gone>: MCP server wiki is not connected\n```\n\n</details>";
+  const sent = `Compare\n\n${block}\n\n${paste}\n\n${unread}`;
+  // The paste-shaped text inside the resource stays part of it.
+  assert.deepEqual(sentParts(sent), [
+    { kind: "text", text: "Compare\n\n" },
+    {
+      kind: "resource",
+      text: block,
+      name: "setup",
+      address: "docs:docs://setup",
+      content:
+        "```sh\nrun\n```\n<details>\n<summary>Pasted text</summary>\n\n```\nnot a paste\n```\n\n</details>",
+      failed: false,
+    },
+    { kind: "text", text: "\n\n" },
+    { kind: "paste", text: "pasted" },
+    { kind: "text", text: "\n\n" },
+    {
+      kind: "resource",
+      text: unread,
+      name: "wiki:docs://<gone>",
+      address: "wiki:docs://<gone>",
+      content: "Could not read MCP resource wiki:docs://<gone>: MCP server wiki is not connected",
+      failed: true,
+    },
+  ]);
+  // Copy keeps the blocks as they were sent.
+  assert.equal(plainMessage(sent), `Compare\n\n${block}\n\npasted\n\n${unread}`);
+});
+test("a resource a sent or queued message brings back is a chip that sends what was read, without reading again", () => {
+  const block =
+    "<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n```\n# Setup\n```\n\n</details>";
+  const unread =
+    "<details>\n<summary>MCP resource: wiki:docs://x (not read)</summary>\n\n```\nMCP server wiki is not connected\n```\n\n</details>";
+  const parts = sentParts(`Compare\n\n${block}\n\n${unread}`);
+  const chips = parts.flatMap((part) => (part.kind === "resource" ? [carriedResource(part)] : []));
+  assert.deepEqual(chips, [
+    { kind: "resource", server: "docs", uri: "docs://setup", name: "setup", block },
+    { kind: "resource", server: "wiki", uri: "docs://x", name: "docs://x", block: unread },
+  ]);
+  assert.deepEqual(chips.map(contextLabel), ["@setup", "@docs://x"]);
+  // Sent again as it was, and not as a mention to read.
+  assert.equal(promptWithContext("Compare", chips), `Compare\n\n${block}\n\n${unread}`);
+  assert.deepEqual(resourceMentions(chips), []);
+  assert.deepEqual(readContext(JSON.parse(JSON.stringify(chips))), chips);
+  // What was read counts toward no context limit, as a paste does not.
+  const big = { ...chips[0], uri: "docs://big", block: "x".repeat(200 * 1024) };
+  assert.doesNotThrow(() => addContext(chips, big));
+});
+test("a resource that could not be read comes back from Undo as one to read again", () => {
+  const unread =
+    "<details>\n<summary>MCP resource: logo · wiki:docs://logo (not read)</summary>\n\n```\na rule keeps this resource from the model\n```\n\n</details>";
+  const [part] = sentParts(unread);
+  assert.equal(part.kind, "resource");
+  if (part.kind !== "resource") return;
+  const chip = resourceToRead(part);
+  assert.deepEqual(chip, { kind: "resource", server: "wiki", uri: "docs://logo", name: "logo" });
+  assert.deepEqual(resourceMentions([chip]), [{ server: "wiki", uri: "docs://logo", name: "logo" }]);
+});
+
+test("files kept while a search runs are those the server would find, in its order", () => {
+  // The scores of the server's `fuzzy_score`.
+  assert.equal(fileScore("setup.md", "s"), 1492);
+  assert.equal(fileScore("style.css", "st"), 1491);
+  assert.equal(fileScore("setup.md", "st"), 92);
+  assert.equal(fileScore("src/Setup.MD", "setup"), 1484);
+  assert.equal(fileScore("docs/guide.md", ""), -13);
+  assert.equal(fileScore("readme.md", "q"), undefined);
+  // Lengths and positions count UTF-8 bytes, and only ASCII letters fold.
+  assert.equal(fileScore("É/é.md", "é"), 1489);
+  assert.equal(fileScore("É.md", "é"), undefined);
+  assert.deepEqual(keptFiles(["setup.md", "style.css", "settings.md", "readme.md"], "ST"), [
+    "style.css",
+    "setup.md",
+    "settings.md",
+  ]);
+  assert.deepEqual(keptFiles(["a.md", "b.md"], "md"), ["a.md", "b.md"]);
+  assert.equal(keptFiles(Array.from({ length: 30 }, (_, index) => `f${index}.md`), "f").length, 20);
+  // A path spelled out lists a folder on the server: nothing is kept.
+  for (const query of ["/", "~", "~/notes", ".", "..", "./src", "../up"]) assert.deepEqual(keptFiles(["src/a.md"], query), []);
+  assert.deepEqual(keptFiles([".haarness/x.md"], ".haar"), [".haarness/x.md"]);
 });

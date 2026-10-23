@@ -81,6 +81,11 @@ impl PermissionChoice {
         {
             choices.insert(3, Self::Repository);
         }
+        // A chat already in Auto (its reviewer left this one to a person)
+        // has nothing to switch to.
+        if app.auto_permissions {
+            choices.retain(|choice| *choice != Self::Auto);
+        }
         choices
     }
 
@@ -346,19 +351,49 @@ fn durable_todos(items: &[Item], through: Option<u64>) -> Vec<haarness_protocol:
         .unwrap_or_default()
 }
 
-/// A batch result's entries as (tool, failed), in step order.
-pub type BatchOutcomes = std::rc::Rc<[(String, bool)]>;
+/// A batch result's entry: its tool, whether it failed, and, when Auto's
+/// reviewer refused it, the reason it gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchOutcome {
+    pub tool: String,
+    pub failed: bool,
+    /// Auto's reviewer refused the step, with its note.
+    pub blocked: Option<haarness_protocol::PermissionReview>,
+}
+
+/// A batch result's entries, in step order.
+pub type BatchOutcomes = std::rc::Rc<[BatchOutcome]>;
 
 /// What the running turn is doing right now, mirrored from `turn.status`
 /// events — the status line renders this instead of a stale free-text notice.
 #[derive(Clone, Default)]
 pub struct PhaseInfo {
-    /// thinking | responding | tool | waiting_permission | waiting_question |
-    /// child_tasks | compacting | done
+    /// thinking | responding | tool | reviewing (Auto's reviewer) |
+    /// waiting_permission | waiting_question | child_tasks | compacting | done
     pub state: String,
     pub tool: Option<String>,
     pub call_id: Option<String>,
     pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this client heard of the phase: a delay before saying what it
+    /// is runs on this clock, never the server's.
+    pub received: Option<std::time::Instant>,
+}
+
+/// What a chat waits on from a person. An approval outranks a question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Waiting {
+    Answer,
+    Approval,
+}
+
+/// A permission request or question that waits for a person, in any chat on
+/// the server: the thread that asked and its conversation's root when the
+/// server named one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingRequest {
+    pub thread_id: ThreadId,
+    pub root_thread_id: Option<ThreadId>,
+    pub kind: Waiting,
 }
 
 /// In-flight rendering state belongs to its thread. Keeping it keyed avoids
@@ -390,6 +425,12 @@ impl PhaseInfo {
     pub fn elapsed_seconds(&self) -> i64 {
         self.since
             .map_or(0, |since| (chrono::Utc::now() - since).num_seconds().max(0))
+    }
+
+    /// How long ago this client heard of the phase.
+    pub fn heard_millis(&self) -> u128 {
+        self.received
+            .map_or(0, |received| received.elapsed().as_millis())
     }
 }
 
@@ -660,6 +701,9 @@ pub struct App {
     pub(crate) pending_server: Option<Box<crate::servers::Connection>>,
     pub(crate) original_client: Option<crate::api::ApiClient>,
     pub(crate) keybindings: std::collections::BTreeMap<String, String>,
+    /// Shortcut settings left out at launch (unknown, unbindable, or a key
+    /// taken by another shortcut), said once on the status line.
+    pub(crate) keybindings_skipped: Vec<String>,
     pub(crate) management: crate::management::Management,
     pub(crate) connect: crate::connect::ConnectFlow,
     /// `/remote-control`: whether this chat is shared through Haarness Cloud.
@@ -696,6 +740,9 @@ pub struct App {
     pub preview: String,
     pub reasoning_preview: String,
     pub live_threads: std::collections::HashMap<ThreadId, LiveThreadState>,
+    /// Every request waiting for a person on the server, by request id. The
+    /// session list leads with the chats they wait in.
+    pub waiting: std::collections::HashMap<String, WaitingRequest>,
     pub notice: String,
     /// The notice last seen by the render tick and when it appeared, so an
     /// answer to something the user did fades instead of describing the past.
@@ -753,6 +800,8 @@ pub struct App {
     pub auto_permissions_seen: std::collections::HashMap<String, bool>,
     /// The server applies Auto itself, for every client.
     pub approval_server: bool,
+    /// The server's Auto asks a reviewer model (`approval-review.v1`).
+    pub approval_reviewer: bool,
     /// Launched with `--yolo`: this TUI answers every request its open
     /// conversation raises once, and its turns approve their own. The server
     /// is not a yolo server, so other clients' chats still ask.
@@ -809,6 +858,14 @@ pub struct App {
     pub terminal: Option<crate::pty_view::TerminalWorkspace>,
     /// Live @-mention completion results from the server.
     pub mention_suggestions: Vec<String>,
+    /// The attached server's MCP resources for the `@` list.
+    pub(crate) mention_resources: crate::resource_mentions::Listing,
+    /// Where a resource listing read off the event loop goes (see
+    /// `App::resources_arrived`); without it, none is asked for.
+    pub(crate) resources_tx: Option<tokio::sync::mpsc::Sender<crate::resource_mentions::Update>>,
+    /// Where a message sent with mentions off the event loop reports back
+    /// (see `App::mentions_sent`); without it, the send waits in place.
+    pub(crate) sends_tx: Option<tokio::sync::mpsc::Sender<crate::resource_mentions::Sent>>,
     /// Escape dismisses autocomplete without deleting the typed query. The
     /// next edit makes suggestions eligible again.
     pub autocomplete_hidden: bool,
@@ -825,6 +882,9 @@ pub struct App {
     /// reflow to either more or fewer terminal rows as delimiters close.
     pub scroll_adjustment: std::cell::Cell<isize>,
     pub last_transcript_len: std::cell::Cell<usize>,
+    /// The messages of the most recently rendered transcript and the row each
+    /// starts on, top first: where the message keys step to.
+    pub transcript_messages: std::cell::RefCell<Vec<(haarness_protocol::ItemId, usize)>>,
     /// Context estimate of the shown thread, keyed by its item count, last
     /// sequence and undo boundary; the meters read it every frame.
     pub context_tokens: std::cell::Cell<Option<ContextEstimate>>,
@@ -998,7 +1058,9 @@ impl App {
             crate::config::save_scoped_history(scope, &self.thread.id.to_string(), &text)
         {
             self.notice = format!("Prompt sent; history could not be saved: {error}");
+            return;
         }
+        self.keep_picks(&[text]);
     }
 
     pub fn new(
@@ -1008,6 +1070,7 @@ impl App {
         providers: Vec<ProviderInfo>,
         agents: Vec<AgentProfile>,
     ) -> Self {
+        let (keybindings, keybindings_skipped) = crate::keybindings::load();
         let agent_index = agents
             .iter()
             .position(|agent| agent.id == thread.agent)
@@ -1040,6 +1103,7 @@ impl App {
             preview: String::new(),
             reasoning_preview: String::new(),
             live_threads: std::collections::HashMap::new(),
+            waiting: std::collections::HashMap::new(),
             notice,
             notice_shown: None,
             undo_draft: None,
@@ -1066,6 +1130,7 @@ impl App {
             children,
             pending_permissions: Vec::new(),
             auto_permissions: false,
+            approval_reviewer: false,
             auto_permissions_seen: std::collections::HashMap::new(),
             approval_server: false,
             yolo: false,
@@ -1089,12 +1154,16 @@ impl App {
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
+            mention_resources: crate::resource_mentions::Listing::default(),
+            resources_tx: None,
+            sends_tx: None,
             autocomplete_hidden: false,
             viewport_offset: 0,
             max_viewport_offset: std::cell::Cell::new(0),
             transcript_rows: std::cell::Cell::new(0),
             scroll_adjustment: std::cell::Cell::new(0),
             last_transcript_len: std::cell::Cell::new(0),
+            transcript_messages: std::cell::RefCell::new(Vec::new()),
             context_tokens: std::cell::Cell::new(None),
             server_info: None,
             tick: 0,
@@ -1110,7 +1179,8 @@ impl App {
             side: crate::side_chat::SideChats::default(),
             pending_server: None,
             original_client: None,
-            keybindings: crate::keybindings::load().unwrap_or_default(),
+            keybindings,
+            keybindings_skipped,
             model_favorites: crate::config::load_state().model_favorites,
             model_recents: crate::config::load_state().model_recents,
             theme: Theme::default(),
@@ -1953,7 +2023,7 @@ impl App {
     pub fn cached_batch_results(
         &self,
         id: ItemId,
-        read: impl FnOnce() -> Vec<(String, bool)>,
+        read: impl FnOnce() -> Vec<BatchOutcome>,
     ) -> BatchOutcomes {
         self.batch_results
             .borrow_mut()
@@ -2082,6 +2152,16 @@ impl App {
     }
 
     pub fn hydrate_questions(&mut self, questions: Vec<PendingQuestionInfo>) {
+        self.hydrate_waiting(
+            Waiting::Answer,
+            questions.iter().map(|pending| {
+                (
+                    pending.question_id.clone(),
+                    pending.thread_id,
+                    pending.root_thread_id,
+                )
+            }),
+        );
         self.pending_questions = questions
             .into_iter()
             .filter(|pending| {
@@ -2104,6 +2184,7 @@ impl App {
     /// Remove one resolved prompt and immediately expose the next queued
     /// question, if any.
     pub fn question_answered(&mut self, id: &str) {
+        self.waiting.remove(id);
         let resolved_notification = self
             .pending_questions
             .iter()
@@ -2426,6 +2507,11 @@ impl App {
     }
 
     pub fn move_selection(&mut self, direction: isize) {
+        if matches!(self.overlay, Overlay::None) {
+            // The person chose a row: a returned pick's row no longer takes
+            // the highlight when its listing comes.
+            self.mention_resources.want = None;
+        }
         let length = self.current_selection_length();
         if length == 0 {
             self.selection = 0;
@@ -2470,7 +2556,17 @@ impl App {
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
-                .map_or_else(|| self.mention_suggestions.len(), |commands| commands.len()),
+                .map_or_else(|| self.shown_mentions().len(), |commands| commands.len()),
+        }
+    }
+
+    /// The `@` list rows the composer shows: none while Esc hides the list,
+    /// so a listing that comes meanwhile is neither picked nor browsed.
+    pub(crate) fn shown_mentions(&self) -> &[String] {
+        if self.autocomplete_hidden {
+            &[]
+        } else {
+            &self.mention_suggestions
         }
     }
 
@@ -2634,24 +2730,134 @@ impl App {
                     || thread.id.to_string().contains(&query)
             })
             .collect();
-        threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        // Chats that wait for a person lead, as Upstream lists them; each
+        // part stays newest first.
+        let waiting = self.waiting_chats();
+        threads.sort_by(|left, right| {
+            waiting
+                .contains_key(&right.id)
+                .cmp(&waiting.contains_key(&left.id))
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
         threads
+    }
+
+    /// The listed chat a waiting request is answered in: the nearest thread
+    /// up its chain that is not a child agent, as Desktop's
+    /// `conversationRoot` finds it (a fork is a chat of its own). A thread
+    /// this client has not listed falls back to the server's root.
+    fn waiting_chat(
+        threads: &std::collections::HashMap<ThreadId, &Thread>,
+        request: &WaitingRequest,
+    ) -> ThreadId {
+        let mut id = request.thread_id;
+        for _ in 0..16 {
+            match threads.get(&id) {
+                Some(thread) if thread.is_subagent => match thread.parent_id {
+                    Some(parent) => id = parent,
+                    None => break,
+                },
+                Some(_) => break,
+                None => return request.root_thread_id.unwrap_or(id),
+            }
+        }
+        id
+    }
+
+    /// What each chat waits on from a person: an approval over a question.
+    /// Built once per list or frame, not per row.
+    pub fn waiting_chats(&self) -> std::collections::HashMap<ThreadId, Waiting> {
+        let mut chats = std::collections::HashMap::new();
+        if self.waiting.is_empty() {
+            return chats;
+        }
+        let threads = self
+            .threads
+            .iter()
+            .map(|thread| (thread.id, thread))
+            .collect();
+        for request in self.waiting.values() {
+            let kind = chats
+                .entry(Self::waiting_chat(&threads, request))
+                .or_insert(request.kind);
+            *kind = (*kind).max(request.kind);
+        }
+        chats
+    }
+
+    /// Replace what waits of one kind with the server's complete list.
+    pub(crate) fn hydrate_waiting(
+        &mut self,
+        kind: Waiting,
+        requests: impl IntoIterator<Item = (String, ThreadId, Option<ThreadId>)>,
+    ) {
+        let anchor = self.session_list_anchor();
+        self.waiting.retain(|_, request| request.kind != kind);
+        for (id, thread_id, root_thread_id) in requests {
+            self.waiting.insert(
+                id,
+                WaitingRequest {
+                    thread_id,
+                    root_thread_id,
+                    kind,
+                },
+            );
+        }
+        self.keep_session_list_anchor(anchor);
+    }
+
+    /// The chat under the session list's cursor, so a change that reorders
+    /// the list (a chat starts or stops waiting, or is updated) can keep the
+    /// cursor on it.
+    pub(crate) fn session_list_anchor(&self) -> Option<ThreadId> {
+        if !matches!(self.overlay, Overlay::Threads) {
+            return None;
+        }
+        self.filtered_threads()
+            .get(self.selection)
+            .map(|thread| thread.id)
+    }
+
+    pub(crate) fn keep_session_list_anchor(&mut self, anchor: Option<ThreadId>) {
+        if let Some(id) = anchor
+            && matches!(self.overlay, Overlay::Threads)
+            && let Some(index) = self
+                .filtered_threads()
+                .iter()
+                .position(|thread| thread.id == id)
+        {
+            self.selection = index;
+        }
     }
 
     /// Compact, truthful metadata for a session-list row. Haarness only calls
     /// a session "working" when local REST/SSE state proves it; older sessions
-    /// are never guessed active from their update timestamp.
-    pub fn session_detail(&self, thread: &Thread) -> String {
+    /// are never guessed active from their update timestamp. `waiting` is
+    /// what the chat waits on, from one [`Self::waiting_chats`] for the list.
+    pub fn session_detail(&self, thread: &Thread, waiting: Option<Waiting>) -> String {
         let current = thread.id == self.thread.id
             || (!self.parent_stack.is_empty() && thread.id == self.root_thread_id);
         let working =
             (current && self.active_turn.is_some()) || self.active_tree_turn_count(thread.id) > 0;
         let language = self.language;
         let mut detail = Vec::new();
+        // What the chat waits for comes first, where truncation never
+        // reaches it, in the words the activity line uses. Its turn is
+        // stopped on the reader, so it says that rather than "working", as
+        // Desktop's waiting rows do.
+        match waiting {
+            Some(Waiting::Approval) => {
+                detail.push(language.text("waiting for approval").to_owned());
+            }
+            Some(Waiting::Answer) => {
+                detail.push(language.text("waiting for your answer").to_owned());
+            }
+            None => {}
+        }
         if current {
             detail.push(language.text("current").to_owned());
         }
-        if working {
+        if working && waiting.is_none() {
             detail.push(language.text("working").to_owned());
         }
         if thread.archived {
@@ -2973,12 +3179,48 @@ fn relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
 impl App {
     /// The permission prompt y/a/w/n answer next: oldest pending.
     pub fn set_auto_permissions(&mut self, enabled: bool) {
-        self.auto_permissions = enabled;
+        self.keep_permission_choice(|app| app.auto_permissions = enabled);
         self.notice = if enabled {
             "Auto on for this TUI launch · new requests allowed once · pending requests stay manual · ctrl+y to review"
         } else {
             "Review mode · permission requests need approval · ctrl+y to switch"
         }.into();
+    }
+
+    /// Change what the card offers (the chat's mode) and keep the answer it
+    /// had in focus: the same choice where it is still offered, otherwise
+    /// Allow once, never whichever neighbour slid into its place. Once + Auto
+    /// staged in a chat that is now in Auto has nothing left to confirm.
+    pub(crate) fn keep_permission_choice(&mut self, change: impl FnOnce(&mut Self)) {
+        // While an answer is staged the selection is confirm or cancel.
+        let before = PermissionChoice::available(self);
+        let focused = before
+            .get(
+                self.permission_selection
+                    .min(before.len().saturating_sub(1)),
+            )
+            .copied()
+            .filter(|_| self.confirm_always.is_none());
+        change(self);
+        if self.first_pending_permission().is_none() {
+            return;
+        }
+        if let Some(staged) = self.confirm_always {
+            if !(self.auto_permissions && staged == PermissionChoice::Auto.key()) {
+                return;
+            }
+            self.confirm_always = None;
+            self.update_permission_notice();
+        }
+        let after = PermissionChoice::available(self);
+        self.permission_selection = focused
+            .and_then(|choice| after.iter().position(|item| *item == choice))
+            .or_else(|| {
+                after
+                    .iter()
+                    .position(|item| *item == PermissionChoice::Once)
+            })
+            .unwrap_or(0);
     }
 
     pub fn first_pending_permission(&self) -> Option<&PendingPermissionInfo> {

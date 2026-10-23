@@ -161,8 +161,9 @@ haarness run --format json "List the open TODOs"   # newline-delimited JSON reco
 `haarness run` uses your default model, else a connected provider's. With no terminal to ask at (a
 script, CI), a permission request is refused and the run stops, naming what was asked: allow it with a
 permission rule, or pass `--yolo` where the damage is bounded. `--auto` instead puts the chat in Auto,
-where it stays for every app until switched back. Ctrl-C stops the run's work on the server and exits
-with status 130. See
+where it stays for every app until switched back; without a terminal it refuses each request that still
+needs a person, goes on, and exits with status 3 if it refused any. Ctrl-C stops the run's work on the
+server and exits with status 130. See
 [Run a prompt from a script or CI](https://haarness.ai/docs/cli/headless-runs).
 
 ## Everywhere you work
@@ -193,10 +194,12 @@ Each chat is in **Review** (the default) or **Auto**, stored on the server and s
 survives quitting. In Review, edits and commands inside the project run without asking; Haarness asks
 before using files outside the project, reading secrets such as `.env`, switching agents or generating
 paid media, plus anything your own rules set to ask. Desktop's browser asks about a site only when
-**Settings → Browser** sets it to **Requires approval**. Auto answers those requests itself, except
-Haarness Cloud actions that spend money or delete something, which always ask, a site set to
-**Requires approval**, which asks unless **Remember site approvals** is on, and a website in your own
-Chrome, which only a person can allow.
+**Settings → Browser** sets it to **Requires approval**. In Auto, a reviewer model answers those requests:
+it approves routine ones once, blocks risky ones with a reason the agent reads, and leaves the rest to
+you with a short note. An ask you configured for a specific command or path still comes to you, and
+Haarness Cloud actions that spend money or delete something always ask, as does a site set to
+**Requires approval** unless **Remember site approvals** is on, and a website in your own Chrome,
+which only a person can allow. See [automatic approvals](docs/AUTO-APPROVALS.md).
 
 | Key | Answer |
 | --- | --- |

@@ -10,7 +10,19 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  onCleanup,
 } from "solid-js";
+import {
+  imageProject,
+  onProjectImageSettled,
+  projectFileWritten,
+  projectRoots,
+  readProjectImage,
+  readToolImage,
+  shownProjectImage,
+  type ShownImage,
+} from "./project-images";
+import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
@@ -30,6 +42,7 @@ import {
   toolFailed,
   toolVerb,
   ranInChrome,
+  reviewBlock,
   routineEditOutput,
   changeRows,
   changeStats,
@@ -91,7 +104,11 @@ export function ToolActivity(props: {
   // approval, "Wrote" once done, "Tried to write" when the tool errored or
   // was refused. A command that ran and exited non-zero still "Ran". The
   // forms are English keys; a batch's label arrives already translated.
+  // Auto's reviewer refused the call: the row says so, and its body gives
+  // the reason rather than the text written for the model.
+  const blocked = createMemo(() => reviewBlock(props.result));
   const verb = () => {
+    if (blocked() !== undefined) return t("Blocked by Auto review");
     const form = props.result
       ? props.result.is_error
         ? shape().attempt
@@ -108,7 +125,9 @@ export function ToolActivity(props: {
   const stats = createMemo(() => changeStats(changes()));
   const input = createMemo(() => toolInput(props.name, props.args));
   const output = createMemo(
-    () => props.result && toolOutput(props.name, props.result.output),
+    () =>
+      props.result &&
+      (blocked() || toolOutput(props.name, props.result.output)),
   );
   // An MCP tool whose server pairs it with a page: the page shows under the
   // row, once its server's apps are known to be on. With them off the row is
@@ -130,6 +149,25 @@ export function ToolActivity(props: {
     return !mcpServersKnown(connection()) || appsOff(connection(), value.server);
   };
   const app = createMemo(() => (off() ? undefined : payload()));
+  // A read that returned an image shows it once its row is open.
+  const image = createMemo(
+    () =>
+      readToolImage(
+        toolName(props.name),
+        props.result,
+        store.state.connection ? projectRoots(store.state.connection) : [],
+      ),
+    undefined,
+    {
+      equals: (a, b) =>
+        a === b ||
+        (!!a &&
+          !!b &&
+          ("data" in a
+            ? "data" in b && a.data === b.data
+            : "path" in b && a.path === b.path && a.size === b.size)),
+    },
+  );
   /** This row's own menu turned the apps off: it says so where the page was, with Undo. */
   const [turnedOff, setTurnedOff] = createSignal(false);
   const apps = (on: boolean) => {
@@ -236,6 +274,9 @@ export function ToolActivity(props: {
                           <pre class="tool-output">{output()}</pre>
                         </Show>
                       </Show>
+                      <Show when={image()} keyed>
+                        {(found) => <ReadImage image={found} alt={(shape().target ?? "").split(/[\\/]/).pop() ?? ""} />}
+                      </Show>
                     </div>
                   }
                 >
@@ -321,6 +362,57 @@ export function ToolActivity(props: {
       </div>
     </Show>
     </>
+  );
+}
+/**
+ * The image a read returned, inside its open row: the one its result
+ * carries, or the project file it read, read again like a reply's image.
+ * Nothing shows until the image is there; shown smaller than it is, a click
+ * opens it full size.
+ */
+function ReadImage(props: { image: { data: string } | { path: string; size?: number }; alt: string }) {
+  const store = useApp();
+  const image = props.image;
+  const project = imageProject(store.state);
+  const connection = project?.connection;
+  /** The file as the read saw it: one of another size is not shown. */
+  const same = (shown: ShownImage | undefined) =>
+    shown?.data !== undefined && ("data" in image || image.size === undefined || shown.size === image.size)
+      ? shown.data
+      : undefined;
+  const remembered = "path" in image && connection ? shownProjectImage(connection, image.path) : undefined;
+  const [data, setData] = createSignal("data" in image ? image.data : same(remembered));
+  if ("path" in image && project) {
+    // A remembered picture of another size may be from before the read, or
+    // after it: the file is read again at once, as if it had been written.
+    if (remembered?.data !== undefined && !same(remembered)) projectFileWritten(project.connection, image.path);
+    const reading = new AbortController();
+    const off = onProjectImageSettled((scope, path, shown) => {
+      // A picture the row shows stays when its file changes or goes.
+      const next = scope === connection && path === image.path ? same(shown) : undefined;
+      if (next) setData(next);
+    });
+    readProjectImage(project, image.path, reading.signal);
+    onCleanup(() => {
+      reading.abort();
+      off();
+    });
+  }
+  return (
+    <Show when={data()}>
+      {(src) => (
+        <div
+          class="tool-image"
+          ref={(element) => {
+            // Shown smaller than it is, it opens full size.
+            const opening = watchOpenImages(element, () => t("Image"));
+            onCleanup(opening.dispose);
+          }}
+        >
+          <img src={src()} alt={props.alt} />
+        </div>
+      )}
+    </Show>
   );
 }
 export function ChangePreview(props: { change: Change; showPath?: boolean }) {

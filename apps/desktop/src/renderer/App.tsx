@@ -26,6 +26,7 @@ import {
   sidebarGroups,
 } from "../projects";
 import { Button, Icon, Forms, type IconName } from "./ui";
+import { ImageViewer } from "./ImageViewer";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
 import { computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
@@ -1650,6 +1651,7 @@ export function App() {
         )}
       </Show>
       <Forms />
+      <ImageViewer />
       <ServerConnect />
       <Show when={palette()}>
         <UniversalSearch close={() => setPalette(false)} />

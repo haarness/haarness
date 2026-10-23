@@ -331,6 +331,7 @@ impl McpRegistry for NativeMcpRegistry {
             scope: None,
             apps: config.apps.filter(|on| !on),
             app_tools: None,
+            turned_off: None,
         };
         self.servers.write().insert(
             name.into(),
@@ -1449,20 +1450,32 @@ where
     Ok((definitions, tx))
 }
 
+/// The task that sends a server's requests. Requests go out in the order
+/// they come; a tool call, a resource read or a prompt is then answered from
+/// its own task, so a slow answer holds up no later request to the server.
+/// Listings (paged, and quick) are answered in turn.
 fn spawn_worker(
     client: rmcp::service::RunningService<RoleClient, CatalogClient>,
     credential: Option<FileCredentialStore>,
     limit: Option<Limit>,
 ) -> mpsc::Sender<WorkerCommand> {
+    let limit = limit.map(Arc::new);
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move {
         let peer = client.peer().clone();
         let apps = client.service().apps.clone();
         let done = client.waiting();
         tokio::pin!(done);
+        // The answers being waited for, each on a task of its own.
+        let mut calls = tokio::task::JoinSet::new();
+        let mut ended = false;
         loop {
             let command = tokio::select! {
-                _ = &mut done => break,
+                _ = &mut done => {
+                    ended = true;
+                    break;
+                }
+                Some(_) = calls.join_next(), if !calls.is_empty() => continue,
                 command = rx.recv() => match command { Some(command) => command, None => break },
             };
             // A queued operation must not escape through an old authenticated client.
@@ -1478,13 +1491,27 @@ fn spawn_worker(
                     let mut params = CallToolRequestParams::new(tool.clone());
                     params.arguments = arguments.as_object().cloned();
                     let app = apps.read().get(&tool).cloned();
-                    let result = peer.call_tool(params).await.map_err(mcp_error).and_then(
-                        |result| match &app {
-                            Some(app) => app_output(result, &tool, app),
-                            None => to_output(result, &tool),
-                        },
+                    let request = rmcp::model::ClientRequest::CallToolRequest(
+                        rmcp::model::CallToolRequest::new(params),
                     );
-                    let _ = reply.send(settled(limit.as_ref(), result));
+                    // A call runs to its end even when nobody waits for it,
+                    // as it always has: it may change something.
+                    dispatch(
+                        &peer,
+                        &mut calls,
+                        request,
+                        reply,
+                        limit.clone(),
+                        false,
+                        move |result| match result {
+                            rmcp::model::ServerResult::CallToolResult(result) => match &app {
+                                Some(app) => app_output(result, &tool, app),
+                                None => to_output(result, &tool),
+                            },
+                            _ => Err(mcp_error("unexpected response to tools/call")),
+                        },
+                    )
+                    .await;
                 }
                 WorkerCommand::Resources { mut reply } => {
                     let result = if peer
@@ -1502,7 +1529,7 @@ fn spawn_worker(
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(settled(limit.as_ref(), result));
+                    let _ = reply.send(settled(limit.as_deref(), result));
                 }
                 WorkerCommand::ResourceTemplates { mut reply } => {
                     let result = if peer
@@ -1518,14 +1545,29 @@ fn spawn_worker(
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(settled(limit.as_ref(), result));
+                    let _ = reply.send(settled(limit.as_deref(), result));
                 }
-                WorkerCommand::ReadResource { uri, mut reply } => {
-                    let result = read_resource(&peer, uri, &mut reply).await;
-                    let Some(result) = result else {
-                        continue;
-                    };
-                    let _ = reply.send(settled(limit.as_ref(), result));
+                WorkerCommand::ReadResource { uri, reply } => {
+                    let request = rmcp::model::ClientRequest::ReadResourceRequest(
+                        rmcp::model::ReadResourceRequest::new(ReadResourceRequestParams::new(uri)),
+                    );
+                    // A read can take long: once nobody waits for it (Stop, a
+                    // closed client) the server is told to stop.
+                    dispatch(
+                        &peer,
+                        &mut calls,
+                        request,
+                        reply,
+                        limit.clone(),
+                        true,
+                        |result| match result {
+                            rmcp::model::ServerResult::ReadResourceResult(result) => {
+                                json_value(result)
+                            }
+                            _ => Err(mcp_error("unexpected response to resources/read")),
+                        },
+                    )
+                    .await;
                 }
                 WorkerCommand::Prompts { reply } => {
                     let result = if peer
@@ -1539,7 +1581,7 @@ fn spawn_worker(
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(settled(limit.as_ref(), result));
+                    let _ = reply.send(settled(limit.as_deref(), result));
                 }
                 WorkerCommand::GetPrompt {
                     prompt,
@@ -1548,54 +1590,89 @@ fn spawn_worker(
                 } => {
                     let mut params = GetPromptRequestParams::new(prompt);
                     params.arguments = arguments.as_object().cloned();
-                    let result = peer
-                        .get_prompt(params)
-                        .await
-                        .map_err(mcp_error)
-                        .and_then(json_value);
-                    let _ = reply.send(settled(limit.as_ref(), result));
+                    let request = rmcp::model::ClientRequest::GetPromptRequest(
+                        rmcp::model::GetPromptRequest::new(params),
+                    );
+                    dispatch(
+                        &peer,
+                        &mut calls,
+                        request,
+                        reply,
+                        limit.clone(),
+                        false,
+                        |result| match result {
+                            rmcp::model::ServerResult::GetPromptResult(result) => {
+                                json_value(result)
+                            }
+                            _ => Err(mcp_error("unexpected response to prompts/get")),
+                        },
+                    )
+                    .await;
                 }
+            }
+        }
+        // A disconnect, reconnect or reload drops the client: the requests
+        // in flight run to their end first, as they did when each was
+        // awaited in turn. Once the server is gone they end at once, saying
+        // why.
+        loop {
+            tokio::select! {
+                _ = &mut done, if !ended => ended = true,
+                next = calls.join_next() => if next.is_none() { break },
             }
         }
     });
     tx
 }
 
-/// Reads `uri`, or tells the server to stop and returns `None` once nobody
-/// waits for the answer (Stop, a closed client): a read can take long, and
-/// the server would otherwise go on with it and hold up the next request.
-async fn read_resource(
+/// Sends `request` now, after the requests before it, and answers `reply`
+/// from a task of its own once the server does, through `answer`. A request
+/// nobody waits for any more is not sent. With `cancel`, the server is told
+/// to stop once nobody waits for the answer.
+async fn dispatch<T: Send + 'static>(
     peer: &rmcp::service::Peer<RoleClient>,
-    uri: String,
-    reply: &mut oneshot::Sender<CoreResult<Value>>,
-) -> Option<CoreResult<Value>> {
-    let request = rmcp::model::ClientRequest::ReadResourceRequest(
-        rmcp::model::ReadResourceRequest::new(ReadResourceRequestParams::new(uri)),
-    );
+    calls: &mut tokio::task::JoinSet<()>,
+    request: rmcp::model::ClientRequest,
+    mut reply: oneshot::Sender<CoreResult<T>>,
+    limit: Option<Arc<Limit>>,
+    cancel: bool,
+    answer: impl FnOnce(rmcp::model::ServerResult) -> CoreResult<T> + Send + 'static,
+) {
+    if reply.is_closed() {
+        return;
+    }
     let handle = match peer
         .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
         .await
     {
         Ok(handle) => handle,
-        Err(error) => return Some(Err(mcp_error(error))),
-    };
-    let id = handle.id.clone();
-    tokio::select! {
-        () = reply.closed() => {
-            let _ = peer
-                .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
-                    Some(id),
-                    Some("The user stopped the request".into()),
-                ))
-                .await;
-            None
+        Err(error) => {
+            let _ = reply.send(settled(limit.as_deref(), Err(mcp_error(error))));
+            return;
         }
-        result = handle.await_response() => Some(match result {
-            Ok(rmcp::model::ServerResult::ReadResourceResult(result)) => json_value(result),
-            Ok(_) => Err(mcp_error("unexpected response to resources/read")),
-            Err(error) => Err(mcp_error(error)),
-        }),
-    }
+    };
+    let peer = peer.clone();
+    calls.spawn(async move {
+        let id = handle.id.clone();
+        let result = if cancel {
+            tokio::select! {
+                () = reply.closed() => {
+                    let _ = peer
+                        .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                            Some(id),
+                            Some("The user stopped the request".into()),
+                        ))
+                        .await;
+                    return;
+                }
+                result = handle.await_response() => result,
+            }
+        } else {
+            handle.await_response().await
+        };
+        let result = result.map_err(mcp_error).and_then(answer);
+        let _ = reply.send(settled(limit.as_deref(), result));
+    });
 }
 
 fn json_values<T: serde::Serialize>(values: Vec<T>) -> CoreResult<Vec<Value>> {
@@ -4279,6 +4356,92 @@ mod recovery_tests {
         assert!(McpRegistry::resource_servers(&registry).is_empty());
         registry.disconnect("plain").await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_slow_read_holds_up_no_later_request_to_its_server() {
+        let dir = std::env::temp_dir().join(format!("haarness-mcp-slow-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancels = dir.join("cancels");
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure(
+                "docs",
+                serde_json::from_value(serde_json::json!({
+                    "transport": "stdio", "command": "python3",
+                    "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resources.py")],
+                    "env": {"CANCEL_LOG": cancels}, "enabled": true
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut slow = Box::pin(registry.read_resource("docs", "docs://slow"));
+        // The slow read goes out first and stays unanswered; a read and a
+        // listing sent after it are answered meanwhile.
+        let (page, listed) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                _ = &mut slow => panic!("the slow read was answered"),
+                answers = async {
+                    futures::join!(
+                        registry.read_resource("docs", "docs://setup"),
+                        registry.resources("docs"),
+                    )
+                } => answers,
+            }
+        })
+        .await
+        .expect("a slow read held up the requests after it");
+        assert_eq!(
+            page.unwrap()["contents"][0]["text"],
+            "# Setup\nRun the fixture."
+        );
+        assert_eq!(listed.unwrap().len(), 2);
+        // Once nobody waits for it, the server is still told to stop.
+        drop(slow);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&cancels).is_ok_and(|text| text.starts_with("cancelled"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the server was not told the read was cancelled");
+        registry.disconnect("docs").await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_call_in_flight_runs_to_its_end_when_its_server_is_disconnected() {
+        let log = std::env::temp_dir().join(format!("haarness-mcp-{}", uuid::Uuid::now_v7()));
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure("fixture", config(&log, "0"))
+            .await
+            .unwrap();
+        // Stop ends the wait for its answer; the call itself goes on.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                registry.call(
+                    "fixture",
+                    "mcp__fixture__wait",
+                    serde_json::json!({"seconds": 1})
+                ),
+            )
+            .await
+            .is_err()
+        );
+        registry.disconnect("fixture").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("waited")) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the call was stopped with its server");
+        std::fs::remove_file(log).unwrap();
     }
 
     #[tokio::test]

@@ -1356,7 +1356,8 @@ impl ManagementService {
         let runtime = self.runtime()?;
         let message = required_string(input, "message")?;
         let payload = format!(
-            "Message from session #{}:\n{message}",
+            "{}{}:\n{message}",
+            haarness_core::SESSION_MESSAGE_PREFIX,
             short_id(context.thread_id)
         );
         let active = runtime.active_turn(target.id).await.map_err(core_error)?;
@@ -1374,6 +1375,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: payload,
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: false,
                     },
                 )
@@ -1398,6 +1400,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: payload,
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: false,
                     },
                 )
@@ -1413,6 +1416,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: payload,
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: false,
                         auto_approve: false,
                         agent: Some(identity.0),
@@ -1579,6 +1583,7 @@ impl ManagementService {
                         request_id: RequestId::new(),
                         text: format!("Agent handoff completed. {reason}"),
                         attachments: Vec::new(),
+                        resources: Vec::new(),
                         synthetic: true,
                         auto_approve: false,
                         agent: Some(continuation_agent),

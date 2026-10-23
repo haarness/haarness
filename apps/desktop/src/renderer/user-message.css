@@ -119,3 +119,44 @@
     transition: none;
   }
 }
+
+/* A resource the server read for an `@` mention folds like a paste, under
+   its name and address. */
+.sent-resource-label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+  min-width: 0;
+  overflow: hidden;
+}
+.sent-resource-label > span {
+  flex: none;
+  color: var(--text);
+}
+.sent-resource-label > small,
+.sent-resource-unread > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.sent-resource-unread > small {
+  flex: none;
+}
+.sent-resource-icon {
+  flex: none;
+  color: var(--muted);
+}
+.sent-resource-unread {
+  display: flex;
+  align-items: center;
+  cursor: default;
+}
+/* One that could not be read says why, quietly, without opening. */
+.sent-resource-reason {
+  margin: var(--s0) 0 0;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  overflow-wrap: anywhere;
+}

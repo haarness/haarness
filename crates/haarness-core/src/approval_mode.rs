@@ -28,8 +28,12 @@ pub(crate) struct ApprovalModes {
     revision: Mutex<Option<u64>>,
     /// Orders mode changes with permission admission: a request is either
     /// registered before Auto turns on, and released by the change, or it
-    /// sees Auto and never prompts.
+    /// sees Auto and never prompts. A request Auto's reviewer is deciding is
+    /// registered but not shown, and is settled under the gate again once
+    /// the review ends, so a change to Review always reaches it.
     pub(crate) gate: AsyncMutex<()>,
+    /// What Auto's reviews share: benched models, covered calls, blocks.
+    pub(crate) reviews: Arc<crate::auto_review::ReviewState>,
 }
 
 impl ApprovalModes {
@@ -40,6 +44,7 @@ impl ApprovalModes {
             cache: DashMap::new(),
             revision: Mutex::new(None),
             gate: AsyncMutex::new(()),
+            reviews: Arc::default(),
         }
     }
 
