@@ -1018,14 +1018,17 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 match sent {
                     Ok(true) => {
                         app.undo_draft = None;
+                        app.mention_resources.want = None;
                         app.save_prompt_history();
                     }
                     // A draft whose unknown picks became plain text comes
-                    // back that way, its `@` list open so Enter picks the
-                    // resource again.
+                    // back that way, the cursor after the first and its `@`
+                    // list open on its resource, so Enter picks it again.
                     Ok(false) => match app.mention_resources.returned.take() {
                         Some(returned) => {
-                            app.composer.set_text(returned);
+                            let (before, after) = returned.text.split_at(returned.at);
+                            app.composer.set_text_split(before, after);
+                            app.mention_resources.want = Some(returned.row);
                             refresh_mentions(app, client).await;
                         }
                         None => app.composer.set_text(text),
@@ -1269,8 +1272,12 @@ pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
             app.ask_resources(client);
             app.mention_suggestions = suggestions;
             app.selection = 0;
+            app.select_wanted();
         }
-        None => app.mention_suggestions.clear(),
+        None => {
+            app.mention_suggestions.clear();
+            app.mention_resources.want = None;
+        }
     }
 }
 
