@@ -1343,6 +1343,53 @@ mod tests {
         assert_eq!(app.selection, 0);
     }
 
+    /// An Esc that hid one prompt's list does not hide the next one's: a
+    /// pick that comes back after it opens its list on that resource.
+    #[tokio::test]
+    async fn a_pick_that_comes_back_after_an_earlier_esc_opens_its_list() {
+        let mut app = app();
+        app.providers = vec![haarness_protocol::ProviderInfo {
+            id: "echo".into(),
+            name: "Echo".into(),
+            authenticated: true,
+            models: Vec::new(),
+        }];
+        let capable = info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]);
+        app.server_info = Some(capable.clone());
+        app.mention_resources.list = vec![resource("docs", "docs://setup", "setup")];
+        app.mention_resources.asked = Some(Instant::now());
+        app.mention_resources.chat = Some((app.thread.id, app.agent().to_owned(), false));
+        let (url, _) = answering(capable).await;
+        let client = ApiClient::new(&url, "token").unwrap();
+        let press =
+            |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        app.composer.set_text("@set".into());
+        app.mention_suggestions = vec!["settings.md".into()];
+        crate::input::handle_key(&mut app, press(crossterm::event::KeyCode::Esc), &client)
+            .await
+            .unwrap();
+        crate::input::handle_key(&mut app, press(crossterm::event::KeyCode::Enter), &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "", "Enter sent the text");
+        assert!(!app.autocomplete_hidden);
+        app.active_turn = None;
+        let setup = mention("docs", "docs://setup", "setup");
+        app.composer
+            .set_text(format!("Explain {}", marker(&setup, "not-a-pick")));
+        crate::input::handle_key(&mut app, press(crossterm::event::KeyCode::Enter), &client)
+            .await
+            .unwrap();
+        assert_eq!(app.composer.text(), "Explain @setup");
+        assert_eq!(
+            app.shown_mentions()
+                .get(app.selection)
+                .and_then(|key| find(&app, key))
+                .map(|row| row.uri.as_str()),
+            Some("docs://setup")
+        );
+    }
+
     /// A turn starting in the chat asks again which servers it cannot reach
     /// (a message sent then follows that turn's agent too), without listing
     /// the resources again.
