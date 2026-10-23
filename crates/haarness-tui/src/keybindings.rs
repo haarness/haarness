@@ -284,6 +284,12 @@ pub(crate) fn overrides_default(bindings: &BTreeMap<String, String>, key: KeyEve
             && bindings.get(*name).is_some_and(|value| value != default)
     })
 }
+/// The chat's keys that are not shortcuts to rebind, listed above the
+/// shortcuts so every key can be found in one place.
+const FIXED_KEYS: &[&str] = &[
+    "Fixed: esc esc stop · ctrl+c clear, then stop · alt+enter queue · ctrl+g approval · tab agent · ctrl+y Auto · ctrl+b sidebar · ctrl+t thinking",
+];
+
 pub(crate) fn view(input: &Value) -> Result<ManagementView> {
     let (mut bindings, _) = load();
     if input["action"] == "save" {
@@ -303,7 +309,7 @@ pub(crate) fn view(input: &Value) -> Result<ManagementView> {
         );
         crate::config::save_state(|s| s.keybindings = saved);
     }
-    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:vec!["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".into()],fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
+    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:FIXED_KEYS.iter().map(|line| (*line).to_owned()).chain(["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".to_owned()]).collect(),fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
 }
 
 #[cfg(test)]

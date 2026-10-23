@@ -814,6 +814,24 @@ impl SelectorLayout {
     }
 }
 
+/// The card width that shows every command and its description on one
+/// aligned row, as [`SelectorLayout`] lays them out.
+pub(crate) fn commands_width(app: &App) -> usize {
+    let entries = app.filtered_slash_entries("");
+    let label = entries
+        .iter()
+        .map(|entry| entry.name.width() + 1)
+        .max()
+        .unwrap_or_default();
+    let detail = entries
+        .iter()
+        .map(|entry| entry.description.width())
+        .max()
+        .unwrap_or_default();
+    // Card padding, the marker gutter, the label, its gap, the description.
+    4 + 3 + label + 2 + detail
+}
+
 /// The filter line. Empty reads as an invitation, not as the word "Search"
 /// with a cursor stuck to it.
 /// Selector fields edit at the end of their text. Keep that insertion point
