@@ -13,11 +13,25 @@ import {
 import { useApp } from "./state";
 import { dismissOnBackdrop, Icon } from "./ui";
 import { isWorktree, locationName, primaryLocation, projectKey } from "../projects";
-import { searchEntries, type SearchEntry } from "./search";
+import { asksForKeys, searchEntries, type SearchEntry } from "./search";
 import { chatTitle } from "./chat-title";
+import { focusComposerWhenShown } from "./composer-focus";
 
 
-export function UniversalSearch(props: { close: () => void }) {
+/** Where Search lists archived chats: a project's, one checkout's of it, or
+ * every project's. */
+export type ArchivedScope = { project?: string; location?: string };
+/** Search opened on archived chats (the sidebar's "N archived" under a list
+ * with no open chats). */
+const [archivedRequest, setArchivedRequest] = createSignal<ArchivedScope & { at: number }>();
+export const archivedSearchRequested = archivedRequest;
+export const searchArchived = (scope: ArchivedScope) => setArchivedRequest({ ...scope, at: Date.now() });
+
+export function UniversalSearch(props: {
+  close: () => void;
+  /** Only archived chats, of this project or checkout when it names one. */
+  archived?: ArchivedScope;
+}) {
   const app = useApp();
   const settings = createSettingsSearch(app, { inventory: false });
   let dialog!: HTMLDialogElement;
@@ -47,7 +61,7 @@ export function UniversalSearch(props: { close: () => void }) {
     setFiles([]);
     setProblem("");
     setLoading(false);
-    if (!q || !connection) return;
+    if (!q || !connection || props.archived) return;
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
@@ -68,8 +82,37 @@ export function UniversalSearch(props: { close: () => void }) {
       clearTimeout(timer);
     });
   });
+  type Conversation = ReturnType<typeof app.conversations>[number];
+  const chatEntry = ({ thread, location, key }: Conversation): SearchEntry => ({
+    key: "thread:" + key,
+    group: thread.archived ? "Archived chats" : "Chats",
+    name: chatTitle(thread.title),
+    detail:
+      (app.projects().find((item) => item.id === projectKey(location))
+        ?.label ?? location.label) +
+      (isWorktree(location) ? " · " + t(locationName(location)) : ""),
+    keywords: thread.id + " " + location.workspace,
+    icon: thread.archived ? "archive" : "chat",
+    action: (open) =>
+      app.chooseProjectSession(location.id, thread.id, open?.keep ? "keep" : "preview"),
+  });
   const entries = createMemo(() => {
     const q = query().trim();
+    const scope = props.archived;
+    if (scope)
+      return searchEntries(
+        app
+          .conversations(scope.project)
+          .filter(({ thread, location }) =>
+            thread.archived &&
+            !thread.isSubagent &&
+            location.checkout?.exists !== false &&
+            (!scope.location || location.id === scope.location),
+          )
+          .sort((a, b) => b.thread.updatedAt.localeCompare(a.thread.updatedAt))
+          .map(chatEntry),
+        q,
+      );
     const commands = app.searchCommands();
     const projects = app.projects().flatMap((project): SearchEntry[] => {
       const root = primaryLocation(project);
@@ -114,20 +157,7 @@ export function UniversalSearch(props: { close: () => void }) {
           (q || !thread.archived),
       )
       .sort((a, b) => b.thread.updatedAt.localeCompare(a.thread.updatedAt));
-    const threads = (q ? conversations : conversations.slice(0, 8)).map(
-      ({ thread, location, key }): SearchEntry => ({
-        key: "thread:" + key,
-        group: thread.archived ? "Archived chats" : "Chats",
-        name: chatTitle(thread.title),
-        detail:
-          (app.projects().find((item) => item.id === projectKey(location))
-            ?.label ?? location.label) +
-          (isWorktree(location) ? " · " + t(locationName(location)) : ""),
-        keywords: thread.id + " " + location.workspace,
-        icon: thread.archived ? "archive" : "chat",
-        action: () => app.chooseProjectSession(location.id, thread.id),
-      }),
-    );
+    const threads = (q ? conversations : conversations.slice(0, 8)).map(chatEntry);
     const connection = app.state.connection?.id;
     const paths = files().map(
       (path): SearchEntry => ({
@@ -149,9 +179,20 @@ export function UniversalSearch(props: { close: () => void }) {
     );
     // Providers are a long, brand-heavy list. Keep them findable by name, but
     // out of the default list — the same rule file results already follow.
-    const configuration = settings().filter((entry) => q || !entry.provider);
+    // A "Shortcut: …" entry repeats the action it belongs to, whose row shows
+    // the key anyway, so it comes only when the search is about keys.
+    const aboutKeys = asksForKeys(q, [t("Shortcuts"), t("Keyboard shortcuts")]);
+    const configuration = settings().filter(
+      (entry) => (q || !entry.provider) && (aboutKeys || entry.group !== "Shortcuts"),
+    );
+    // With nothing typed, the list leads with the two ways to start.
+    const leading = q ? [] : ["new", "open"];
+    const ordered = [
+      ...leading.flatMap((key) => commands.filter((entry) => entry.key === key)),
+      ...commands.filter((entry) => !leading.includes(entry.key)),
+    ];
     const ranked = searchEntries(
-      [...commands, ...configuration, ...projects, ...threads, ...paths].map(
+      [...ordered, ...configuration, ...projects, ...threads, ...paths].map(
         (entry) => ({
           ...entry,
           keywords: [entry.keywords, t(entry.group)].filter(Boolean).join(" "),
@@ -196,10 +237,26 @@ export function UniversalSearch(props: { close: () => void }) {
           location.checkout?.exists !== false &&
           app.indexes()[location.id]?.loading,
       );
-  function run(entry?: SearchEntry) {
+  /** The project, and the checkout when it is a worktree, Search is limited to. */
+  const scopeName = () => {
+    const project = app.projects().find((item) => item.id === props.archived?.project);
+    const location = project?.locations.find((item) => item.id === props.archived?.location);
+    return (project?.label ?? "") + (isWorktree(location) ? " · " + t(locationName(location!)) : "");
+  };
+  /** With Command (Control elsewhere) held, a chat opens in a tab that stays. */
+  const keeps = (event: MouseEvent | KeyboardEvent) =>
+    app.state.platform === "darwin" ? event.metaKey : event.ctrlKey;
+  function run(entry?: SearchEntry, open: { keep?: boolean } = {}) {
     if (!entry || entry.disabled) return;
     executing = true;
     props.close();
+    // Closing the dialog gives the keyboard back to what had it, often the
+    // sidebar's Search button. A chat or project leads to its message box;
+    // any other pick that leaves the keyboard on that button (or nowhere)
+    // sends it to the message box too, while one that took the keyboard
+    // somewhere (a dialog, the terminal) keeps it there.
+    const leads = /^(thread|project|worktree):/.test(entry.key);
+    const opener = previous?.matches("[data-search-button]") ? previous : null;
     void app.run(async () => {
       if (
         entry.destination !== "settings" &&
@@ -207,7 +264,8 @@ export function UniversalSearch(props: { close: () => void }) {
         !(await app.closeSettings())
       )
         return;
-      await entry.action();
+      await entry.action(open);
+      if (leads || opener) focusComposerWhenShown(leads ? previous : opener);
     });
   }
   return (
@@ -247,7 +305,7 @@ export function UniversalSearch(props: { close: () => void }) {
           }
           if (event.key === "Enter") {
             event.preventDefault();
-            run(entries()[index()]);
+            run(entries()[index()], { keep: keeps(event) });
           }
         }}
       >
@@ -263,7 +321,13 @@ export function UniversalSearch(props: { close: () => void }) {
               entries().length ? "palette-option-" + index() : undefined
             }
             ref={(element) => queueMicrotask(() => element.focus())}
-            placeholder={t("Search anything in Haarness…")}
+            placeholder={
+              !props.archived
+                ? t("Search anything in Haarness…")
+                : props.archived.project
+                  ? t("Search archived chats in {name}…", { name: scopeName() })
+                  : t("Search archived chats…")
+            }
             value={query()}
             onInput={(event) => {
               setQuery(event.currentTarget.value);
@@ -304,7 +368,13 @@ export function UniversalSearch(props: { close: () => void }) {
                         setIndex(position());
                         setSelection(key);
                       }}
-                      onClick={() => run(entry())}
+                      onClick={(event) => run(entry(), { keep: keeps(event) })}
+                      onMouseDown={(event) => {
+                        if (event.button === 1) event.preventDefault();
+                      }}
+                      onAuxClick={(event) => {
+                        if (event.button === 1) run(entry(), { keep: true });
+                      }}
                     >
                       <Show
                         when={entry().provider}

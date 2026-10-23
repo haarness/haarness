@@ -26,6 +26,8 @@
 .titlebar input {
   -webkit-app-region: no-drag;
 }
+/* The sidebar toggle keeps its place when it is pressed: at the start of the
+   bar, after the traffic lights on macOS, with the sidebar shown or not. */
 .window-toolbar {
   width: var(--sidebar-width);
   height: 100%;
@@ -33,7 +35,7 @@
   padding-inline: var(--s3) var(--s2);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   flex: none;
   min-width: 46px;
 }
@@ -90,6 +92,11 @@
   min-height: 0;
 }
 .sidebar {
+  /* A project heading's height, which the rows brought into view stop
+     below, and the scrollbar's width (base.css), which the list's gutter
+     takes from the sidebar's padding. */
+  --project-row: 30px;
+  --scrollbar: 11px;
   width: var(--sidebar-width);
   flex: none;
   display: flex;
@@ -189,6 +196,10 @@
   inherits: true;
   initial-value: 0%;
 }
+/* The scrollbar's gutter is kept whether or not the list overflows, so
+   expanding a project never shifts the rows sideways. It lies in the
+   sidebar's own padding (its outer edge, the thumb's transparent border, is
+   cut off there), so rows still end on the column of the menus above. */
 .sidebar-lists {
   --sidebar-scrollbar-opacity: 0%;
   transition: --sidebar-scrollbar-opacity 240ms ease-out;
@@ -197,9 +208,15 @@
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding-bottom: var(--s2);
-  margin: 0 calc(var(--s1) * -1);
-  padding-inline: var(--s1);
+  margin-inline: calc(var(--s1) * -1) calc(var(--scrollbar) * -1);
+  padding-inline: var(--s1) 0;
+}
+/* With no padding at the list's end, its rows draw their keyboard ring inside
+   (base.css draws it, outside, with the same selector). */
+:root:not([data-pointer-focus]) .sidebar-lists button:focus-visible {
+  outline-offset: -2px;
 }
 .sidebar-lists.is-scrolling {
   --sidebar-scrollbar-opacity: 35%;
@@ -272,7 +289,7 @@
   border: 0;
   width: 100%;
   justify-content: flex-start;
-  min-height: 30px;
+  min-height: var(--project-row);
   padding: 0 var(--s2);
   color: var(--muted);
   font-size: var(--ui);
@@ -306,6 +323,33 @@
   position: relative;
   border-radius: var(--r-md);
 }
+/* A project's heading stays at the top of the list while its chats scroll
+   under it, so every row in view says which project it belongs to; the next
+   project's heading pushes it away. Opaque, and square so no row shows
+   through its corners. */
+.project-list .project-row {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--sidebar);
+  border-radius: 0;
+}
+/* Rows passing under it fade out rather than being cut at a hard edge. The
+   fade fits the gap above a list's first row, so it shows only on rows
+   scrolled under the heading. */
+.project-list .project-row::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  inset-inline: 0;
+  height: var(--s0);
+  background: linear-gradient(var(--sidebar), transparent);
+  pointer-events: none;
+}
+/* Rows brought into view (a chat chosen, a row walked to) stop below it. */
+.project-group .session-row {
+  scroll-margin-block: calc(var(--project-row) + var(--s0)) var(--s1);
+}
 .project-row > .project-heading {
   flex: 1;
   min-width: 0;
@@ -314,7 +358,7 @@
 .project-disclosure {
   flex: none;
   width: 28px;
-  min-height: 30px;
+  min-height: var(--project-row);
   padding: 0;
   border: 0;
   border-radius: var(--r-md);
@@ -542,9 +586,16 @@ html[data-order-dragging] * {
   color: var(--muted);
   flex: none;
 }
-.session-row:hover .session-waiting,
-.session-row:focus-within .session-waiting {
-  display: none;
+/* On hover or focus the row's archive button takes the place of its age or
+   waiting label, which keeps its room so the title does not move. Leaving,
+   the label comes back once the button has faded, so the two never overlap. */
+.session-row :is(.session-waiting, .session-age) {
+  transition: visibility 0s linear var(--fast);
+}
+.session-row:hover :is(.session-waiting, .session-age),
+.session-row:focus-within :is(.session-waiting, .session-age) {
+  visibility: hidden;
+  transition-delay: 0s;
 }
 /* Select chats: a tick box in place of the status dot (rows keep their own
    backgrounds, so the open chat still stands out), and the bar of actions
@@ -615,8 +666,14 @@ html[data-order-dragging] * {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-/* Row-trailing controls share one column with the project and checkout menus. */
+/* The row's archive button shares one column with the project and checkout
+   menus. Until the row is hovered or focused it is out of sight and takes no
+   room, so the title gets the width; then it lies over the row's end. (A
+   pointer over it hovers the row, so it is never pressed unseen.) */
 .session-row > .icon-button {
+  position: absolute;
+  top: 1px;
+  inset-inline-end: 0;
   width: 26px;
   min-width: 26px;
   height: 28px;
@@ -665,6 +722,22 @@ html[data-order-dragging] * {
   padding-inline: var(--s5) var(--s2);
   margin: 0;
 }
+/* "3 archived": quiet, but plainly something to press. */
+.sessions-archived {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--muted) 50%, transparent);
+  text-underline-offset: 2px;
+}
+.sessions-archived:hover {
+  text-decoration-color: currentColor;
+}
 
 .sidebar-footer {
   border-top: 1px solid var(--hairline);
@@ -701,6 +774,10 @@ html[data-order-dragging] * {
 .resize-handle:focus-visible,
 .resize-handle.dragging {
   background: var(--primary);
+}
+/* With the keyboard on it, the divider thickens to a 3px bar. */
+.resize-handle:focus-visible {
+  box-shadow: 0 0 0 1px var(--primary);
 }
 .resize-handle.horizontal {
   width: auto;
@@ -852,6 +929,19 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 }
 .workspace-tab.active > button:first-child {
   color: var(--text);
+}
+/* The preview tab, which the next chat opened replaces, is set in italics,
+   as an editor's preview tab is. */
+.workspace-tab.preview > button:first-child {
+  font-style: italic;
+}
+/* The tab's label is a block (it ellipsises), so the dot is set inline with
+   a size of its own rather than collapsing to a sliver over the first letter. */
+.workspace-tab > button:first-child > .session-status {
+  display: inline-block;
+  vertical-align: middle;
+  margin-block-start: -2px;
+  margin-inline-end: var(--s2);
 }
 .workspace-tab > .icon-button {
   width: 18px;
@@ -1125,25 +1215,46 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 }
 
 /* --------------------------------------------------------------- narrow UI */
-@media (max-width: 1100px) {
-  .workbench.has-dock .chat-pane {
-    visibility: hidden;
-  }
-  .workbench.has-dock.dock-expanded .chat-pane {
-    display: none;
-  }
-  .workbench.has-dock > .resize-handle {
-    display: none;
-  }
-  .side-panel {
-    position: absolute;
-    top: 0;
-    inset-inline-end: 0;
-    width: 100%;
-    height: 100%;
-    z-index: 10;
-    border-inline-start: 1px solid var(--hairline);
-  }
+/* With no room for the conversation beside it (App.tsx measures the
+   workbench, after the sidebar has stepped aside), the side panel lies over
+   the conversation, and its strip leads with the way back. */
+.workbench.dock-over .chat-pane {
+  visibility: hidden;
+}
+.workbench.dock-over > .resize-handle {
+  display: none;
+}
+.workbench.dock-over .side-panel {
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+  border-inline-start: 1px solid var(--hairline);
+}
+.dock-return {
+  flex: none;
+  height: 26px;
+  min-height: 0;
+  padding-block: 0;
+  padding-inline: var(--s2);
+  gap: var(--s1);
+  border: 0;
+  border-radius: var(--r-md);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.dock-return:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.dock-tabs-rule {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin-inline: var(--s1);
+  background: var(--hairline);
 }
 @media (max-width: 940px) {
   .titlebar-actions {

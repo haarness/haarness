@@ -486,7 +486,7 @@ test("an agent's page opens a closed side panel on the Browser, but never brings
   const browser = page.getByRole("region", { name: "Web browser" });
   const sidePanel = page.locator(".side-panel");
   const toggle = page.getByRole("button", { name: /^(Show|Hide) side panel$/ });
-  const browserTab = page.getByRole("button", { name: "Show browser panel", exact: true });
+  const browserTab = page.getByRole("button", { name: "Show Browser panel", exact: true });
   const hide = async () => {
     await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
     await expect(sidePanel).toBeHidden();
@@ -527,7 +527,7 @@ test("an agent's page opens a closed side panel on the Browser, but never brings
   await expect(browser).toBeVisible();
   // Closing the Browser's own tab puts it away too: the agent's page brings
   // the tab back with a dot, and the panel launcher stays.
-  await page.getByRole("button", { name: "Close browser panel", exact: true }).click();
+  await page.getByRole("button", { name: "Close Browser panel", exact: true }).click();
   await expect(browser).toBeHidden();
   await tool("navigate", { tabID, url: siteURL + "/popup" });
   await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
@@ -555,7 +555,7 @@ test("an agent's page opens a closed side panel on the Browser, but never brings
   await expect(toggle.locator(".icon-button-dot")).toHaveCount(0);
   // A tab the agent keeps in the background loads pages where it is.
   const background = (await tool("tabs_open", { url: siteURL + "/popup", focus: false })).value.id;
-  await page.getByRole("button", { name: "Show context panel", exact: true }).click();
+  await page.getByRole("button", { name: "Show Context panel", exact: true }).click();
   await hide();
   await tool("navigate", { tabID: background, url: siteURL + "/frame" });
   await stays(() => expect(sidePanel).toBeHidden());
@@ -592,14 +592,14 @@ test("an agent's page opens a closed side panel on the Browser, but never brings
   await expect(browserTab.locator(".dock-tab-dot")).toHaveCount(0);
   await expect(browserTab).not.toHaveAttribute("aria-description", /./);
   // The dot is about this chat's page; another chat shows none.
-  await page.getByRole("button", { name: "Show context panel", exact: true }).click();
+  await page.getByRole("button", { name: "Show Context panel", exact: true }).click();
   await tool("navigate", { tabID, url: siteURL + "/frame" });
   await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
   await select(second);
   await expect(browserTab.locator(".dock-tab-dot")).toHaveCount(0);
   await select(thread);
   await expect(page.locator(".dock-tab.active")).toContainText("Context");
-  await page.getByRole("button", { name: "Close context panel", exact: true }).click();
+  await page.getByRole("button", { name: "Close Context panel", exact: true }).click();
   await tool("tabs_close", { tabID: background });
   // Leave the tab on the fixture page the following tests read.
   await tool("navigate", { tabID, url: siteURL });

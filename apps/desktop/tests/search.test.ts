@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  asksForKeys,
   matchesShortcut,
   physicalKey,
   searchEntries,
@@ -77,6 +78,64 @@ test("search does not cut off conversations at eight and excludes nonmatching na
   );
   assert.equal(searchEntries(entries, "conversation").length, 30);
   assert.equal(searchEntries(entries, "Conversation 29")[0].key, "29");
+});
+
+test("a match inside a word ranks far below one at a word's start", () => {
+  const entries = [
+    entry("provider", "Deterministic test provider", { group: "Settings" }),
+    entry("toggle", "Toggle terminal"),
+    entry("size", "Terminal text size", { group: "Settings" }),
+  ];
+  assert.deepEqual(searchEntries(entries, "term").map((item) => item.key), ["size", "toggle", "provider"]);
+  // Still found, but far behind: below even a match in an entry's keywords.
+  const withAlias = [...entries, entry("alias", "Console", { keywords: "terminal shell" })];
+  assert.deepEqual(searchEntries(withAlias, "term").slice(-2).map((item) => item.key), ["alias", "provider"]);
+});
+
+test("in scripts written without spaces a match anywhere in a title starts a word", () => {
+  const settings = (names: string[]) => names.map((name, index) => entry(String(index), name, { group: "Settings" }));
+  // Chinese: 浏览器 in 智能体浏览器控制 ranks with the titles that begin
+  // with it, above a setting found only by its keywords.
+  const zh = [
+    entry("alias", "显示完整网址", { group: "Settings", keywords: "浏览器 网址" }),
+    ...settings(["智能体浏览器控制", "浏览器设置范围", "浏览器"]),
+  ];
+  assert.deepEqual(searchEntries(zh, "浏览器").map((item) => item.name), ["浏览器", "浏览器设置范围", "智能体浏览器控制", "显示完整网址"]);
+  // Japanese, after a particle: エージェントのブラウザ制御.
+  const ja = [
+    entry("alias", "完全な URL を表示", { group: "Settings", keywords: "ブラウザ" }),
+    ...settings(["エージェントのブラウザ制御", "ブラウザ設定の適用範囲", "ブラウザ"]),
+  ];
+  assert.deepEqual(searchEntries(ja, "ブラウザ").map((item) => item.name), ["ブラウザ", "ブラウザ設定の適用範囲", "エージェントのブラウザ制御", "完全な URL を表示"]);
+  // Thai: กิจกรรมเครื่องมือแบบย่อ ranks above a tool found by its description.
+  const th = [
+    entry("tool", "web_fetch", { group: "Settings", keywords: "เครื่องมือ" }),
+    ...settings(["กิจกรรมเครื่องมือแบบย่อ", "เครื่องมือ"]),
+  ];
+  assert.deepEqual(searchEntries(th, "เครื่องมือ").map((item) => item.name), ["เครื่องมือ", "กิจกรรมเครื่องมือแบบย่อ", "web_fetch"]);
+  // A Latin word still has to begin where the query does.
+  assert.deepEqual(searchEntries(settings(["Deterministic", "Terminal"]), "term").map((item) => item.name), ["Terminal", "Deterministic"]);
+});
+
+test("an action outranks a setting or shortcut that matches as well", () => {
+  const entries = [
+    entry("setting", "Open project", { group: "Settings" }),
+    entry("shortcut", "Open project", { group: "Shortcuts" }),
+    entry("command", "Open project"),
+  ];
+  assert.deepEqual(searchEntries(entries, "open").map((item) => item.key), ["command", "setting", "shortcut"]);
+  // A command that cannot run still gives way to one that can.
+  const disabled = [entry("setting", "Open project", { group: "Settings" }), entry("command", "Open project", { disabled: true })];
+  assert.deepEqual(searchEntries(disabled, "open").map((item) => item.key), ["setting", "command"]);
+});
+
+test("a search is about keys when it names them, a modifier, or the interface's word for shortcuts", () => {
+  for (const query of ["shortcut new", "Shortcut: New chat", "short", "keyboard", "key", "Ctrl+N", "⌘ ⇧ L", "cmd", "alt", "hotk"])
+    assert.equal(asksForKeys(query), true, query);
+  for (const query of ["", "new chat", "terminal", "model", "keep", "theme"])
+    assert.equal(asksForKeys(query), false, query);
+  assert.equal(asksForKeys("tasten", ["Tastenkombinationen"]), true);
+  assert.equal(asksForKeys("ta", ["Tastenkombinationen"]), false);
 });
 
 test("shortcut matching requires every modifier to agree", () => {

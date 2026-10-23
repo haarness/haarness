@@ -66,7 +66,8 @@ export function createPointerOrdering(callbacks: {
         preview = document.createElement("div");
         preview.className = "order-drag-preview";
         preview.setAttribute("aria-hidden", "true");
-        preview.textContent = handle.innerText.trim();
+        // The row's title alone, without the age or labels beside it.
+        preview.textContent = (handle.querySelector<HTMLElement>("[data-order-title]") ?? handle).innerText.trim();
         document.body.append(preview);
         frame = requestAnimationFrame(scroll);
       }

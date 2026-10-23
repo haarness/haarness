@@ -65,11 +65,16 @@ import {
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
 import {
   archivedByReader,
+  keptTabs,
   newlyArchived,
+  openTab,
   sameTabs,
   savedTabs,
+  tabOrderScope,
   tabsKey,
+  takeSlot,
   unarchivedChats,
+  type TabOpen,
 } from "./chat-tabs";
 import { themeColors } from "../themes";
 import {
@@ -127,6 +132,9 @@ interface State extends Live {
   platform: string;
   selected: string;
   tabs: string[];
+  /** The tab a plain click opened, which the next one replaces ("" when
+   * every tab is kept); see `openTab`. */
+  preview: string;
   items: T.Item[];
   providers: T.ProviderInfo[];
   agents: T.AgentProfile[];
@@ -210,6 +218,7 @@ function createApp(saved?: Preferences) {
     platform: "",
     selected: "",
     tabs: [],
+    preview: "",
     items: [],
     threads: [],
     turns: [],
@@ -582,16 +591,32 @@ function createApp(saved?: Preferences) {
   async function choose(
     id: string,
     panel: State["panel"] = "chat",
-    options: { fresh?: boolean } = {},
+    options: { fresh?: boolean; tab?: TabOpen } = {},
   ) {
     if (state.selected === id) {
       set("panel", panel);
+      if (options.tab === "keep") keepTab(id);
       return;
     }
     const current = ++selection;
     const connection = state.connection!.id;
-    const opened = !state.tabs.includes(id);
-    tabHistory = [...tabHistory.filter((tab) => tab !== id), id];
+    const next = openTab(state.tabs, state.preview, id, options.tab);
+    // Double-clicked while it opened: the preview it takes is kept. Only this
+    // chat consumes the mark; a project opening first chooses its own.
+    if (keepNext === id) {
+      if (next.preview === id) next.preview = "";
+      keepNext = "";
+    }
+    // The preview this chat replaces leaves the tab strip; its slot in a
+    // saved tab order goes to this chat.
+    const replaced = next.preview === id && state.preview !== id && !next.tabs.includes(state.preview)
+      ? state.preview
+      : "";
+    const slot = replaced
+      ? takeSlot(state.ordering[tabOrderScope(connection)], replaced, id)
+      : undefined;
+    const kept = keptTabs(state.tabs, state.preview);
+    tabHistory = [...tabHistory.filter((tab) => tab !== id && tab !== replaced), id];
     batch(() => {
       // A chat created just now (see `freshChat`) has no history to load, so
       // its composer stays in view while the first message goes out.
@@ -599,9 +624,12 @@ function createApp(saved?: Preferences) {
       set("selected", id);
       set("items", []);
       set("panel", panel);
-      if (opened) set("tabs", (tabs) => [...tabs, id]);
+      if (!sameTabs(state.tabs, next.tabs)) set("tabs", next.tabs);
+      set("preview", next.preview);
+      if (slot) set("ordering", tabOrderScope(connection), slot);
     });
-    if (opened) rememberTabs(connection);
+    if (!sameTabs(kept, keptTabs(state.tabs, state.preview))) rememberTabs(connection);
+    if (slot) void saveOrdering();
     // Remembered as soon as it is chosen, not once its history has loaded: a
     // reload or quit in between brought back the chat shown before.
     void window.haarness.storage("session:" + connection, id);
@@ -623,10 +651,44 @@ function createApp(saved?: Preferences) {
     }
   }
 
-  /** Open chat tabs outlast a reload or relaunch, as the selected chat does. */
+  /** Open chat tabs outlast a reload or relaunch, as the selected chat does.
+   * The preview is not among them: it comes back only as the selected chat. */
   function rememberTabs(connection: string) {
-    void window.haarness.storage(tabsKey(connection), [...state.tabs]);
+    void window.haarness.storage(tabsKey(connection), keptTabs(state.tabs, state.preview));
   }
+  /** A double-click on a chat can land before the chat it opens is chosen
+   * (another project's opens first); the next navigation elsewhere drops it. */
+  let keepNext = "";
+  /** Turns the preview `id` into a tab that stays, or the chat being opened
+   * now when it becomes the preview. */
+  function keepTab(id: string) {
+    if (!id || state.preview !== id) {
+      if (id && state.selected !== id) keepNext = id;
+      return;
+    }
+    set("preview", "");
+    if (state.connection) rememberTabs(state.connection.id);
+  }
+  // A preview becomes a tab of its own once it is used: a draft there (text,
+  // attachments or context chips such as a folded paste), work running
+  // there, or an approval or a question waiting for an answer.
+  createEffect(() => {
+    const id = state.preview;
+    const connection = state.connection?.id;
+    if (!id || !connection) return;
+    const key = sessionKey(connection, id);
+    const root = (thread: string) => conversationRoot(state.threads, thread);
+    if (
+      !!state.drafts[key] ||
+      !!attachmentDraft(key)?.length ||
+      !!contexts()[key]?.length ||
+      state.turns.some((turn) => turn.threadId === id || root(turn.threadId) === id) ||
+      [...state.permissions, ...state.questions].some(
+        (item) => (item.rootThreadId ?? item.threadId) === id,
+      )
+    )
+      untrack(() => keepTab(id));
+  });
   // A chat archived while its tab waits behind another (from the sidebar,
   // Archive chats or another window) leaves the tab strip with its sidebar
   // row. The chat on screen stays open, with its archived notice and Restore.
@@ -639,14 +701,20 @@ function createApp(saved?: Preferences) {
         (id) => id !== state.selected && state.tabs.includes(id),
       );
       if (!closing.length || !state.connection) return;
-      set("tabs", (tabs) => tabs.filter((tab) => !closing.includes(tab)));
+      batch(() => {
+        set("tabs", (tabs) => tabs.filter((tab) => !closing.includes(tab)));
+        if (closing.includes(state.preview)) set("preview", "");
+      });
       tabHistory = tabHistory.filter((tab) => !closing.includes(tab));
       rememberTabs(state.connection.id);
     });
   });
   async function closeTab(id: string) {
-    set("openingChat", 0);
-    set("tabs", (tabs) => tabs.filter((tab) => tab !== id));
+    stopOpening();
+    batch(() => {
+      set("tabs", (tabs) => tabs.filter((tab) => tab !== id));
+      if (state.preview === id) set("preview", "");
+    });
     if (state.connection) rememberTabs(state.connection.id);
     tabHistory = tabHistory.filter((tab) => state.tabs.includes(tab));
     if (state.selected !== id) return;
@@ -972,6 +1040,7 @@ function createApp(saved?: Preferences) {
       set("selected", "");
       set("items", []);
       set("tabs", []);
+      set("preview", "");
       set("threads", []);
       set("turns", []);
       set("permissions", []);
@@ -992,7 +1061,7 @@ function createApp(saved?: Preferences) {
   }
   async function switchServer(id: string) {
     if (!servers().some((item) => item.id === id)) return false;
-    set("openingChat", 0);
+    stopOpening();
     const attempt = connectAttempt;
     const remembered = await window.haarness.storage("server-project:" + id);
     if (attempt !== connectAttempt) return false;
@@ -1009,7 +1078,7 @@ function createApp(saved?: Preferences) {
     return true;
   }
   async function openProject(newChat = false) {
-    set("openingChat", 0);
+    stopOpening();
     const server = currentServer();
     if (server.url || server.host) {
       set("remoteProjectRequest", { server, newChat });
@@ -1428,7 +1497,7 @@ function createApp(saved?: Preferences) {
       );
   }
   async function selectProject(id: string, newChat = false) {
-    set("openingChat", 0);
+    stopOpening();
     const group = projects().find((item) => item.id === id);
     if (!group) return false;
     const location = primaryLocation(group);
@@ -1463,7 +1532,7 @@ function createApp(saved?: Preferences) {
   }
   async function startChat(location?: string) {
     batch(() => {
-      set("openingChat", 0);
+      stopOpening();
       set("loadingChat", 0);
     });
     if (location) {
@@ -1563,6 +1632,7 @@ function createApp(saved?: Preferences) {
         set("selected", "");
         set("items", []);
         set("tabs", []);
+        set("preview", "");
         tabHistory = [];
         set("streams", {});
         set("tasks", {});
@@ -1624,7 +1694,7 @@ function createApp(saved?: Preferences) {
       }
       // Keep the record to what is open now: without the chats archived or
       // gone meanwhile, and with any chat chosen while the project loaded.
-      if (!sameTabs(remembered, state.tabs)) rememberTabs(view.id);
+      if (!sameTabs(remembered, keptTabs(state.tabs, state.preview))) rememberTabs(view.id);
       if (newChat || newChatAttempt === attempt)
         await window.haarness.storage("session:" + view.id, "");
       const saved = await window.haarness.storage("session:" + view.id);
@@ -1637,7 +1707,8 @@ function createApp(saved?: Preferences) {
           (item) => item.id === saved && !archivedByReader(item),
         )
       )
-        await choose(saved);
+        // A chat the project does not keep a tab for was its preview.
+        await choose(saved, "chat", { tab: "preview" });
       else if (!newChat && newChatAttempt !== attempt && saved == null) {
         const waiting =
           state.permissions[0]?.rootThreadId ??
@@ -1668,31 +1739,44 @@ function createApp(saved?: Preferences) {
       if (attempt === connectAttempt) set("openingProject", "");
     }
   }
+  /** The location `id` is open and settled, so nothing needs connecting. */
+  const projectOpen = (id: string) =>
+    state.connection?.id === id &&
+    state.ready &&
+    state.connectionStatus === "Connected" &&
+    !activation;
   async function activateProject(id: string) {
     if (state.recent.find((item) => item.id === id)?.checkout?.exists === false)
       throw new Error(
         "This checkout is missing. Restore its folder or choose another location in this project.",
       );
-    if (
-      state.connection?.id === id &&
-      state.ready &&
-      state.connectionStatus === "Connected" &&
-      !activation
-    )
-      return true;
+    if (projectOpen(id)) return true;
     return connect({ recent: id });
   }
-  async function chooseProjectSession(project: string, thread: string) {
+  async function chooseProjectSession(project: string, thread: string, tab?: TabOpen) {
     const request = ++navigation;
+    if (keepNext !== thread) keepNext = "";
+    // A chat of the project already open is chosen at once, in place: its
+    // tabs stay on screen, and the message box waits for it as for a tab
+    // chosen. Another project shows the loading mark while it opens.
+    if (projectOpen(project)) {
+      await Promise.all([expandLocation(project, true), choose(thread, "chat", { tab })]);
+      return;
+    }
     set("openingChat", request);
     try {
-      if (!(await activateProject(project)) || state.openingChat !== request)
-        return;
+      if (!(await activateProject(project)) || navigation !== request) return;
       await expandLocation(project, true);
-      if (state.openingChat === request) await choose(thread);
+      if (navigation === request) await choose(thread, "chat", { tab });
     } finally {
       if (state.openingChat === request) set("openingChat", 0);
     }
+  }
+  /** Ends a chat opening still under way (a project, server or New chat
+   * chosen meanwhile, or its tab closed). */
+  function stopOpening() {
+    navigation++;
+    set("openingChat", 0);
   }
   let notificationNavigation = 0;
   async function openNotification(target: NotificationTarget) {
@@ -1801,6 +1885,8 @@ function createApp(saved?: Preferences) {
     const target = project()?.id;
     const draftProject = newDraftScope();
     const targetThread = state.selected;
+    // A message sent in a preview keeps its tab.
+    keepTab(targetThread);
     if (activation) await activation.promise;
     const connection = state.connection?.id;
     if (!connection) throw new Error("Open project first");
@@ -1967,7 +2053,13 @@ function createApp(saved?: Preferences) {
       scope,
       moveInOrder(state.ordering[scope] ?? ids, ids, id, target),
     );
-    await window.haarness.storage("ordering:v1", {
+    // Moving the preview tab keeps it.
+    if (state.preview === id && state.connection && scope === tabOrderScope(state.connection.id))
+      keepTab(id);
+    await saveOrdering();
+  }
+  function saveOrdering() {
+    return window.haarness.storage("ordering:v1", {
       version: 1,
       lists: unwrap(state.ordering),
     });
@@ -2268,6 +2360,7 @@ function createApp(saved?: Preferences) {
     startChat,
     chooseProjectSession,
     choose,
+    keepTab,
     closeTab,
     create,
     send,
