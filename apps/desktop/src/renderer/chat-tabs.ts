@@ -58,3 +58,45 @@ export function newlyArchived(
     .filter((thread) => archivedByReader(thread) && before.has(thread.id))
     .map((thread) => thread.id);
 }
+
+/** The ordering scope (`ordering:v1`) of a location's chat tabs. */
+export const tabOrderScope = (connection: string) =>
+  "list:session-tabs:" + connection;
+
+/**
+ * How a chat comes into the tab strip. A plain click in the sidebar or a
+ * Search pick opens a `preview`: it takes the preview tab's place, so looking
+ * through chats leaves one tab behind rather than one each. `keep` gives the
+ * chat a tab that stays (a middle-click, Command/Control-click or
+ * double-click), turning its preview into one. Anything else keeps an open
+ * tab as it is and opens a new chat in a tab of its own.
+ */
+export type TabOpen = "preview" | "keep" | undefined;
+
+/** The tabs, and which of them is the preview, once `id` is opened. */
+export function openTab(
+  tabs: readonly string[],
+  preview: string,
+  id: string,
+  how: TabOpen,
+): { tabs: string[]; preview: string } {
+  if (tabs.includes(id))
+    return { tabs: [...tabs], preview: how === "keep" && preview === id ? "" : preview };
+  if (how !== "preview") return { tabs: [...tabs, id], preview };
+  const at = preview ? tabs.indexOf(preview) : -1;
+  if (at < 0) return { tabs: [...tabs, id], preview: id };
+  return { tabs: tabs.map((tab, index) => (index === at ? id : tab)), preview: id };
+}
+
+/** The tabs a location remembers: every tab but its preview. A preview that
+ * was the open chat still comes back, as the location's selected chat. */
+export function keptTabs(tabs: readonly string[], preview: string) {
+  return tabs.filter((tab) => tab !== preview);
+}
+
+/** A saved tab order with the replaced preview's slot handed to the chat that
+ * took its place, so the new preview shows where the old one was. */
+export function takeSlot(saved: readonly string[] | undefined, from: string, to: string) {
+  if (!saved?.includes(from) || saved.includes(to)) return undefined;
+  return saved.map((id) => (id === from ? to : id));
+}

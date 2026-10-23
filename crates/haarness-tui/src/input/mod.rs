@@ -14,6 +14,11 @@ use crate::state::{App, InterruptTarget, Overlay, PermissionChoice, PhaseInfo, s
 
 const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// What Ctrl+C on a draft says: the draft is cleared, not lost, as far as
+/// it comes back (↑ and undo bring back text, never attachments).
+const DRAFT_CLEARED: &str = "Draft cleared · ↑ brings it back";
+const DRAFT_TEXT_CLEARED: &str = "Draft cleared · ↑ brings back its text, not its attachments";
+
 fn confirm<T: Copy + PartialEq>(pending: &mut Option<(T, std::time::Instant)>, target: T) -> bool {
     let now = std::time::Instant::now();
     if pending.as_ref().is_some_and(|(candidate, armed)| {
@@ -154,24 +159,172 @@ pub(crate) async fn answer_permission(
 /// the gap between the doubled letters of a typed word.
 const STAGED_READ_TIME: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// A printable key while the approval card owns the keyboard. Returns false
-/// when the key is not an answer, which means the user is typing a message.
+/// How long a one-key answer (`y`, `n`, and `a` on a Chrome card) waits, its
+/// chip lit, before it is sent: longer than the gap between two letters typed
+/// at speed, short enough to feel immediate. A printable key that comes
+/// first shows the letter began a message ("yes…", "no wait").
+pub(crate) const ANSWER_SETTLE_TIME: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Whether `choice` answers the focused card on its own key, without a
+/// confirming press: Allow once and Reject, and every answer on a Chrome site
+/// request (`explicit`), whose answer for this chat covers one site.
+fn answers_on_one_key(app: &App, choice: PermissionChoice) -> bool {
+    !choice.staged()
+        || app
+            .first_pending_permission()
+            .is_some_and(|pending| pending.explicit)
+}
+
+/// The one-key answer waiting out [`ANSWER_SETTLE_TIME`], while it still
+/// answers the card on screen: one that changed under it (a session switch,
+/// another client's answer, the keyboard handed back) took the letter with
+/// it.
+pub(crate) fn settling_answer(app: &App) -> Option<&crate::state::SettlingAnswer> {
+    let settling = app.permission_settling.as_ref()?;
+    let typed = app
+        .permission_typed
+        .as_ref()
+        .is_some_and(|(typed, _, _)| typed.ends_with(settling.letter));
+    let head = app
+        .first_pending_permission()
+        .is_some_and(|pending| pending.permission_id == settling.permission_id);
+    (app.permission_focus && app.confirm_always.is_none() && typed && head).then_some(settling)
+}
+
+/// When the settling one-key answer is due, for the event loop to wake then.
+pub(crate) fn settle_deadline(app: &App) -> Option<std::time::Instant> {
+    settling_answer(app).map(|settling| settling.typed + ANSWER_SETTLE_TIME)
+}
+
+/// Send the settling answer now: Enter, the same letter again, or a key that
+/// is not typing asked for it. False when none was settling.
+async fn send_settling_answer(app: &mut App, client: &ApiClient) -> Result<bool> {
+    let letter = settling_answer(app).map(|settling| settling.letter);
+    app.permission_settling = None;
+    let Some(letter) = letter else {
+        return Ok(false);
+    };
+    answer_permission(app, client, letter).await?;
+    Ok(true)
+}
+
+/// The event loop's wake-up at the deadline: the answer goes once its window
+/// has passed with no key. A key, paste or click the terminal sent that is
+/// not handled yet (`input_waiting`) came before this moment, however late it
+/// is read, so it is handled first and decides.
+pub(crate) async fn settle_answer(
+    app: &mut App,
+    client: &ApiClient,
+    input_waiting: bool,
+) -> Result<()> {
+    app.follow_permission_head();
+    if !input_waiting && settle_deadline(app).is_some_and(|due| std::time::Instant::now() >= due) {
+        send_settling_answer(app, client).await?;
+    }
+    Ok(())
+}
+
+/// Take back a one-key answer before it is sent: the card shows the choice it
+/// showed before the key. False when none is settling.
+fn cancel_settling_answer(app: &mut App) -> bool {
+    if settling_answer(app).is_none() {
+        return false;
+    }
+    app.permission_settling = None;
+    if let Some((_, selection, _)) = app.permission_typed.take() {
+        app.permission_selection = selection;
+    }
+    app.update_permission_notice();
+    true
+}
+
+/// Keys whose only meaning, while the card has the keyboard, is on the card:
+/// Enter, the arrows, Tab, the page keys and Ctrl+E. The message keys and the
+/// fold key (Alt+arrows, Ctrl+R by default) keep their meaning beyond it, as
+/// do Ctrl+Y and Ctrl+G.
+fn acts_only_on_card(app: &App, key: KeyEvent) -> bool {
+    if message_key(app, key).is_some() || presses_fold_key(app, key) {
+        return false;
+    }
+    matches!(
+        key.code,
+        KeyCode::Enter
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+    ) || (key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::CONTROL)
+}
+
+/// What a key does to a one-key answer still settling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettleKey {
+    /// A printable key: the letter began a message, or, the same letter
+    /// again, confirms it (`permission_letter`).
+    Typing,
+    /// Esc, Ctrl+C, Backspace and Delete take the letter back.
+    TakeBack,
+    /// A key that is no key press of its own (a modifier on its own).
+    Neutral,
+    /// Every other key sends the answer first, as Enter does, then does
+    /// what it does: nothing can slip between the letter and its answer.
+    Sends,
+}
+
+fn settle_key(key: KeyEvent) -> SettleKey {
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    match key.code {
+        KeyCode::Char(_) if plain => SettleKey::Typing,
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => SettleKey::TakeBack,
+        KeyCode::Esc | KeyCode::Backspace | KeyCode::Delete if plain => SettleKey::TakeBack,
+        KeyCode::Modifier(_)
+        | KeyCode::CapsLock
+        | KeyCode::NumLock
+        | KeyCode::ScrollLock
+        | KeyCode::Null => SettleKey::Neutral,
+        _ => SettleKey::Sends,
+    }
+}
+
+/// A printable key while the approval card owns the keyboard, typed at
+/// `typed`. Returns false when the key is not an answer, which means the
+/// user is typing a message.
 ///
-/// `y` and `n` answer at once, and so does `a` on a Chrome site request
-/// (`explicit`), whose answer for this chat covers one site. Everything else
-/// a letter does here can be undone (`h`/`l` move the selection;
-/// `a`/`w`/`r`/`u` only stage their answer), so those letters are
-/// remembered: when the next key shows they began a word ("update…",
-/// "always…", "hello"), they move to the composer with it and nothing is
-/// answered. A choice staged by a letter is confirmed
-/// only by that letter again once it could be read (or Enter): typed at
-/// speed, "www…" or "uuid" are words, not a folder rule or Auto.
-async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> Result<bool> {
+/// Nothing a letter does here is final at once, so every letter the card
+/// takes is remembered: when the next key shows they began a word ("yes…",
+/// "update…", "always…", "hello"), they move to the composer with it and
+/// nothing is answered. `y`, `n` and a Chrome card's `a` light their chip and
+/// answer once [`ANSWER_SETTLE_TIME`] passes with no key, or at once on Enter
+/// or the same letter again; `h`/`l` move the selection; `a`/`w`/`r`/`u`
+/// only stage their answer. A choice staged by a letter is confirmed only by
+/// that letter again once it could be read (or Enter): typed at speed, "www…"
+/// or "uuid" are words, not a folder rule or Auto. Gaps are measured between
+/// the moments the keys were typed, not handled.
+async fn permission_letter(
+    app: &mut App,
+    client: &ApiClient,
+    letter: char,
+    typed: std::time::Instant,
+) -> Result<bool> {
+    if let Some(settling) = settling_answer(app) {
+        // A double tap confirms; any other letter began a message.
+        if settling.letter == letter {
+            send_settling_answer(app, client).await?;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
     if let Some(staged) = app.confirm_always
-        && let Some((typed, _, at)) = &app.permission_typed
-        && typed.ends_with(staged)
+        && let Some((letters, _, at)) = &app.permission_typed
+        && letters.ends_with(staged)
     {
-        if letter != staged || at.elapsed() < STAGED_READ_TIME {
+        if letter != staged || typed.saturating_duration_since(*at) < STAGED_READ_TIME {
             return Ok(false);
         }
         answer_permission(app, client, letter).await?;
@@ -179,23 +332,34 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
     }
     let selection = app.permission_selection;
     let remember = |app: &mut App| {
-        let typed = app
+        let letters = app
             .permission_typed
-            .get_or_insert_with(|| (String::new(), selection, std::time::Instant::now()));
-        typed.0.push(letter);
-        typed.2 = std::time::Instant::now();
+            .get_or_insert_with(|| (String::new(), selection, typed));
+        letters.0.push(letter);
+        letters.2 = typed;
     };
     if matches!(letter, 'h' | 'l') {
         remember(app);
         move_permission_selection(app, if letter == 'h' { -1 } else { 1 });
         return Ok(true);
     }
-    let Some(choice) = PermissionChoice::available(app)
-        .into_iter()
-        .find(|choice| choice.key() == letter)
-    else {
+    let choices = PermissionChoice::available(app);
+    let Some(index) = choices.iter().position(|choice| choice.key() == letter) else {
         return Ok(false);
     };
+    let choice = choices[index];
+    if answers_on_one_key(app, choice) {
+        remember(app);
+        app.permission_selection = index;
+        app.permission_settling =
+            app.first_pending_permission()
+                .map(|pending| crate::state::SettlingAnswer {
+                    permission_id: pending.permission_id.clone(),
+                    letter,
+                    typed,
+                });
+        return Ok(true);
+    }
     answer_permission(app, client, letter).await?;
     if choice.staged() && app.confirm_always == Some(letter) {
         remember(app);
@@ -203,6 +367,21 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
         app.permission_typed = None;
     }
     Ok(true)
+}
+
+/// Undo in a prompt: Ctrl+- (or Ctrl+_) as each terminal sends it. Most,
+/// tmux and macOS Terminal among them, have no code for Ctrl+- and send
+/// 0x1F, Ctrl+_'s, which crossterm reads as Ctrl+7; the kitty keyboard
+/// protocol reports the key itself.
+pub(crate) fn undo_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('-' | '7') => key.modifiers == KeyModifiers::CONTROL,
+        KeyCode::Char('_') => {
+            key.modifiers == KeyModifiers::CONTROL
+                || key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        }
+        _ => false,
+    }
 }
 
 /// A message key bound to a named key (an arrow, Home, End, Page Up/Down).
@@ -214,6 +393,13 @@ fn message_key(app: &App, key: KeyEvent) -> Option<MessageStep> {
         return None;
     }
     crate::keybindings::resolve(&app.keybindings, key).and_then(MessageStep::of)
+}
+
+/// The key bound to opening the fold nearest the prompt. Like the message
+/// keys it works while a card or a question holds the keyboard, and in a
+/// child agent's view: it only changes what is read.
+fn presses_fold_key(app: &App, key: KeyEvent) -> bool {
+    crate::keybindings::resolve(&app.keybindings, key) == Some(crate::keybindings::FOLD_ACTION)
 }
 
 /// Move the approval panel's chip selection, wrapping both directions.
@@ -327,11 +513,46 @@ pub enum AppAction {
     StartWorkspaceRefOperation(WorkspaceRefOperation),
 }
 
+/// [`handle_key_at`] for a key read just now, as tests press them.
+#[cfg(test)]
 pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Result<AppAction> {
+    handle_key_at(app, key, std::time::Instant::now(), client).await
+}
+
+/// [`handle_key`] for a key the terminal input read at `typed`.
+pub async fn handle_key_at(
+    app: &mut App,
+    key: KeyEvent,
+    typed: std::time::Instant,
+    client: &ApiClient,
+) -> Result<AppAction> {
     // With the kitty keyboard protocol active, releases and repeats arrive as
     // distinct events; only presses (and repeats) should mutate state.
     if key.kind == KeyEventKind::Release {
         return Ok(AppAction::Continue);
+    }
+    app.follow_permission_head();
+    // A one-key answer still settling meets the next key before anything
+    // else does: typing decides in `permission_letter`; a key that takes
+    // the letter back does only that; Enter sends it and is spent; any other
+    // key sends it and then does its own thing (Ctrl+Y included).
+    if settling_answer(app).is_some() {
+        match settle_key(key) {
+            SettleKey::TakeBack => {
+                cancel_settling_answer(app);
+                return Ok(AppAction::Continue);
+            }
+            SettleKey::Sends => {
+                send_settling_answer(app, client).await?;
+                // A key that only moves on the card is spent with it: once
+                // the card is answered it must not recall a message, switch
+                // the agent or scroll something else instead.
+                if acts_only_on_card(app, key) {
+                    return Ok(AppAction::Continue);
+                }
+            }
+            SettleKey::Typing | SettleKey::Neutral => {}
+        }
     }
     app.sync_prompt_history(client);
     if app.terminal.is_some() {
@@ -373,7 +594,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         } else if app.cancel_queue_edit() {
             app.notice = "Edit cancelled · draft restored".into();
         } else if !app.composer.is_empty() || !app.attachments.is_empty() || app.shell_mode {
-            app.composer.clear();
+            let kept = app.composer.discard();
+            let attached = !app.attachments.is_empty();
             app.attachments.clear();
             app.undo_draft = None;
             app.mention_suggestions.clear();
@@ -381,7 +603,13 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.shell_mode = false;
             app.autocomplete_hidden = false;
             app.selection = 0;
-            app.notice = "Input cleared".into();
+            app.notice = match (kept, attached) {
+                (true, false) => DRAFT_CLEARED,
+                (true, true) => DRAFT_TEXT_CLEARED,
+                (false, true) => "Attachments removed",
+                (false, false) => "Input cleared",
+            }
+            .into();
         } else if let Some(turn) = app.active_turn {
             let target = InterruptTarget::Turn(turn);
             if confirm(&mut app.ctrl_c_action, target) {
@@ -423,16 +651,22 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.step_messages(step);
                 return Ok(AppAction::Continue);
             }
+            if presses_fold_key(app, key) {
+                app.toggle_nearest_fold();
+                return Ok(AppAction::Continue);
+            }
             let plain = key.modifiers.is_empty();
             if let KeyCode::Char(letter) = key.code
                 && (plain || key.modifiers == KeyModifiers::SHIFT)
             {
-                if plain && permission_letter(app, client, letter).await? {
+                if plain && permission_letter(app, client, letter, typed).await? {
                     return Ok(AppAction::Continue);
                 }
                 // A child thread has no composer to type into.
                 if app.is_child_view() {
-                    app.permission_typed = None;
+                    if let Some((_, selection, _)) = app.permission_typed.take() {
+                        app.permission_selection = selection;
+                    }
                     app.confirm_always = None;
                     app.update_permission_notice();
                     return Ok(AppAction::Continue);
@@ -538,6 +772,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.step_messages(step);
             return Ok(AppAction::Continue);
         }
+        if action == Some(crate::keybindings::FOLD_ACTION) {
+            app.toggle_nearest_fold();
+            return Ok(AppAction::Continue);
+        }
         app.composer.clear();
         app.attachments.clear();
         app.mention_suggestions.clear();
@@ -545,6 +783,14 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         app.shell_mode = false;
         app.autocomplete_hidden = false;
         app.selection = 0;
+        // Typing here goes nowhere, so say why rather than drop it silently.
+        let typing = matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
+        if typing {
+            app.notice =
+                "A child agent's conversation is read-only · ↑ returns to its parent".into();
+            return Ok(AppAction::Continue);
+        }
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('d')) => return Ok(AppAction::Quit),
             (KeyModifiers::CONTROL, KeyCode::Char('z' | 'Z')) => {
@@ -584,6 +830,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     if let Some(question) = app.first_pending_question().cloned() {
         if let Some(step) = message_key(app, key) {
             app.step_messages(step);
+            return Ok(AppAction::Continue);
+        }
+        if presses_fold_key(app, key) {
+            app.toggle_nearest_fold();
             return Ok(AppAction::Continue);
         }
         let id = question.question_id;
@@ -741,6 +991,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             {
                 app.composer.redo();
             }
+            _ if undo_key(key) => app.composer.undo(),
             KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match character {
                     'a' => app.composer.move_home(),
@@ -749,7 +1000,6 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     'w' => app.composer.delete_word_back(),
                     'k' => app.composer.kill_to_end(),
                     'u' => app.composer.kill_to_start(),
-                    '-' => app.composer.undo(),
                     '.' => app.composer.redo(),
                     _ => {}
                 }
@@ -804,6 +1054,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         }
         match action.as_str() {
             "commands" => app.open_overlay(Overlay::Commands),
+            crate::keybindings::FOLD_ACTION => app.toggle_nearest_fold(),
             "stash_save" => {
                 app.open_management("stash", &serde_json::json!({"action":"save"}), client)
                     .await?;
@@ -819,6 +1070,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
+            _ if undo_key(key) => app.composer.undo(),
             KeyCode::Char('p') => app.open_overlay(Overlay::Commands),
             KeyCode::Char('l') => {
                 app.refresh_threads(client).await?;
@@ -849,7 +1101,6 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             KeyCode::Char('w') | KeyCode::Backspace => app.composer.delete_word_back(),
             KeyCode::Char('k') => app.composer.kill_to_end(),
             KeyCode::Char('u') => app.composer.kill_to_start(),
-            KeyCode::Char('-') if key.modifiers == KeyModifiers::CONTROL => app.composer.undo(),
             KeyCode::Char('.') if key.modifiers == KeyModifiers::CONTROL => app.composer.redo(),
             KeyCode::Char('j') | KeyCode::Enter => app.composer.insert_char('\n'),
             KeyCode::Left => app.composer.move_word_left(),
@@ -918,6 +1169,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.move_selection(-1);
             } else if !app.composer.move_up() && app.composer.history_prev() {
                 app.selection = 0;
+                // Brought back, the cleared draft needs no more saying so.
+                if app.notice == DRAFT_CLEARED || app.notice == DRAFT_TEXT_CLEARED {
+                    app.notice.clear();
+                }
             }
         }
         KeyCode::Down => {
@@ -1022,9 +1277,16 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.scroll_to_bottom();
                 }
             } else if let Some(raw) = selected_slash_command(app) {
-                app.composer.clear();
+                // The line leaves the prompt while the command runs, and
+                // comes back when the command refuses it or fails, so a
+                // mistyped interval or argument is fixed in place.
+                let line = app.composer.set_aside();
                 app.selection = 0;
                 let action = app.execute_command(&raw, client).await;
+                let refused = app.shows_notice_lasting(crate::state::NoticeLasts::UntilNextCommand);
+                if (action.is_err() || refused) && app.composer.is_empty() {
+                    app.composer.restore(line);
+                }
                 app.return_undo_draft();
                 return action;
             } else if let Some(name) = unknown_slash_command(app) {
@@ -1040,14 +1302,16 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                         std::time::Duration::from_secs(5),
                     );
                 }
-                app.notice = notice;
+                app.refuse_command(notice);
             } else if !app.composer.text().trim().is_empty() || !app.attachments.is_empty() {
                 // Resolve before taking the draft; a failed settings read must
                 // preserve text and attachments for retry.
                 let delivery = if key.modifiers.contains(KeyModifiers::ALT) {
                     haarness_protocol::InputDelivery::Queue
                 } else {
-                    client.input_delivery().await?
+                    let delivery = client.input_delivery().await?;
+                    app.input_delivery = Some(delivery);
+                    delivery
                 };
                 let text = app.composer.take();
                 app.scroll_to_bottom();
@@ -1788,6 +2052,17 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
             ) =>
         {
             app.open_connect_picker(None, client).await?;
+        }
+        KeyCode::Esc | KeyCode::Left
+            if matches!(
+                app.overlay,
+                Overlay::Options {
+                    kind: crate::state::OptionsKind::SessionActions,
+                    ..
+                }
+            ) =>
+        {
+            app.return_to_sessions();
         }
         KeyCode::Esc => app.close_overlay(),
         KeyCode::Right | KeyCode::Tab if matches!(app.overlay, Overlay::Threads) => {

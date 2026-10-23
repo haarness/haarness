@@ -71,7 +71,7 @@ async function choose(app: ElectronApplication, path: string) {
 }
 async function files(page: Page) {
   if (await button(page, "Show side panel").isVisible()) await button(page, "Show side panel").click();
-  if (await button(page, "Show files panel").isVisible()) await button(page, "Show files panel").click();
+  if (await button(page, "Show Files panel").isVisible()) await button(page, "Show Files panel").click();
   else if (!await page.locator(".explorer").isVisible()) {
     await button(page, "Open panel").click(); await button(page, "Open Files").click();
   }

@@ -499,7 +499,10 @@ test("workspace opening is direct, enables project configuration, and preserves 
   await settings.getByRole("button", { name: "Projects", exact: true }).click();
   await expect(currentFolder).toContainText("Project configuration disabled");
   await settings.getByRole("button", { name: "General", exact: true }).click();
-  await expect(settings.getByRole("combobox", { name: "Input mode scope" })).toContainText("Global");
+  // Without project configuration only the global value applies: no project override is offered.
+  const delivery = settings.locator('[data-setting="Messages sent while working"]');
+  await expect(delivery.getByRole("radiogroup", { name: "Messages sent while working" })).toBeVisible();
+  await expect(delivery.getByRole("button", { name: "Override for this project" })).toHaveCount(0);
   await settings.getByRole("button", { name: "Browser", exact: true }).click();
   await expect(settings.getByRole("combobox", { name: "Browser settings scope" })).toContainText("Global default");
   // Settings changes may overlap a background sidebar refresh or another
@@ -1666,9 +1669,10 @@ test("whole rows reorder silently, project titles expand, and sessions have one 
   await expect(headings.first()).toHaveText("reorder-project");
   await source.press("Alt+End");
   await expect(headings).toHaveText(before);
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   for (const title of ["Menu One", "Menu Two"]) {
     await client.createThread({ title, provider: "echo", model: "echo-1" });
-    await project.getByRole("button", { name: title, exact: true }).click();
+    await project.getByRole("button", { name: title, exact: true }).dblclick();
   }
   const one = project.getByRole("button", { name: "Menu One", exact: true });
   const two = project.getByRole("button", { name: "Menu Two", exact: true });
@@ -1766,10 +1770,10 @@ test("the project menu pins, renames, files under a section, reveals, archives c
   const headings = page.locator(".project-list .project-heading");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 
-  // Edit: a custom display name replaces the folder name wherever the project is shown.
+  // Rename: a custom display name replaces the folder name wherever the project is shown.
   await options("workspace").click();
-  await item("Edit").click();
-  const edit = page.getByRole("dialog", { name: "Edit project", exact: true });
+  await item("Rename…").click();
+  const edit = page.getByRole("dialog", { name: "Rename project", exact: true });
   await expect(edit.getByLabel("Folder")).toHaveAttribute("readonly", "");
   await edit.getByLabel("Name").fill("Client app");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
@@ -1863,7 +1867,7 @@ test("the project menu pins, renames, files under a section, reveals, archives c
 
   // An empty name restores the folder name, so later scenarios keep addressing "workspace".
   await options("Client app").click();
-  await item("Edit").click();
+  await item("Rename…").click();
   await edit.getByLabel("Name").fill("");
   await edit.getByRole("button", { name: "Save", exact: true }).click();
   const original = page.getByRole("region", { name: "Project workspace", exact: true });
@@ -2017,7 +2021,6 @@ test("sidebar sections keep drag and keyboard ordering inside and across groups,
   const thread = await client.createThread({ title: "Flat list row", provider: "echo", model: "echo-1" });
   const layout = async (choice: "In one list" | "By project") => {
     await page.getByRole("button", { name: "Project list options", exact: true }).click();
-    await item("Organize sidebar").click();
     await page.getByRole("menuitemradio", { name: choice, exact: true }).click();
   };
   await layout("In one list");
@@ -2188,11 +2191,13 @@ test("file drops attach across the chat area and preserve text drop behavior", a
     return event.defaultPrevented;
   });
   expect(textDropPrevented).toBe(false);
+  // A file Desktop cannot attach or point to (made by the page, so it has
+  // no path) gets a quiet notice, not an error.
   const invalid = await fileTransfer("unsupported.txt", "text/plain");
   await chat.dispatchEvent("drop", { dataTransfer: invalid });
-  await expect(page.getByText("Attach an image, PDF, audio, or video file.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Only images, PDFs, audio and video can be attached.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
   await expect(page.locator(".composer-attachments > span")).toHaveCount(3);
-  await page.getByRole("button", { name: "Dismiss error", exact: true }).click();
   await send("Dropped files are sent once");
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(page.locator('.transcript img[alt="Attached image"]')).toHaveCount(4);
@@ -2200,10 +2205,33 @@ test("file drops attach across the chat area and preserve text drop behavior", a
   await invalid.dispose();
 });
 
-test("a dropped file that is not media goes into the message as its path at the caret, and undo takes it out", async () => {
+test("a dropped text file of the project is mentioned, any other goes into the message as its path at the caret, and undo takes it out", async () => {
   await newSession();
   const chat = page.getByRole("region", { name: "Chat", exact: true });
   const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const chips = page.getByLabel("Attached context", { exact: true }).locator(".prompt-context-item");
+  const drop = async (path: string, name: string) => {
+    const transfer = await page.evaluateHandle(({ path, name }) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["# spec"], name, { type: "text/markdown" }));
+      // A file the page makes has no path of its own; a real drop's file URL
+      // names it, as Electron's own path would.
+      transfer.setData("text/uri-list", "file://" + encodeURI(path));
+      return transfer;
+    }, { path, name });
+    for (const type of ["dragenter", "dragover", "drop"])
+      await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+    await transfer.dispose();
+  };
+  // A text file of the project becomes a mention, as choosing it after @ would.
+  await mkdir(join(workspace, "docs"), { recursive: true });
+  await writeFile(join(workspace, "docs", "dropped notes.md"), "# Dropped notes\n");
+  await drop(join(workspace, "docs", "dropped notes.md"), "dropped notes.md");
+  await expect(chips.filter({ hasText: "docs/dropped notes.md" })).toHaveCount(1);
+  await expect(input).toHaveValue("");
+  await chips.filter({ hasText: "docs/dropped notes.md" }).getByRole("button", { name: /Remove/ }).click();
+  await expect(chips).toHaveCount(0);
+
   const before = "Hello\n\nsee this path: ";
   const after = "\n\nAlso!";
   await input.fill(before + after);
@@ -2212,25 +2240,17 @@ test("a dropped file that is not media goes into the message as its path at the 
     element.setSelectionRange(at, at);
     element.blur();
   }, before.length);
-  const spec = join(workspace, "docs", "drop spec.md");
-  const transfer = await page.evaluateHandle((path) => {
-    const transfer = new DataTransfer();
-    transfer.items.add(new File(["# spec"], "drop spec.md", { type: "text/markdown" }));
-    // A file the page makes has no path of its own; a real drop's file URL
-    // names it, as Electron's own path would.
-    transfer.setData("text/uri-list", "file://" + encodeURI(path));
-    return transfer;
-  }, spec);
-  for (const type of ["dragenter", "dragover", "drop"])
-    await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+  // One the project cannot read (here, not there at all) is named by its path.
+  await drop(join(workspace, "docs", "drop spec.md"), "drop spec.md");
   await expect(input).toHaveValue(before + '"docs/drop spec.md"' + after);
   await expect(input).toBeFocused();
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(chat).not.toHaveClass(/file-drop-active/);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(input).toHaveValue(before + after);
-  await transfer.dispose();
   await input.fill("");
+  // Later tests review the project's changes; this one leaves none.
+  await rm(join(workspace, "docs"), { recursive: true, force: true });
   expect(errors).toEqual([]);
 });
 
@@ -2609,7 +2629,7 @@ test("side-panel launcher opens tools beside chat and supports tab ordering", as
   await expect(page.locator(".review")).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("header-and-project-tabs.png"), animations: "disabled" });
   const reviewHandle = page.getByRole("button", {
-    name: "Show diff panel",
+    name: "Show Review panel",
     exact: true,
   });
   await reviewHandle.focus();
@@ -3148,11 +3168,12 @@ test("conversation tab order survives reopening and uses horizontal keyboard con
     provider: "echo",
     model: "echo-1",
   });
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   for (const title of [first.title, second.title])
     await page
       .locator(".sessions")
       .getByRole("button", { name: title, exact: true })
-      .click();
+      .dblclick();
   const handle = page.getByRole("tab", {
     name: "Tab Two",
     exact: true,
@@ -3193,11 +3214,12 @@ test("closing a session tab returns to the previous active conversation", async 
   const titles = ["History A", "History B", "History C", "History D"];
   for (const title of titles)
     await client.createThread({ title, provider: "echo", model: "echo-1" });
+  // Double-clicked, each keeps a tab of its own (a plain click previews).
   const open = async (title: string) => {
     await page
       .locator(".sessions")
       .getByRole("button", { name: title, exact: true })
-      .click();
+      .dblclick();
     await expect(
       page.locator(".session-bar .workspace-tab.active, .session-bar-title"),
     ).toContainText(title);
@@ -3849,7 +3871,8 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
   const block = settings.locator(".setting-block").filter({
     has: page.getByRole("heading", { name: "OpenAI", exact: true }),
   });
-  await expect(block).toContainText("Not connected");
+  // Providers lists what is connected; the catalog is in Connect a provider.
+  await expect(block).toHaveCount(0);
   await settings
     .getByRole("button", { name: "Connect a provider", exact: true })
     .click();
@@ -3891,7 +3914,11 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
     .getByRole("dialog", { name: "Disconnect OpenAI?", exact: true })
     .getByRole("button", { name: "Disconnect", exact: true })
     .click();
-  await expect(block).toContainText("Not connected");
+  await expect(block).toHaveCount(0);
+  // The keyboard moves on to another provider's row, or to Connect a provider.
+  await expect
+    .poll(() => page.evaluate(() => !!document.activeElement?.closest(".provider-row, .providers-hero")))
+    .toBe(true);
   expect(
     (await client.providers()).find((provider) => provider.id === "openai")
       ?.authenticated,
@@ -4004,11 +4031,11 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   const command =
     '!tool bash {"command":"printf auto-once-proof > auto-once.txt"}';
   await start(parent.id, command);
-  await expect(
-    page.getByRole("button", { name: "Allow once + Auto", exact: true }),
-  ).toBeVisible();
+  // Allow once + Auto waits in the Always menu, so the card's answers fit
+  // one line: Deny, Always allow, Allow once.
+  await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("button", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
     .click();
   await finished();
   expect(await readFile(join(workspace, "auto-once.txt"), "utf8")).toBe(
@@ -4312,18 +4339,23 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     });
   await still();
   const rest = await bottom();
-  // Its answers keep their places as Allow once + Auto goes, and a focus on
-  // that button passes to Allow once; the card is the same element, updated.
+  // Its answers keep their places as Allow once + Auto leaves the Always
+  // menu, and the keyboard stays on Allow once; the card is the same
+  // element, updated.
   const deny = card.getByRole("button", { name: "Deny", exact: true });
+  const always = card.getByRole("button", { name: "Always allow", exact: true });
   const once = card.getByRole("button", { name: "Allow once", exact: true });
   const across = async () =>
-    Promise.all([deny, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
+    Promise.all([deny, always, once].map(async (button) => Math.round((await button.boundingBox())!.x)));
   const places = await across();
   await card.screenshot({ path: test.info().outputPath("auto-review-review-card-light.png") });
   await card.evaluate((node) => {
     node.dataset.probe = "kept";
   });
-  await card.getByRole("button", { name: "Allow once + Auto", exact: true }).focus();
+  await always.click();
+  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await once.focus();
   await client.setApprovalMode(thread.id, { mode: "auto" });
   await expect(auto).toBeVisible();
   await expect(card.locator(".approval-review")).toHaveText("Auto review is deciding…");
@@ -4331,6 +4363,9 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
   expect(Math.abs((await bottom()) - rest)).toBeLessThan(2);
   expect(await across()).toEqual(places);
   await expect(once).toBeFocused();
+  await always.click();
+  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await expect(card).toHaveAttribute("data-probe", "kept");
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
@@ -4402,7 +4437,7 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
   // Requests are decided one at a time: the dock shows the oldest and counts
   // the rest, so both children's prompts never stack.
   await expect(
-    page.getByRole("button", { name: "Allow once + Auto", exact: true }),
+    page.getByRole("button", { name: "Always allow", exact: true }),
   ).toHaveCount(1);
   await expect(page.locator(".prompt-count")).toHaveText("1 of 2");
   await page
@@ -4411,8 +4446,9 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
       exact: true,
     })
     .click();
+  await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("button", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
     .click();
   await expect
     .poll(() =>
@@ -4566,8 +4602,9 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     .getByRole("region", { name: "Project workspace", exact: true })
     .getByRole("button", { name: "workspace", exact: true });
   await expect(header).toBeVisible();
+  // Its chevron collapses it; its name would open it, as another project.
   if ((await header.getAttribute("aria-expanded")) === "true")
-    await header.click();
+    await page.getByRole("button", { name: "Collapse project workspace", exact: true }).click();
   await expect(header).toHaveAttribute("aria-expanded", "false");
   // Desktop's Auto for new chats covers chats Desktop starts. A chat another
   // client starts (the TUI, a phone, the API) stays in Review.
@@ -4734,7 +4771,7 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   expect(errors).toEqual([]);
 });
 
-test("an open-ended question opens in its answer field unless a draft is being typed, and Enter replies", async () => {
+test("an open-ended question leaves the keyboard in the message box, its answer field a Shift+Tab away, and Enter replies", async () => {
   const thread = await client.createThread({
     title: "Open-ended question focus",
     provider: "echo",
@@ -4759,10 +4796,14 @@ test("an open-ended question opens in its answer field unless a draft is being t
   };
   await expect(composer).toBeEnabled();
 
-  // The message box stays in view during a question, but an empty one is idle.
+  // The message box stays in view during a question and keeps the keyboard,
+  // even empty: what is typed there is the next message, not an answer. The
+  // answer field is the card's last stop before it.
   await composer.focus();
   await ask({ prompt: "What should the release be called?" });
   await expect(question).toContainText("What should the release be called?");
+  await expect(composer).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   await expect(answer).toBeFocused();
   await page.screenshot({ path: test.info().outputPath("question-open-ended-focus.png") });
   await page.keyboard.type("Aurora");
@@ -6775,7 +6816,7 @@ test("workspace panes stay beside chat, resize, preserve drafts and adapt to a s
     "A workspace beside my conversation",
   );
   await page
-    .getByRole("button", { name: "Show files panel", exact: true })
+    .getByRole("button", { name: "Show Files panel", exact: true })
     .click();
   await expect(page.locator(".file-preview .cm-content")).toContainText(
     "A draft kept while reviewing",
@@ -9633,6 +9674,8 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   });
   const activity = page.locator(".message.step > .tool-call").last();
   await expect(activity.locator(":scope > summary")).toContainText("printf");
+  // The approval card docks first and moves the step up; then it is opened.
+  await expect(page.getByRole("alert", { name: "Permission request" })).toBeVisible();
   await activity.locator(":scope > summary").click();
   await expect(activity.locator(".tool-empty")).toHaveText(
     "Waiting for output…",
@@ -9689,9 +9732,16 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   await expect(activity.locator(":scope > summary")).toContainText("Edited");
   await activity.locator(":scope > summary").click();
   await expect(activity.locator(".change-preview")).toBeVisible();
-  await expect(activity.locator(".change-lines .add")).toHaveText("false");
-  await expect(activity.locator(".change-lines .remove")).toHaveText("true");
+  await expect(activity.locator(".change-lines .add code")).toHaveText("false");
+  await expect(activity.locator(".change-lines .remove code")).toHaveText("true");
+  await expect(activity.locator(".change-lines .add .diff-sign")).toHaveText("+");
+  await expect(activity.locator(".change-lines .remove .diff-sign")).toHaveText("−");
   await expect(activity).not.toContainText('"old":');
+  // Opening a finished step whose body pushed the end out of view paused
+  // following; closing it takes following back up for the next turn.
+  await activity.locator(":scope > summary").click();
+  await expect(activity.locator(".change-preview")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
   const waiting = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
     text:
@@ -9721,8 +9771,26 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     .toBeTruthy();
   const live = page.locator(".tool-batch").last();
   await expect(live.locator(":scope > summary")).toContainText("Read files");
+  // The question docks first and the view follows it down; then the batch
+  // is opened, so nothing moves between aiming and clicking.
+  await expect(page.locator(".prompt-dock.question")).toBeVisible();
+  await expect
+    .poll(() => page.locator(".transcript").evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
+    .toBeLessThan(5);
   await live.locator(":scope > summary").click();
+  // Its steps draw a moment after it opens, and the batch then comes up
+  // for them to show: aim at the first one once it has stopped there.
   const reading = live.locator(".tool-child").first();
+  await expect(reading.locator("summary")).toBeInViewport({ ratio: 1 });
+  let aimed = "";
+  await expect
+    .poll(async () => {
+      const box = JSON.stringify(await reading.locator("summary").boundingBox());
+      const still = box === aimed;
+      aimed = box;
+      return still;
+    })
+    .toBe(true);
   await reading.locator("summary").click();
   await expect(reading.locator(".tool-empty")).toHaveText(
     "Waiting for output…",
@@ -9741,6 +9809,11 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     (element) => getComputedStyle(element).borderLeftColor,
   );
   expect(failedBatchRail).toBe(neutralRail);
+  // Steps opened above paused following, as scrolling up would; the next
+  // turn is read from the latest again.
+  const jumpToLatest = page.getByRole("button", { name: "Jump to latest", exact: true });
+  if (await jumpToLatest.isVisible()) await jumpToLatest.click();
+  await expect(jumpToLatest).toHaveCount(0);
   const missing = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
     text: '!tool glob {"pattern":"**/*.{yml,yaml,json,toml,lock}","path":".missing-tools-folder"}',
@@ -11142,13 +11215,22 @@ test("provider artwork and combined reasoning follow each model's actual capabil
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await settings.getByRole("button", { name: "Providers", exact: true }).click();
-    for (const id of ["anthropic", "openai", "gemini"])
-      await expect(settings.locator(`[data-setting="provider:${id}"] [data-provider-icon="${id}"]`)).toHaveCount(1);
+    // The connected custom provider is listed with the neutral icon; the
+    // catalog, with each brand's artwork, is in Connect a provider.
     await expect(settings.locator('[data-setting="provider:picker-fixture"] [data-provider-icon="generic"]')).toHaveCount(1);
-    const icon = settings.locator('[data-setting="provider:anthropic"] .provider-icon-mask');
+    await expect(settings.locator('[data-setting="provider:anthropic"]')).toHaveCount(0);
+    await settings.getByRole("button", { name: "Connect a provider", exact: true }).click();
+    const connect = page.getByRole("dialog", { name: "Connect a provider", exact: true });
+    for (const id of ["anthropic", "openai", "gemini"])
+      await expect(connect.locator(`.connect-row[data-provider="${id}"] [data-provider-icon="${id}"]`)).toHaveCount(1);
+    const icon = connect.locator('.connect-row[data-provider="anthropic"] .provider-icon-mask');
     await expect.poll(() => icon.evaluate((element) => getComputedStyle(element).maskImage)).not.toBe("none");
     await page.screenshot({ path: test.info().outputPath("provider-icons-dark.png") });
+    await connect.getByRole("button", { name: "Close dialog", exact: true }).click();
     await settings.getByRole("button", { name: "Models", exact: true }).click();
+    // Models of providers that are not connected wait behind Show all.
+    await expect(settings.locator('tbody [data-provider-icon="anthropic"]')).toHaveCount(0);
+    await settings.getByRole("switch", { name: "Show all", exact: true }).check();
     await expect(settings.locator('tbody [data-provider-icon="anthropic"]').first()).toBeVisible();
     await settings.getByRole("button", { name: "Close settings", exact: true }).click();
     await page.getByRole("button", { name: "Search", exact: true }).click();
@@ -11511,7 +11593,8 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   await page.screenshot({ path: test.info().outputPath("conversation-find-light.png") });
   await find.press("Escape");
   await expect(find).toHaveCount(0);
-  await expect(page.locator(".transcript")).toBeFocused();
+  // The keyboard goes back to where Find was opened from, the message box.
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Chat actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Find in chat", exact: true }).click();
   await expect(find).toBeFocused();
@@ -12768,23 +12851,56 @@ test("shared input settings apply project and global modes to real Desktop chat"
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await expect(settings).toBeVisible();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer"); // /settings only opens the pane.
-    const mode = settings.getByRole("combobox", { name: "Messages sent while working", exact: true });
-    const scope = settings.getByRole("combobox", { name: "Input mode scope", exact: true });
-    await expect(mode).toContainText("Steer");
-    await expect(scope).toContainText("This project");
-    await selectValue(mode, "queue");
+    const row = settings.locator('[data-setting="Messages sent while working"]');
+    const steer = row.getByRole("radio", { name: "Steer", exact: true });
+    const queue = row.getByRole("radio", { name: "Queue", exact: true });
+    // /input-mode saved this project's own value; the caption says so and
+    // names the value its reset falls back to.
+    const caption = row.locator(".input-settings-scope");
+    await expect(steer).toHaveAttribute("aria-checked", "true");
+    await expect(caption).toContainText("This project");
+    await expect(caption.getByRole("button", { name: "Use global setting (Queue)", exact: true })).toBeVisible();
+    await queue.click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
-    await selectValue(scope, "global");
-    await selectValue(mode, "steer");
+    expect(await readFile(globalFile, "utf8")).toBe(originalGlobal);
+    // Use global setting removes the project's value; the global one shows.
+    await row.getByRole("button", { name: "Use global setting (Queue)", exact: true }).click();
+    await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(caption).toContainText("All projects");
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(row).not.toContainText("This project");
+    // Without a project value, the choice is the global setting's.
+    await steer.click();
     await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
-    expect((await settingsApi({ action: "get" })).delivery).toBe("queue");
-    await selectValue(scope, "project");
-    await selectValue(mode, "inherit");
+    expect((await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(steer).toHaveAttribute("aria-checked", "true");
+    // Override for this project starts the project's own value from the one shown.
+    await row.getByRole("button", { name: "Override for this project", exact: true }).click();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("steer");
+    await expect(row).toContainText("This project");
+    // Arrow keys move the choice, which saves at once.
+    await steer.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(queue).toBeFocused();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
+    expect((await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
+    await row.getByRole("button", { name: "Use global setting (Steer)", exact: true }).click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer");
+    // A reset and a choice right after it change the global setting, never
+    // bring the project's value back.
+    await row.getByRole("button", { name: "Override for this project", exact: true }).click();
+    await row.getByRole("button", { name: "Use global setting (Steer)", exact: true }).click();
+    await queue.click();
+    await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("queue");
+    expect((await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(caption).toContainText("All projects");
+    await steer.click();
+    await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
     // An external client changes the same project while General stays open.
     await settingsApi({ action: "set", delivery: "queue" });
-    await expect(mode).toContainText("Queue");
+    await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(row).toContainText("This project");
     await page.screenshot({ path: "test-results/input-settings-general.png" });
     await settings.getByRole("button", { name: "Close settings", exact: true }).click();
     await send("/input-mode reset");

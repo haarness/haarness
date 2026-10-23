@@ -271,8 +271,8 @@ async function addServer(name: string, url: string, token: string) {
   await form.getByRole("textbox", { name: "Name", exact: true }).fill(name);
   await form.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(
-    pane.locator(".setting-row").filter({ hasText: name }),
-  ).toContainText("Selected");
+    pane.locator(".setting-row").filter({ hasText: name }).locator(".current-tag"),
+  ).toHaveText("Current");
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
     "true",
@@ -796,6 +796,9 @@ test("opening another project while the one before waits to reconnect leaves the
     await heading("switch-first").click();
     await expect(heading("switch-first")).toHaveClass(/current/);
     await expect(ready()).toHaveAttribute("data-project-ready", "true");
+    // Collapsed, so no live index of its list reads it once it is left: what
+    // is counted below is the project's own reconnect.
+    await page.getByRole("button", { name: "Collapse project switch-first", exact: true }).click();
     // The first project's stream is refused: its waits grow to 4 s.
     proxy.intercept((req, res) => {
       if (new URL(req.url!, proxy.url).pathname !== "/v1/events") return false;
@@ -950,11 +953,12 @@ test("server switching scopes projects and chats, restores selection, and preser
   await expect(
     pane.getByRole("button", { name: "Add remote server", exact: true }),
   ).toHaveCount(0);
-  await pane.getByRole("button", { name: "Forget", exact: true }).click();
+  // The sidebar's verb: Remove project, with the same confirmation.
+  await pane.getByRole("button", { name: "Remove project remote-one", exact: true }).click();
   await page
     .locator("dialog[open]")
     .last()
-    .getByRole("button", { name: "Forget project", exact: true })
+    .getByRole("button", { name: "Remove project", exact: true })
     .click();
   await expect(pane).toContainText("No projects yet");
   const saved = await page.evaluate(() => window.haarness.boot());
@@ -1057,9 +1061,9 @@ test("legacy remote connections migrate independently and empty local selection 
   await form.getByRole("button", { name: "Save", exact: true }).click();
   await closeSettings();
   await switchTo("This computer");
-  await expect(page.locator(".sidebar .project-heading")).toHaveText([
-    "Open project",
-  ]);
+  // No project here yet: Home offers Open project, and the sidebar lists none.
+  await expect(page.getByRole("region", { name: "Project home" })).toBeVisible();
+  await expect(page.locator(".sidebar .project-heading")).toHaveCount(0);
   await app.close();
   await launch();
   await expect(page.locator(".server-switcher-button")).toHaveText(

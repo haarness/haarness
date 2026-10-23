@@ -124,6 +124,15 @@
   font-size: var(--title-sm);
   line-height: 1;
 }
+/* The only control in an empty strip: it names itself. */
+.browser-new.labelled {
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.browser-new.labelled:hover:not(:disabled) {
+  color: var(--text);
+}
 .browser-toolbar {
   display: flex;
   align-items: center;

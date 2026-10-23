@@ -1,7 +1,7 @@
 import { language, t } from "./i18n";
 import { splitSchedules } from "./schedule-data";
 import { conversationRoot } from "../thread-kinds";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import {
   type DesktopProject,
   groupProjects,
@@ -22,6 +22,9 @@ import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
 import { chatTitle } from "./chat-title";
 import { relativeAge } from "./relative-age";
+import { revealInList } from "./reveal";
+import { searchArchived } from "./UniversalSearch";
+import { focusComposerWhenShown } from "./composer-focus";
 import {
   drawnChats,
   emptySelection,
@@ -106,9 +109,10 @@ function ProjectGroup(props: {
       },
     ];
   };
-  async function editProject() {
+  /** A name of the reader's own; the folder is shown, not changed. */
+  async function renameProject() {
     const input = await ask(
-      t("Edit project"),
+      t("Rename project"),
       [
         {
           name: "name",
@@ -181,6 +185,18 @@ function ProjectGroup(props: {
           void app.run(() => app.fileProjectBeside(source, props.project.id, position)),
       },
     );
+  let row!: HTMLDivElement;
+  // The current project's heading comes into view when it becomes current,
+  // and when the chat chosen in it has no row drawn: on New chat, or with
+  // the project collapsed. A chosen chat's own row shows itself.
+  const chosen = createMemo(() =>
+    active() ? `${state.connection?.id}\n${state.selected}` : "",
+  );
+  createEffect(
+    on(chosen, (now, before) => {
+      if (now && (!before || !expanded() || !state.selected)) revealInList(row);
+    }),
+  );
   return (
     <section
       class="project-group"
@@ -188,7 +204,7 @@ function ProjectGroup(props: {
       aria-label={t("Project {name}", { name: props.project.label })}
       {...drop()}
     >
-      <div class="project-row">
+      <div class="project-row" ref={row}>
         <button
           class="project-disclosure"
           aria-label={
@@ -216,7 +232,9 @@ function ProjectGroup(props: {
           aria-description={pinned() ? t("Pinned") : undefined}
           onClick={() =>
             app.run(async () => {
-              await app.expandProject(props.project.id, !expanded());
+              // Another project's name opens it, its list shown; the current
+              // project's name shows or hides its list.
+              await app.expandProject(props.project.id, active() ? !expanded() : true);
               if (await app.selectProject(props.project.id))
                 app.set("panel", "chat");
             })
@@ -242,9 +260,9 @@ function ProjectGroup(props: {
                 ),
             },
             {
-              label: t("Edit"),
-              icon: "settings",
-              run: () => void app.run(editProject),
+              label: t("Rename…"),
+              icon: "edit",
+              run: () => void app.run(renameProject),
             },
             {
               divider: true,
@@ -677,6 +695,17 @@ export function SessionList(props: {
     availableLocations().filter(
       (location) => !!app.indexes()[location.id]?.error,
     );
+  /** Chats of this list the reader archived, which Search still finds. */
+  const archived = () =>
+    app
+      .conversations(props.project?.id)
+      .filter(
+        ({ thread, location }) =>
+          thread.archived &&
+          !thread.isSubagent &&
+          location.checkout?.exists !== false &&
+          (!props.location || location.id === props.location.id),
+      ).length;
   return (
     <div
       class="sessions"
@@ -693,11 +722,13 @@ export function SessionList(props: {
               app.attachFiles(sessionKey(location.id, thread.id), files),
             ]));
           });
-          const selected = () =>
-            state.connection?.id === row().location.id &&
-            conversationRoot(state.threads, state.selected) ===
-              row().thread.id &&
-            state.panel === "chat";
+          /** The open chat is this one (or one of its agents'). */
+          const open = createMemo(
+            () =>
+              state.connection?.id === row().location.id &&
+              conversationRoot(state.threads, state.selected) === row().thread.id,
+          );
+          const selected = () => open() && state.panel === "chat";
           const picking = () => selecting(scope());
           const picked = () => picking() && !!selection()?.chats.includes(key);
           /** In Select chats, a click picks the row (Shift: the rows since
@@ -743,7 +774,12 @@ export function SessionList(props: {
             <div
               class="session-row"
               {...sort}
-              ref={(element) => { sort.ref(element); fileDrop.ref(element); }}
+              ref={(element) => {
+                sort.ref(element);
+                fileDrop.ref(element);
+                // The chosen chat's row comes into view, however it was chosen.
+                createEffect(on(open, (now) => now && revealInList(element)));
+              }}
               classList={{ selected: selected(), "file-drop-active": fileDrop.dragging() }}
               data-pick-scope={scope()}
               data-pick-key={key}
@@ -765,14 +801,10 @@ export function SessionList(props: {
                 aria-current={selected()}
                 aria-pressed={picking() ? picked() : undefined}
                 title={chatTitle(row().thread.title)}
+                {...openRow(app, () => row(), picking)}
                 onClick={(event) => {
                   if (pick(event)) return;
-                  void app.run(() =>
-                    app.chooseProjectSession(
-                      row().location.id,
-                      row().thread.id,
-                    ),
-                  );
+                  void openChat(app, event, row());
                 }}
               >
                 <Show
@@ -791,7 +823,7 @@ export function SessionList(props: {
                   <PickBox picked={picked()} />
                 </Show>
                 <span class="session-label">
-                  <span class="session-title">
+                  <span class="session-title" data-order-title>
                     {chatTitle(row().thread.title)}
                   </span>
                   <Show when={place()}>
@@ -836,11 +868,28 @@ export function SessionList(props: {
       <ScheduledSessions rows={rows()} />
       <Show when={!order.ordered().length && !split().groups.length}>
         <p class="sessions-empty" role="status">
-          {failures().length
-            ? ""
-            : loading()
-              ? t("Opening…")
-              : t("No chats yet.")}
+          {failures().length ? (
+            ""
+          ) : loading() ? (
+            t("Opening…")
+          ) : archived() ? (
+            <>
+              {t("No open chats")}
+              <span aria-hidden="true"> · </span>
+              {/* Search, on just these archived chats. */}
+              <button
+                class="sessions-archived"
+                aria-haspopup="dialog"
+                onClick={() =>
+                  searchArchived({ project: props.project?.id, location: props.location?.id })
+                }
+              >
+                {t("{count} archived", { count: archived() })}
+              </button>
+            </>
+          ) : (
+            t("No chats yet.")
+          )}
         </p>
       </Show>
       <For each={failures()}>
@@ -908,6 +957,46 @@ export function SessionList(props: {
 type Conversation = ReturnType<
   ReturnType<typeof useApp>["conversations"]
 >[number];
+
+/**
+ * A plain click on a chat row: the chat opens in the preview tab. Clicked
+ * with the pointer, the keyboard then goes to its message box, so typing
+ * lands in the chat on screen; Enter on a row that has the keyboard (or an
+ * Alt+arrow step) leaves it on the row.
+ */
+function openChat(app: ReturnType<typeof useApp>, event: MouseEvent, row: Conversation) {
+  const from = event.currentTarget as Element;
+  return app.run(async () => {
+    await app.chooseProjectSession(row.location.id, row.thread.id, "preview");
+    if (event.detail > 0) focusComposerWhenShown(from);
+  });
+}
+
+/** A chat row's other ways in: a middle-click opens the chat in a tab that
+ * stays, and a double-click keeps the preview it opened. In Select chats,
+ * clicks only pick. */
+function openRow(
+  app: ReturnType<typeof useApp>,
+  row: () => Conversation,
+  picking: () => boolean,
+) {
+  return {
+    onMouseDown(event: MouseEvent) {
+      // No autoscroll (or paste) from the middle button.
+      if (event.button === 1) event.preventDefault();
+    },
+    onAuxClick(event: MouseEvent) {
+      if (event.button !== 1 || picking()) return;
+      event.preventDefault();
+      void app.run(() =>
+        app.chooseProjectSession(row().location.id, row().thread.id, "keep"),
+      );
+    },
+    onDblClick() {
+      if (!picking()) app.keepTab(row().thread.id);
+    },
+  };
+}
 function ScheduledSessions(props: { rows: Conversation[] }) {
   const app = useApp();
   const groups = createMemo(() => splitSchedules(props.rows).groups);
@@ -1021,14 +1110,8 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                 })}
                                 aria-current={active()}
                                 title={chatTitle(row().thread.title)}
-                                onClick={() =>
-                                  app.run(() =>
-                                    app.chooseProjectSession(
-                                      row().location.id,
-                                      row().thread.id,
-                                    ),
-                                  )
-                                }
+                                {...openRow(app, () => row(), () => false)}
+                                onClick={(event) => void openChat(app, event, row())}
                               >
                                 <span
                                   class="session-status"

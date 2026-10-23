@@ -1,6 +1,6 @@
 import { keepsRowsAbove, measureRow } from "./measure-row";
 import { toastAnchor } from "./toast-anchors";
-import { t, splitAround, parseLanguage, formatNumber } from "./i18n";
+import { t, splitAround, parseLanguage, formatNumber, language } from "./i18n";
 import { isOpen, setOpen } from "./disclosure";
 import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
@@ -26,6 +26,7 @@ import {
   contextKey,
   resourceToRead,
   countLines,
+  fileContext,
   mentionAgents,
   pasteFolds,
   pastedText,
@@ -91,7 +92,9 @@ import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
-import { isTextEntry, typingElsewhere } from "./text-entry";
+import type { FileContent } from "../shared";
+import { isTextEntry } from "./text-entry";
+import { selection as chatSelection } from "./sidebar-selection";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
 import { ConversationOutline } from "./ConversationOutline";
@@ -126,6 +129,8 @@ import {
 /* The plan already has a home above the composer, so its bookkeeping calls do
    not also belong in the transcript. */
 const PLAN_TOOLS = ["todo", "todowrite", "todoread"];
+/** How much of a step opened at the bottom of the view is brought into it. */
+const OPENED_IN_SIGHT = 80;
 /** How long Auto's reviewer runs before the activity line says so. */
 const REVIEW_NOTICE_MS = 800;
 
@@ -269,32 +274,60 @@ export function Session() {
     () => !!project() && editable(),
   );
   /**
-   * Dropped or pasted files: media attaches to the draft, and any other file
-   * of this computer (source code, a folder) is referred to by its path,
-   * written at the message box's caret. A remote project's server cannot
-   * read this computer's files, so there they are refused as before.
+   * Dropped or pasted files: media attaches to the draft. Any other file of
+   * this computer inside the project is mentioned, as `@` would (a chip that
+   * carries its text); one outside it, a folder or a file that is not text is
+   * referred to by its path, written at the message box's caret. A remote
+   * project's server cannot read this computer's files, so there they are
+   * not taken, and a quiet notice says what can be attached.
    */
   async function receiveFiles(files: File[], uris = "") {
     const key = app.draftKey();
+    const connection = state.connection;
     const media: File[] = [],
       paths: string[] = [];
+    let refused = 0;
     for (const file of files) {
-      const path =
-        !state.connection?.remote && !(await attachable(file))
-          ? droppedPath(file, uris, window.haarness.pathForFile(file))
-          : "";
+      if (await attachable(file)) {
+        media.push(file);
+        continue;
+      }
+      const path = connection?.remote ? "" : droppedPath(file, uris, window.haarness.pathForFile(file));
       if (path) paths.push(path);
-      else media.push(file);
+      else refused++;
     }
-    if (paths.length && app.draftKey() === key && composer?.isConnected && !composer.disabled)
+    const root = (connection?.workspace ?? "").replace(/\/+$/, "") + "/";
+    const written: string[] = [];
+    for (const path of paths) {
+      const mention =
+        connection && root.length > 1 && path.startsWith(root)
+          ? await window.haarness
+              .files<FileContent>(connection.id, "read", { path: path.slice(root.length) })
+              .then((file) => (file.encoding === "utf8" ? fileContext(file.path, file.content) : undefined))
+              .catch(() => undefined)
+          : undefined;
+      // One too large to carry is named by its path instead.
+      const added =
+        !!mention &&
+        app.draftKey() === key &&
+        state.connection?.id === connection?.id &&
+        (await app.addPromptContext(mention, key).then(
+          () => true,
+          () => false,
+        ));
+      if (!added) written.push(path);
+    }
+    if (written.length && app.draftKey() === key && composer?.isConnected && !composer.disabled)
       insertText(
         pathText(
-          paths,
+          written,
           state.connection?.workspace ?? "",
           composer.value.slice(0, composer.selectionStart),
           composer.value.slice(composer.selectionEnd),
         ),
       );
+    if (refused)
+      app.notify(t("Only images, PDFs, audio and video can be attached. Mention a project file with @."), "blocked");
     if (media.length) await app.attachFiles(key, media);
   }
   const [choices, setChoices] = createSignal<
@@ -482,6 +515,18 @@ export function Session() {
   let composer!: HTMLTextAreaElement;
   let conversation!: HTMLElement;
 
+  /** The new chat a first message is making, which the message box's text
+   * moves to with the view: the box it moves from and where it lands, by
+   * owner, draft key and stored draft. */
+  let carriedTo:
+    | { from: string; fromKey: string; fromStored: string; to: string; toKey: string; toStored: string }
+    | undefined;
+  /** The chat the message box was drawn for last. */
+  let shownOwner = "";
+  /** Text on its way, by stored draft: it stays stored there (ahead of what
+   * is typed since) until the message has gone, so quitting meanwhile
+   * loses nothing. */
+  const unsent = new Map<string, string>();
   let historyIndex = -1;
   let recalled: PromptHistoryEntry[] = [];
   let savedPrompt: PromptHistoryEntry | undefined;
@@ -558,8 +603,12 @@ export function Session() {
   // End scrolls to the bottom known when the key went down; virtual rows
   // measured meanwhile move it. Re-pin once that scroll settles.
   let settleAtEnd = false;
-  function pauseFollowing() {
+  /** Scrolling away, or (`focus`) a control brought into view. Only the
+   * person's own scrolling makes a step's opening no longer the reason. */
+  function pauseFollowing(focus = false) {
     settleAtEnd = false;
+    quietUntil = undefined;
+    if (!focus) pausedByToggle = undefined;
     revealTarget = undefined;
     cancelAnimationFrame(revealFrame);
     if (scrolling.scrollHeight <= scrolling.clientHeight + 4) return;
@@ -567,12 +616,145 @@ export function Session() {
     scrollFrame = 0;
     setFollow(false);
   }
+  /* A step or thought the reader opens or closes stays where it was clicked:
+     following pins streamed output to the bottom, not the row's own growth.
+     When opening it pushes the latest output out of view, following pauses,
+     as scrolling up would, and Jump to latest offers the way back. The
+     last step, still running, keeps following, but only for what it (or
+     the turn) writes after it was opened. When closing a step brings the
+     end of the chat into view, or closes the step whose opening paused it,
+     following resumes. */
+  let toggled:
+    | {
+        control: Element;
+        row: HTMLElement;
+        top: number;
+        height: number;
+        /** The view as it was: its offset, its content's height and what lay below it. */
+        scrollTop: number;
+        scrollHeight: number;
+        below: number;
+        until: number;
+      }
+    | undefined;
+  /** The step whose opening paused following, until something else moves the view. */
+  // By item, not element: the list may draw the row anew in between.
+  let pausedByToggle: string | undefined;
+  /** The list's and the view's heights when a running step was opened:
+   * following waits for more to be written, or for the view to change. */
+  let quietUntil: { height: number; view: number } | undefined;
+  /** Back to following the newest output (End, Jump to latest, sending,
+   * another chat). A step's opening still settling gives way: once it
+   * settled, it would put the view back and pause following again. */
+  function resumeFollowing() {
+    toggled = undefined;
+    quietUntil = undefined;
+    pausedByToggle = undefined;
+    setFollow(true);
+  }
+  function holdToggled(event: MouseEvent) {
+    const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
+    const row = control?.closest<HTMLElement>("[data-index]");
+    if (!control || !row || !scrolling.contains(row)) return;
+    quietUntil = undefined;
+    const hold = {
+      control,
+      row,
+      top: control.getBoundingClientRect().top,
+      height: row.offsetHeight,
+      scrollTop: scrolling.scrollTop,
+      scrollHeight: scrolling.scrollHeight,
+      below: scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight,
+      // A click that opens nothing gives the view back soon.
+      until: performance.now() + 500,
+    };
+    // One hold at a time: a click on another step replaces this one.
+    toggled = hold;
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    requestAnimationFrame(() => keepToggled(hold));
+  }
+  function keepToggled(held: NonNullable<typeof toggled>) {
+    if (toggled !== held) return;
+    const grown = held.row.isConnected ? held.row.offsetHeight - held.height : 0;
+    // The body draws after the toggle event, and a thought's text after
+    // that (Markdown renders in a worker); the list takes the row's new
+    // height a frame or more later still.
+    // (Closing the step whose opening paused following needs no height:
+    // following comes back either way.)
+    const drawing =
+      !grown ||
+      !!held.row.querySelector('.markdown[data-markdown-ready="false"]') ||
+      (grown > 0 && scrolling.scrollHeight < held.scrollHeight + grown - 1) ||
+      (grown < 0 && pausedByToggle !== held.row.dataset.itemId && scrolling.scrollHeight > held.scrollHeight + grown + 1);
+    if (held.row.isConnected && drawing && performance.now() < held.until) {
+      requestAnimationFrame(() => keepToggled(held));
+      return;
+    }
+    toggled = undefined;
+    if (!held.row.isConnected) return followLatest();
+    const moved = held.control.getBoundingClientRect().top - held.top;
+    if (Math.abs(moved) >= 1) scrolling.scrollTop += moved;
+    // What opened out of sight below the view comes up just enough for its
+    // first lines to show, never taking the row itself off the top.
+    if (grown > 0) {
+      const view = scrolling.getBoundingClientRect();
+      const summary = held.control.getBoundingClientRect();
+      const opened = (held.control.closest("details") ?? held.row).getBoundingClientRect();
+      const wanted = Math.min(opened.bottom - summary.bottom, OPENED_IN_SIGHT);
+      const lift = Math.min(wanted - (view.bottom - summary.bottom), summary.top - view.top - 8);
+      if (lift > 0) scrolling.scrollTop += lift;
+    }
+    lastTop = scrolling.scrollTop;
+    // What lies below the view now. Opened, it is what did before, pushed
+    // down by the row's growth, less what the view moved: read from the
+    // row, not from the list's height, so a reply streaming meanwhile
+    // changes nothing. Closed, the list's own height says it, once it has
+    // given the row's height back.
+    const below =
+      grown > 0
+        ? held.below + grown - (scrolling.scrollTop - held.scrollTop)
+        : scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
+    // The last step, still running, is the work under way: opened while
+    // following, it stays where it was clicked, and following goes on only
+    // once it (or the turn) writes more; its own opening never moves it.
+    const index = Number(held.row.dataset.index);
+    const item = rows()[index];
+    if (
+      grown > 0 &&
+      follow() &&
+      index === rows().length - 1 &&
+      item?.data.type === "tool_call" &&
+      !toolResult(state.items, item)
+    ) {
+      quietUntil = { height: scrolling.scrollHeight, view: scrolling.clientHeight };
+      return;
+    }
+    if (grown > 0 && below > 4) {
+      if (follow()) pausedByToggle = held.row.dataset.itemId;
+      setFollow(false);
+    } else if (below <= 4 || (grown < 0 && !!pausedByToggle && pausedByToggle === held.row.dataset.itemId)) {
+      // Closing the step whose opening paused following takes it back up.
+      pausedByToggle = undefined;
+      setFollow(true);
+    }
+    followLatest();
+  }
   function followLatest() {
-    if (!follow() || scrollFrame) return;
+    if (!follow() || scrollFrame || toggled) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
       // User input can arrive after a stream delta scheduled this frame.
       if (!follow() || !scrolling) return;
+      // A running step just opened holds the view until more is written.
+      if (quietUntil) {
+        if (
+          scrolling.scrollHeight <= quietUntil.height + 1 &&
+          Math.abs(scrolling.clientHeight - quietUntil.view) < 1
+        )
+          return;
+        quietUntil = undefined;
+      }
       scrolling.scrollTop = scrolling.scrollHeight;
       lastTop = scrolling.scrollTop;
     });
@@ -596,7 +778,7 @@ export function Session() {
     // the previous scroll position as well as its already-visible bounds.
     if (scrolling.scrollTop >= lastTop - 2 && box.top >= view.top && box.bottom <= view.bottom)
       return;
-    pauseFollowing();
+    pauseFollowing(true);
     lastTop = scrolling.scrollTop;
   }
   onMount(() => {
@@ -621,11 +803,15 @@ export function Session() {
       else followLatest();
     };
     scrolling.addEventListener("scrollend", settle);
+    // Before the row's own handlers, so its place is read before it changes.
+    scrolling.addEventListener("click", holdToggled, true);
     onCleanup(() => {
       children.disconnect();
       resize.disconnect();
       scrolling.removeEventListener("scrollend", settle);
+      scrolling.removeEventListener("click", holdToggled, true);
       cancelAnimationFrame(scrollFrame);
+      toggled = undefined;
     });
   });
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -709,6 +895,14 @@ export function Session() {
       setStopping(false);
     }
   };
+  // File → Stop response (Cmd+. on macOS, Ctrl+. elsewhere) stops the shown
+  // chat's work; with nothing running it does nothing.
+  onCleanup(
+    window.haarness.onEvent((event) => {
+      if (event.kind !== "menu" || event.data !== "stop-response") return;
+      if (active() && !stopping() && editable()) void app.run(stop);
+    }),
+  );
   const stream = () => (active() ? state.streams[active()!.id] : undefined);
   const [findOpen, setFindOpen] = createSignal(false);
   const [findMatch, setFindMatch] = createSignal("");
@@ -728,12 +922,31 @@ export function Session() {
     restoredDraft?.owner === owner() &&
     restoredDraft.text === draft() &&
     restoredDraft.attachments === JSON.stringify(attachments());
+  /** What had the keyboard when Find opened, which gets it back. */
+  let findOpener: HTMLElement | undefined;
   const closeFind = () => {
     setFindOpen(false);
     setFindMatch("");
-    scrolling?.focus({ preventScroll: true });
+    const opener = findOpener;
+    findOpener = undefined;
+    const back =
+      opener?.isConnected && !(opener as HTMLButtonElement).disabled && opener.getClientRects().length
+        ? opener
+        : editable() && composer?.isConnected && !composer.disabled
+          ? composer
+          : scrolling;
+    back?.focus({ preventScroll: true });
   };
   const openFind = () => {
+    const active = document.activeElement;
+    // From the palette or a menu, which close, the message box takes it back.
+    if (
+      !findOpen() &&
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      !active.closest("dialog, [role='dialog'], [role='menu'], .conversation-find")
+    )
+      findOpener = active;
     set("panel", "chat");
     setFindOpen(true);
     queueMicrotask(() =>
@@ -835,6 +1048,7 @@ export function Session() {
     on(owner, (key) => {
       setFindOpen(false);
       setFindMatch("");
+      findOpener = undefined;
       restoredDraft = undefined;
       void window.haarness.storage("history-draft:" + key).then((value) => {
         if (
@@ -967,6 +1181,7 @@ export function Session() {
               name: t("Stop response"),
               keywords: "interrupt cancel turn",
               icon: "stop" as const,
+              hint: shortcutLabel("Mod+.", state.platform),
               disabled: stopping(),
               action: stop,
             },
@@ -1011,6 +1226,18 @@ export function Session() {
           PLAN_TOOLS.includes(
             toolName((item.data as { name: string }).name ?? ""),
           )
+        ) &&
+        // A question still being asked is the card above the message box;
+        // its row comes once it is answered, with the answer.
+        !(
+          item.data.type === "tool_call" &&
+          toolName(item.data.name) === "question" &&
+          // A question announced live may not name its turn.
+          state.questions.some(
+            (question) =>
+              question.threadId === item.threadId && (!question.turnId || question.turnId === item.turnId),
+          ) &&
+          !toolResult(state.items, item)
         ) &&
         (!("call_id" in item.data) ||
           !tasks().has(taskKey(item.turnId, item.data.call_id)) ||
@@ -1116,7 +1343,7 @@ export function Session() {
     const target = promptTarget(move, prompts.length, reading, follow());
     if (target === undefined) return false;
     if (target === "latest") {
-      setFollow(true);
+      resumeFollowing();
       followLatest();
     } else jumpToPrompt(target);
     return true;
@@ -1231,6 +1458,29 @@ export function Session() {
       cancelAnimationFrame(revealFrame);
     });
   });
+  /* One footer per assistant turn, under its last text: when the reply
+     ended, Copy for all of it and Fork. Earlier text of the turn keeps the
+     footer's height with nothing in it, so the footer moving on to newer
+     text never moves the transcript. */
+  const turnTexts = createMemo(() => {
+    const texts = new Map<string, T.Item[]>();
+    for (const item of rows())
+      if (item.data.type === "assistant_message") {
+        const key = item.turnId ?? item.id;
+        const list = texts.get(key);
+        if (list) list.push(item);
+        else texts.set(key, [item]);
+      }
+    return texts;
+  });
+  const reply = (item?: T.Item) => {
+    if (item?.data.type !== "assistant_message") return undefined;
+    const texts = turnTexts().get(item.turnId ?? item.id) ?? [item];
+    return {
+      last: texts.at(-1)?.id === item.id,
+      text: texts.map((text) => (text.data as { text: string }).text).join("\n\n"),
+    };
+  };
   // Older forks retain their source link but have no recorded boundary. Put
   // their marker at the beginning rather than guessing which history was copied.
   const forkDividerIndex = createMemo(() => {
@@ -1242,6 +1492,12 @@ export function Session() {
         ? 0
         : -1;
   });
+  /* The reply a fork continued from is tinted for a moment when its chat
+     opens from the fork, so the eye finds it; without motion when the
+     reader prefers less. */
+  const [sourceReply, setSourceReply] = createSignal<string>();
+  let sourceTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(sourceTimer));
   async function openForkSource() {
     const source = forkSource();
     if (!source) return;
@@ -1261,6 +1517,10 @@ export function Session() {
         );
       virtual.scrollToIndex(Math.max(0, index), { align: "center" });
       scrolling.focus({ preventScroll: true });
+      clearTimeout(sourceTimer);
+      // Only the reply it was forked from: nothing when it is not there.
+      setSourceReply(index >= 0 ? rows()[index]?.id : undefined);
+      sourceTimer = setTimeout(() => setSourceReply(undefined), 1600);
     }
   }
   const ForkDivider = () => (
@@ -1316,7 +1576,24 @@ export function Session() {
       ([, id]) => {
         // Navigation can happen before the typing debounce has saved the draft.
         persistDraft();
-        setDraft(state.drafts[draftKey()] ?? "");
+        // A first message's new chat takes the box as it is, with what was
+        // typed while the chat was made, and the new-chat page starts empty:
+        // the text is in one place only.
+        const carry = carriedTo?.to === owner() ? carriedTo : undefined;
+        if (carry) {
+          carriedTo = undefined;
+          if (carry.from === shownOwner) {
+            const held = unsent.get(carry.fromStored);
+            if (held !== undefined) {
+              unsent.delete(carry.fromStored);
+              unsent.set(carry.toStored, held);
+            }
+            change(draft());
+            set("drafts", carry.fromKey, "");
+            void app.run(() => window.haarness.storage(carry.fromStored, ""));
+          } else setDraft(state.drafts[draftKey()] ?? "");
+        } else setDraft(state.drafts[draftKey()] ?? "");
+        shownOwner = owner();
         fileDrop.reset();
         const key = draftKey();
         const current = owner();
@@ -1342,7 +1619,7 @@ export function Session() {
               }
             });
         lastTop = 0;
-        setFollow(true);
+        resumeFollowing();
       },
     ),
   );
@@ -1407,14 +1684,79 @@ export function Session() {
     if (project()) {
       set("drafts", draftKey(), text);
       clearTimeout(draftTimer);
-      const key = "draft:" + draftScope() + ":" + state.selected;
-      draftSave = { key, text };
+      const key = storedDraftKey();
+      const held = unsent.get(key);
+      draftSave = { key, text: held === undefined ? text : text.trim() ? held + "\n\n" + text : held };
       draftTimer = setTimeout(persistDraft, 500);
     }
   }
+  /** Where the message box's text is kept between launches. */
+  function storedDraftKey() {
+    return "draft:" + draftScope() + ":" + state.selected;
+  }
+  // An input method composing text owns the message box until it ends: the
+  // box's text is only replaced after that, so the composition is not lost.
+  let composingText = false;
+  let afterComposition: (() => void)[] = [];
+  function whenComposed(run: () => void) {
+    if (composingText) afterComposition.push(run);
+    else run();
+  }
+  function compositionEnded() {
+    composingText = false;
+    const runs = afterComposition;
+    afterComposition = [];
+    // The composed text reaches the box with the input that follows.
+    setTimeout(() => runs.forEach((run) => run()));
+  }
+  /** Takes the text being sent out of the message box, keeping whatever was
+   * typed after it. */
+  function takeSent(text: string, from: string) {
+    whenComposed(() => {
+      if (owner() !== from) return;
+      const value = draft();
+      if (value === text) change("");
+      else if (text && value.startsWith(text)) change(value.slice(text.length).replace(/^\s+/, ""));
+    });
+  }
+  /** Puts text that was not sent back where it was typed, ahead of anything
+   * typed since; into the box when that chat is still shown. */
+  function putBack(text: string, places: string[], key: string, stored: string) {
+    if (!text) return;
+    const joined = (value: string) => (value.trim() ? text + "\n\n" + value : text);
+    if (places.includes(owner())) {
+      whenComposed(() => change(joined(draft())));
+      return;
+    }
+    const value = joined(state.drafts[key] ?? "");
+    set("drafts", key, value);
+    if (draftSave?.key === stored) draftSave = undefined;
+    void app.run(() => window.haarness.storage(stored, value));
+  }
   /** The chats whose Enter waits for the model choices. */
   const waitingForModels = new Set<string>();
+  /** The send under way in each chat, which a second Enter there waits for. */
+  const inFlight = new Map<string, Promise<boolean>>();
+  const waitingForSend = new Set<string>();
   async function send(delivery?: T.InputDelivery): Promise<void> {
+    // Enter again while a message is on its way sends this one once that
+    // one has gone, however often it is pressed: the box stays editable, so
+    // what is in it then is the next message (a command such as /undo runs
+    // after it too). If that one did not go, its text is back in the box,
+    // and nothing more is sent.
+    if (submitting() && (draft().trim() || attachments().length || app.promptContext().length)) {
+      const pressed = owner();
+      if (waitingForSend.has(pressed)) return;
+      waitingForSend.add(pressed);
+      let went = false;
+      try {
+        went = (await inFlight.get(pressed)) ?? false;
+      } finally {
+        waitingForSend.delete(pressed);
+      }
+      if (!went || owner() !== pressed || submitting()) return;
+      return send(delivery);
+    }
     if (queue.editing()) {
       // A queued message keeps only its pastes and the resources it held
       // among the chips: its edit saves text.
@@ -1503,8 +1845,9 @@ export function Session() {
       submitting() ||
       controls.busy() ||
       stopping() ||
-      (!showStop() &&
-        !draft().trim() &&
+      // Nothing to send: Enter in an empty box does nothing, also while work
+      // runs (Stop has a button of its own, and Esc).
+      (!draft().trim() &&
         !attachments().length &&
         !app.promptContext().length)
     )
@@ -1547,7 +1890,20 @@ export function Session() {
     const originProject = draftProject();
     const text = draft();
     const contextKey = app.draftKey();
+    const storedKey = storedDraftKey();
+    const keyboard = document.activeElement === composer;
+    // Kept as it was until it has gone (see `change`).
+    unsent.set(storedKey, text);
     setSubmissions((items) => [...items, origin]);
+    let landed!: (went: boolean) => void;
+    const flight = new Promise<boolean>((done) => (landed = done));
+    inFlight.set(origin, flight);
+    // The message box empties as the message goes and keeps the keyboard,
+    // so the next one can be typed at once. A second Enter waits for this
+    // send; text that is not sent comes back.
+    takeSent(text, origin);
+    persistDraft();
+    let sent = false;
     try {
       await app.loadAttachmentDraft(contextKey);
       await app.loadPromptContext(contextKey);
@@ -1571,11 +1927,10 @@ export function Session() {
       const historyEntry = { text, attachments: originalAttachments, context, thread: selected ?? undefined };
       void app.run(() => history.record(historyKey(connection!), historyEntry));
       persistDraft();
-      setFollow(true);
+      resumeFollowing();
       if (!state.connection && !state.openingProject) {
         if (!(await app.connect({ recent: project()!.id }, true))) return;
         connection = state.connection!.id;
-        setDraft(text);
       }
       // Continuing an archived chat brings it back to the sidebar, as
       // resuming one does in the TUI; the server leaves that to clients.
@@ -1590,6 +1945,18 @@ export function Session() {
             app.setPromptContext(sessionKey(connection!, id), context),
           );
           createdOwner = connection + ":" + id;
+          // The view moves to the new chat (state.tsx gives it the new-chat
+          // draft), and the box goes with it as it is then, with what was
+          // typed while the chat was being made.
+          if (!state.selected)
+            carriedTo = {
+              from: origin,
+              fromKey: contextKey,
+              fromStored: storedKey,
+              to: createdOwner,
+              toKey: sessionKey(connection!, id),
+              toStored: "draft:" + connection + ":" + id,
+            };
           // Commit the destination before removing the persisted starter
           // attachments. A failed disk write must leave the original recoverable.
           void app.run(async () => {
@@ -1606,10 +1973,16 @@ export function Session() {
             );
           });
           setSubmissions((items) => [...items, createdOwner]);
+          inFlight.set(createdOwner, flight);
         },
         context,
         delivery,
       );
+      sent = true;
+      // Gone: what the box holds now is what its draft keeps.
+      const landedStored = ["draft:" + connection + ":" + threadId, storedKey];
+      for (const key of landedStored) unsent.delete(key);
+      if (draftSave && landedStored.includes(draftSave.key)) draftSave = { key: draftSave.key, text: draft() };
       void app.run(() =>
         history.record(historyKey(connection!), {
           text,
@@ -1624,15 +1997,25 @@ export function Session() {
           sessionKey(connection!, threadId),
           context,
         );
-      if (
+      const shown =
         state.connection?.id === connection &&
         (state.selected === selected ||
-          (!selected && state.selected === threadId))
-      ) {
-        if (draft() === text) {
-          setDraft("");
-          composer.focus();
-        }
+          (!selected && state.selected === threadId));
+      // A first message moves the view to its new chat; the keyboard stays
+      // in the message box, unless the person has put it elsewhere since.
+      if (
+        shown &&
+        keyboard &&
+        composer?.isConnected &&
+        (!document.activeElement || document.activeElement === document.body)
+      )
+        composer.focus({ preventScroll: true });
+      // What was typed while that chat was being made went to it with the
+      // view (state.tsx), so the new-chat draft starts empty again.
+      if (!selected && shown) {
+        set("drafts", "new:" + originProject, "");
+        if (draftSave?.key === storedKey) draftSave = undefined;
+        await window.haarness.storage(storedKey, "");
       }
       // app.send already clears the shared text draft. Attachments have
       // their own lifecycle, and files added during the request must survive.
@@ -1649,6 +2032,22 @@ export function Session() {
       setSubmissions((items) =>
         items.filter((item) => item !== origin && item !== createdOwner),
       );
+      // The view has moved to a new chat by now, or never will: then the
+      // text stays on the new-chat page, where it was typed, and the new
+      // chat keeps no copy.
+      if (carriedTo?.to === createdOwner) {
+        const stale = carriedTo;
+        set("drafts", stale.toKey, "");
+        void app.run(() => window.haarness.storage(stale.toStored, ""));
+      }
+      carriedTo = undefined;
+      if (!sent) {
+        unsent.delete(storedKey);
+        if (createdOwner) unsent.delete("draft:" + createdOwner);
+      }
+      for (const key of [origin, createdOwner]) if (inFlight.get(key) === flight) inFlight.delete(key);
+      landed(sent);
+      if (!sent) putBack(text, [origin, createdOwner], contextKey, storedKey);
     }
   }
   async function model(value: string) {
@@ -1718,6 +2117,14 @@ export function Session() {
     if (tool) return toolActivity(tool.name, tool.arguments);
     return stream()?.text ? t("Writing a reply") : t("Thinking");
   });
+  // In Show, a thought being written says Thinking above its text, so the
+  // activity line keeps its place (and its word for screen readers) without
+  // saying it a second time.
+  const thinkingShown = () =>
+    !!stream()?.reasoning &&
+    !stream()?.text &&
+    state.preferences.thinking === "show" &&
+    activity() === t("Thinking");
   // Re-read the activity when a running review reaches the notice delay.
   createEffect(() => {
     const turn = active();
@@ -1855,7 +2262,7 @@ export function Session() {
                 "input, textarea, select, [contenteditable]",
               )
             ) {
-              setFollow(true);
+              resumeFollowing();
               settleAtEnd = true;
             }
           }}
@@ -1875,13 +2282,9 @@ export function Session() {
               <h2>
                 <Show
                   when={project()}
-                  fallback={splitAround(t("{project} to get started"), () => (
-                    <ProjectPicker heading />
-                  ))}
+                  fallback={projectHeading(t("{project} to get started"))}
                 >
-                  {splitAround(t("What should we work on in {project}?"), () => (
-                    <ProjectPicker heading />
-                  ))}
+                  {projectHeading(t("What should we work on in {project}?"))}
                 </Show>
               </h2>
               <Show when={project()}>
@@ -1949,6 +2352,7 @@ export function Session() {
                   data-item-id={rows()[row.index]?.id}
                   classList={{
                     "conversation-match": rows()[row.index]?.id === findMatch(),
+                    "fork-source": !!sourceReply() && rows()[row.index]?.id === sourceReply(),
                   }}
                   style={{
                     position: "absolute",
@@ -1977,6 +2381,7 @@ export function Session() {
                       rows()[row.index],
                       thread()?.revert?.sequence,
                     )}
+                    reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
                   />
                 </div>
@@ -1989,7 +2394,10 @@ export function Session() {
           <Show when={stream()?.reasoning && state.preferences.thinking === "show"}>
             <div class="message reasoning">
               <div class="message-label">
-                <span class="author">{t("Thinking")}</span>
+                {/* While it is the work under way, its label is the live one. */}
+                <Shimmer class="author" active={thinkingShown()}>
+                  {t("Thinking")}
+                </Shimmer>
               </div>
               <Markdown text={stream()!.reasoning} live />
             </div>
@@ -2026,8 +2434,13 @@ export function Session() {
             })()}
           </Show>
           <Show when={active() && !pending()}>
-            <div class="assistant-activity" role="status" aria-live="polite">
-              <Shimmer>{activity()}</Shimmer>
+            <div
+              class="assistant-activity"
+              classList={{ "activity-said": thinkingShown() }}
+              role="status"
+              aria-live="polite"
+            >
+              <Shimmer active={!thinkingShown()}>{activity()}</Shimmer>
               {/* Compact: the newest line of thought ticks here, on the one
                   row already holding the activity, so nothing moves; screen
                   readers hear only the activity. */}
@@ -2072,7 +2485,7 @@ export function Session() {
               aria-label={t("Jump to latest")}
               title={t("Jump to latest")}
               onClick={() => {
-                setFollow(true);
+                resumeFollowing();
                 followLatest();
               }}
             >
@@ -2223,8 +2636,9 @@ export function Session() {
                 aria-activedescendant={
                   slashOpen() ? "slash-command-" + slashIndex() : undefined
                 }
+                // Not while a message is being sent: what is typed then is
+                // the next message (`send` waits for the first).
                 disabled={
-                  submitting() ||
                   controls.busy() ||
                   !project() ||
                   !state.ready ||
@@ -2238,7 +2652,11 @@ export function Session() {
                       ? pickedElements() > 1
                         ? t("Ask about these elements…")
                         : t("Ask about this element…")
-                      : active()
+                      : currentQuestion()
+                        ? // A question waits above: what is typed here is a
+                          // message of its own, not the answer.
+                          t("Answer the question above, or send a message…")
+                        : active()
                         ? t("Send a follow-up message…")
                         : state.selected
                           ? t("Reply, or @ to add files and agents")
@@ -2246,6 +2664,11 @@ export function Session() {
                 }
                 value={draft()}
                 onInput={(event) => change(event.currentTarget.value)}
+                onCompositionStart={() => (composingText = true)}
+                onCompositionEnd={compositionEnded}
+                onBlur={() => {
+                  if (composingText) compositionEnded();
+                }}
                 onKeyDown={(event) => {
                   if (event.isComposing || event.defaultPrevented) return;
                   if (event.key === "Enter" && event.altKey && !event.shiftKey && state.connection?.info.capabilities.includes("input-queue.v1")) {
@@ -2288,6 +2711,23 @@ export function Session() {
                     event.preventDefault();
                     event.stopPropagation();
                     queue.cancel();
+                    return;
+                  }
+                  // Esc in an empty message box stops the work, as Stop
+                  // does; a menu or popover of the box, Find, or the
+                  // sidebar's chat selection takes it first.
+                  if (
+                    event.key === "Escape" &&
+                    !event.shiftKey &&
+                    !event.altKey &&
+                    !event.metaKey &&
+                    !event.ctrlKey &&
+                    showStop() &&
+                    !findOpen() &&
+                    !chatSelection()
+                  ) {
+                    event.preventDefault();
+                    if (!event.repeat && !stopping()) void app.run(stop);
                     return;
                   }
                   if (
@@ -2572,6 +3012,38 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
+/** The new-chat heading with the project picker in it. The word or mark
+ * right after the name ("?") stays on its line: a long name gives way with
+ * an ellipsis instead of leaving the mark alone on the next line. */
+function projectHeading(template: string) {
+  const [before, after = ""] = template.split("{project}");
+  const [, glued = "", rest = ""] = /^(\S*)([\s\S]*)$/.exec(after) ?? [];
+  return (
+    <>
+      {before}
+      <span class="heading-project">
+        <ProjectPicker heading />
+        {glued}
+      </span>
+      {rest}
+    </>
+  );
+}
+/** A message's time as it shows (short), with the full date and time on
+ * hover and for assistive technology. */
+function Timestamp(props: { value: string }) {
+  const date = () => new Date(props.value);
+  const valid = () => !Number.isNaN(date().getTime());
+  return (
+    <time
+      class="message-time"
+      dateTime={valid() ? date().toISOString() : undefined}
+      title={valid() ? date().toLocaleString(language(), { dateStyle: "full", timeStyle: "short" }) : undefined}
+    >
+      {time(props.value)}
+    </time>
+  );
+}
 /** What the person reads when a provider refused images that later requests leave out. */
 function mediaOmittedNotice(names: string[], guessed: boolean) {
   const list = names.join(", ");
@@ -2589,6 +3061,9 @@ function Message(props: {
   fork: () => Promise<unknown>;
   /** The message is the current Find match. */
   matched?: boolean;
+  /** For a reply: whether it is its turn's last text, which carries the
+   * turn's footer, and the turn's whole reply, which Copy takes. */
+  reply?: { last: boolean; text: string };
 }) {
   const app = useApp();
   const content = () => props.item?.data;
@@ -2650,7 +3125,7 @@ function Message(props: {
             return copy(
               data.type === "user_message"
                 ? plainMessage(data.command_line || data.text)
-                : (data as { text: string }).text,
+                : (props.reply?.text ?? (data as { text: string }).text),
             );
           })
         }
@@ -2728,7 +3203,7 @@ function Message(props: {
               </UserMessageBody>
             </div>
             <div class="message-footer">
-              <span class="message-time">{time(props.item.createdAt)}</span>
+              <Timestamp value={props.item.createdAt} />
               <MessageTools />
             </div>
           </Match>
@@ -2736,8 +3211,10 @@ function Message(props: {
           <Match when={content().type === "assistant_message"}>
             <Markdown text={(content() as { text: string }).text} />
             <div class="message-footer">
-              <span class="message-time">{time(props.item.createdAt)}</span>
-              <MessageTools />
+              <Show when={props.reply?.last ?? true}>
+                <Timestamp value={props.item.createdAt} />
+                <MessageTools />
+              </Show>
             </div>
           </Match>
 
@@ -2760,7 +3237,7 @@ function Message(props: {
           <Match when={content().type === "reasoning"}>
             <div class="message-label">
               <span class="author">{t("Thinking")}</span>
-              <span class="message-time">{time(props.item.createdAt)}</span>
+              <Timestamp value={props.item.createdAt} />
               <MessageTools />
             </div>
             <Markdown text={(content() as { text: string }).text} />
@@ -3042,25 +3519,59 @@ function Permission(props: {
     (props.permission.alwaysPatterns ?? []).map((rule) =>
       describeAlwaysRule(category(), rule, { t, shortPath }),
     );
+  const autoOffered = () => !app.isAutoApproval() && canAutoApprove(props.permission);
+  /* Deny, Always and Allow once share one line, even in a narrow chat:
+     every way of allowing more than this request waits in the Always menu,
+     Allow once + Auto included. */
   const alwaysChoices = (): MenuAction[] => [
-    {
-      label: t("Always for this folder"),
-      detail: alwaysRules().join(", ") || shortPath(app.state.connection?.workspace ?? ""),
-      icon: "folder",
-      run: () => decide("always_workspace"),
-    },
-    {
-      label: t("Always for this repository"),
-      detail: t("Every linked worktree of {repository}", {
-        repository: shortPath(props.permission.repositoryScope ?? ""),
-      }),
-      icon: "branch",
-      run: () => decide("always_repository"),
-    },
+    ...(props.permission.allowAlways !== false
+      ? [
+          {
+            label: t("Always for this folder"),
+            detail: middleTruncate(
+              alwaysRules().join(", ") || shortPath(app.state.connection?.workspace ?? ""),
+            ),
+            icon: "folder" as const,
+            run: () => decide("always_workspace"),
+          },
+          ...(props.permission.repositoryScope
+            ? [
+                {
+                  label: t("Always for this repository"),
+                  detail: middleTruncate(
+                    t("Every linked worktree of {repository}", {
+                      repository: shortPath(props.permission.repositoryScope),
+                    }),
+                  ),
+                  icon: "branch" as const,
+                  run: () => decide("always_repository"),
+                },
+              ]
+            : []),
+        ]
+      : []),
+    ...(autoOffered()
+      ? [
+          {
+            label: t("Allow once + Auto"),
+            detail: t("Then Auto decides for this chat"),
+            icon: "shield" as const,
+            divider: props.permission.allowAlways !== false,
+            run: () => decide("auto"),
+          },
+        ]
+      : []),
   ];
+  let dock!: HTMLElement;
+  const holdKeyboard = cardKeyboard(() => dock);
   return (
     <section
+      ref={(element) => {
+        dock = element;
+        holdKeyboard(element);
+      }}
       class="prompt-dock approval"
+      tabindex="-1"
       role="alert"
       aria-label={t("Permission request")}
     >
@@ -3269,7 +3780,7 @@ function Permission(props: {
           >
             {t("Deny")}
           </button>
-          <button disabled={answered()} onClick={() => decide("once")}>
+          <button ref={allowOnce} disabled={answered()} onClick={() => decide("once")}>
             {t("Allow once")}
           </button>
           <button
@@ -3284,9 +3795,11 @@ function Permission(props: {
       </Show>
       <Show when={!explicit() && !settled()}>
         <footer class="prompt-actions" ref={footer}>
-          {/* At the start, apart from the answers: when Auto turns on and it
-              goes, nothing else moves, and its focus passes to Allow once. */}
-          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+          {/* With nothing to allow always, Allow once + Auto keeps a button
+              of its own at the start, apart from the answers: when Auto
+              turns on and it goes, nothing else moves, and its focus passes
+              to Allow once. */}
+          <Show when={autoOffered() && props.permission.allowAlways === false}>
             <button
               class="prompt-auto"
               ref={(button) =>
@@ -3309,32 +3822,42 @@ function Permission(props: {
           >
             {t("Deny")}
           </button>
+          {/* The ways of allowing more than this request share one slot: a
+              menu, or the one way as a button of its own. Both are always
+              there, one of them unseen, so the slot keeps the wider one's
+              width and the answers never move when Auto comes or goes. */}
           <Show when={props.permission.allowAlways !== false}>
-            <Show
-              when={props.permission.repositoryScope}
-              fallback={
-                <button
-                  disabled={answered()}
-                  onClick={() => decide("always_workspace")}
-                  title={alwaysRules().join("\n")}
-                >
-                  {t("Always for this folder")}
-                </button>
-              }
-            >
-              <MenuButton
-                label={t("Always allow")}
-                content={
-                  <>
-                    {t("Always allow")}
-                    <Icon name="down" size="xs" />
-                  </>
-                }
-                class="prompt-always"
-                title={alwaysRules().join("\n") || t("Always allow")}
-                items={alwaysChoices()}
-              />
-            </Show>
+            <span class="prompt-always-slot">
+              <button
+                classList={{ "slot-unused": alwaysChoices().length > 1 }}
+                aria-hidden={alwaysChoices().length > 1 ? "true" : undefined}
+                tabindex={alwaysChoices().length > 1 ? -1 : undefined}
+                disabled={answered()}
+                onClick={() => alwaysChoices()[0]?.run?.()}
+                title={alwaysRules().join("\n") || alwaysChoices()[0]?.detail}
+              >
+                {t("Always for this folder")}
+              </button>
+              <span
+                class="prompt-always-menu"
+                classList={{ "slot-unused": alwaysChoices().length <= 1 }}
+                aria-hidden={alwaysChoices().length <= 1 ? "true" : undefined}
+              >
+                <MenuButton
+                  label={t("Always allow")}
+                  content={
+                    <>
+                      {t("Always allow")}
+                      <Icon name="down" size="xs" />
+                    </>
+                  }
+                  class="prompt-always"
+                  disabled={answered() || alwaysChoices().length <= 1}
+                  title={alwaysRules().join("\n") || t("Always allow")}
+                  items={alwaysChoices()}
+                />
+              </span>
+            </span>
           </Show>
           <button
             class="primary"
@@ -3348,6 +3871,14 @@ function Permission(props: {
       </Show>
     </section>
   );
+}
+/** A menu line too long for the menu, with its start and its end kept (a
+ * command's start, a path's last folders) and the middle left out. */
+function middleTruncate(text: string, length = 30) {
+  const characters = Array.from(text);
+  if (characters.length <= length) return text;
+  const head = Math.ceil((length - 1) / 2);
+  return characters.slice(0, head).join("") + "…" + characters.slice(characters.length - (length - 1 - head)).join("");
 }
 /** The closed script toggle: its size, which for a cut file counts only
  * what was read. */
@@ -3377,6 +3908,72 @@ function chromeRequestText(category: ChromeField) {
 }
 /** How long a card answered elsewhere says so before it goes. */
 const SETTLED_NOTE_MS = 1500;
+/**
+ * The keyboard around a card docked above the message box. A card never
+ * takes the keyboard from where it is: the message box stays in view under
+ * it, so what is typed there stays the next message, and Shift+Tab or the
+ * pointer reaches the card's answers. Only when nothing has the keyboard, or
+ * in an agent's chat, which has no message box, the card itself takes it
+ * (never one of its answers), so Tab reaches them and no key answers by
+ * itself. Answered with the keyboard inside it, a card gives the keyboard
+ * back to the message box, or to the transcript in an agent's chat.
+ */
+function cardKeyboard(dock: () => HTMLElement | undefined) {
+  let holding = false;
+  onMount(() => {
+    const element = dock();
+    if (!element) return;
+    const active = document.activeElement;
+    const idle = !active || active === document.body;
+    const agentChat =
+      !document.querySelector("[data-composer-input]") &&
+      !!active?.closest(".conversation") &&
+      !isTextEntry(active);
+    if (idle || agentChat) element.focus({ preventScroll: true });
+  });
+  onCleanup(() => {
+    if (!holding) return;
+    queueMicrotask(() => {
+      const active = document.activeElement;
+      // The next card took it, or the person put it somewhere.
+      if (active && active !== document.body && active.isConnected) return;
+      const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
+      (box && !box.disabled ? box : document.querySelector<HTMLElement>(".transcript"))?.focus({
+        preventScroll: true,
+      });
+    });
+  });
+  return (element: HTMLElement) => {
+    // The card itself binds no key; what is typed on it goes to the message
+    // box, where it was meant.
+    element.addEventListener("keydown", (event) => {
+      const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
+      if (
+        event.target !== element ||
+        event.key.length !== 1 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.isComposing ||
+        !box ||
+        box.disabled
+      )
+        return;
+      event.preventDefault();
+      box.focus({ preventScroll: true });
+      if (!document.execCommand("insertText", false, event.key)) {
+        box.setRangeText(event.key, box.selectionStart, box.selectionEnd, "end");
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    element.addEventListener("focusin", () => (holding = true));
+    element.addEventListener("focusout", (event) => {
+      // Focus lost with its button (answered, disabled) is still held here.
+      const next = event.relatedTarget;
+      if (next instanceof Node && !element.contains(next)) holding = false;
+    });
+  };
+}
 /** Enter that confirms an input method's composition belongs to the input method. */
 const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 
@@ -3409,26 +4006,18 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       }
     });
   };
-  // A question with nothing to pick is answered by typing, so it opens in
-  // its answer field, unless someone is typing elsewhere.
-  onMount(() => {
-    if (!input || props.question.choices?.length) return;
-    const active = document.activeElement;
-    if (
-      active?.closest("dialog, [role='dialog']") ||
-      typingElsewhere(
-        active,
-        dock,
-        document.querySelector("[data-composer-input]"),
-      )
-    )
-      return;
-    input.focus({ preventScroll: true });
-  });
+  const holdKeyboard = cardKeyboard(() => dock);
+  // One answer, and nothing to write instead: choosing it is the reply, as
+  // Enter on it is (and as in the TUI).
+  const answersOnClick = () => !props.question.multiple && props.question.custom === false;
   return (
     <section
-      ref={dock}
+      ref={(element) => {
+        dock = element;
+        holdKeyboard(element);
+      }}
       class="prompt-dock question"
+      tabindex="-1"
       aria-label={t("A question for you")}
       onKeyDown={(event) => {
         // Cmd/Ctrl+Enter replies from anywhere in the card, with what is
@@ -3461,6 +4050,7 @@ function Question(props: { question: T.PendingQuestionInfo }) {
                 if (!props.question.multiple) {
                   setChoices([choice]);
                   setAnswer("");
+                  if (answersOnClick()) submit();
                   return;
                 }
                 setChoices((old) =>

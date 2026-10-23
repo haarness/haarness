@@ -400,6 +400,9 @@ pub struct TuiState {
     pub language: Option<String>,
     /// `compact`, `show` or `hide`; absent until Ctrl+T changes it.
     pub thinking: Option<String>,
+    /// Whether the sidebar docks beside the conversation; absent until
+    /// Ctrl+B changes it on a terminal wide enough to dock it.
+    pub sidebar: Option<bool>,
     pub last_thread: Option<String>,
     /// Legacy single-thread scroll value; read as a fallback for two release
     /// cycles after per-thread view state shipped.
@@ -484,6 +487,12 @@ pub fn load_state() -> TuiState {
 
 /// Load-modify-write so independent fields never clobber each other.
 pub fn save_state(update: impl FnOnce(&mut TuiState)) {
+    // Each save reads, changes and rewrites the whole file: one at a time,
+    // so two changes made together (a test run's threads) both land.
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _saving = SAVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(directory) = config_dir() else {
         return;
     };
@@ -491,7 +500,26 @@ pub fn save_state(update: impl FnOnce(&mut TuiState)) {
     update(&mut state);
     let _ = std::fs::create_dir_all(&directory);
     if let Ok(body) = toml::to_string(&state) {
-        let _ = std::fs::write(directory.join("tui-state.toml"), body);
+        write_whole(&directory.join("tui-state.toml"), &body);
+    }
+}
+
+/// Write `body` to `path` so that a read never finds it half written: beside
+/// it, then moved into place. A file kept elsewhere through a symbolic link
+/// (a dotfiles folder) is written where the link leads, and the link stays.
+fn write_whole(path: &std::path::Path, body: &str) {
+    let target = std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten()
+        .unwrap_or_else(|| path.to_path_buf());
+    let name = target.file_name().map_or_else(
+        || "tui-state.toml".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let partial = target.with_file_name(format!("{name}.{}.partial", std::process::id()));
+    if std::fs::write(&partial, body).is_err() || std::fs::rename(&partial, &target).is_err() {
+        let _ = std::fs::remove_file(&partial);
     }
 }
 
@@ -636,6 +664,15 @@ pub fn save_thinking(mode: crate::state::ThinkingMode) {
     save_state(move |state| state.thinking = Some(mode.key().to_owned()));
 }
 
+/// Whether the sidebar was left open where it docks; open until chosen.
+pub fn load_sidebar() -> bool {
+    load_state().sidebar.unwrap_or(true)
+}
+
+pub fn save_sidebar(open: bool) {
+    save_state(move |state| state.sidebar = Some(open));
+}
+
 pub(crate) fn load_client_json<T: serde::de::DeserializeOwned + Default>(
     name: &str,
 ) -> anyhow::Result<T> {
@@ -751,9 +788,52 @@ fn overlay(base: toml::Value, over: toml::Value) -> toml::Value {
 mod tests {
     use super::{
         BackgroundMode, adopt_legacy_files, merge_tui_settings, parse_background_mode,
-        resolve_config_dir,
+        resolve_config_dir, write_whole,
     };
     use std::path::PathBuf;
+
+    /// A state file kept elsewhere through a link is written where the link
+    /// leads, the link stays a link, and no half-written copy is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn state_is_written_through_a_link_and_leaves_no_partial_file() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-write-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dotfiles = root.join("dotfiles");
+        let config = root.join("config");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let target = dotfiles.join("tui-state.toml");
+        std::fs::write(&target, "old").unwrap();
+        let link = config.join("tui-state.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_whole(&link, "sidebar = false\n");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "sidebar = false\n"
+        );
+        // A write that cannot land leaves nothing beside the file.
+        let missing = root.join("gone").join("tui-state.toml");
+        write_whole(&missing, "x");
+        for folder in [&dotfiles, &config] {
+            let names: Vec<_> = std::fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                names.iter().all(|name| !name.ends_with(".partial")),
+                "{names:?}"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn config_folder_is_the_one_the_cli_uses_on_every_os() {
