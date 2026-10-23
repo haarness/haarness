@@ -8,26 +8,56 @@
 //! typed and followed by an arrow within one read.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io;
 use std::time::Duration;
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use futures::{FutureExt as _, StreamExt as _};
+use futures::{FutureExt as _, StreamExt};
 
 /// The longest sequence after the doubled Escape: `[1;16A`.
 const LONGEST: usize = 6;
 
+/// Where events come from: the terminal, or a test's reads.
+pub(crate) trait Source {
+    /// The next event, waiting for one.
+    fn next(&mut self) -> impl Future<Output = Option<io::Result<Event>>>;
+    /// An event that came with the last read, already decoded; never waits.
+    fn ready(&mut self) -> Option<io::Result<Event>>;
+}
+
+impl Source for EventStream {
+    fn next(&mut self) -> impl Future<Output = Option<io::Result<Event>>> {
+        StreamExt::next(self)
+    }
+
+    fn ready(&mut self) -> Option<io::Result<Event>> {
+        // Ask first, so a lone Escape never leaves the stream waiting on a
+        // waker nobody holds.
+        if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+            return None;
+        }
+        StreamExt::next(self).now_or_never().flatten()
+    }
+}
+
 /// The terminal's events, with an Escape-prefixed key joined into one.
-pub(crate) struct TerminalInput {
-    stream: EventStream,
+pub(crate) struct TerminalInput<S = EventStream> {
+    source: S,
     /// Events already read and decoded, not handed out yet.
     ready: VecDeque<io::Result<Event>>,
 }
 
 impl TerminalInput {
     pub(crate) fn new() -> Self {
+        Self::reading(EventStream::new())
+    }
+}
+
+impl<S: Source> TerminalInput<S> {
+    fn reading(source: S) -> Self {
         Self {
-            stream: EventStream::new(),
+            source,
             ready: VecDeque::new(),
         }
     }
@@ -36,19 +66,16 @@ impl TerminalInput {
     pub(crate) async fn next(&mut self) -> Option<io::Result<Event>> {
         let event = match self.ready.pop_front() {
             Some(event) => event,
-            None => self.stream.next().await?,
+            None => self.source.next().await?,
         };
         if !escape(&event) {
             return Some(event);
         }
         // Several Option+arrows can come in one read (a held key, bunched
         // SSH packets, a slow frame), so this runs for every Escape, queued
-        // or new. Keys from the same read are already decoded; ask first, so
-        // a lone Escape never leaves the stream waiting on a waker nobody
-        // holds.
-        while self.ready.len() < LONGEST && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
-        {
-            let Some(Some(next)) = self.stream.next().now_or_never() else {
+        // or new: what else that read brought tops the queue up.
+        while self.ready.len() < LONGEST {
+            let Some(next) = self.source.ready() else {
                 break;
             };
             let key = matches!(next, Ok(Event::Key(_)));
@@ -112,8 +139,9 @@ pub(crate) fn escaped_key(keys: &[KeyEvent]) -> Option<(KeyEvent, usize)> {
     None
 }
 
-/// A complete cursor or editing key sequence after its Escape: `[A`, `OA`,
-/// `[1;2A`, `[5~` or `[5;2~`.
+/// A complete cursor or editing key sequence after its Escape: `[A`,
+/// `[1;2A`, `[5~` or `[5;2~`. Not the `OA` form: the TUI never turns on
+/// application cursor keys, and Escape then a typed "OH" must stay text.
 fn decode(sequence: &str) -> Option<(KeyCode, KeyModifiers)> {
     let letter = |character| match character {
         'A' => Some(KeyCode::Up),
@@ -124,14 +152,6 @@ fn decode(sequence: &str) -> Option<(KeyCode, KeyModifiers)> {
         'F' => Some(KeyCode::End),
         _ => None,
     };
-    if let Some(rest) = sequence.strip_prefix('O') {
-        let mut characters = rest.chars();
-        let code = letter(characters.next()?)?;
-        return characters
-            .next()
-            .is_none()
-            .then_some((code, KeyModifiers::NONE));
-    }
     let rest = sequence.strip_prefix('[')?;
     let last = rest.chars().last()?;
     let body = &rest[..rest.len() - last.len_utf8()];
@@ -212,7 +232,6 @@ mod tests {
         assert_eq!(joined("[D"), Some((KeyCode::Left, alt, 2)));
         assert_eq!(joined("[H"), Some((KeyCode::Home, alt, 2)));
         assert_eq!(joined("[F"), Some((KeyCode::End, alt, 2)));
-        assert_eq!(joined("OA"), Some((KeyCode::Up, alt, 2)));
         assert_eq!(joined("[5~"), Some((KeyCode::PageUp, alt, 3)));
         assert_eq!(joined("[6~"), Some((KeyCode::PageDown, alt, 3)));
         assert_eq!(
@@ -283,10 +302,57 @@ mod tests {
         );
     }
 
+    /// A test's terminal: each inner queue is what one read brought.
+    struct Reads(VecDeque<VecDeque<KeyEvent>>);
+
+    impl Source for Reads {
+        fn next(&mut self) -> impl Future<Output = Option<io::Result<Event>>> {
+            while self.0.front().is_some_and(VecDeque::is_empty) {
+                self.0.pop_front();
+            }
+            std::future::ready(self.ready())
+        }
+
+        fn ready(&mut self) -> Option<io::Result<Event>> {
+            Some(Ok(Event::Key(self.0.front_mut()?.pop_front()?)))
+        }
+    }
+
+    async fn handed_out(reads: Vec<Vec<KeyEvent>>) -> Vec<KeyEvent> {
+        let mut input =
+            TerminalInput::reading(Reads(reads.into_iter().map(VecDeque::from).collect()));
+        let mut out = Vec::new();
+        while let Some(Ok(Event::Key(key))) = input.next().await {
+            out.push(key);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn the_reader_joins_queued_escapes_and_never_across_reads() {
+        let option_up = || [vec![escape()], typed("[A")].concat();
+        let alt_up = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+        // Three in one read: the first top-up stops at six events, so the
+        // second and third Escapes are joined from the queue.
+        assert_eq!(
+            handed_out(vec![[option_up(), option_up(), option_up()].concat()]).await,
+            [alt_up, alt_up, alt_up]
+        );
+        // An Escape that ends one read is an Escape, whatever the next brings.
+        assert_eq!(
+            handed_out(vec![vec![escape()], typed("[A")]).await,
+            [vec![escape()], typed("[A")].concat()
+        );
+        assert_eq!(
+            handed_out(vec![option_up(), vec![escape()], typed("x")]).await,
+            [vec![alt_up, escape()], typed("x")].concat()
+        );
+    }
+
     #[test]
     fn anything_else_after_an_escape_is_left_alone() {
         for text in [
-            "", "[", "[1", "[1;", "[x", "x[A", "[2A", "[;3A", "[1;0A", "[9~", "O", "Ox",
+            "", "[", "[1", "[1;", "[x", "x[A", "[2A", "[;3A", "[1;0A", "[9~", "OA", "OH", "OF",
         ] {
             assert_eq!(joined(text), None, "{text:?}");
         }
