@@ -1,7 +1,7 @@
 import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
-import { BaseTag, SettingRow as Row } from "./SettingRow";
+import { BaseTag, CurrentTag, PathText, SettingRow as Row } from "./SettingRow";
 import { DiagnosticsSetting } from "./Diagnostics";
 import { Markdown } from "./Markdown";
 import { UsageStatisticsSetting } from "./UsageStatistics";
@@ -18,6 +18,7 @@ import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
 import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
 import { AssetForm, type AssetRow } from "./AssetForm";
+import { definitionSource, type DefinitionRow } from "./settings-lists";
 import { SourceForm } from "./SourceForm";
 import { ProviderForm } from "./ProviderForm";
 import { RouterConnectionDialog } from "./RouterConnectionDialog";
@@ -754,6 +755,7 @@ function Servers() {
           <Row
             title={item.label}
             target={"server:" + item.id}
+            tag={app.state.activeServer === item.id ? <CurrentTag /> : undefined}
             description={
               item.url ??
               (item.cloud
@@ -761,14 +763,13 @@ function Servers() {
                 : "Local projects on this computer")
             }
           >
-            <button
-              disabled={
-                app.state.activeServer === item.id && !app.state.openingProject
-              }
-              onClick={() => app.run(() => app.switchServer(item.id))}
-            >
-              {app.state.activeServer === item.id ? t("Selected") : t("Switch")}
-            </button>
+            {/* The server shown says so beside its name; switching to it again
+                only means something while a project of it is still opening. */}
+            <Show when={app.state.activeServer !== item.id || app.state.openingProject}>
+              <button onClick={() => app.run(() => app.switchServer(item.id))}>
+                {t("Switch")}
+              </button>
+            </Show>
             <Show when={item.url}>
               <button
                 onClick={() =>
@@ -898,23 +899,26 @@ function Computers() {
           >
             <Icon name="host" size="md" />
             <div>
-              <strong>{computer.name}</strong>
+              <span class="computer-row-name">
+                <strong>{computer.name}</strong>
+                <Show when={active() === computer.id}>
+                  <CurrentTag />
+                </Show>
+              </span>
               <p>
                 {computer.connected
                   ? platformName(computer.platform) || t("Connected")
                   : lastSeen(computer)}
               </p>
             </div>
-            <button
-              disabled={
-                active() === computer.id
-                  ? !app.state.openingProject
-                  : !computer.connected
-              }
-              onClick={() => app.run(() => app.openComputer(computer))}
-            >
-              {active() === computer.id ? t("Selected") : t("Switch")}
-            </button>
+            <Show when={active() !== computer.id || app.state.openingProject}>
+              <button
+                disabled={active() !== computer.id && !computer.connected}
+                onClick={() => app.run(() => app.openComputer(computer))}
+              >
+                {t("Switch")}
+              </button>
+            </Show>
           </div>
         )}
       </For>
@@ -933,7 +937,7 @@ function Projects() {
             <div class="settings-current-project-details">
               <span class="small muted">{t("Current working folder")}</span>
               <h3>{connection().workspace.split(/[\\/]/).filter(Boolean).at(-1) || connection().workspace}</h3>
-              <p class="settings-current-project-path">{connection().workspace}</p>
+              <PathText class="settings-current-project-path" path={connection().workspace} />
               <span class="small muted">{t(app.currentServer().label)}</span>
               <Show when={!connection().remote && !connection().trust}>
                 <p class="small muted">{t("Project configuration disabled")}</p>
@@ -948,9 +952,6 @@ function Projects() {
         <p>
           {t("Manage projects on this server. Switch servers to see another server’s projects.")}
         </p>
-        <button onClick={() => app.openSettings("servers")}>
-          {t("Switch server")}
-        </button>
         <button
           class="primary"
           onClick={() => app.run(() => app.openProject())}
@@ -966,27 +967,33 @@ function Projects() {
       </Show>
       <For each={app.projects()}>
         {(item) => (
-          <Row title={item.label} target={"project:" + item.id} description={item.root}>
+          <Row
+            title={item.label}
+            target={"project:" + item.id}
+            detail={<PathText class="setting-row-path" path={item.root} />}
+          >
             <button onClick={() => app.run(() => app.selectProject(item.id))}>
               {t("Open")}
             </button>
+            {/* The sidebar's Remove project, in the same words. */}
             <button
+              aria-label={t("Remove project {name}", { name: item.label })}
               onClick={() =>
                 app.run(async () => {
                   if (
                     await confirm(
-                      t("Forget project {name}?", { name: item.label }),
+                      t("Remove {name} from the sidebar?", { name: item.label }),
                       t(
                         "Chat history, running tasks and the saved server connection are preserved.",
                       ),
-                      { submit: t("Forget project"), danger: true },
+                      { submit: t("Remove project"), danger: true },
                     )
                   )
                     await app.forgetProject(item.id);
                 })
               }
             >
-              {t("Forget")}
+              {t("Remove")}
             </button>
           </Row>
         )}
@@ -1228,7 +1235,8 @@ const assetCopy = {
 } as const;
 function Assets(props: { kind: string; cli: Cli }) {
   const app = useApp();
-  const [rows, setRows] = createSignal<AssetRow[]>([]);
+  const [rows, setRows] = createSignal<(AssetRow & DefinitionRow)[]>([]);
+  const [plugins, setPlugins] = createSignal<T.PluginInfo[]>([]);
   const kind = () =>
     props.kind === "agents"
       ? "agent"
@@ -1241,8 +1249,8 @@ function Assets(props: { kind: string; cli: Cli }) {
   let latest = 0;
   async function refresh() {
     const request = ++latest;
-    const [list, state] = await Promise.all([
-      app.native<AssetRow[]>({
+    const [list, state, installed] = await Promise.all([
+      app.native<(AssetRow & DefinitionRow)[]>({
         action: "asset",
         kind: kind(),
         input: { action: "list" },
@@ -1256,11 +1264,14 @@ function Assets(props: { kind: string; cli: Cli }) {
               { action: "list" },
             )
             .catch(() => undefined),
+      // Plugins name where a definition that is not the person's own comes from.
+      app.api<T.PluginInfo[]>("plugins").catch(() => [] as T.PluginInfo[]),
     ]);
     // The pane serves agents, commands and skills in turn: a slower answer
     // for the section shown before must not replace this one.
     if (request !== latest) return;
     setRows(list);
+    setPlugins(installed);
     setEnabled(
       Object.fromEntries(
         (state?.[props.kind] ?? []).map((row) => [row.name, row.enabled !== false]),
@@ -1287,6 +1298,10 @@ function Assets(props: { kind: string; cli: Cli }) {
     prior: Record<string, unknown>;
     editing: boolean;
   }>();
+  const sourceLabel = (item: DefinitionRow) => {
+    const source = definitionSource(item, plugins());
+    return source === "builtin" ? t("Built-in") : source;
+  };
   async function edit(item?: AssetRow) {
     let prior: Record<string, unknown> = {};
     if (item)
@@ -1339,9 +1354,7 @@ function Assets(props: { kind: string; cli: Cli }) {
                 ? t("This project")
                 : item.scope === "global"
                   ? t("All projects")
-                  : item.scope === "base"
-                    ? undefined
-                    : t("Built-in / plugin"),
+                  : sourceLabel(item),
             ]
               .filter(Boolean)
               .join(" · ")}

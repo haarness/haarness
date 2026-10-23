@@ -315,7 +315,10 @@ test("your other computers open from the server switcher through Haarness Cloud,
     const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
     await expect(dialog.getByRole("button", { name: "Servers", exact: true })).toHaveClass(/active/);
     const section = dialog.getByRole("region", { name: "Your computers" });
-    await expect(section.locator(".computer-row").filter({ hasText: "Studio" }).getByRole("button")).toHaveText("Selected");
+    // The computer shown is marked Current, with nothing to press.
+    const studioRow = section.locator(".computer-row").filter({ hasText: "Studio" });
+    await expect(studioRow.locator(".current-tag")).toHaveText("Current");
+    await expect(studioRow.getByRole("button")).toHaveCount(0);
     const awayRow = section.locator(".computer-row").filter({ hasText: "Old Mac" });
     await expect(awayRow).toHaveClass(/away/);
     await expect(awayRow.getByRole("button", { name: "Switch" })).toBeDisabled();
@@ -749,7 +752,10 @@ test("live: Desktop opens another computer through a real local Cloud and works 
     const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
     await dialog.getByRole("button", { name: "Servers", exact: true }).click();
     const section = dialog.getByRole("region", { name: "Your computers" });
-    await expect(section.locator(".computer-row").filter({ hasText: "Studio" }).getByRole("button")).toHaveText("Selected");
+    // The computer shown is marked Current, with nothing to press.
+    const studioRow = section.locator(".computer-row").filter({ hasText: "Studio" });
+    await expect(studioRow.locator(".current-tag")).toHaveText("Current");
+    await expect(studioRow.getByRole("button")).toHaveCount(0);
     await expect(section.locator(".computer-row").filter({ hasText: "Old box" })).toHaveClass(/away/);
     await expect(section.locator(".computer-row").filter({ hasText: "Desk" })).toHaveCount(0);
     await shoot(page, "live-settings-servers");
