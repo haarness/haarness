@@ -478,6 +478,7 @@ async fn run_with_client(
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
     app.thinking = config::load_thinking();
+    app.sidebar_open = config::load_sidebar();
     if !app.keybindings_skipped.is_empty() {
         app.notice = app.language.format(
             "Shortcuts not applied: {names} · /keybinds",

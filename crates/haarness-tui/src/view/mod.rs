@@ -597,15 +597,20 @@ impl App {
     }
 
     /// Ctrl+B: show or hide the sidebar. Wide enough, it docks beside the
-    /// conversation; narrower, it opens over the conversation until hidden.
+    /// conversation, and the choice is kept for the next launch; narrower,
+    /// it opens over the conversation until hidden.
     pub fn toggle_sidebar(&mut self) {
-        let shown = if self.frame_width.get() >= SIDEBAR_DOCK_WIDTH {
+        let docks = self.frame_width.get() >= SIDEBAR_DOCK_WIDTH;
+        let shown = if docks {
             self.sidebar_open
         } else {
             self.sidebar_overlay
         };
         self.sidebar_open = !shown;
         self.sidebar_overlay = !shown;
+        if docks {
+            crate::config::save_sidebar(self.sidebar_open);
+        }
     }
 
     /// Ctrl+T: the next thinking display (Compact, Show, Hide), kept for the

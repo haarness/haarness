@@ -400,6 +400,9 @@ pub struct TuiState {
     pub language: Option<String>,
     /// `compact`, `show` or `hide`; absent until Ctrl+T changes it.
     pub thinking: Option<String>,
+    /// Whether the sidebar docks beside the conversation; absent until
+    /// Ctrl+B changes it on a terminal wide enough to dock it.
+    pub sidebar: Option<bool>,
     pub last_thread: Option<String>,
     /// Legacy single-thread scroll value; read as a fallback for two release
     /// cycles after per-thread view state shipped.
@@ -634,6 +637,15 @@ pub fn load_thinking() -> crate::state::ThinkingMode {
 
 pub fn save_thinking(mode: crate::state::ThinkingMode) {
     save_state(move |state| state.thinking = Some(mode.key().to_owned()));
+}
+
+/// Whether the sidebar was left open where it docks; open until chosen.
+pub fn load_sidebar() -> bool {
+    load_state().sidebar.unwrap_or(true)
+}
+
+pub fn save_sidebar(open: bool) {
+    save_state(move |state| state.sidebar = Some(open));
 }
 
 pub(crate) fn load_client_json<T: serde::de::DeserializeOwned + Default>(
