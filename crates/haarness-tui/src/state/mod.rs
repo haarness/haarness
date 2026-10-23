@@ -135,6 +135,16 @@ impl PermissionChoice {
     }
 }
 
+/// A one-key answer (`y`, `n`, a Chrome card's `a`) lit on its chip and not
+/// sent yet: its letter, the request it answers, and when the letter was
+/// typed (read from the terminal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlingAnswer {
+    pub permission_id: String,
+    pub letter: char,
+    pub typed: std::time::Instant,
+}
+
 /// Where the approval card's subject (a long command, say) is scrolled to,
 /// and whether it is expanded, for the request it was moved on: any other
 /// request starts at its first row, collapsed.
@@ -835,6 +845,12 @@ pub struct App {
     /// and when the last one was taken. When the next key shows they began a
     /// message, they move to the composer with it instead.
     pub permission_typed: Option<(String, usize, std::time::Instant)>,
+    /// The one-key answer waiting out its window, if any; it answers only
+    /// the request it was typed at.
+    pub permission_settling: Option<SettlingAnswer>,
+    /// The request the card's typed letters, staged answer and chip
+    /// selection belong to: a different one at the head starts afresh.
+    pub permission_head: Option<String>,
     /// Highlighted chip on the docked approval panel: an index into
     /// `permission_choices`, or into confirm/cancel while `confirm_always`
     /// is staged.
@@ -1161,6 +1177,8 @@ impl App {
             permission_focus: false,
             confirm_always: None,
             permission_typed: None,
+            permission_settling: None,
+            permission_head: None,
             permission_selection: 0,
             permission_scroll: None,
             permission_fit: std::cell::Cell::new(SubjectFit::default()),

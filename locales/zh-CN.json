@@ -22,6 +22,7 @@
   "Archive": "归档",
   "Ask": "询问",
   "Ask anything…": "随便问点什么…",
+  "{answer} in a moment · enter now · esc cancels": "即将{answer} · enter 立即 · esc 取消",
   "Enter steers · alt+enter queues": "Enter 引导 · alt+enter 排队",
   "Enter queues until this work is done": "Enter 排队，当前工作完成后再发送",
   "Assistant": "助手",

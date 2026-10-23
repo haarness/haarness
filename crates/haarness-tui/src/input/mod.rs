@@ -160,7 +160,7 @@ const STAGED_READ_TIME: std::time::Duration = std::time::Duration::from_millis(4
 /// How long a one-key answer (`y`, `n`, and `a` on a Chrome card) waits, its
 /// chip lit, before it is sent: longer than the gap between two letters typed
 /// at speed, short enough to feel immediate. A printable key that comes
-/// sooner shows the letter began a message ("yes…", "no wait").
+/// first shows the letter began a message ("yes…", "no wait").
 pub(crate) const ANSWER_SETTLE_TIME: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Whether `choice` answers the focused card on its own key, without a
@@ -173,32 +173,51 @@ fn answers_on_one_key(app: &App, choice: PermissionChoice) -> bool {
             .is_some_and(|pending| pending.explicit)
 }
 
-/// The one-key answer waiting out [`ANSWER_SETTLE_TIME`], and when its key
-/// came: the last letter the card took, when it is such an answer.
-pub(crate) fn settling_answer(app: &App) -> Option<(char, std::time::Instant)> {
-    if !app.permission_focus || app.confirm_always.is_some() {
-        return None;
-    }
-    let (typed, _, at) = app.permission_typed.as_ref()?;
-    let letter = typed.chars().last()?;
-    PermissionChoice::available(app)
-        .into_iter()
-        .find(|choice| choice.key() == letter)
-        .filter(|choice| answers_on_one_key(app, *choice))
-        .map(|_| (letter, *at))
+/// The one-key answer waiting out [`ANSWER_SETTLE_TIME`], while it still
+/// answers the card on screen: one that changed under it (a session switch,
+/// another client's answer, the keyboard handed back) took the letter with
+/// it.
+pub(crate) fn settling_answer(app: &App) -> Option<&crate::state::SettlingAnswer> {
+    let settling = app.permission_settling.as_ref()?;
+    let typed = app
+        .permission_typed
+        .as_ref()
+        .is_some_and(|(typed, _, _)| typed.ends_with(settling.letter));
+    let head = app
+        .first_pending_permission()
+        .is_some_and(|pending| pending.permission_id == settling.permission_id);
+    (app.permission_focus && app.confirm_always.is_none() && typed && head).then_some(settling)
 }
 
 /// When the settling one-key answer is due, for the event loop to wake then.
 pub(crate) fn settle_deadline(app: &App) -> Option<std::time::Instant> {
-    settling_answer(app).map(|(_, at)| at + ANSWER_SETTLE_TIME)
+    settling_answer(app).map(|settling| settling.typed + ANSWER_SETTLE_TIME)
 }
 
-/// Send the settling one-key answer once no key has followed it in time.
-pub(crate) async fn settle_answer(app: &mut App, client: &ApiClient) -> Result<()> {
-    if let Some((letter, at)) = settling_answer(app)
-        && at.elapsed() >= ANSWER_SETTLE_TIME
-    {
-        answer_permission(app, client, letter).await?;
+/// Send the settling answer now: Enter, the same letter again, or a key that
+/// is not typing asked for it. False when none was settling.
+async fn send_settling_answer(app: &mut App, client: &ApiClient) -> Result<bool> {
+    let letter = settling_answer(app).map(|settling| settling.letter);
+    app.permission_settling = None;
+    let Some(letter) = letter else {
+        return Ok(false);
+    };
+    answer_permission(app, client, letter).await?;
+    Ok(true)
+}
+
+/// The event loop's wake-up at the deadline: the answer goes once its window
+/// has passed with no key. Input the terminal sent that is not handled yet
+/// (`input_waiting`) came before this moment, however late it is read, so it
+/// is handled first and decides.
+pub(crate) async fn settle_answer(
+    app: &mut App,
+    client: &ApiClient,
+    input_waiting: bool,
+) -> Result<()> {
+    app.follow_permission_head();
+    if !input_waiting && settle_deadline(app).is_some_and(|due| std::time::Instant::now() >= due) {
+        send_settling_answer(app, client).await?;
     }
     Ok(())
 }
@@ -209,6 +228,7 @@ fn cancel_settling_answer(app: &mut App) -> bool {
     if settling_answer(app).is_none() {
         return false;
     }
+    app.permission_settling = None;
     if let Some((_, selection, _)) = app.permission_typed.take() {
         app.permission_selection = selection;
     }
@@ -216,27 +236,69 @@ fn cancel_settling_answer(app: &mut App) -> bool {
     true
 }
 
-/// A printable key while the approval card owns the keyboard. Returns false
-/// when the key is not an answer, which means the user is typing a message.
+/// What a key does to a one-key answer still settling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettleKey {
+    /// A printable key: the letter began a message, or, the same letter
+    /// again, confirms it (`permission_letter`).
+    Typing,
+    /// Esc, Ctrl+C, Backspace and Delete take the letter back.
+    TakeBack,
+    /// A key that is no key press of its own (a modifier on its own).
+    Neutral,
+    /// Every other key sends the answer first, as Enter does, then does
+    /// what it does: nothing can slip between the letter and its answer.
+    Sends,
+}
+
+fn settle_key(key: KeyEvent) -> SettleKey {
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    match key.code {
+        KeyCode::Char(_) if plain => SettleKey::Typing,
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => SettleKey::TakeBack,
+        KeyCode::Esc | KeyCode::Backspace | KeyCode::Delete if plain => SettleKey::TakeBack,
+        KeyCode::Modifier(_)
+        | KeyCode::CapsLock
+        | KeyCode::NumLock
+        | KeyCode::ScrollLock
+        | KeyCode::Null => SettleKey::Neutral,
+        _ => SettleKey::Sends,
+    }
+}
+
+/// A printable key while the approval card owns the keyboard, typed at
+/// `typed`. Returns false when the key is not an answer, which means the
+/// user is typing a message.
 ///
 /// Nothing a letter does here is final at once, so every letter the card
 /// takes is remembered: when the next key shows they began a word ("yes…",
 /// "update…", "always…", "hello"), they move to the composer with it and
 /// nothing is answered. `y`, `n` and a Chrome card's `a` light their chip and
-/// answer once [`ANSWER_SETTLE_TIME`] passes with no other key (Enter sends
-/// at once); `h`/`l` move the selection; `a`/`w`/`r`/`u` only stage their
-/// answer. A choice staged by a letter is confirmed only by that letter again
-/// once it could be read (or Enter): typed at speed, "www…" or "uuid" are
-/// words, not a folder rule or Auto.
-async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> Result<bool> {
-    if settling_answer(app).is_some() {
+/// answer once [`ANSWER_SETTLE_TIME`] passes with no key, or at once on Enter
+/// or the same letter again; `h`/`l` move the selection; `a`/`w`/`r`/`u`
+/// only stage their answer. A choice staged by a letter is confirmed only by
+/// that letter again once it could be read (or Enter): typed at speed, "www…"
+/// or "uuid" are words, not a folder rule or Auto. Gaps are measured between
+/// the moments the keys were typed, not handled.
+async fn permission_letter(
+    app: &mut App,
+    client: &ApiClient,
+    letter: char,
+    typed: std::time::Instant,
+) -> Result<bool> {
+    if let Some(settling) = settling_answer(app) {
+        // A double tap confirms; any other letter began a message.
+        if settling.letter == letter {
+            send_settling_answer(app, client).await?;
+            return Ok(true);
+        }
         return Ok(false);
     }
     if let Some(staged) = app.confirm_always
-        && let Some((typed, _, at)) = &app.permission_typed
-        && typed.ends_with(staged)
+        && let Some((letters, _, at)) = &app.permission_typed
+        && letters.ends_with(staged)
     {
-        if letter != staged || at.elapsed() < STAGED_READ_TIME {
+        if letter != staged || typed.saturating_duration_since(*at) < STAGED_READ_TIME {
             return Ok(false);
         }
         answer_permission(app, client, letter).await?;
@@ -244,11 +306,11 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
     }
     let selection = app.permission_selection;
     let remember = |app: &mut App| {
-        let typed = app
+        let letters = app
             .permission_typed
-            .get_or_insert_with(|| (String::new(), selection, std::time::Instant::now()));
-        typed.0.push(letter);
-        typed.2 = std::time::Instant::now();
+            .get_or_insert_with(|| (String::new(), selection, typed));
+        letters.0.push(letter);
+        letters.2 = typed;
     };
     if matches!(letter, 'h' | 'l') {
         remember(app);
@@ -263,6 +325,13 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
     if answers_on_one_key(app, choice) {
         remember(app);
         app.permission_selection = index;
+        app.permission_settling =
+            app.first_pending_permission()
+                .map(|pending| crate::state::SettlingAnswer {
+                    permission_id: pending.permission_id.clone(),
+                    letter,
+                    typed,
+                });
         return Ok(true);
     }
     answer_permission(app, client, letter).await?;
@@ -418,15 +487,44 @@ pub enum AppAction {
     StartWorkspaceRefOperation(WorkspaceRefOperation),
 }
 
+/// [`handle_key_at`] for a key read just now, as tests press them.
+#[cfg(test)]
 pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Result<AppAction> {
+    handle_key_at(app, key, std::time::Instant::now(), client).await
+}
+
+/// [`handle_key`] for a key the terminal input read at `typed`.
+pub async fn handle_key_at(
+    app: &mut App,
+    key: KeyEvent,
+    typed: std::time::Instant,
+    client: &ApiClient,
+) -> Result<AppAction> {
     // With the kitty keyboard protocol active, releases and repeats arrive as
     // distinct events; only presses (and repeats) should mutate state.
     if key.kind == KeyEventKind::Release {
         return Ok(AppAction::Continue);
     }
-    // A key read after a one-key answer's window came too late to take it
-    // back: the answer goes first, as it would have on the loop's wake-up.
-    settle_answer(app, client).await?;
+    app.follow_permission_head();
+    // A one-key answer still settling meets the next key before anything
+    // else does: typing decides in `permission_letter`; a key that takes
+    // the letter back does only that; Enter sends it and is spent; any other
+    // key sends it and then does its own thing (Ctrl+Y included).
+    if settling_answer(app).is_some() {
+        match settle_key(key) {
+            SettleKey::TakeBack => {
+                cancel_settling_answer(app);
+                return Ok(AppAction::Continue);
+            }
+            SettleKey::Sends => {
+                send_settling_answer(app, client).await?;
+                if key.code == KeyCode::Enter {
+                    return Ok(AppAction::Continue);
+                }
+            }
+            SettleKey::Typing | SettleKey::Neutral => {}
+        }
+    }
     app.sync_prompt_history(client);
     if app.terminal.is_some() {
         return handle_terminal_key(app, key, client).await;
@@ -455,8 +553,6 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             }
             app.selection_range = None;
             app.notice = "Copied selection".into();
-        } else if cancel_settling_answer(app) {
-            // The answer a letter lit is taken back before it is sent.
         } else if app.workspace_mutation.is_some() || app.workspace_ref_operation.is_some() {
             app.notice = "Folder operation is still running · it cannot be safely cancelled".into();
         } else if matches!(app.overlay, Overlay::ProviderLogin) {
@@ -527,7 +623,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             if let KeyCode::Char(letter) = key.code
                 && (plain || key.modifiers == KeyModifiers::SHIFT)
             {
-                if plain && permission_letter(app, client, letter).await? {
+                if plain && permission_letter(app, client, letter, typed).await? {
                     return Ok(AppAction::Continue);
                 }
                 // A child thread has no composer to type into.
@@ -541,12 +637,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 }
                 app.release_permission_focus(true);
             } else {
-                // Any other key is a deliberate move on the card. Esc takes
-                // back a one-key answer still settling, as it does a staged
-                // one; Enter sends the chip that answer lit.
-                if key.code == KeyCode::Esc && cancel_settling_answer(app) {
-                    return Ok(AppAction::Continue);
-                }
+                // Any other key is a deliberate move on the card.
                 app.permission_typed = None;
                 match key.code {
                     KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {

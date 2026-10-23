@@ -9241,12 +9241,14 @@ fn outside_write_event(thread: &Thread, id: &str) -> haarness_protocol::EventEnv
 }
 
 /// Let a one-key approval answer's window pass, as the event loop does when
-/// it wakes at the answer's deadline.
+/// it wakes at the answer's deadline with no input waiting.
 async fn settle(app: &mut App, client: &crate::api::ApiClient) {
-    if let Some((_, _, at)) = &mut app.permission_typed {
-        *at -= crate::input::ANSWER_SETTLE_TIME;
+    if let Some(settling) = &mut app.permission_settling {
+        settling.typed -= crate::input::ANSWER_SETTLE_TIME;
     }
-    crate::input::settle_answer(app, client).await.unwrap();
+    crate::input::settle_answer(app, client, false)
+        .await
+        .unwrap();
 }
 
 async fn type_text(app: &mut App, text: &str, client: &crate::api::ApiClient) {
@@ -9321,7 +9323,7 @@ async fn a_one_key_answer_settles_before_it_is_sent() {
     assert!(app.composer.is_empty());
     assert!(crate::input::settle_deadline(&app).is_some());
     // A wake-up before the window ends sends nothing.
-    crate::input::settle_answer(&mut app, &offline)
+    crate::input::settle_answer(&mut app, &offline, false)
         .await
         .unwrap();
     assert_eq!(app.pending_permissions.len(), 1);
@@ -9373,7 +9375,7 @@ async fn a_one_key_answer_settles_before_it_is_sent() {
 }
 
 /// A reply typed at a waiting card that starts with an answer letter goes to
-/// the prompt whole, however long after the letter its next key came, and
+/// the prompt whole when its next key comes within the letter's window, and
 /// nothing is answered then or later.
 #[tokio::test]
 async fn a_reply_starting_with_y_or_n_answers_nothing() {
@@ -9395,6 +9397,180 @@ async fn a_reply_starting_with_y_or_n_answers_nothing() {
         assert!(!app.permission_focus, "{message}");
         assert!(crate::input::settle_deadline(&app).is_none(), "{message}");
     }
+}
+
+/// Keys that are not typing never let a settling letter slip: Ctrl+Y (which
+/// could switch the chat to Auto and settle the card its own way) and ↑
+/// send the answer first and then do their own thing.
+#[tokio::test]
+async fn a_key_that_is_not_typing_sends_the_settling_answer_first() {
+    for (code, modifiers) in [
+        (KeyCode::Char('y'), KeyModifiers::CONTROL),
+        (KeyCode::Up, KeyModifiers::NONE),
+    ] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.reduce(
+            outside_write_event(&thread, "perm-first"),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+        for key in [
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            KeyEvent::new(code, modifiers),
+        ] {
+            let _ = crate::input::handle_key(&mut app, key, &client).await;
+        }
+        assert!(app.pending_permissions.is_empty(), "{code:?}");
+        let requests = server.await.unwrap();
+        assert!(
+            requests[0].contains("/permissions/perm-first")
+                && requests[0].contains("\"decision\":\"reject\""),
+            "{code:?}: {}",
+            requests[0]
+        );
+    }
+}
+
+/// A key typed within the window counts as typed within it however late the
+/// loop handles it, and input waiting at the deadline is handled first.
+#[tokio::test]
+async fn a_key_typed_in_the_window_but_handled_late_still_begins_a_message() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    // Any reply would fail against this client; none must be attempted.
+    let client = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-late"), &client)
+        .await
+        .unwrap();
+    let typed = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(2))
+        .unwrap();
+    let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+    crate::input::handle_key_at(&mut app, key('y'), typed, &client)
+        .await
+        .unwrap();
+    // The deadline is long past, but a key waits to be handled: it goes first.
+    crate::input::settle_answer(&mut app, &client, true)
+        .await
+        .unwrap();
+    assert!(crate::input::settle_deadline(&app).is_some());
+    crate::input::handle_key_at(
+        &mut app,
+        key('e'),
+        typed + std::time::Duration::from_millis(80),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.composer.text(), "ye");
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(!app.notice.contains("Could not answer"), "{}", app.notice);
+}
+
+/// `y y` approves at once, rather than putting "yy" in the prompt.
+#[tokio::test]
+async fn a_double_tap_confirms_at_once() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-double"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    type_text(&mut app, "yy", &client).await;
+    assert!(app.pending_permissions.is_empty());
+    assert!(app.composer.is_empty());
+    assert!(server.await.unwrap()[0].contains("\"decision\":\"once\""));
+}
+
+/// A letter answers only the request it was typed at. When another comes to
+/// the head of the card first (another client answered, a session switch),
+/// the letter goes with the old one, and so do a staged answer and the chip
+/// selection.
+#[tokio::test]
+async fn a_letter_never_answers_a_card_it_was_not_typed_at() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    // Any reply would fail against this client; none must be attempted.
+    let client = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-seen"), &client)
+        .await
+        .unwrap();
+    app.reduce(outside_write_event(&thread, "perm-unseen"), &client)
+        .await
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('n')).await;
+    assert!(crate::input::settle_deadline(&app).is_some());
+    app.reduce(
+        fixture_event(
+            "permission.resolved",
+            thread.id,
+            thread.id,
+            serde_json::json!({"permissionId": "perm-seen"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    settle(&mut app, &client).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert_eq!(app.pending_permissions[0].permission_id, "perm-unseen");
+    assert_eq!(app.permission_selection, 0);
+    assert!(!app.notice.contains("Could not answer"), "{}", app.notice);
+
+    // A session switch replaces the list: a letter settling, an answer staged
+    // and the selection all stay with the card they were made at.
+    press_key(&mut app, KeyCode::Char('y')).await;
+    let mut other = pending_permission_fixture(&thread, "perm-other-session");
+    other.thread_id = ThreadId::new();
+    app.hydrate_permissions(vec![other.clone()], &client).await;
+    assert!(crate::input::settle_deadline(&app).is_none());
+    settle(&mut app, &client).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    app.hydrate_permissions(
+        vec![pending_permission_fixture(&thread, "perm-staged")],
+        &client,
+    )
+    .await;
+    app.permission_focus = true;
+    press_key(&mut app, KeyCode::Char('a')).await;
+    assert_eq!(app.confirm_always, Some('a'));
+    app.hydrate_permissions(vec![other], &client).await;
+    assert_eq!(app.confirm_always, None);
+    assert_eq!(app.permission_typed, None);
+    assert_eq!(app.permission_selection, 0);
+    assert!(!app.notice.contains("Could not answer"), "{}", app.notice);
+}
+
+/// While a letter settles, its chip shows it is on its way and the row under
+/// the chips says what is about to happen and that Esc cancels it.
+#[tokio::test]
+async fn a_settling_letter_says_what_is_about_to_happen() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-shown"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press_key(&mut app, KeyCode::Char('n')).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Reject  …"), "{text}");
+    assert!(
+        text.contains("Reject in a moment · enter now · esc cancels"),
+        "{text}"
+    );
+    assert!(!text.contains("esc reject"), "{text}");
+    press_key(&mut app, KeyCode::Esc).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Reject  n"), "{text}");
+    assert!(text.contains("esc reject"), "{text}");
 }
 
 /// A prompt from an older server carries no "always" patterns; its Always

@@ -22,6 +22,7 @@
   "Archive": "أرشفة",
   "Ask": "سؤال",
   "Ask anything…": "اسأل أي شيء…",
+  "{answer} in a moment · enter now · esc cancels": "{answer} بعد لحظة · enter الآن · esc يلغي",
   "Enter steers · alt+enter queues": "Enter للتوجيه · alt+enter لقائمة الانتظار",
   "Enter queues until this work is done": "Enter يضيف إلى قائمة الانتظار حتى ينتهي هذا العمل",
   "Assistant": "المساعد",

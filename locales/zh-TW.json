@@ -22,6 +22,7 @@
   "Archive": "封存",
   "Ask": "詢問",
   "Ask anything…": "隨便問點什麼…",
+  "{answer} in a moment · enter now · esc cancels": "即將{answer} · enter 立即 · esc 取消",
   "Enter steers · alt+enter queues": "Enter 引導 · alt+enter 加入佇列",
   "Enter queues until this work is done": "Enter 加入佇列，目前工作完成後再送出",
   "Assistant": "助手",
