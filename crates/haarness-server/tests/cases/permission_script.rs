@@ -1044,9 +1044,10 @@ async fn a_card_announced_again_when_auto_turns_on_keeps_its_script() {
 }
 
 /// The first time a request is listed, whatever it carries: polled as often
-/// as the runtime lets another task in.
+/// as the runtime lets another task in, for up to ten seconds.
 async fn first_listing(runtime: &AgentRuntime) -> haarness_protocol::PendingPermissionInfo {
-    for _ in 0..50_000 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         if let Some(pending) = runtime.pending_permissions().into_iter().next() {
             return pending;
         }
