@@ -226,8 +226,8 @@ struct BatchStep<'a> {
     tool: &'a str,
     parameters: &'a serde_json::Value,
     failed: Option<bool>,
-    /// Auto's reviewer refused it, for this reason.
-    blocked: Option<String>,
+    /// Auto's reviewer refused it, with its note.
+    blocked: Option<haarness_protocol::PermissionReview>,
 }
 
 /// Each entry of a batch result as (tool, failed). The metadata holds every
@@ -240,10 +240,7 @@ fn batch_outcomes(output: &str, metadata: &serde_json::Value) -> Vec<crate::stat
                 .iter()
                 .map(|entry| {
                     let tool = entry.get("tool").and_then(serde_json::Value::as_str);
-                    let blocked = entry
-                        .get("metadata")
-                        .and_then(review_block)
-                        .map(str::to_owned);
+                    let blocked = entry.get("metadata").and_then(review_block);
                     crate::state::BatchOutcome {
                         tool: tool.unwrap_or_default().to_owned(),
                         failed: entry.get("error").is_some() && blocked.is_none(),
@@ -498,14 +495,23 @@ fn rejected_by_user(output: &str) -> bool {
         .starts_with("The user rejected this action")
 }
 
-/// The reason Auto's reviewer gave for blocking a call, when it blocked it
-/// (`metadata.review` of status `blocked`; empty when it gave none).
-fn review_block(metadata: &serde_json::Value) -> Option<&str> {
+/// Auto's reviewer's note on a call it blocked (`metadata.review` of status
+/// `blocked`), or `None` when it did not block it. A note this client cannot
+/// read whole keeps what it can: its English reason.
+fn review_block(metadata: &serde_json::Value) -> Option<haarness_protocol::PermissionReview> {
     (metadata.pointer("/review/status")?.as_str()? == "blocked").then(|| {
-        metadata
-            .pointer("/review/rationale")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
+        serde_json::from_value(metadata["review"].clone()).unwrap_or_else(|_| {
+            haarness_protocol::PermissionReview {
+                status: haarness_protocol::PermissionReviewStatus::Blocked,
+                risk: None,
+                rule: None,
+                rationale: metadata
+                    .pointer("/review/rationale")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                reason: None,
+            }
+        })
     })
 }
 
@@ -1648,9 +1654,16 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     }
                     Some("blocked") => {
                         let lead = app.language.text("Blocked by Auto review");
-                        match blocked.map(str::trim).filter(|reason| !reason.is_empty()) {
-                            Some(reason) => format!("  {lead}: {}", single_line(reason, 160)),
-                            None => format!("  {lead}"),
+                        let reason = blocked
+                            .as_ref()
+                            .map(|review| {
+                                crate::view::approval::review_reason_text(review, app.language)
+                            })
+                            .unwrap_or_default();
+                        if reason.is_empty() {
+                            format!("  {lead}")
+                        } else {
+                            format!("  {lead}: {}", single_line(&reason, 160))
                         }
                     }
                     None if queued => "  queued".to_owned(),
@@ -1871,7 +1884,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         };
                         // A refused step says so after its target, as a
                         // call of its own does.
-                        let blocked = step.blocked.as_deref().map(|reason| {
+                        let blocked = step.blocked.as_ref().map(|review| {
+                            let reason =
+                                crate::view::approval::review_reason_text(review, app.language);
                             let lead = app.language.text("Blocked by Auto review");
                             if reason.is_empty() {
                                 format!("  {lead}")

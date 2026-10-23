@@ -1962,6 +1962,10 @@ html[dir="rtl"] .tool-target {
 .prompt-actions .prompt-always {
   gap: var(--s1);
 }
+/* Apart from the answers, so they stay put when it goes. */
+.prompt-actions .prompt-auto {
+  margin-inline-end: auto;
+}
 .prompt-actions input {
   flex: 1;
   min-width: 140px;

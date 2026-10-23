@@ -357,7 +357,8 @@ fn durable_todos(items: &[Item], through: Option<u64>) -> Vec<haarness_protocol:
 pub struct BatchOutcome {
     pub tool: String,
     pub failed: bool,
-    pub blocked: Option<String>,
+    /// Auto's reviewer refused the step, with its note.
+    pub blocked: Option<haarness_protocol::PermissionReview>,
 }
 
 /// A batch result's entries, in step order.

@@ -118,10 +118,21 @@ export async function approveAndEnable(input: {
   acknowledge: () => void;
   current: () => boolean;
   enable: () => Promise<unknown>;
-}) {
-  await input.reply();
+  /** A reply error that means the request was settled meanwhile. */
+  settled?: (error: unknown) => boolean;
+}): Promise<boolean> {
+  // A request settled meanwhile (Auto's reviewer, another window) still
+  // takes the person's choice of Auto: true says it was answered already.
+  let answered = false;
+  try {
+    await input.reply();
+  } catch (error) {
+    if (!input.settled?.(error)) throw error;
+    answered = true;
+  }
   input.acknowledge();
   if (input.current()) await input.enable();
+  return answered;
 }
 
 /** The plain reading of a stored rule's catch-all, by permission. */
@@ -173,6 +184,13 @@ export function describeAlwaysRule(
   return pattern;
 }
 
+/** `text` (a path, an error) set apart from the sentence around it, so a
+ * right-to-left sentence keeps it in one piece (`/tmp/cache`, not
+ * `tmp/cache/`) and its own punctuation in place: FSI … PDI. */
+export function isolate(text: unknown): string {
+  return "\u2068" + String(text ?? "") + "\u2069";
+}
+
 /** Haarness's own words for a note it wrote itself, by its code, in the
  * person's language; undefined for the reviewer's own words or a code this
  * window does not know (its English `rationale` is shown then). */
@@ -189,13 +207,15 @@ export function reviewReasonText(
     case "no_model":
       return t("No model was available to review this request.");
     case "error":
-      return t("It could not decide ({detail}).", { detail: reason.detail });
+      return t("It could not decide ({detail}).", { detail: isolate(reason.detail) });
     case "streak":
       return t("It blocked {count} actions in a row, so the rest of this turn is yours to approve.", { count: reason.count });
     case "turn_limit":
       return t("It blocked {count} actions this turn, so the rest of it is yours to approve.", { count: reason.count });
     case "unnamed_deletion":
-      return t("This deletes {path}, outside the project, and your messages do not name it.", { path: reason.path });
+      return t("This deletes {path}, outside the project, and your messages do not name it.", { path: isolate(reason.path) });
+    case "unplaced_deletion":
+      return t("This deletes {path}, a path Haarness can't place, and your messages do not name it.", { path: isolate(reason.path) });
     case "rated":
       return review.risk === "critical"
         ? t("It rated this action critical risk.")
@@ -216,17 +236,47 @@ export function reviewNote(
   review: PermissionReview | null | undefined,
   t: (key: string, values?: Record<string, string | number>) => string,
 ): string {
-  if (!review) return "";
-  if (review.status === "reviewing") return t("Auto review is deciding…");
+  const parts = reviewNoteParts(review, t);
+  if (!parts) return "";
+  return parts.lead + (parts.rule ? " · " + parts.rule : "") + (parts.reason ? ": " + parts.reason : "");
+}
+
+/** The note's parts, for a card that sets the rule and the reason apart
+ * (`<bdi>`): each keeps its own direction beside the interface's. */
+export function reviewNoteParts(
+  review: PermissionReview | null | undefined,
+  t: (key: string, values?: Record<string, string | number>) => string,
+): { lead: string; rule?: string; reason?: string } | undefined {
+  if (!review) return undefined;
+  if (review.status === "reviewing") return { lead: t("Auto review is deciding…") };
   const lead =
     review.status === "failed"
       ? t("Auto review unavailable")
       : review.status === "paused"
         ? t("Auto review paused")
         : t("Auto review");
+  return { lead, rule: reviewRule(review, t), reason: reviewReason(review, t) || undefined };
+}
+
+/** The reviewer's rule as a note shows it: Haarness's own ("Destructive
+ * action", on a note it wrote itself) in the person's language, the
+ * reviewer's as it wrote it. */
+export function reviewRule(
+  review: PermissionReview,
+  t: (key: string, values?: Record<string, string | number>) => string,
+): string | undefined {
   const rule = review.rule?.trim();
-  const reason = (reviewReasonText(review, t) ?? review.rationale ?? "").trim();
-  return lead + (rule ? " · " + rule : "") + (reason ? ": " + reason : "");
+  if (!rule) return undefined;
+  return review.reason ? t(rule) : rule;
+}
+
+/** The reason in a note, in the person's language when Haarness wrote it;
+ * empty when there is none. */
+export function reviewReason(
+  review: PermissionReview,
+  t: (key: string, values?: Record<string, string | number>) => string,
+): string {
+  return (reviewReasonText(review, t) ?? review.rationale ?? "").trim();
 }
 
 /** A reply the server answered with "not found": the request was settled
