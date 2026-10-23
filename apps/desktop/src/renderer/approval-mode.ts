@@ -236,3 +236,19 @@ export function alreadySettled(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\bnot found: permission\b/i.test(message);
 }
+
+/** The shield control's tooltip in Auto: where the server's Auto asks a
+ * reviewer (`approval-review.v1`) it says so; otherwise Auto approves once. */
+export function autoApprovalHint(
+  chat: boolean,
+  reviewer: boolean,
+  t: (key: string) => string,
+): string {
+  if (reviewer)
+    return chat
+      ? t("Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.")
+      : t("Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.");
+  return chat
+    ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
+    : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.");
+}

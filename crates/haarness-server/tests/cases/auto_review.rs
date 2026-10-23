@@ -1220,3 +1220,56 @@ async fn turning_auto_on_with_a_card_shown_says_so_and_keeps_the_note() {
     assert!(matches!(late, Err(CoreError::NotFound(_))), "{late:?}");
     assert!(workspace.0.join("late.txt").exists());
 }
+
+#[tokio::test]
+async fn the_server_says_auto_asks_a_reviewer_only_while_it_does() {
+    for (enabled, expected) in [(true, true), (false, false)] {
+        let workspace = Workspace::new();
+        let (runtime, _provider) = runtime_with(&workspace.0, |config| {
+            config.auto_review.enabled = enabled;
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = serve(
+            listener,
+            "review-token",
+            ServerState {
+                browser: None,
+                management: None,
+                runtime: Arc::new(runtime),
+                mcp: Arc::new(NoMcp),
+                skills: Arc::new(NoSkills),
+                plugins: None,
+                workflows: None,
+                workspaces: None,
+                workspace_id: None,
+                workspace: workspace.0.clone(),
+                project_trusted: false,
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+        let info: ServerInfo = reqwest::Client::new()
+            .get(format!("http://{}/v1/info", handle.address))
+            .bearer_auth("review-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == haarness_protocol::APPROVAL_REVIEW_CAPABILITY),
+            expected,
+            "{:?}",
+            info.capabilities
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
+        );
+    }
+}
