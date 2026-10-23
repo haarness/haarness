@@ -5302,11 +5302,18 @@ impl Refusals {
     /// with never moves the run toward a stop, nor starts the streak over.
     fn count(&mut self, stream: Option<usize>, transcripts: Option<usize>) -> bool {
         self.total += 1;
+        let mut confirm = |now: usize| self.transcripts.replace(now).map(|before| now > before);
         let progressed = match (stream, transcripts) {
-            (Some(now), _) => self.stream.replace(now).map(|before| now > before),
+            (Some(now), transcripts) => match self.stream.replace(now).map(|before| now > before) {
+                Some(true) => Some(true),
+                // The stream saw nothing: a stalled stream would say the
+                // same, so the transcripts confirm it before the streak
+                // grows.
+                _ => transcripts.and_then(&mut confirm),
+            },
             (None, Some(now)) => {
                 self.stream = None;
-                self.transcripts.replace(now).map(|before| now > before)
+                confirm(now)
             }
             (None, None) => {
                 self.stream = None;
@@ -5469,11 +5476,23 @@ impl RunWatch {
     /// side by side never stop it.
     async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> bool {
         let stream = self.progress.get().and_then(Progress::read);
-        // A stream that failed (a proxy that buffers it, say) counts on the
-        // transcripts for this one refusal, so it cannot hold the streak off.
-        let transcripts = match stream {
-            Some(_) => None,
-            None => transcript_successes(client, root).await,
+        // Progress the stream saw needs nothing more. Otherwise (the stream
+        // failed, or saw nothing, as a stalled one would) the transcripts
+        // say, so a stream can neither hold the streak off nor stop the run
+        // wrongly.
+        let progressed = {
+            let refusals = self
+                .refusals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            stream
+                .zip(refusals.stream)
+                .is_some_and(|(now, before)| now > before)
+        };
+        let transcripts = if progressed {
+            None
+        } else {
+            transcript_successes(client, root).await
         };
         self.refusals
             .lock()
@@ -5515,8 +5534,14 @@ impl RunWatch {
         if self.approver == Approver::OtherClients && !self.yolo {
             return Ok(());
         }
-        // A run that refuses counts the calls that succeed in it from now on.
-        if self.auto && self.approver == Approver::Nobody {
+        // A run that refuses counts the calls that succeed in it from now on,
+        // from its events and, to confirm, its transcripts.
+        if self.auto && self.approver == Approver::Nobody && self.progress.get().is_none() {
+            let transcripts = transcript_successes(client, root).await;
+            self.refusals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .transcripts = transcripts;
             self.progress.get_or_init(|| Progress::follow(client, root));
         }
         // One listing for both: a request that arrives after a separate
@@ -5535,7 +5560,8 @@ impl RunWatch {
             if self.approver == Approver::OtherClients {
                 continue;
             }
-            let request = describe_permission(&pending);
+            // What the agent asked, safe to print: its command is its own.
+            let request = printed_request(&pending);
             let reply = |decision| PermissionReply {
                 decision,
                 feedback: None,
@@ -5552,7 +5578,7 @@ impl RunWatch {
                     .await;
                 anyhow::bail!(
                     "Stopped: the agent asked to use {} in Chrome, which always needs a person. Answer in the TUI or Desktop, or allow the site under Settings → Browser → Chrome.",
-                    chrome_sites(&pending).join(", ")
+                    terminal_safe(&chrome_sites(&pending).join(", "), false)
                 );
             }
             if self.approver == Approver::Nobody && pending.allow_always == Some(false) {
@@ -5832,6 +5858,13 @@ fn chrome_sites(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<Strin
 /// it (`url`, `script`, `text`, `paths`, …) without the server's own
 /// preparation. Control and direction characters are escaped, so a page
 /// cannot redraw the prompt, and a long value says how much is not shown.
+/// What a run says the agent asked for, safe to print: the command or path
+/// in it is the agent's, so its control and direction characters are
+/// escaped and it stays on one line.
+fn printed_request(pending: &haarness_protocol::PendingPermissionInfo) -> String {
+    terminal_safe(&describe_permission(pending), false)
+}
+
 /// `text` safe to print: control and direction characters escaped
 /// (`\u{202e}`), so nothing in it can redraw the terminal or turn a line
 /// around; line breaks kept only where `lines` says so.
@@ -12606,8 +12639,8 @@ mod tests {
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
         auto_review_line, default_run_model_client, describe_permission, discard_refused_chat,
-        refusal_feedback, requested_run_model, review_note, run_attachments, run_tree,
-        wait_for_turn_client,
+        printed_request, refusal_feedback, requested_run_model, review_note, run_attachments,
+        run_tree, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -15503,34 +15536,48 @@ request_timeout = 0
 
         // Five refusals with nothing succeeding anywhere in the run in
         // between stop it; a call that succeeded anywhere starts the count
-        // again.
-        let mut refusals = Refusals::default();
-        for _ in 0..4 {
-            assert!(!refusals.count(Some(3), None));
-        }
-        assert!(
-            !refusals.count(Some(4), None),
-            "progress somewhere in the run"
-        );
+        // again. The run reads its transcripts as it starts following.
+        let mut refusals = Refusals {
+            transcripts: Some(0),
+            ..Refusals::default()
+        };
+        assert!(!refusals.count(Some(3), None), "progress the stream saw");
         assert_eq!(refusals.in_a_row, 1);
-        // With nothing to compare with, a refusal neither moves the run
+        // The stream sees nothing: the transcripts confirm it.
+        for expected in 2..=4 {
+            assert!(!refusals.count(Some(3), Some(0)));
+            assert_eq!(refusals.in_a_row, expected);
+        }
+        assert!(refusals.count(Some(3), Some(0)));
+        assert_eq!(refusals.total, 5);
+
+        // A stream stalled silently: the transcripts show the progress, so
+        // the run goes on.
+        let mut refusals = Refusals {
+            transcripts: Some(0),
+            ..Refusals::default()
+        };
+        for done in 1..=6 {
+            assert!(!refusals.count(Some(0), Some(done)));
+            assert_eq!(refusals.in_a_row, 1);
+        }
+        // With nothing to confirm with, a refusal neither moves the run
         // toward a stop nor starts the streak over.
+        assert!(!refusals.count(Some(0), None));
         assert!(!refusals.count(None, None));
         assert_eq!(refusals.in_a_row, 1);
-        // A stream that keeps failing counts on the transcripts instead.
-        assert!(!refusals.count(None, Some(10)));
-        assert_eq!(refusals.in_a_row, 1);
-        assert!(!refusals.count(None, Some(10)));
+        // A stream that keeps failing counts on the transcripts alone.
+        assert!(!refusals.count(None, Some(6)));
         assert_eq!(refusals.in_a_row, 2);
         assert!(
-            !refusals.count(None, Some(11)),
+            !refusals.count(None, Some(7)),
             "progress in the transcripts"
         );
         assert_eq!(refusals.in_a_row, 1);
         for _ in 0..3 {
-            assert!(!refusals.count(None, Some(11)));
+            assert!(!refusals.count(None, Some(7)));
         }
-        assert!(refusals.count(None, Some(11)));
+        assert!(refusals.count(None, Some(7)));
 
         // Five agents side by side, each refused once while the others get
         // work done: never five in a row.
@@ -16045,6 +16092,19 @@ request_timeout = 0
         assert_eq!(
             describe_permission(&pending),
             "generate an image or video (image:generate)"
+        );
+        // What a run prints of the agent's command is safe to print.
+        pending.permission = "bash".into();
+        pending.patterns = Vec::new();
+        pending.detail = serde_json::json!({"command": "rm -rf x\u{1b}[2J\u{202e}\nok"});
+        let printed = printed_request(&pending);
+        assert!(
+            !printed.contains(['\u{1b}', '\u{202e}', '\n']),
+            "{printed:?}"
+        );
+        assert!(
+            printed.contains("rm -rf x\\u{1b}[2J\\u{202e}\\u{a}ok"),
+            "{printed:?}"
         );
     }
 
