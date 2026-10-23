@@ -3838,6 +3838,8 @@ impl AgentRuntime {
 
     /// Run one shell command through the normal bash tool and permission path,
     /// persisting the call/result into the thread without a provider turn.
+    /// It is a person's own command (the TUI's `!`), so it is not marked as
+    /// an agent's (see [`crate::ExecutionSettings::person_shell`]).
     pub async fn run_shell(&self, thread_id: ThreadId, command: String) -> CoreResult<Item> {
         Ok(self
             .run_direct_tool(
@@ -3850,11 +3852,13 @@ impl AgentRuntime {
             .item)
     }
 
-    /// Execute a named native or projected MCP tool outside a provider turn.
-    /// This is intentionally not a raw registry escape hatch: every call is
-    /// persisted and passes through normal hooks, permission policy, workspace
-    /// snapshots, and cancellation. A workflow gets its own idle thread and
-    /// uses this method for `ctx.tool()` and `ctx.shell()` host requests.
+    /// Execute a named native or projected MCP tool outside a provider turn,
+    /// for a person (the TUI's `!` through [`run_shell`](Self::run_shell),
+    /// Desktop's browser tool calls); a workflow's own calls go through
+    /// [`run_workflow_tool`](Self::run_workflow_tool). This is intentionally
+    /// not a raw registry escape hatch: every call is persisted and passes
+    /// through normal hooks, permission policy, workspace snapshots, and
+    /// cancellation.
     pub async fn run_direct_tool(
         &self,
         thread_id: ThreadId,
@@ -3862,8 +3866,15 @@ impl AgentRuntime {
         arguments: serde_json::Value,
         cancel: CancellationToken,
     ) -> CoreResult<DirectToolResult> {
-        self.run_direct_tool_as(thread_id, name, arguments, cancel, RunStance::default())
-            .await
+        self.run_direct_tool_as(
+            thread_id,
+            name,
+            arguments,
+            cancel,
+            RunStance::default(),
+            true,
+        )
+        .await
     }
 
     /// [`run_direct_tool`](Self::run_direct_tool) for a workflow's own
@@ -3879,10 +3890,12 @@ impl AgentRuntime {
         cancel: CancellationToken,
     ) -> CoreResult<DirectToolResult> {
         let stance = self.run_stances.of(thread_id).unwrap_or_default();
-        self.run_direct_tool_as(thread_id, name, arguments, cancel, stance)
+        self.run_direct_tool_as(thread_id, name, arguments, cancel, stance, false)
             .await
     }
 
+    /// `person` is a person's own call, whose shell command is not marked
+    /// as an agent's; a workflow's is.
     async fn run_direct_tool_as(
         &self,
         thread_id: ThreadId,
@@ -3890,6 +3903,7 @@ impl AgentRuntime {
         mut arguments: serde_json::Value,
         cancel: CancellationToken,
         stance: RunStance,
+        person: bool,
     ) -> CoreResult<DirectToolResult> {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -4348,6 +4362,7 @@ impl AgentRuntime {
             }
         }
         let mut execution = components.config.execution.clone();
+        execution.person_shell = person;
         if name == "bash"
             && allowed.is_ok()
             && let Some(hooks) = &components.hooks
