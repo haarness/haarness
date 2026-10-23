@@ -62,9 +62,9 @@ in child-agent views, and while an approval card or a question waits: those
 keep every other key, and a message key never answers them. They are the
 configurable shortcuts `messages_previous`, `messages_next`,
 `messages_previous_user`, `messages_next_user`, `messages_first` and
-`messages_last_user` under `[tui.keybinds]` or in `/keybinds`, Upstream's
-names; a shortcut may name `up`, `down`, `left`, `right`, `home`, `end`,
-`pageup` or `pagedown` with ctrl, alt or shift.
+`messages_last_user` under `[tui.keybinds]` or in `/keybinds`; a shortcut
+may name `up`, `down`, `left`, `right`, `home`, `end`, `pageup` or `pagedown`
+with ctrl, alt or shift.
 
 Alt with an arrow reaches the TUI wherever Option or Alt reaches the terminal
 at all. iTerm2 and other xterm-style terminals send Alt+Up as `ESC [1;3A`;

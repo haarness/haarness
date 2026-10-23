@@ -403,12 +403,32 @@ async fn message_keys_leave_the_draft_word_motion_and_a_waiting_card_alone() {
     assert!(app.permission_focus);
     assert_eq!(app.pending_permissions.len(), 1);
     assert!(app.composer.is_empty());
-    // A rebound key moves the same way; the old one does nothing now.
+    // So does a question: the choice and the custom answer stay as they were.
     app.permission_focus = false;
+    app.pending_permissions.clear();
+    app.pending_questions
+        .push(haarness_protocol::PendingQuestionInfo {
+            question_id: "nav-question".into(),
+            prompt: "Which one?".into(),
+            choices: vec!["red".into(), "blue".into()],
+            multiple: false,
+            custom: true,
+            thread_id: app.thread.id,
+            root_thread_id: Some(app.thread.id),
+            turn_id: None,
+            created_at: chrono::Utc::now(),
+        });
+    app.question_selection = 1;
+    key(&mut app, KeyCode::Down, KeyModifiers::ALT).await;
+    assert_eq!(top_line(&app), "reply-6");
+    assert_eq!(app.question_selection, 1);
+    assert_eq!(app.pending_questions.len(), 1);
+    app.pending_questions.clear();
+    // A rebound key moves the same way; the old one does nothing now.
     app.keybindings
         .insert("messages_previous".into(), "ctrl+pageup".into());
     key(&mut app, KeyCode::Up, KeyModifiers::ALT).await;
-    assert_eq!(top_line(&app), "prompt-6");
+    assert_eq!(top_line(&app), "reply-6");
     key(&mut app, KeyCode::PageUp, KeyModifiers::CONTROL).await;
-    assert_eq!(top_line(&app), "reply-5");
+    assert_eq!(top_line(&app), "prompt-6");
 }
