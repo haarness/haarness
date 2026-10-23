@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "تختفي المحادثات المؤرشفة من الشريط الجانبي. يظل البحث يعثر عليها، ويمكن استعادة كل منها.",
   "Remove project": "إزالة المشروع",
   "Edit project": "تحرير المشروع",
+  "Rename…": "إعادة تسمية…",
+  "Rename project": "إعادة تسمية المشروع",
   "An empty name restores the folder name.": "يؤدي ترك الاسم فارغًا إلى استعادة اسم المجلد.",
   "Next agent": "الوكيل التالي",
   "Previous agent": "الوكيل السابق",

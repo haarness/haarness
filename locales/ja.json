@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "アーカイブ済みチャットはサイドバーから消えます。検索では引き続き見つかり、それぞれ復元できます。",
   "Remove project": "プロジェクトを削除",
   "Edit project": "プロジェクトを編集",
+  "Rename…": "名前変更…",
+  "Rename project": "プロジェクト名を変更",
   "An empty name restores the folder name.": "名前を空にするとフォルダー名に戻ります。",
   "Next agent": "次のエージェント",
   "Previous agent": "前のエージェント",

@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "Arkiverede chats forsvinder fra sidepanelet. Søgning finder dem stadig, og hver enkelt kan gendannes.",
   "Remove project": "Fjern projekt",
   "Edit project": "Rediger projekt",
+  "Rename…": "Omdøb…",
+  "Rename project": "Omdøb projekt",
   "An empty name restores the folder name.": "Et tomt navn gendanner mappenavnet.",
   "Next agent": "Næste agent",
   "Previous agent": "Forrige agent",

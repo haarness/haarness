@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "Archived chats leave the sidebar. Search still finds them, and each one can be restored.",
   "Remove project": "Remove project",
   "Edit project": "Edit project",
+  "Rename…": "Rename…",
+  "Rename project": "Rename project",
   "An empty name restores the folder name.": "An empty name restores the folder name.",
   "Next agent": "Next agent",
   "Previous agent": "Previous agent",

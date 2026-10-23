@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "Архивные чаты исчезают из боковой панели. Поиск по-прежнему находит их, и каждый можно восстановить.",
   "Remove project": "Убрать проект",
   "Edit project": "Редактировать проект",
+  "Rename…": "Переименовать…",
+  "Rename project": "Переименовать проект",
   "An empty name restores the folder name.": "Пустое имя возвращает название папки.",
   "Next agent": "Следующий агент",
   "Previous agent": "Предыдущий агент",

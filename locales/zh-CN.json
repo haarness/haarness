@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "已归档对话将从侧边栏移除。搜索仍能找到它们，每个对话都可以恢复。",
   "Remove project": "移除项目",
   "Edit project": "编辑项目",
+  "Rename…": "重命名…",
+  "Rename project": "重命名项目",
   "An empty name restores the folder name.": "名称留空将恢复为文件夹名称。",
   "Next agent": "下一个智能体",
   "Previous agent": "上一个智能体",

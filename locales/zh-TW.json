@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "已封存對話會從側邊欄移除。搜尋仍可找到它們，每個對話都可以還原。",
   "Remove project": "移除專案",
   "Edit project": "編輯專案",
+  "Rename…": "重新命名…",
+  "Rename project": "重新命名專案",
   "An empty name restores the folder name.": "名稱留空會恢復為資料夾名稱。",
   "Next agent": "下一個代理",
   "Previous agent": "上一個代理",

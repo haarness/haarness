@@ -1188,6 +1188,8 @@
   "Archived chats leave the sidebar. Search still finds them, and each one can be restored.": "แชทที่เก็บถาวรจะหายไปจากแถบด้านข้าง การค้นหายังคงพบแชทเหล่านั้น และแต่ละรายการสามารถกู้คืนได้",
   "Remove project": "นำโปรเจกต์ออก",
   "Edit project": "แก้ไขโปรเจกต์",
+  "Rename…": "เปลี่ยนชื่อ…",
+  "Rename project": "เปลี่ยนชื่อโปรเจกต์",
   "An empty name restores the folder name.": "หากเว้นชื่อว่างไว้ จะกลับไปใช้ชื่อโฟลเดอร์",
   "Next agent": "เอเจนต์ถัดไป",
   "Previous agent": "เอเจนต์ก่อนหน้า",
