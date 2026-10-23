@@ -1761,6 +1761,8 @@ pub struct ScriptFile {
     /// puts them: one that is the script itself (through a link) is written
     /// before it runs.
     pub outputs: Vec<PathBuf>,
+    /// Run by its path, so the system reads its `#!` line.
+    pub executed: bool,
 }
 
 /// The scripts `command` runs from `cwd`, in order, for the person answering
@@ -1965,6 +1967,8 @@ struct Script {
     trusted: bool,
     /// `source` or `.` of it: it runs in the line's own shell.
     sourced: bool,
+    /// Run by its path.
+    executed: bool,
 }
 
 impl Line<'_> {
@@ -2107,6 +2111,7 @@ impl Line<'_> {
             path,
             withheld,
             outputs,
+            executed: script.executed,
         });
     }
 
@@ -2222,6 +2227,7 @@ impl Line<'_> {
                     rest = options.rest;
                 }
                 _ => {
+                    let executed = program.value.contains('/');
                     let (word, sourced) = if matches!(name.as_str(), "source" | ".") {
                         (
                             arguments.first().filter(|word| word.value.contains('/')),
@@ -2229,7 +2235,7 @@ impl Line<'_> {
                         )
                     } else if let Some(plain) = interpreter(&name) {
                         (interpreter_script(plain, arguments), false)
-                    } else if program.value.contains('/') {
+                    } else if executed {
                         (Some(program), false)
                     } else {
                         (None, false)
@@ -2251,6 +2257,7 @@ impl Line<'_> {
                         file,
                         trusted,
                         sourced,
+                        executed: executed && !sourced,
                     }));
                 }
             }
@@ -3955,6 +3962,24 @@ mod scripts {
             assert_eq!(withheld_last(command), Some(Changeable), "{command}");
         }
         assert_eq!(withheld("./run.sh > /dev/null 2>&1"), None);
+    }
+
+    /// Run by its path, the system reads its `#!` line; the reader checks
+    /// that line then.
+    #[test]
+    fn says_whether_a_script_is_run_by_its_path() {
+        let executed = |command: &str| script_files(command, &cwd())[0].executed;
+        for command in ["./run.sh", "sudo ./run.sh", "nohup /tmp/run.sh &"] {
+            assert!(executed(command), "{command}");
+        }
+        for command in [
+            "bash run.sh",
+            "sh ./run.sh",
+            "source ./run.sh",
+            ". ./run.sh",
+        ] {
+            assert!(!executed(command), "{command}");
+        }
     }
 
     #[test]

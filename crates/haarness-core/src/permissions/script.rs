@@ -106,7 +106,9 @@ pub async fn for_prompt(
 /// [`super::bash::script_files`] for what counts) and that `readable` lets
 /// this chat read. Nothing for a secret-named file (the built-in `read`
 /// rules), a credential file ([`is_credential`]), a binary, a folder, a
-/// device, a missing file, or one a link leads into `/proc` or `/dev`.
+/// device, a missing file, one a link leads into `/proc` or `/dev`, or one
+/// run by its path whose `#!` line runs another file
+/// ([`runs_another_file`]).
 #[must_use]
 pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Option<Shown> {
     super::bash::script_files(command, cwd)
@@ -184,6 +186,9 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
         return Some(withheld(file, ScriptWithheld::Written));
     }
     let mut bytes = read_bytes(&real)?;
+    if script.executed && runs_another_file(&bytes) {
+        return None;
+    }
     let seal = Seal {
         file: file.to_path_buf(),
         real,
@@ -227,6 +232,43 @@ fn named(file: &Path) -> PathBuf {
         .and_then(|folder| folder.canonicalize().ok())
         .zip(file.file_name())
         .map_or(lexical, |(folder, name)| folder.join(name))
+}
+
+/// Whether a script run by its path has the system run another file too,
+/// by its `#!` line: an interpreter that is not a rooted path, or an
+/// argument that is not an option or has a `/` (`#!/bin/sh /x/evil.sh`,
+/// `#!/bin/sh evil.sh`, `#!/usr/bin/perl -I/x`), the script's own path
+/// coming after them. `#!/usr/bin/env NAME` and `#!/usr/bin/env -S …` are
+/// taken as they are.
+fn runs_another_file(bytes: &[u8]) -> bool {
+    let Some(line) = bytes.strip_prefix(b"#!") else {
+        return false;
+    };
+    let line = line.split(|&byte| byte == b'\n').next().unwrap_or_default();
+    let line = String::from_utf8_lossy(line);
+    let mut words = line.split([' ', '\t']).filter(|word| !word.is_empty());
+    let Some(interpreter) = words.next() else {
+        return false;
+    };
+    let mut arguments: Vec<&str> = words.collect();
+    if !interpreter.starts_with('/') {
+        return true;
+    }
+    if Path::new(interpreter).file_name() == Some("env".as_ref()) {
+        match arguments.first() {
+            Some(first) if first.starts_with("-S") || first.starts_with("--split-string") => {
+                return false;
+            }
+            // The program it looks up by name.
+            Some(name) if !name.starts_with('-') && !name.contains('/') => {
+                arguments.remove(0);
+            }
+            _ => {}
+        }
+    }
+    arguments
+        .iter()
+        .any(|argument| !argument.starts_with('-') || argument.contains('/'))
 }
 
 /// Whether `path` (absolute) leads, as written or through links, into
@@ -612,6 +654,61 @@ mod tests {
         fixture.write("other.log", "");
         let shown = bash_script("sh run.sh > other.log 2>&1", &fixture.0, |_| true).unwrap();
         assert_eq!(shown.content, "echo old\n");
+    }
+
+    /// `#!/bin/sh /x/evil.sh` runs `evil.sh` with the script after it: a
+    /// script run by its path whose `#!` line names another file is not
+    /// shown. Run by an interpreter, its `#!` line is a comment.
+    #[cfg(unix)]
+    #[test]
+    fn a_shebang_that_runs_another_file_shows_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = Fixture::new();
+        let evil = fixture.write("evil.sh", "echo evil\n");
+        let write = |first: &str| {
+            let script = fixture.write("run.sh", format!("{first}\necho body\n"));
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write(&format!("#!/bin/sh {}", evil.display()));
+        let ran = std::process::Command::new("./run.sh")
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "evil\n");
+        for first in [
+            format!("#!/bin/sh {}", evil.display()),
+            "#!/bin/sh evil.sh".into(),
+            "#!/usr/bin/perl -I/opt/lib".into(),
+            "#!/usr/bin/env /opt/evil".into(),
+            "#!/usr/bin/env node /opt/evil.js".into(),
+            "#!evil".into(),
+        ] {
+            write(&first);
+            for command in ["./run.sh", "sudo ./run.sh"] {
+                assert!(
+                    bash_script(command, &fixture.0, |_| true).is_none(),
+                    "{first}"
+                );
+            }
+            // An interpreter reads that line as a comment.
+            let shown = bash_script("sh run.sh", &fixture.0, |_| true).unwrap();
+            assert!(shown.content.ends_with("echo body\n"), "{first}");
+        }
+        for first in [
+            "#!/bin/sh",
+            "#! /bin/bash -eu",
+            "#!/usr/bin/env bash",
+            "#!/usr/bin/env -S deno run --allow-read=/tmp",
+            "#!/usr/bin/awk -f",
+            "echo no shebang",
+        ] {
+            write(first);
+            let shown = bash_script("./run.sh", &fixture.0, |_| true);
+            assert!(
+                shown.is_some_and(|shown| shown.content.ends_with("echo body\n")),
+                "{first}"
+            );
+        }
     }
 
     /// A link into `/dev` (or `/proc`) leads where the server's process
