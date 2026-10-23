@@ -209,9 +209,9 @@ async fn send_settling_answer(app: &mut App, client: &ApiClient) -> Result<bool>
 }
 
 /// The event loop's wake-up at the deadline: the answer goes once its window
-/// has passed with no key. Input the terminal sent that is not handled yet
-/// (`input_waiting`) came before this moment, however late it is read, so it
-/// is handled first and decides.
+/// has passed with no key. A key, paste or click the terminal sent that is
+/// not handled yet (`input_waiting`) came before this moment, however late it
+/// is read, so it is handled first and decides.
 pub(crate) async fn settle_answer(
     app: &mut App,
     client: &ApiClient,

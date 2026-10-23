@@ -1078,9 +1078,10 @@ async fn run_with_client(
                     (event_rx, event_task) = client.subscribe_again(Some((uuid::Uuid::nil(), 0)));
                 }
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
-                // Input already here came before the deadline: it is handled
-                // first, and the tick comes back for the answer after it.
-                let input_waiting = input.pending();
+                // A key, paste or click already here came before the
+                // deadline: it is handled first, and the tick comes back for
+                // the answer after it.
+                let input_waiting = input.input_waiting();
                 if let Err(error) = crate::input::settle_answer(&mut app, &client, input_waiting).await {
                     app.notice = format!("Could not answer permission: {error}");
                 }
