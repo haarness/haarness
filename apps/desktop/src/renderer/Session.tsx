@@ -1395,6 +1395,12 @@ export function Session() {
         ? 0
         : -1;
   });
+  /* The reply a fork continued from is tinted for a moment when its chat
+     opens from the fork, so the eye finds it; without motion when the
+     reader prefers less. */
+  const [sourceReply, setSourceReply] = createSignal<string>();
+  let sourceTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(sourceTimer));
   async function openForkSource() {
     const source = forkSource();
     if (!source) return;
@@ -1414,6 +1420,9 @@ export function Session() {
         );
       virtual.scrollToIndex(Math.max(0, index), { align: "center" });
       scrolling.focus({ preventScroll: true });
+      clearTimeout(sourceTimer);
+      setSourceReply(rows()[Math.max(0, index)]?.id);
+      sourceTimer = setTimeout(() => setSourceReply(undefined), 1600);
     }
   }
   const ForkDivider = () => (
@@ -1939,6 +1948,14 @@ export function Session() {
     if (tool) return toolActivity(tool.name, tool.arguments);
     return stream()?.text ? t("Writing a reply") : t("Thinking");
   });
+  // In Show, a thought being written says Thinking above its text, so the
+  // activity line keeps its place (and its word for screen readers) without
+  // saying it a second time.
+  const thinkingShown = () =>
+    !!stream()?.reasoning &&
+    !stream()?.text &&
+    state.preferences.thinking === "show" &&
+    activity() === t("Thinking");
   // Re-read the activity when a running review reaches the notice delay.
   createEffect(() => {
     const turn = active();
@@ -2096,13 +2113,9 @@ export function Session() {
               <h2>
                 <Show
                   when={project()}
-                  fallback={splitAround(t("{project} to get started"), () => (
-                    <ProjectPicker heading />
-                  ))}
+                  fallback={projectHeading(t("{project} to get started"))}
                 >
-                  {splitAround(t("What should we work on in {project}?"), () => (
-                    <ProjectPicker heading />
-                  ))}
+                  {projectHeading(t("What should we work on in {project}?"))}
                 </Show>
               </h2>
               <Show when={project()}>
@@ -2170,6 +2183,7 @@ export function Session() {
                   data-item-id={rows()[row.index]?.id}
                   classList={{
                     "conversation-match": rows()[row.index]?.id === findMatch(),
+                    "fork-source": !!sourceReply() && rows()[row.index]?.id === sourceReply(),
                   }}
                   style={{
                     position: "absolute",
@@ -2211,7 +2225,10 @@ export function Session() {
           <Show when={stream()?.reasoning && state.preferences.thinking === "show"}>
             <div class="message reasoning">
               <div class="message-label">
-                <span class="author">{t("Thinking")}</span>
+                {/* While it is the work under way, its label is the live one. */}
+                <Shimmer class="author" active={thinkingShown()}>
+                  {t("Thinking")}
+                </Shimmer>
               </div>
               <Markdown text={stream()!.reasoning} live />
             </div>
@@ -2248,8 +2265,13 @@ export function Session() {
             })()}
           </Show>
           <Show when={active() && !pending()}>
-            <div class="assistant-activity" role="status" aria-live="polite">
-              <Shimmer>{activity()}</Shimmer>
+            <div
+              class="assistant-activity"
+              classList={{ "activity-said": thinkingShown() }}
+              role="status"
+              aria-live="polite"
+            >
+              <Shimmer active={!thinkingShown()}>{activity()}</Shimmer>
               {/* Compact: the newest line of thought ticks here, on the one
                   row already holding the activity, so nothing moves; screen
                   readers hear only the activity. */}
@@ -2816,6 +2838,23 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
+/** The new-chat heading with the project picker in it. The word or mark
+ * right after the name ("?") stays on its line: a long name gives way with
+ * an ellipsis instead of leaving the mark alone on the next line. */
+function projectHeading(template: string) {
+  const [before, after = ""] = template.split("{project}");
+  const [, glued = "", rest = ""] = /^(\S*)([\s\S]*)$/.exec(after) ?? [];
+  return (
+    <>
+      {before}
+      <span class="heading-project">
+        <ProjectPicker heading />
+        {glued}
+      </span>
+      {rest}
+    </>
+  );
+}
 /** A message's time as it shows (short), with the full date and time on
  * hover and for assistive technology. */
 function Timestamp(props: { value: string }) {

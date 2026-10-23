@@ -507,6 +507,9 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
     await input.fill("::thinkslow");
     await input.press("Enter");
     await expect(page.locator(".message.reasoning").first()).toContainText("Reading the request");
+    // The thought being written says Thinking; the activity line keeps its
+    // place without saying it a second time.
+    await expect(page.locator(".assistant-activity")).toHaveClass(/activity-said/);
     await expect(page.locator(".message.assistant").last()).toContainText("Thought it through");
     await expect(page.locator(".message.reasoning")).toContainText("The second keeps the public API stable.");
     expect(errors).toEqual([]);
@@ -720,6 +723,52 @@ test("the queue's Steer now has an arrow of its own, and Remove hands the keyboa
     await expect(tray).toHaveCount(0);
     await expect(input).toBeFocused();
     await page.getByRole("button", { name: "Stop response", exact: true }).click();
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("the new-chat heading holds still as the box grows, @ lists as wide as the box, and replies keep task boxes", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const heading = page.locator(".conversation-empty h2");
+    await expect(heading).toBeVisible();
+    // Let the hero's entrance finish before measuring where it rests.
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
+    const rest = (await heading.boundingBox())!.y;
+    await page.evaluate(() => {
+      const transfer = new DataTransfer();
+      const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+      transfer.items.add(new File([png], "pixel.png", { type: "image/png" }));
+      document.querySelector(".conversation")!.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    });
+    await expect(page.locator(".composer-attachments")).toBeVisible();
+    expect(Math.abs((await heading.boundingBox())!.y - rest)).toBeLessThan(1);
+    await page.getByRole("button", { name: "Remove pixel.png", exact: true }).click();
+
+    // The @ list is as wide as the message box it completes.
+    await input.fill("@");
+    const popover = page.locator(".mention-popover");
+    await expect(popover).toBeVisible();
+    const [list, box] = await Promise.all([popover.boundingBox(), page.locator(".composer").boundingBox()]);
+    expect(Math.abs(list!.width - (box!.width - 2))).toBeLessThan(3);
+    await input.press("Escape");
+
+    // A reply's task list keeps its boxes, ticked as written and read-only;
+    // its table heads read in the reply's own case.
+    await input.fill("Checklist\n\n- [ ] open task\n- [x] finished task\n\n| Name | Status |\n| --- | --- |\n| parser | done |");
+    await input.press("Enter");
+    const reply = page.locator(".message.assistant").last();
+    await expect(reply).toContainText("finished task");
+    const boxes = reply.locator("input.task-box");
+    await expect(boxes).toHaveCount(2);
+    await expect(boxes.nth(0)).not.toBeChecked();
+    await expect(boxes.nth(1)).toBeChecked();
+    await expect(boxes.nth(1)).toBeDisabled();
+    await expect(reply.locator("th").first()).toHaveCSS("text-transform", "none");
+    await expect(reply.locator("th").first()).toHaveText("Name");
     expect(errors).toEqual([]);
   } finally {
     await close();
