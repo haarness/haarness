@@ -271,8 +271,8 @@ async function addServer(name: string, url: string, token: string) {
   await form.getByRole("textbox", { name: "Name", exact: true }).fill(name);
   await form.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(
-    pane.locator(".setting-row").filter({ hasText: name }),
-  ).toContainText("Selected");
+    pane.locator(".setting-row").filter({ hasText: name }).locator(".current-tag"),
+  ).toHaveText("Current");
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
     "true",
@@ -950,11 +950,12 @@ test("server switching scopes projects and chats, restores selection, and preser
   await expect(
     pane.getByRole("button", { name: "Add remote server", exact: true }),
   ).toHaveCount(0);
-  await pane.getByRole("button", { name: "Forget", exact: true }).click();
+  // The sidebar's verb: Remove project, with the same confirmation.
+  await pane.getByRole("button", { name: "Remove project remote-one", exact: true }).click();
   await page
     .locator("dialog[open]")
     .last()
-    .getByRole("button", { name: "Forget project", exact: true })
+    .getByRole("button", { name: "Remove project", exact: true })
     .click();
   await expect(pane).toContainText("No projects yet");
   const saved = await page.evaluate(() => window.haarness.boot());

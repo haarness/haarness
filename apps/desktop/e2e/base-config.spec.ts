@@ -107,7 +107,8 @@ test("items of the base config folder carry a quiet Base tag and no Remove", asy
     await section("Agents");
     const build = settings.locator('[data-setting="agents:build"]');
     await expect(build.locator(".setting-tag")).toHaveCount(0);
-    await expect(build.locator("p")).toContainText("Built-in / plugin");
+    await expect(build.locator("p")).toContainText("Built-in");
+    await expect(build.locator("p")).not.toContainText("plugin");
 
     // MCP: the tag beside the status, and Manage offers no Remove.
     await section("MCP servers");

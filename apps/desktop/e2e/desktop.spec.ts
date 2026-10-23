@@ -499,7 +499,10 @@ test("workspace opening is direct, enables project configuration, and preserves 
   await settings.getByRole("button", { name: "Projects", exact: true }).click();
   await expect(currentFolder).toContainText("Project configuration disabled");
   await settings.getByRole("button", { name: "General", exact: true }).click();
-  await expect(settings.getByRole("combobox", { name: "Input mode scope" })).toContainText("Global");
+  // Without project configuration only the global value applies: no project override is offered.
+  const delivery = settings.locator('[data-setting="Messages sent while working"]');
+  await expect(delivery.getByRole("radiogroup", { name: "Messages sent while working" })).toBeVisible();
+  await expect(delivery.getByRole("button", { name: "Override for this project" })).toHaveCount(0);
   await settings.getByRole("button", { name: "Browser", exact: true }).click();
   await expect(settings.getByRole("combobox", { name: "Browser settings scope" })).toContainText("Global default");
   // Settings changes may overlap a background sidebar refresh or another
@@ -3849,7 +3852,8 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
   const block = settings.locator(".setting-block").filter({
     has: page.getByRole("heading", { name: "OpenAI", exact: true }),
   });
-  await expect(block).toContainText("Not connected");
+  // Providers lists what is connected; the catalog is in Connect a provider.
+  await expect(block).toHaveCount(0);
   await settings
     .getByRole("button", { name: "Connect a provider", exact: true })
     .click();
@@ -3891,7 +3895,11 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
     .getByRole("dialog", { name: "Disconnect OpenAI?", exact: true })
     .getByRole("button", { name: "Disconnect", exact: true })
     .click();
-  await expect(block).toContainText("Not connected");
+  await expect(block).toHaveCount(0);
+  // The keyboard moves on to another provider's row, or to Connect a provider.
+  await expect
+    .poll(() => page.evaluate(() => !!document.activeElement?.closest(".provider-row, .providers-hero")))
+    .toBe(true);
   expect(
     (await client.providers()).find((provider) => provider.id === "openai")
       ?.authenticated,
@@ -11142,13 +11150,22 @@ test("provider artwork and combined reasoning follow each model's actual capabil
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await settings.getByRole("button", { name: "Providers", exact: true }).click();
-    for (const id of ["anthropic", "openai", "gemini"])
-      await expect(settings.locator(`[data-setting="provider:${id}"] [data-provider-icon="${id}"]`)).toHaveCount(1);
+    // The connected custom provider is listed with the neutral icon; the
+    // catalog, with each brand's artwork, is in Connect a provider.
     await expect(settings.locator('[data-setting="provider:picker-fixture"] [data-provider-icon="generic"]')).toHaveCount(1);
-    const icon = settings.locator('[data-setting="provider:anthropic"] .provider-icon-mask');
+    await expect(settings.locator('[data-setting="provider:anthropic"]')).toHaveCount(0);
+    await settings.getByRole("button", { name: "Connect a provider", exact: true }).click();
+    const connect = page.getByRole("dialog", { name: "Connect a provider", exact: true });
+    for (const id of ["anthropic", "openai", "gemini"])
+      await expect(connect.locator(`.connect-row[data-provider="${id}"] [data-provider-icon="${id}"]`)).toHaveCount(1);
+    const icon = connect.locator('.connect-row[data-provider="anthropic"] .provider-icon-mask');
     await expect.poll(() => icon.evaluate((element) => getComputedStyle(element).maskImage)).not.toBe("none");
     await page.screenshot({ path: test.info().outputPath("provider-icons-dark.png") });
+    await connect.getByRole("button", { name: "Close dialog", exact: true }).click();
     await settings.getByRole("button", { name: "Models", exact: true }).click();
+    // Models of providers that are not connected wait behind Show all.
+    await expect(settings.locator('tbody [data-provider-icon="anthropic"]')).toHaveCount(0);
+    await settings.getByRole("switch", { name: "Show all", exact: true }).check();
     await expect(settings.locator('tbody [data-provider-icon="anthropic"]').first()).toBeVisible();
     await settings.getByRole("button", { name: "Close settings", exact: true }).click();
     await page.getByRole("button", { name: "Search", exact: true }).click();
@@ -12768,23 +12785,56 @@ test("shared input settings apply project and global modes to real Desktop chat"
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await expect(settings).toBeVisible();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer"); // /settings only opens the pane.
-    const mode = settings.getByRole("combobox", { name: "Messages sent while working", exact: true });
-    const scope = settings.getByRole("combobox", { name: "Input mode scope", exact: true });
-    await expect(mode).toContainText("Steer");
-    await expect(scope).toContainText("This project");
-    await selectValue(mode, "queue");
+    const row = settings.locator('[data-setting="Messages sent while working"]');
+    const steer = row.getByRole("radio", { name: "Steer", exact: true });
+    const queue = row.getByRole("radio", { name: "Queue", exact: true });
+    // /input-mode saved this project's own value; the caption says so and
+    // names the value its reset falls back to.
+    const caption = row.locator(".input-settings-scope");
+    await expect(steer).toHaveAttribute("aria-checked", "true");
+    await expect(caption).toContainText("This project");
+    await expect(caption.getByRole("button", { name: "Use global setting (Queue)", exact: true })).toBeVisible();
+    await queue.click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
-    await selectValue(scope, "global");
-    await selectValue(mode, "steer");
+    expect(await readFile(globalFile, "utf8")).toBe(originalGlobal);
+    // Use global setting removes the project's value; the global one shows.
+    await row.getByRole("button", { name: "Use global setting (Queue)", exact: true }).click();
+    await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(caption).toContainText("All projects");
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(row).not.toContainText("This project");
+    // Without a project value, the choice is the global setting's.
+    await steer.click();
     await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
-    expect((await settingsApi({ action: "get" })).delivery).toBe("queue");
-    await selectValue(scope, "project");
-    await selectValue(mode, "inherit");
+    expect((await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(steer).toHaveAttribute("aria-checked", "true");
+    // Override for this project starts the project's own value from the one shown.
+    await row.getByRole("button", { name: "Override for this project", exact: true }).click();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("steer");
+    await expect(row).toContainText("This project");
+    // Arrow keys move the choice, which saves at once.
+    await steer.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(queue).toBeFocused();
+    await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBe("queue");
+    expect((await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
+    await row.getByRole("button", { name: "Use global setting (Steer)", exact: true }).click();
     await expect.poll(async () => (await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
     expect((await settingsApi({ action: "get" })).delivery).toBe("steer");
+    // A reset and a choice right after it change the global setting, never
+    // bring the project's value back.
+    await row.getByRole("button", { name: "Override for this project", exact: true }).click();
+    await row.getByRole("button", { name: "Use global setting (Steer)", exact: true }).click();
+    await queue.click();
+    await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("queue");
+    expect((await settingsApi({ action: "get" })).scopeDelivery).toBeNull();
+    await expect(caption).toContainText("All projects");
+    await steer.click();
+    await expect.poll(async () => (await settingsApi({ action: "get", scope: "global" })).scopeDelivery).toBe("steer");
     // An external client changes the same project while General stays open.
     await settingsApi({ action: "set", delivery: "queue" });
-    await expect(mode).toContainText("Queue");
+    await expect(queue).toHaveAttribute("aria-checked", "true");
+    await expect(row).toContainText("This project");
     await page.screenshot({ path: "test-results/input-settings-general.png" });
     await settings.getByRole("button", { name: "Close settings", exact: true }).click();
     await send("/input-mode reset");
