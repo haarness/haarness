@@ -1173,7 +1173,9 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 let delivery = if key.modifiers.contains(KeyModifiers::ALT) {
                     haarness_protocol::InputDelivery::Queue
                 } else {
-                    client.input_delivery().await?
+                    let delivery = client.input_delivery().await?;
+                    app.input_delivery = Some(delivery);
+                    delivery
                 };
                 let text = app.composer.take();
                 app.scroll_to_bottom();

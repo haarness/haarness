@@ -2334,6 +2334,9 @@ impl App {
                     .as_str()
                     .unwrap_or("Input settings saved")
                     .into();
+                if let Ok(delivery) = serde_json::from_value(result["data"]["delivery"].clone()) {
+                    self.input_delivery = Some(delivery);
+                }
             }
 
             "permissions-mode" => match arguments.trim() {

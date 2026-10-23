@@ -10827,6 +10827,32 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
     assert!(text.contains("○ bash echo one  queued"), "{text}");
 }
 
+/// Before a first token the band says the turn is working; it says thinking
+/// only while reasoning streams. The empty prompt says what Enter does with
+/// a message meanwhile, as the project's input mode decides.
+#[test]
+fn a_running_turn_says_working_until_it_thinks_and_what_enter_does() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.active_turn = Some(haarness_protocol::TurnId::new());
+    app.turn_started = Some(std::time::Instant::now());
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("working   0s"), "{text}");
+    assert!(!text.contains("thinking"), "{text}");
+    assert!(text.contains("Enter steers · alt+enter queues"), "{text}");
+    app.reasoning_preview = "Looking at the parser first".into();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("thinking   0s"), "{text}");
+    app.input_delivery = Some(haarness_protocol::InputDelivery::Queue);
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("Enter queues until this work is done"),
+        "{text}"
+    );
+    app.active_turn = None;
+    assert!(frame_text(&app, (100, 30)).contains("Ask anything…"));
+}
+
 #[tokio::test]
 async fn turn_status_drives_the_status_line() {
     let thread = fixture_thread();
@@ -17713,7 +17739,11 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
     // The strip's text shares the prompt's column, under a rail at the edge.
     strip_row(&app, "▎ 1. first");
     strip_row(&app, "▎ 2. second");
-    assert!(working.contains("\n  Ask anything"), "{working}");
+    // While work runs the prompt says what Enter does with a message.
+    assert!(
+        working.contains("\n  Enter steers · alt+enter queues"),
+        "{working}"
+    );
 
     app.active_turn = None;
     let paused = frame_text(&app, (100, 30));

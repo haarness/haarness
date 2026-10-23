@@ -65,7 +65,7 @@ Each message has icon buttons: **Edit**, **Send now** (**Steer now** while work 
 
 ## TUI
 
-**Enter** uses the configured mode; **Alt+Enter** explicitly queues. Use `/queue <message>` to defer text, or `/queue` to open the pending list.
+**Enter** uses the configured mode; **Alt+Enter** explicitly queues. While work runs, the empty prompt says which: `Enter steers · alt+enter queues`, or `Enter queues until this work is done` in Queue mode. Use `/queue <message>` to defer text, or `/queue` to open the pending list.
 
 Above the prompt, steering the agent has not read yet appears under **Steering · N**. Queued messages appear under **Queued · N**, or **Queue paused — send when ready** when idle. The strip shows the first three messages numbered in order, then a `+N more` line.
 

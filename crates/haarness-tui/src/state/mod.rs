@@ -747,6 +747,9 @@ pub struct App {
     /// The last command run would not run as typed; see
     /// [`App::refuse_command`].
     pub command_refused: bool,
+    /// What Enter does with a message while work runs, as last read from
+    /// the project (`/input-mode`): steer it in, or queue it.
+    pub input_delivery: Option<haarness_protocol::InputDelivery>,
     /// The notice last seen by the render tick and when it appeared, so an
     /// answer to something the user did fades instead of describing the past.
     pub(crate) notice_shown: Option<(String, std::time::Instant)>,
@@ -1111,6 +1114,7 @@ impl App {
             notice_shown: None,
             undo_draft: None,
             command_refused: false,
+            input_delivery: None,
             custom_status_line: None,
             billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
