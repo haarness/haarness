@@ -2774,5 +2774,9 @@
   "not read": "読み取れませんでした",
   "agents · files · resources": "エージェント · ファイル · リソース",
   "files · agents · resources": "ファイル · エージェント · リソース",
-  "Files, agents and resources": "ファイル、エージェント、リソース"
+  "Files, agents and resources": "ファイル、エージェント、リソース",
+  "a rule keeps this resource from the model": "ルールにより、このリソースはモデルに渡されません",
+  "did not answer within {seconds} s": "{seconds} 秒以内に応答がありませんでした",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "このサーバーは MCP リソースを読み取れません。メッセージから削除するか、サーバーを更新してください。",
+  "Sent again as it was read.": "読み取ったときの内容のまま、もう一度送信します。"
 }

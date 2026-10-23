@@ -2774,5 +2774,9 @@
   "not read": "okunamadı",
   "agents · files · resources": "ajanlar · dosyalar · kaynaklar",
   "files · agents · resources": "dosyalar · ajanlar · kaynaklar",
-  "Files, agents and resources": "Dosyalar, aracılar ve kaynaklar"
+  "Files, agents and resources": "Dosyalar, aracılar ve kaynaklar",
+  "a rule keeps this resource from the model": "bir kural bu kaynağı modelden uzak tutuyor",
+  "did not answer within {seconds} s": "{seconds} sn içinde yanıt vermedi",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Bu sunucu MCP kaynaklarını okuyamıyor. Bunları mesajdan kaldırın veya sunucuyu güncelleyin.",
+  "Sent again as it was read.": "Okunduğu hâliyle yeniden gönderilir."
 }

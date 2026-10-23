@@ -4,7 +4,7 @@ import type { EventEnvelope, InputQueue as Queue, InputQueueAction, PendingInput
 import { useApp } from "./state";
 import { Button, Icon } from "./ui";
 import { attachmentName, type Attachment } from "./media";
-import { sentParts, type PromptContext } from "./prompt-context";
+import { carriedResource, sentParts, type PromptContext } from "./prompt-context";
 import { pasteLabel } from "./PromptContext";
 import "./input-queue.css";
 
@@ -99,17 +99,21 @@ export function createInputQueue(composer: {
     setError("");
     // Queued messages carry text and attachments, so the composer's context
     // chips are set aside with the rest of the draft; a paste the message
-    // holds comes back as its chip and goes back in place when saved.
+    // holds comes back as its chip, and a resource the server read as a chip
+    // holding what was read, and both go back in place when saved.
     const parts = sentParts(item.text);
-    const pastes = parts.flatMap((part) =>
-      part.kind === "paste" ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }] : [],
+    const chips = parts.flatMap((part): PromptContext[] =>
+      part.kind === "paste"
+        ? [{ kind: "paste" as const, id: crypto.randomUUID(), text: part.text }]
+        : part.kind === "resource"
+          ? [carriedResource(part)]
+          : [],
     );
-    // A resource the server read stays in the text, as it was queued.
-    const typed = parts.flatMap((part) => (part.kind === "paste" ? [] : [part.text])).join("");
+    const typed = parts.flatMap((part) => (part.kind === "text" ? [part.text] : [])).join("");
     composer.write({
-      text: pastes.length ? typed.trimEnd() : typed,
+      text: chips.length ? typed.trimEnd() : typed,
       attachments: (item.attachments ?? []).map((data) => ({ data, name: attachmentName(data) })),
-      context: pastes,
+      context: chips,
     });
   }
   /** Leave the edit and give the composer back its earlier draft. */

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   activeMention,
   addContext,
+  carriedResource,
   commandPrompt,
   contextLabel,
   countLines,
@@ -297,4 +298,24 @@ test("what the server read for a mentioned resource is one block of the sent mes
   ]);
   // Copy keeps the blocks as they were sent.
   assert.equal(plainMessage(sent), `Compare\n\n${block}\n\npasted\n\n${unread}`);
+});
+test("a resource a sent or queued message brings back is a chip that sends what was read, without reading again", () => {
+  const block =
+    "<details>\n<summary>MCP resource: setup · docs:docs://setup</summary>\n\n```\n# Setup\n```\n\n</details>";
+  const unread =
+    "<details>\n<summary>MCP resource: wiki:docs://x (not read)</summary>\n\n```\nMCP server wiki is not connected\n```\n\n</details>";
+  const parts = sentParts(`Compare\n\n${block}\n\n${unread}`);
+  const chips = parts.flatMap((part) => (part.kind === "resource" ? [carriedResource(part)] : []));
+  assert.deepEqual(chips, [
+    { kind: "resource", server: "docs", uri: "docs://setup", name: "setup", block },
+    { kind: "resource", server: "wiki", uri: "docs://x", name: "docs://x", block: unread },
+  ]);
+  assert.deepEqual(chips.map(contextLabel), ["@setup", "@docs://x"]);
+  // Sent again as it was, and not as a mention to read.
+  assert.equal(promptWithContext("Compare", chips), `Compare\n\n${block}\n\n${unread}`);
+  assert.deepEqual(resourceMentions(chips), []);
+  assert.deepEqual(readContext(JSON.parse(JSON.stringify(chips))), chips);
+  // What was read counts toward no context limit, as a paste does not.
+  const big = { ...chips[0], uri: "docs://big", block: "x".repeat(200 * 1024) };
+  assert.doesNotThrow(() => addContext(chips, big));
 });

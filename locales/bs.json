@@ -2774,5 +2774,9 @@
   "not read": "nije pročitano",
   "agents · files · resources": "agenti · datoteke · resursi",
   "files · agents · resources": "datoteke · agenti · resursi",
-  "Files, agents and resources": "Datoteke, agenti i resursi"
+  "Files, agents and resources": "Datoteke, agenti i resursi",
+  "a rule keeps this resource from the model": "pravilo drži ovaj resurs dalje od modela",
+  "did not answer within {seconds} s": "nije odgovorio u roku od {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Ovaj server ne može čitati MCP resurse. Uklonite ih iz poruke ili ažurirajte server.",
+  "Sent again as it was read.": "Šalje se ponovo onako kako je pročitan."
 }

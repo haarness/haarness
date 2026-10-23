@@ -23,7 +23,10 @@ export type PromptContext =
   | { kind: "paste"; id: string; text: string }
   | ResourceContext;
 /** An MCP resource picked from the `@` list. Only its address travels with
- * the message; the server reads it from `server` when the message is sent. */
+ * the message; the server reads it from `server` when the message is sent.
+ * One that Undo or a queued message's edit brings back holds `block`, what
+ * the server read for it as the message carried it, and is sent as it was,
+ * without reading it again, as a paste is. */
 export type ResourceContext = {
   kind: "resource";
   server: string;
@@ -31,6 +34,7 @@ export type ResourceContext = {
   name: string;
   description?: string;
   mimeType?: string;
+  block?: string;
 };
 /** What a server must say before Desktop sends it resource mentions: an
  * older one would drop them without a word. */
@@ -115,11 +119,14 @@ export function pasteSize(text: string, locale: string) {
     maximumFractionDigits: unit === "megabyte" ? 1 : 0,
   }).format(value);
 }
-/** File snapshots, delegations and picked elements are bounded; a paste
- * stands for text the message box would have taken whole, so it counts
- * toward neither limit. */
+/** What was already sent: a paste, or a resource as the server read it. */
+const carried = (item: PromptContext) => item.kind === "paste" || (item.kind === "resource" && item.block !== undefined);
+/** File snapshots, delegations, picked elements and resources to read are
+ * bounded; a paste stands for text the message box would have taken whole,
+ * and a resource brought back holds what was sent before, so neither counts
+ * toward a limit. */
 function checkContext(items: PromptContext[]) {
-  const bounded = items.filter((item) => item.kind !== "paste");
+  const bounded = items.filter((item) => !carried(item));
   if (bounded.length > MAX_CONTEXT_ITEMS)
     throw Error(
       `A message holds up to ${MAX_CONTEXT_ITEMS} context items. Remove some before adding more.`,
@@ -140,7 +147,7 @@ export function readContext(value: unknown): PromptContext[] {
     if (item.kind === "resource")
       return (
         [item.server, item.uri, item.name].every((value) => typeof value === "string" && !!value) &&
-        [item.description, item.mimeType].every((value) => value === undefined || typeof value === "string")
+        [item.description, item.mimeType, item.block].every((value) => value === undefined || typeof value === "string")
       );
     if (item.kind === "paste")
       return (
@@ -227,12 +234,12 @@ const escapeHtml = (text: string) =>
  * fenced as data and inspectable in the saved user message. */
 export function promptWithContext(text: string, items: PromptContext[]) {
   checkContext(items);
-  // Resources travel as mentions (`resourceMentions`), read by the server.
-  const written = items.filter(
-    (item): item is Exclude<PromptContext, ResourceContext> => item.kind !== "resource",
-  );
+  // Resources to read travel as mentions (`resourceMentions`); one brought
+  // back is written as it was sent.
+  const written = items.filter((item) => item.kind !== "resource" || item.block !== undefined);
   if (!written.length) return text;
   const parts = written.map((item) => {
+    if (item.kind === "resource") return item.block!;
     if (item.kind === "agent")
       return `Delegate the relevant work from this message and attached context using the task tool with agent ${JSON.stringify(item.name)}. Keep normal permissions in effect.`;
     if (item.kind === "element") return elementPrompt(item, escapeHtml);
@@ -250,8 +257,26 @@ export function promptWithContext(text: string, items: PromptContext[]) {
 /** The resources a draft mentions, as the server reads them at send. */
 export const resourceMentions = (items: PromptContext[]) =>
   items.flatMap((item) =>
-    item.kind === "resource" ? [{ server: item.server, uri: item.uri, name: item.name }] : [],
+    item.kind === "resource" && item.block === undefined
+      ? [{ server: item.server, uri: item.uri, name: item.name }]
+      : [],
   );
+/** What a sent or queued message's resource comes back as: a chip holding
+ * the block as it was sent. Its address is `<server>:<uri>`; a server name
+ * has no colon of its own in practice, and only the chip's look depends on
+ * where it is split. */
+export function carriedResource(part: Extract<SentPart, { kind: "resource" }>): ResourceContext {
+  const colon = part.address.indexOf(":");
+  const server = colon < 0 ? part.address : part.address.slice(0, colon);
+  const uri = colon < 0 ? part.address : part.address.slice(colon + 1);
+  return {
+    kind: "resource",
+    server,
+    uri,
+    name: part.name === part.address ? uri : part.name,
+    block: part.text,
+  };
+}
 /** One piece of a sent message: what was typed (file snapshots, picked
  * page elements and delegations included, which Markdown shows as written),
  * a paste that was sent as a chip, with the text pasted, or what the server

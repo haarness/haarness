@@ -2774,5 +2774,9 @@
   "not read": "non lu",
   "agents · files · resources": "agents · fichiers · ressources",
   "files · agents · resources": "fichiers · agents · ressources",
-  "Files, agents and resources": "Fichiers, agents et ressources"
+  "Files, agents and resources": "Fichiers, agents et ressources",
+  "a rule keeps this resource from the model": "une règle tient cette ressource à l’écart du modèle",
+  "did not answer within {seconds} s": "n’a pas répondu en {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Ce serveur ne peut pas lire les ressources MCP. Retirez-les du message ou mettez le serveur à jour.",
+  "Sent again as it was read.": "Renvoyée telle qu’elle a été lue."
 }

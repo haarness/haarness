@@ -2774,5 +2774,9 @@
   "not read": "ikke læst",
   "agents · files · resources": "agenter · filer · ressourcer",
   "files · agents · resources": "filer · agenter · ressourcer",
-  "Files, agents and resources": "Filer, agenter og ressourcer"
+  "Files, agents and resources": "Filer, agenter og ressourcer",
+  "a rule keeps this resource from the model": "en regel holder denne ressource væk fra modellen",
+  "did not answer within {seconds} s": "svarede ikke inden for {seconds} s",
+  "This server cannot read MCP resources. Remove them from the message, or update the server.": "Denne server kan ikke læse MCP-ressourcer. Fjern dem fra beskeden, eller opdater serveren.",
+  "Sent again as it was read.": "Sendes igen, som det blev læst."
 }
