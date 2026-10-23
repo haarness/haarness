@@ -140,12 +140,19 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         lands("NAV-PROMPT-5", "Option+Up from macOS Terminal did not move to the prompt")
         raw(*TERMINAL_APP_OPTION_UP)
         lands("Echo: NAV-PROMPT-4", "a second Option+Up did not move on")
+        # A burst, as a held key or bunched packets bring it: one read, three keys.
+        raw(*TERMINAL_APP_OPTION_UP * 3)
+        lands("NAV-PROMPT-3", "three Option+Ups in one read did not move three messages")
         time.sleep(.3)
         assert "[A" not in pane(), "Option+Up typed [A into the prompt"
         assert "draft kept" in pane(), "Option+Up disturbed the draft"
         assert "interrupt" not in pane().lower(), "Option+Up armed an interrupt"
         screen("terminal-app-option-up")
-        checks.append("macOS Terminal's Option+Up (ESC ESC [A) is Alt+Up: no Escape, no [A typed, draft kept")
+        for _ in range(3):
+            keys("M-Down")
+            time.sleep(.15)
+        lands("Echo: NAV-PROMPT-4", "Alt+Down did not come back after the burst")
+        checks.append("macOS Terminal's Option+Up (ESC ESC [A) is Alt+Up, three in one read too: no Escape, no [A typed, draft kept")
 
         # By prompt, the last prompt and the first message.
         keys("S-M-Up")
@@ -174,13 +181,39 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         lands("Echo: NAV-PROMPT-5", "Alt+Up over the approval card did not move the transcript")
         raw(*TERMINAL_APP_OPTION_UP)
         lands("NAV-PROMPT-5", "Option+Up over the approval card did not move the transcript")
+        raw(*TERMINAL_APP_OPTION_UP * 3)
+        lands("Echo: NAV-PROMPT-3", "a burst over the approval card did not move three messages")
         time.sleep(.5)
         assert len(api("/permissions")) == 1, "a message key answered the approval"
         assert "Allow once" in pane(), "the approval card went away"
+        assert "[A" not in pane(), "a burst typed [A"
         screen("over-approval")
+        # A lone Escape still rejects the focused card.
+        keys("Escape")
+        until(lambda: not api("/permissions") and not api("/turns/active"), "Escape did not reject the approval")
+        replies = [item["data"].get("text", "") for item in api(f"/threads/{thread}/items") if item["data"]["type"] == "assistant_message"]
+        assert "rejected" in replies[-1].lower(), f"Escape did not reject the request: {replies[-1]!r}"
+        checks.append("Over a focused approval card both forms, and a burst, move the transcript and leave the request waiting; a lone Escape still rejects it")
+
+        # A running turn: a burst never interrupts it; a double Escape still does.
+        keys("C-End")
+        turn(thread, '!tool bash {"command":"sleep 30"}')
+        until(lambda: "Allow once" in pane(), "the sleep approval did not show")
         keys("y")
-        until(lambda: not api("/permissions") and not api("/turns/active"), "approval did not finish")
-        checks.append("Over a focused approval card both forms move the transcript and leave the request waiting")
+        until(lambda: not api("/permissions") and api("/turns/active"), "the sleep did not start")
+        time.sleep(.5)
+        raw(*TERMINAL_APP_OPTION_UP * 3)
+        time.sleep(1)
+        assert api("/turns/active"), "a burst of Option+Up stopped the turn"
+        assert "[A" not in pane() and "esc again" not in pane().lower(), "a burst of Option+Up armed an interrupt"
+        keys("C-End")
+        until(lambda: "scrolled" not in pane(), "Ctrl+End did not return to the latest output")
+        keys("Escape")
+        until(lambda: "esc again" in pane().lower(), "Escape did not arm the interrupt")
+        time.sleep(.3)
+        keys("Escape")
+        until(lambda: not api("/turns/active"), "a double Escape did not stop the turn", timeout=15)
+        checks.append("During a turn a burst of Option+Up leaves it running; a double Escape still stops it")
 
         # Other chats wait: one for an approval, one for an answer. The list
         # leads with them, newest first, and marks them as Desktop's sidebar does.

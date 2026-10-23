@@ -1,9 +1,11 @@
 //! Option with an arrow from macOS Terminal. Terminal.app, and iTerm2's
 //! Terminal.app preset, send Option+Up as Escape followed by the arrow's own
-//! sequence, `ESC ESC [ A`, and tmux passes that on unchanged. crossterm reads
-//! it as an Escape press and then `[` and `A` typed, so the key would arm an
-//! interrupt, reject a focused approval and type into the prompt. When those
-//! keys arrived together, in the same read, they are one Alt key again.
+//! sequence, `ESC ESC [ A` (tmux usually re-encodes it as `ESC [1;3A` before
+//! the TUI sees it, but not always). crossterm reads that as an Escape press
+//! and then `[` and `A` typed, so the key would arm an interrupt, reject a
+//! focused approval and type into the prompt. When those keys arrived
+//! together, in the same read, they are one Alt key again; so is an Escape
+//! typed and followed by an arrow within one read.
 
 use std::collections::VecDeque;
 use std::io;
@@ -18,6 +20,7 @@ const LONGEST: usize = 6;
 /// The terminal's events, with an Escape-prefixed key joined into one.
 pub(crate) struct TerminalInput {
     stream: EventStream,
+    /// Events already read and decoded, not handed out yet.
     ready: VecDeque<io::Result<Event>>,
 }
 
@@ -31,15 +34,18 @@ impl TerminalInput {
 
     /// The next event. Cancel safe: it only waits before taking anything.
     pub(crate) async fn next(&mut self) -> Option<io::Result<Event>> {
-        if let Some(event) = self.ready.pop_front() {
+        let event = match self.ready.pop_front() {
+            Some(event) => event,
+            None => self.stream.next().await?,
+        };
+        if !escape(&event) {
             return Some(event);
         }
-        let event = self.stream.next().await?;
-        if !matches!(&event, Ok(Event::Key(key)) if bare_escape(key)) {
-            return Some(event);
-        }
-        // Keys from the same read are already decoded. Ask first, so a lone
-        // Escape never leaves the stream waiting on a waker nobody holds.
+        // Several Option+arrows can come in one read (a held key, bunched
+        // SSH packets, a slow frame), so this runs for every Escape, queued
+        // or new. Keys from the same read are already decoded; ask first, so
+        // a lone Escape never leaves the stream waiting on a waker nobody
+        // holds.
         while self.ready.len() < LONGEST && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
         {
             let Some(Some(next)) = self.stream.next().now_or_never() else {
@@ -51,20 +57,33 @@ impl TerminalInput {
                 break;
             }
         }
-        let keys = self
-            .ready
-            .iter()
-            .map_while(|event| match event {
-                Ok(Event::Key(key)) => Some(*key),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if let Some((key, taken)) = escaped_key(&keys) {
-            self.ready.drain(..taken);
-            return Some(Ok(Event::Key(key)));
-        }
-        Some(event)
+        Some(join(event, &mut self.ready))
     }
+}
+
+fn escape(event: &io::Result<Event>) -> bool {
+    matches!(event, Ok(Event::Key(key)) if bare_escape(key))
+}
+
+/// `event` as it is, or, when it is an Escape and the keys at the front of
+/// `ready` (what came with it) spell a cursor key, that key with Alt, which
+/// takes them out of `ready`.
+fn join(event: io::Result<Event>, ready: &mut VecDeque<io::Result<Event>>) -> io::Result<Event> {
+    if !escape(&event) {
+        return event;
+    }
+    let keys = ready
+        .iter()
+        .map_while(|event| match event {
+            Ok(Event::Key(key)) => Some(*key),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((key, taken)) = escaped_key(&keys) else {
+        return event;
+    };
+    ready.drain(..taken);
+    Ok(Event::Key(key))
 }
 
 fn bare_escape(key: &KeyEvent) -> bool {
@@ -210,6 +229,58 @@ mod tests {
         );
         // Keys typed after the sequence stay keys of their own.
         assert_eq!(joined("[Axyz"), Some((KeyCode::Up, alt, 2)));
+    }
+
+    /// What `TerminalInput` hands out when one read brought `events`.
+    fn read(events: Vec<KeyEvent>) -> Vec<KeyEvent> {
+        let mut ready = events
+            .into_iter()
+            .map(|key| Ok(Event::Key(key)))
+            .collect::<VecDeque<_>>();
+        let mut out = Vec::new();
+        while let Some(event) = ready.pop_front() {
+            let Ok(Event::Key(key)) = join(event, &mut ready) else {
+                panic!("not a key");
+            };
+            out.push(key);
+        }
+        out
+    }
+
+    fn escape() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn several_option_arrows_in_one_read_are_each_one_key() {
+        let option_up = || [vec![escape()], typed("[A")].concat();
+        let alt_up = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(read(option_up()), [alt_up]);
+        assert_eq!(read([option_up(), option_up()].concat()), [alt_up, alt_up]);
+        assert_eq!(
+            read([option_up(), option_up(), option_up()].concat()),
+            [alt_up, alt_up, alt_up]
+        );
+        // Typed text around them stays text.
+        assert_eq!(
+            read([typed("d"), option_up(), typed("x")].concat()),
+            [typed("d"), vec![alt_up], typed("x")].concat()
+        );
+    }
+
+    #[test]
+    fn an_escape_with_text_or_alone_stays_an_escape() {
+        assert_eq!(read(vec![escape()]), [escape()]);
+        assert_eq!(
+            read([vec![escape()], typed("hi")].concat()),
+            [vec![escape()], typed("hi")].concat()
+        );
+        assert_eq!(read(vec![escape(), escape()]), [escape(), escape()]);
+        // A lone Escape after a joined key is still a lone Escape.
+        assert_eq!(
+            read([vec![escape()], typed("[A"), vec![escape()]].concat()),
+            [KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), escape()]
+        );
     }
 
     #[test]
