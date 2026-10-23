@@ -5992,6 +5992,24 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
 /// and first lines, indented and each cut to `PREVIEW_COLUMNS` cells, or why its
 /// text is not shown. The server has already made its text safe for a
 /// terminal.
+/// `line` with its tabs as spaces to the next stop of four.
+fn expand_tabs(line: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+    let mut text = String::with_capacity(line.len());
+    let mut column = 0;
+    for character in line.chars() {
+        if character == '\t' {
+            let pad = TAB_WIDTH - column % TAB_WIDTH;
+            text.push_str(&" ".repeat(pad));
+            column += pad;
+        } else {
+            text.push(character);
+            column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    text
+}
+
 fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
     use haarness_protocol::ScriptWithheld;
     const LINES: usize = 6;
@@ -6017,8 +6035,10 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
     let mut text = format!("It runs {}:\n", terminal_safe(&script.path, false));
     for line in lines.iter().take(LINES) {
         text.push_str("    ");
-        // What the file holds is printed, never run by the terminal.
-        let line = terminal_safe(line, false);
+        // What the file holds is printed, never run by the terminal: tabs
+        // to the next stop of four, as the terminal UI's card shows them,
+        // anything else that could act on the terminal escaped.
+        let line = terminal_safe(&expand_tabs(line), false);
         // Cut by the cells a terminal draws, so wide characters count twice.
         let mut used = 0;
         let cut = line.char_indices().find_map(|(at, character)| {
@@ -12251,6 +12271,16 @@ mod tests {
                 .as_deref(),
             Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
         );
+        // Tabs go to the next stop of four, as on the terminal UI's card;
+        // nothing reaches the terminal as an escape.
+        assert_eq!(
+            super::script_preview(Some(&script("\tif x; then\n\t\techo a\tb\n", false, None)))
+                .as_deref(),
+            Some("It runs /work/run.sh:\n        if x; then\n            echo a  b\n")
+        );
+        let escaped =
+            super::script_preview(Some(&script("echo \u{1b}[2J\n", false, None))).unwrap();
+        assert!(escaped.contains("echo \\u{1b}[2J"), "{escaped:?}");
     }
 
     /// Run in a process of its own (it installs the process's panic hook):
