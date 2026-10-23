@@ -61,3 +61,4 @@ tower.workspace = true
 fs2.workspace = true
 haarness-store = { path = "../haarness-store" }
 reqwest.workspace = true
+tracing-subscriber.workspace = true

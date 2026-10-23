@@ -398,3 +398,87 @@ async fn capacity_reaps_idle_clients_but_preserves_inflight_requests() {
     assert_eq!(statuses[1].status, "running");
     service.shutdown().await;
 }
+
+/// Language servers and formatters do not inherit what no process the server
+/// starts may (`haarness_core::private_env_names`): the server's credentials,
+/// the OpenTelemetry settings (a collector key) and a chat id that a server
+/// started by an agent's shell command inherits from it, which names none of
+/// its own chats. A server's or formatter's configured `environment` still
+/// sets them. Run again in a process whose own environment holds them.
+#[cfg(unix)]
+#[tokio::test]
+async fn language_servers_and_formatters_never_inherit_the_server_s_private_variables() {
+    const NAME: &str =
+        "language_servers_and_formatters_never_inherit_the_server_s_private_variables";
+    if std::env::var_os("HAARNESS_LANGUAGE_INHERITED_ID").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env("HAARNESS_LANGUAGE_INHERITED_ID", "1")
+            .env("HAARNESS_SESSION_ID", "outer-chat")
+            .env("HAARNESS_SERVER_TOKEN", "server-secret")
+            .env("OTEL_EXPORTER_OTLP_HEADERS", "collector-key")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("nothing private inherited"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let workspace = Workspace::new();
+    // Each process writes what it got before it does its work.
+    let record = r#"printf '%s|%s|%s|%s' "${HAARNESS_SESSION_ID-unset}" "${HAARNESS_SERVER_TOKEN-unset}" "${OTEL_EXPORTER_OTLP_HEADERS-unset}" "${OTEL_SERVICE_NAME-unset}" > "$0"; exec python3 "$@""#;
+    let lsp = workspace.0.join("lsp-env");
+    let format = workspace.0.join("formatter-env");
+    let configured = |value: &str| BTreeMap::from([("OTEL_SERVICE_NAME".into(), value.into())]);
+    let mut lsp_server = server(&[".mock"]);
+    lsp_server.command = ["sh", "-c", record, &lsp.display().to_string()]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([fixture("mock_lsp.py")])
+        .collect();
+    lsp_server.environment = configured("configured-lsp");
+    let mut mock_formatter = formatter(&[".mock"]);
+    mock_formatter.command = ["sh", "-c", record, &format.display().to_string()]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([fixture("mock_formatter.py"), "$FILE".into()])
+        .collect();
+    mock_formatter.environment = configured("configured-formatter");
+    let service = LanguageService::new(
+        workspace.0.clone(),
+        LspConfig {
+            builtins: false,
+            diagnostic_timeout_ms: 2_000,
+            request_timeout_ms: 2_000,
+            servers: BTreeMap::from([("mock".into(), lsp_server)]),
+            ..LspConfig::default()
+        },
+        FormatterConfig {
+            enabled: true,
+            builtins: false,
+            formatters: BTreeMap::from([("mockfmt".into(), mock_formatter)]),
+        },
+    );
+    let source = workspace.0.join("sample.mock");
+    tokio::fs::write(&source, "entity BADFMT BROKEN\n")
+        .await
+        .unwrap();
+    let report = service
+        .process_file(source.clone(), CancellationToken::new())
+        .await;
+    assert_eq!(report.formatted_by, ["mockfmt"]);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&lsp).unwrap(),
+        "unset|unset|unset|configured-lsp"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&format).unwrap(),
+        "unset|unset|unset|configured-formatter"
+    );
+    service.shutdown().await;
+    println!("nothing private inherited");
+}

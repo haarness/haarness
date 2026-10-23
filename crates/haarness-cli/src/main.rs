@@ -11363,6 +11363,12 @@ async fn ensure_workspace_server_at(
     let start_log = prepare_start_log(&paths.data);
     let start_id = random_token();
     let mut command = ProcessCommand::new(executable);
+    // A client that an agent's command started (`haarness run` in it, say)
+    // has Haarness's own markers; this server outlives that command and
+    // serves a person's own `!` commands and terminals too.
+    for name in haarness_core::own_agent_markers(std::env::var_os("AI_AGENT").as_deref()) {
+        command.env_remove(name);
+    }
 
     command
         .args(paths.root.as_ref().map(|_| "--data-dir"))

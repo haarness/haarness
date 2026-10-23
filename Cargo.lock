@@ -1624,6 +1624,7 @@ version = "0.1.3"
 dependencies = [
  "dunce",
  "futures",
+ "haarness-core",
  "serde",
  "serde_json",
  "tokio",
@@ -1821,6 +1822,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "uuid",
@@ -1926,6 +1928,7 @@ version = "0.1.3"
 dependencies = [
  "chrono",
  "fs2",
+ "haarness-core",
  "haarness-protocol",
  "serde",
  "serde_json",
