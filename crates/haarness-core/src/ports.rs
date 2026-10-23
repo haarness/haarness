@@ -160,6 +160,15 @@ pub trait ThreadRepository: Send + Sync {
     ) -> CoreResult<haarness_protocol::InputQueue> {
         Err(CoreError::Invalid("Deferred input is unavailable".into()))
     }
+    /// Records that request `request` was steered into a running turn of
+    /// chat `id`, so `has_input_admission` finds a retry of it.
+    async fn record_steered_input(
+        &self,
+        _id: ThreadId,
+        _request: haarness_protocol::RequestId,
+    ) -> CoreResult<()> {
+        Ok(())
+    }
     async fn change_input_queue(
         &self,
         _id: ThreadId,

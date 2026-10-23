@@ -401,11 +401,14 @@ is not asked (the person picked it, as they attach a file): a deny for
 away, keeps it out. The rest of the message is still sent. The same server and
 URI twice is read once; two servers with one URI are two mentions. The rules are those of
 the agent the message runs under: the request's `agent` (or its command's),
-else the running turn's for `/input`, else the chat's. No `PreToolUse` hook
-runs: a mention is no tool call. A message with mentions is read and admitted
-on the server's own time, so a client that goes away meanwhile does not lose
-it; a retry with the same `requestId` finds it without reading again, and one
-sent while the first is still reading waits for it. A published chat's request with `resources` is refused (`403`), and
+else the running turn's for `/input` with `delivery: steer`, else the chat's
+(also for `delivery: queue`: a queued message runs later as a turn of its
+own). No `PreToolUse` hook runs: a mention is no tool call. A message with
+mentions is read and admitted on the server's own time, so a client that goes
+away meanwhile does not lose it; a retry with the same `requestId` (a turn, a
+queued message, or a message steered into a running turn, which is recorded
+for this) finds it without reading or delivering it again, and one sent while
+the first is still reading waits for it. A published chat's request with `resources` is refused (`403`), and
 its `/v1/info` leaves the capability out. Servers advertise
 `mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
 resources only when it is there. `GET /v1/mcp?threadId=<id>&agent=<agent>` (either one alone works; a named

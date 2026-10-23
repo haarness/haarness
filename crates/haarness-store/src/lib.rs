@@ -938,6 +938,9 @@ impl ThreadRepository for SqliteStore {
     ) -> CoreResult<haarness_protocol::InputQueue> {
         input::enqueue(&mut self.connection.lock(), id, value)
     }
+    async fn record_steered_input(&self, id: ThreadId, request: RequestId) -> CoreResult<()> {
+        input::record_steer(&self.connection.lock(), id, request)
+    }
     async fn change_input_queue(
         &self,
         id: ThreadId,

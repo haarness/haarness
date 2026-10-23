@@ -196,6 +196,23 @@ pub(super) fn change(
     Ok(queue)
 }
 
+/// Records that request `request` was steered into a running turn of
+/// `thread`: a tombstone no queue lists, so a retry of the same request is
+/// found (`has_input_admission`) and not delivered twice.
+pub(super) fn record_steer(
+    db: &Connection,
+    thread: ThreadId,
+    request: RequestId,
+) -> CoreResult<()> {
+    db.execute(
+        "INSERT INTO pending_inputs(id,thread_id,payload,position,state) VALUES(?1,?2,'{}',0,'steered')
+         ON CONFLICT(id) DO NOTHING",
+        params![request.to_string(), thread.to_string()],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// Keep a tombstone so retransmission cannot resurrect delivered/removed work.
 pub(super) fn consume(
     tx: &Transaction<'_>,
@@ -210,7 +227,8 @@ pub(super) fn consume(
         )
         .optional()
         .map_err(storage)?;
-    let Some((owner, state, payload)) = row else {
+    // A steer's record only answers a retry; it is no queued input.
+    let Some((owner, state, payload)) = row.filter(|(_, state, _)| state != "steered") else {
         return Ok(None);
     };
     if owner != thread.to_string() || state != "pending" {

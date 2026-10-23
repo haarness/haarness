@@ -627,12 +627,32 @@ async fn a_mention_follows_the_agent_its_message_runs_under() {
         .unwrap()
         .unwrap()
         .forget();
+    let steer = json!({
+        "requestId": RequestId::new(),
+        "text": "And this",
+        "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
+    });
+    // Its retry finds it steered: nothing is read or delivered twice.
+    for _ in 0..2 {
+        fixture
+            .client
+            .post(format!("{}/v1/threads/{}/input", fixture.base, thread.id))
+            .json(&steer)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    // Queued, a message runs later as a turn of its own, under the chat's
+    // agent, so its mention is read.
     fixture
         .client
         .post(format!("{}/v1/threads/{}/input", fixture.base, thread.id))
         .json(&json!({
             "requestId": RequestId::new(),
-            "text": "And this",
+            "delivery": "queue",
+            "text": "Then this",
             "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
         }))
         .send()
@@ -641,12 +661,26 @@ async fn a_mention_follows_the_agent_its_message_runs_under() {
         .error_for_status()
         .unwrap();
     provider.release_first.add_permits(1);
-    let sent = user_messages(&fixture.items(&thread).await);
+    let sent = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sent = user_messages(&fixture.items(&thread).await);
+            if sent.len() == 3 {
+                return sent;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the queued message runs");
     assert!(
         sent[1].starts_with("And this")
             && sent[1].contains("a rule keeps this resource from the model"),
         "{sent:?}"
     );
-    assert!(fixture.docs.reads.lock().unwrap().is_empty());
+    assert!(
+        sent[2].starts_with("Then this") && sent[2].contains("# docs setup"),
+        "{sent:?}"
+    );
+    assert_eq!(*fixture.docs.reads.lock().unwrap(), ["docs:docs://setup"]);
     fixture.handle.shutdown().await.unwrap();
 }
