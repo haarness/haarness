@@ -190,7 +190,9 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
         return Some(withheld(file, ScriptWithheld::Written));
     }
     let mut bytes = read_bytes(&real)?;
-    if follows_shebang(script.shebang, &bytes) && runs_another_file(&bytes) {
+    if follows_shebang(script.shebang, &bytes) && runs_another_file(&bytes)
+        || declares_another_encoding(&bytes)
+    {
         return None;
     }
     let seal = Seal {
@@ -339,6 +341,44 @@ fn is_script(interpreter: &Path) -> bool {
     match open(&real).and_then(|mut file| file.read_exact(&mut start)) {
         Ok(()) => &start == b"#!",
         Err(error) => error.kind() != std::io::ErrorKind::UnexpectedEof,
+    }
+}
+
+/// Whether one of the file's first two lines declares a source encoding
+/// (PEP 263, `# -*- coding: … -*-`) other than UTF-8, ASCII or Latin-1:
+/// Python decodes the file by it, so it may run lines the card cannot show
+/// (`# coding: utf-7` makes `+AAo-` a line break).
+fn declares_another_encoding(bytes: &[u8]) -> bool {
+    let start = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).replace("\r\n", "\n");
+    start
+        .split(['\n', '\r'])
+        .take(2)
+        .filter_map(coding)
+        .any(|encoding| {
+            !matches!(
+                encoding.to_ascii_lowercase().replace('_', "-").as_str(),
+                "utf-8" | "utf8" | "ascii" | "latin-1" | "iso-8859-1" | "cp1252"
+            )
+        })
+}
+
+/// The encoding a line declares: `^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`.
+fn coding(line: &str) -> Option<&str> {
+    let mut rest = line
+        .trim_start_matches([' ', '\t', '\x0c'])
+        .strip_prefix('#')?;
+    loop {
+        rest = &rest[rest.find("coding")? + "coding".len()..];
+        let Some(value) = rest.strip_prefix([':', '=']) else {
+            continue;
+        };
+        let value = value.trim_start_matches([' ', '\t']);
+        let end = value
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            .unwrap_or(value.len());
+        if end > 0 {
+            return Some(&value[..end]);
+        }
     }
 }
 
@@ -840,6 +880,70 @@ mod tests {
                 "{first}: {command}"
             );
         }
+    }
+
+    /// Python decodes a file by the encoding its first two lines declare
+    /// (PEP 263): under `utf-7`, `+AAo-` is a line break the card would not
+    /// show, so such a file shows nothing.
+    #[test]
+    fn a_declared_encoding_other_than_utf8_or_latin1_shows_nothing() {
+        let fixture = Fixture::new();
+        for start in [
+            "# coding: utf-7\n",
+            "#!/usr/bin/env python3\n# -*- coding: utf_7 -*-\n",
+            "# vim: set fileencoding=unicode_escape :\n",
+            "\x0c# coding=UTF-16\n",
+            "\r\n# coding: shift_jis\r\n",
+        ] {
+            fixture.write("x.py", format!("{start}print(1) +AAo-print(2)\n"));
+            assert!(
+                bash_script("python3 x.py", &fixture.0, |_| true).is_none(),
+                "{start:?}"
+            );
+        }
+        for start in [
+            "# -*- coding: utf-8 -*-\n",
+            "# coding: UTF8\n",
+            "# coding: latin-1\n",
+            "# coding=iso-8859-1\n",
+            "# coding: cp1252\n",
+            "# coding: ascii\n",
+            "# no declaration\n",
+            // On the third line it declares nothing.
+            "#\n#\n# coding: utf-7\n",
+            "x = 1  # coding: utf-7\n",
+        ] {
+            fixture.write("x.py", format!("{start}print(1)\n"));
+            assert!(
+                bash_script("python3 x.py", &fixture.0, |_| true).is_some(),
+                "{start:?}"
+            );
+        }
+    }
+
+    /// A link into `/dev` (or `/proc`) leads where the server's process
+    /// answers, not the shell's: the script is not shown, and output sent
+    /// through one withholds it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_dev_or_proc_shows_nothing() {
+        let fixture = Fixture::new();
+        fixture.write("run.sh", "echo body\n");
+        std::os::unix::fs::symlink("/dev", fixture.0.join("devices")).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("devices"), fixture.0.join("again")).unwrap();
+        std::os::unix::fs::symlink("/dev/null", fixture.0.join("out.log")).unwrap();
+        assert!(through_system_folder(&fixture.0.join("again/fd/3")));
+        assert!(through_system_folder(Path::new("/proc/self/cwd/run.sh")));
+        assert!(!through_system_folder(&fixture.0.join("run.sh")));
+        for command in ["sh devices/fd/3", "sh again/fd/3"] {
+            assert!(
+                bash_script(command, &fixture.0, |_| true).is_none(),
+                "{command}"
+            );
+        }
+        let shown = bash_script("sh run.sh > out.log", &fixture.0, |_| true).unwrap();
+        assert_eq!(shown.withheld, Some(ScriptWithheld::Changeable));
+        assert_eq!(shown.content, "");
     }
 
     #[test]
