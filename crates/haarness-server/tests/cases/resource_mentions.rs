@@ -7,7 +7,7 @@
 //! read the owner's servers.
 use super::*;
 use haarness_core::{PermissionDecision, PermissionRule};
-use haarness_protocol::{Item, ItemData, RESOURCE_MENTIONS_CAPABILITY};
+use haarness_protocol::{Item, ItemData, QueueInputResponse, RESOURCE_MENTIONS_CAPABILITY};
 use serde_json::json;
 
 /// Two servers that expose the same URI (`docs` and `wiki`), and a third
@@ -682,5 +682,62 @@ async fn a_mention_follows_the_agent_its_message_runs_under() {
         "{sent:?}"
     );
     assert_eq!(*fixture.docs.reads.lock().unwrap(), ["docs:docs://setup"]);
+    fixture.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_steer_and_its_retries_deliver_it_once_even_when_they_race() {
+    let provider = SlowText::default();
+    let fixture = fixture_with(Arc::new(provider.clone())).await;
+    let thread = fixture.thread().await;
+    let post = |body: Value| {
+        let client = fixture.client.clone();
+        let url = format!("{}/v1/threads/{}/input", fixture.base, thread.id);
+        async move {
+            client
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<QueueInputResponse>()
+                .await
+                .unwrap()
+        }
+    };
+    // A steer to an idle chat starts a turn; its retry finds that turn.
+    let start = json!({"requestId": RequestId::new(), "text": "Go"});
+    let started = post(start.clone()).await;
+    tokio::time::timeout(Duration::from_secs(10), provider.first_started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let retried = post(start).await;
+    assert!(!retried.queued && retried.item.is_none());
+    assert_eq!(
+        retried.turn.map(|turn| turn.id),
+        started.turn.map(|turn| turn.id)
+    );
+    // A steer into it, retried in turn and three times at once.
+    let steer = json!({"requestId": RequestId::new(), "text": "Steer"});
+    for _ in 0..2 {
+        assert!(post(steer.clone()).await.queued);
+    }
+    let racing = json!({"requestId": RequestId::new(), "text": "Race"});
+    let answers = futures::future::join_all((0..3).map(|_| post(racing.clone()))).await;
+    assert!(answers.iter().all(|answer| answer.queued));
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|answer| answer.item.is_some())
+            .count(),
+        1
+    );
+    provider.release_first.add_permits(1);
+    let sent = user_messages(&fixture.items(&thread).await);
+    assert_eq!(sent, ["Go", "Steer", "Race"]);
     fixture.handle.shutdown().await.unwrap();
 }

@@ -1608,8 +1608,9 @@ impl AgentRuntime {
             .await?
             || self
                 .repository
-                .has_turn_for_request(thread_id, request)
-                .await?)
+                .turn_for_request(thread_id, request)
+                .await?
+                .is_some())
     }
 
     /// The agent a message to chat `thread_id` runs under, when it is not
@@ -2037,6 +2038,19 @@ impl AgentRuntime {
                 turn: None,
             });
         }
+        // A steer that started a turn: its retry finds that turn instead of
+        // joining it as a second message.
+        if let Some(turn) = self
+            .repository
+            .turn_for_request(thread_id, request.request_id)
+            .await?
+        {
+            return Ok(QueueInputResponse {
+                queued: false,
+                item: None,
+                turn: Some(turn),
+            });
+        }
         if request.delivery == haarness_protocol::InputDelivery::Queue {
             return self.defer_input(thread_id, request).await;
         }
@@ -2375,27 +2389,34 @@ impl AgentRuntime {
         request: &QueueInputRequest,
     ) -> CoreResult<QueueInputResponse> {
         let root = self.resolve_root(thread).await;
-        let item = self
-            .repository
-            .append_item(
-                thread.id,
-                Some(turn_id),
-                ItemData::UserMessage {
-                    text: request.text.clone(),
-                    attachments: request.attachments.clone(),
-                    queued: true,
-                    synthetic: request.synthetic,
-                    command_line: None,
-                },
-            )
-            .await?;
-        // A person's retry of the same request finds it, and is not
-        // delivered twice.
-        if !request.synthetic {
+        let data = ItemData::UserMessage {
+            text: request.text.clone(),
+            attachments: request.attachments.clone(),
+            queued: true,
+            synthetic: request.synthetic,
+            command_line: None,
+        };
+        // A person's steer is recorded by its request with the item, under
+        // the turn's gate, so a retry (even one racing it) is not delivered
+        // twice.
+        let item = if request.synthetic {
             self.repository
-                .record_steered_input(thread.id, request.request_id)
-                .await?;
-        }
+                .append_item(thread.id, Some(turn_id), data)
+                .await?
+        } else {
+            let Some(item) = self
+                .repository
+                .append_steered_input(thread.id, turn_id, request.request_id, data)
+                .await?
+            else {
+                return Ok(QueueInputResponse {
+                    queued: true,
+                    item: None,
+                    turn: None,
+                });
+            };
+            item
+        };
         self.events.publish_scoped(
             "item.created",
             Some(thread.id),
