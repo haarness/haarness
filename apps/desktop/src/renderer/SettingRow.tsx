@@ -1,4 +1,4 @@
-import { createSignal, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { t } from "./i18n";
 import { Icon } from "./icons";
 import { splitPath } from "./settings-lists";
@@ -25,15 +25,65 @@ export function CurrentTag() {
     </span>
   );
 }
-/** A folder as a person reads it: the home folder as `~`, and a long path
- * giving way in the middle so its last folder stays in sight. The whole path
- * is the tooltip and stays in the text for copying and finding. */
-export function PathText(props: { path: string; class?: string }) {
-  const parts = () => splitPath(props.path);
+/** This computer's home folder, read once from Electron. */
+let homeFolder: Promise<string> | undefined;
+const [home, setHome] = createSignal("");
+function localHome() {
+  homeFolder ??= window.haarness
+    .boot()
+    .then((boot) => boot.home ?? "")
+    .catch(() => "");
+  void homeFolder.then(setHome);
+  return home();
+}
+let measure: CanvasRenderingContext2D | null | undefined;
+/**
+ * A folder as a person reads it: this computer's home folder as `~` (`local`,
+ * a path of the server Desktop runs on), and a long path giving way in the
+ * middle so its last folder stays in sight. The cut is measured, so the
+ * ellipsis meets the last folder without a gap. The whole path is the
+ * tooltip and what assistive technology reads.
+ */
+export function PathText(props: { path: string; local?: boolean; class?: string }) {
+  let element!: HTMLSpanElement;
+  const parts = () => splitPath(props.path, props.local ? localHome() : undefined);
+  const [head, setHead] = createSignal<string>();
+  function fit() {
+    const box = element?.parentElement;
+    const { head: full, tail } = parts();
+    measure ??= document.createElement("canvas").getContext("2d");
+    if (!box || !measure || !full) return setHead(undefined);
+    const style = getComputedStyle(element);
+    const space = getComputedStyle(box);
+    const width = box.clientWidth - parseFloat(space.paddingLeft) - parseFloat(space.paddingRight);
+    measure.font = style.font;
+    measure.letterSpacing = style.letterSpacing === "normal" ? "0px" : style.letterSpacing;
+    const fits = (text: string) => measure!.measureText(text + tail).width <= width;
+    if (fits(full)) return setHead(full);
+    let low = 0;
+    let high = full.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (fits(full.slice(0, middle) + "…")) low = middle;
+      else high = middle - 1;
+    }
+    setHead(full.slice(0, low).replace(/[/\\\s]+$/, "") + "…");
+  }
+  onMount(() => {
+    const observer = new ResizeObserver(() => fit());
+    if (element.parentElement) observer.observe(element.parentElement);
+    onCleanup(() => observer.disconnect());
+    void document.fonts?.ready.then(() => fit());
+  });
+  createEffect(() => {
+    parts();
+    queueMicrotask(fit);
+  });
   return (
-    <span class={"path-text " + (props.class ?? "")} title={props.path} dir="ltr">
-      <span class="path-text-head">{parts().head}</span>
-      <span class="path-text-tail">{parts().tail}</span>
+    <span ref={element} class={"path-text " + (props.class ?? "")} title={props.path} dir="ltr">
+      <span class="sr-only">{props.path}</span>
+      <span class="path-text-head" aria-hidden="true">{head() ?? parts().head}</span>
+      <span class="path-text-tail" aria-hidden="true">{parts().tail}</span>
     </span>
   );
 }

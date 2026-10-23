@@ -765,9 +765,9 @@ function Servers() {
                 : "Local projects on this computer")
             }
           >
-            {/* The server shown says so beside its name; switching to it again
-                only means something while a project of it is still opening. */}
-            <Show when={app.state.activeServer !== item.id || app.state.openingProject}>
+            {/* The server shown says so beside its name and has nothing to
+                switch to; the row never grows or loses a button meanwhile. */}
+            <Show when={app.state.activeServer !== item.id}>
               <button onClick={() => app.run(() => app.switchServer(item.id))}>
                 {t("Switch")}
               </button>
@@ -913,9 +913,9 @@ function Computers() {
                   : lastSeen(computer)}
               </p>
             </div>
-            <Show when={active() !== computer.id || app.state.openingProject}>
+            <Show when={active() !== computer.id}>
               <button
-                disabled={active() !== computer.id && !computer.connected}
+                disabled={!computer.connected}
                 onClick={() => app.run(() => app.openComputer(computer))}
               >
                 {t("Switch")}
@@ -939,7 +939,7 @@ function Projects() {
             <div class="settings-current-project-details">
               <span class="small muted">{t("Current working folder")}</span>
               <h3>{connection().workspace.split(/[\\/]/).filter(Boolean).at(-1) || connection().workspace}</h3>
-              <PathText class="settings-current-project-path" path={connection().workspace} />
+              <PathText class="settings-current-project-path" path={connection().workspace} local={!connection().remote} />
               <span class="small muted">{t(app.currentServer().label)}</span>
               <Show when={!connection().remote && !connection().trust}>
                 <p class="small muted">{t("Project configuration disabled")}</p>
@@ -972,12 +972,13 @@ function Projects() {
           <Row
             title={item.label}
             target={"project:" + item.id}
-            detail={<PathText class="setting-row-path" path={item.root} />}
+            detail={<PathText class="setting-row-path" path={item.root} local={!app.currentServer().url && !app.currentServer().host && !app.currentServer().cloud} />}
           >
             <button onClick={() => app.run(() => app.selectProject(item.id))}>
               {t("Open")}
             </button>
-            {/* The sidebar's Remove project, in the same words. */}
+            {/* The sidebar's Remove project, in the same words; the name only
+                adds to what the button says. */}
             <button
               aria-label={t("Remove project {name}", { name: item.label })}
               onClick={() =>
@@ -995,7 +996,7 @@ function Projects() {
                 })
               }
             >
-              {t("Remove")}
+              {t("Remove project")}
             </button>
           </Row>
         )}
