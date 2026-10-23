@@ -11,7 +11,8 @@ resource whose server is gone by then is named in the message as not read. A res
 the message 10 s at most, while the prompt stays live and a second message waits. The same marker text piped to
 `haarness run` reads nothing: only a pick this TUI made is a mention. After a restart (`-c`), a chip recalled
 from history is still read; once its pick is forgotten, it comes back as plain `@setup` with its `@` list open
-on that resource, below a project file of the same name, so one Enter picks it again.
+on that resource, below a project file of the same name, so one Enter picks it again. A listing that comes after
+Esc hid the `@` list leaves it hidden: Enter then sends the text as typed.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-resource-mentions-tmux.py
 Pane captures, with their colours, go to RESOURCE_TMUX_EVIDENCE; HAARNESS_E2E_DIR holds the run's state.
@@ -57,6 +58,8 @@ project = root / "project"
 (project / ".haarness").mkdir(parents=True)
 (project / "settings.md").write_text("A file the `@set` query finds too.\n")
 requests = root / "requests.log"
+# While this file exists, the listings of `docs` and `wiki` take as many seconds as it holds.
+delay = root / "list-delay"
 def server(**env):
     return {"command": sys.executable, "args": [str(FIXTURE)], "env": {"REQUEST_LOG": str(requests), **env}}
 
@@ -65,7 +68,8 @@ def server(**env):
     "model": "echo/echo-1",
     # Every tool of `closed`, so every resource of it, is kept from the chat.
     "permission": {"mcp__closed__*": "deny"},
-    "mcp": {"docs": server(), "wiki": server(LIST_SLOW="1"), "closed": server()},
+    "mcp": {"docs": server(LIST_DELAY_FILE=str(delay)), "wiki": server(LIST_SLOW="1", LIST_DELAY_FILE=str(delay)),
+            "closed": server()},
 }, indent=2) + "\n")
 env = {k: v for k, v in os.environ.items() if not k.startswith("HAARNESS_")}
 env.update(
@@ -299,6 +303,33 @@ try:
     assert read in again["text"], again
     assert listings("resources/read") == before + 1, requests.read_text()
     checks.append("a forgotten pick comes back as plain @setup with its resource highlighted below a same-named file; one Enter picks it again")
+
+    # A slow listing that comes after Esc hid the list leaves it hidden, and Enter sends the text as typed.
+    keys("C-c")
+    keys("C-c")
+    until(lambda: subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode != 0,
+          "the TUI did not exit", 15)
+    delay.write_text("5")
+    launch("-c")
+    time.sleep(1)
+    before = (listings(), listings("resources/read"))
+    count = len(everywhere())
+    text("@set")
+    until(lambda: "settings.md" in pane(), "the files did not come")
+    assert "Setup guide" not in pane(), pane()
+    keys("Escape")
+    until(lambda: listings() == before[0] + 3, "the servers were not asked")
+    time.sleep(6)
+    assert "Setup guide" not in pane() and "settings.md" not in pane(), pane()
+    screen("tui-resource-hidden-after-esc")
+    keys("Enter")
+    until(lambda: len(everywhere()) == count + 1, "Enter did not send the text")
+    idle()
+    assert any(item["text"] == "@set" for item in everywhere()), everywhere()
+    assert "[@setup]" not in pane(), pane()
+    assert listings("resources/read") == before[1], requests.read_text()
+    delay.unlink()
+    checks.append("a listing that comes after Esc hid the @ list leaves it hidden, and Enter sends the text as typed")
     for check in checks:
         print("ok -", check)
     print(f"evidence: {EVIDENCE}")

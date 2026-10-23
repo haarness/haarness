@@ -372,7 +372,8 @@ pub(crate) async fn apply(app: &mut App, client: &ApiClient) -> Result<bool> {
     let Some((start, query)) = app.composer.mention_query() else {
         return Ok(false);
     };
-    let Some(selected) = app.mention_suggestions.get(app.selection).cloned() else {
+    // Hidden by Esc, the list picks nothing: Enter sends the text.
+    let Some(selected) = app.shown_mentions().get(app.selection).cloned() else {
         return Ok(false);
     };
     if app.attach_resource(&selected) {

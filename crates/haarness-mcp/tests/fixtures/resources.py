@@ -2,11 +2,13 @@
 
 A read of `docs://slow` gets no answer; the cancellation the client sends for it is appended to CANCEL_LOG.
 With REQUEST_LOG set, the method of every request is appended to it. LIST_SLOW=1 lists `docs://slow` too.
+A listing waits LIST_DELAY seconds, or as many as the file LIST_DELAY_FILE holds while it exists.
 """
 import base64
 import json
 import os
 import sys
+import time
 
 PNG = base64.b64encode(
     bytes.fromhex(
@@ -49,6 +51,11 @@ for line in sys.stdin:
     elif method == 'tools/list':
         reply(request['id'], {'tools': []})
     elif method == 'resources/list':
+        delay = os.environ.get('LIST_DELAY', '0')
+        if os.path.exists(os.environ.get('LIST_DELAY_FILE', '')):
+            with open(os.environ['LIST_DELAY_FILE']) as file:
+                delay = file.read().strip()
+        time.sleep(float(delay))
         reply(request['id'], {'resources': RESOURCES})
     elif method == 'resources/templates/list':
         reply(request['id'], {'resourceTemplates': [{'uriTemplate': 'docs://page/{id}', 'name': 'page'}]})
