@@ -18,6 +18,26 @@ pub(crate) const ACTIONS: &[(&str, &str, &str)] = &[
     ("stash_save", "Save draft to stash", "ctrl+s"),
     ("editor", "External editor", "alt+e"),
     ("new", "New session", "alt+n"),
+    // Upstream's message keys. Alt with an arrow reaches the TUI in every
+    // terminal, macOS Terminal's ESC-prefixed form included (`input::meta`),
+    // and Alt+Left/Right stay word motions.
+    ("messages_previous", "Previous message", "alt+up"),
+    ("messages_next", "Next message", "alt+down"),
+    ("messages_previous_user", "Previous prompt", "alt+shift+up"),
+    ("messages_next_user", "Next prompt", "alt+shift+down"),
+    ("messages_first", "First message", "alt+home"),
+    ("messages_last_user", "Last prompt", "alt+end"),
+];
+/// Keys named by their name rather than the character they type.
+const NAMED: &[(&str, KeyCode)] = &[
+    ("up", KeyCode::Up),
+    ("down", KeyCode::Down),
+    ("left", KeyCode::Left),
+    ("right", KeyCode::Right),
+    ("home", KeyCode::Home),
+    ("end", KeyCode::End),
+    ("pageup", KeyCode::PageUp),
+    ("pagedown", KeyCode::PageDown),
 ];
 pub(crate) fn parse(value: &str) -> Result<Option<(KeyCode, KeyModifiers)>> {
     if value == "none" || value.is_empty() {
@@ -38,11 +58,15 @@ pub(crate) fn parse(value: &str) -> Result<Option<(KeyCode, KeyModifiers)>> {
     let code = if let Some(number) = name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
         ensure!((1..=12).contains(&number), "Use F1 through F12");
         KeyCode::F(number)
+    } else if let Some((_, code)) = NAMED.iter().find(|(named, _)| *named == name) {
+        // Bare, these move the prompt's cursor and the transcript.
+        ensure!(!modifiers.is_empty(), "Add ctrl, alt or shift to {name}");
+        *code
     } else {
         ensure!(
             name.chars().count() == 1
                 && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-            "Use a modified character or F1–F12"
+            "Use a modified character, a modified arrow, home, end, pageup or pagedown, or F1–F12"
         );
         KeyCode::Char(name.chars().next().unwrap())
     };
@@ -144,7 +168,7 @@ pub(crate) fn view(input: &Value) -> Result<ManagementView> {
         let saved = bindings.clone();
         crate::config::save_state(|s| s.keybindings = saved);
     }
-    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:vec!["Use ctrl+k, alt+r, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".into()],fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
+    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:vec!["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".into()],fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
 }
 
 #[cfg(test)]
@@ -173,5 +197,49 @@ mod tests {
         assert_eq!(legacy["models"], "F3");
         assert_eq!(legacy["sessions"], "F2");
         validate(&legacy).unwrap();
+    }
+
+    #[test]
+    fn message_keys_are_alt_arrows_bound_once_and_named_keys_need_a_modifier() {
+        let defaults: BTreeMap<String, String> = ACTIONS
+            .iter()
+            .map(|(action, _, key)| (action.to_string(), key.to_string()))
+            .collect();
+        validate(&defaults).unwrap();
+        let alt = KeyModifiers::ALT;
+        let shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        for (code, modifiers, action) in [
+            (KeyCode::Up, alt, "messages_previous"),
+            (KeyCode::Down, alt, "messages_next"),
+            (KeyCode::Up, shift, "messages_previous_user"),
+            (KeyCode::Down, shift, "messages_next_user"),
+            (KeyCode::Home, alt, "messages_first"),
+            (KeyCode::End, alt, "messages_last_user"),
+        ] {
+            assert_eq!(
+                resolve(&defaults, KeyEvent::new(code, modifiers)),
+                Some(action)
+            );
+        }
+        // Word motion, the prompt's own keys and plain scrolling stay free.
+        for (code, modifiers) in [
+            (KeyCode::Left, alt),
+            (KeyCode::Right, alt),
+            (KeyCode::Char('b'), alt),
+            (KeyCode::Char('f'), alt),
+            (KeyCode::Up, KeyModifiers::NONE),
+            (KeyCode::Home, KeyModifiers::CONTROL),
+            (KeyCode::End, KeyModifiers::CONTROL),
+            (KeyCode::PageUp, KeyModifiers::NONE),
+        ] {
+            assert_eq!(resolve(&defaults, KeyEvent::new(code, modifiers)), None);
+        }
+        assert_eq!(
+            parse("Ctrl+PageDown").unwrap(),
+            Some((KeyCode::PageDown, KeyModifiers::CONTROL))
+        );
+        assert!(parse("up").is_err());
+        assert!(parse("end").is_err());
+        assert!(parse("alt+upward").is_err());
     }
 }

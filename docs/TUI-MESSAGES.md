@@ -44,12 +44,42 @@ so a stale selection cannot affect a different conversation.
 The same browser works in a local TUI and a TUI attached to a server. Alt+M uses
 the configurable `messages` shortcut under `[tui.keybinds]`.
 
+## Move between messages
+
+**Alt+Up** and **Alt+Down** move the transcript to the previous or next
+message: the nearest prompt or reply that starts above, or below, the top row
+of the view becomes the top row, as **Jump to message** places it.
+**Alt+Shift+Up** and **Alt+Shift+Down** do the same for your prompts only,
+**Alt+Home** goes to the start of the conversation (as Ctrl+Home does) and
+**Alt+End** to your last prompt. A message counts when it has text of its own:
+a reply that is only tool calls, a prompt that is only attachments and internal
+prompts are passed over. With no message that way, the view moves a page.
+Moving pauses following like any scroll; End or Ctrl+End returns to the latest
+output.
+
+The keys work with a draft in the prompt (Alt+Left/Right still move by word),
+in child-agent views, and while an approval card or a question waits: those
+keep every other key, and a message key never answers them. They are the
+configurable shortcuts `messages_previous`, `messages_next`,
+`messages_previous_user`, `messages_next_user`, `messages_first` and
+`messages_last_user` under `[tui.keybinds]` or in `/keybinds`, Upstream's
+names; a shortcut may name `up`, `down`, `left`, `right`, `home`, `end`,
+`pageup` or `pagedown` with ctrl, alt or shift.
+
+Alt with an arrow reaches the TUI wherever Option or Alt reaches the terminal
+at all. iTerm2 and other xterm-style terminals send Alt+Up as `ESC [1;3A`;
+macOS Terminal sends Option+Up as `ESC ESC [A` (Escape, then the arrow), which
+the TUI reads as the same key rather than as Escape; tmux passes both on as
+they are. Ctrl with an arrow was not used because macOS keeps Ctrl+Up and
+Ctrl+Down for Mission Control.
+
 ## Verification
 
 ```sh
 cargo test -p haarness-tui
 cargo build -p haarness-cli
 HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-message-browser-tmux.py
+HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-tui-navigation-tmux.py
 ```
 
 The terminal test creates a private Git repository and server data directory. It

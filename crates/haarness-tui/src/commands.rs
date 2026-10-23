@@ -279,7 +279,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "messages",
         &["message", "browse"],
-        "Search prompts and replies · jump, read, copy or fork · Alt+M",
+        "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages",
     ),
     command(
         "rename",

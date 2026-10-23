@@ -2065,7 +2065,7 @@
   "Restore files undone by /undo": "還原被 /undo 復原的檔案",
   "Undo back to any earlier checkpoint in this session": "復原到此工作階段中任一較早的檢查點",
   "Fork this thread": "分支此對話",
-  "Search prompts and replies · jump, read, copy or fork · Alt+M": "搜尋提示與回覆 · 跳轉、閱讀、複製或分支 · Alt+M",
+  "Search, jump, read, copy or fork · Alt+M · Alt+↑↓ between messages": "搜尋、跳轉、閱讀、複製或分支 · Alt+M · Alt+↑↓ 在訊息間移動",
   "Rename this session: /rename [session-id] <title>": "重新命名此工作階段：/rename [session-id] <title>",
   "Archive this thread and start a new one": "封存此對話並開始新的對話",
   "Set effort or Ultracode orchestration: /reasoning high|xhigh|max|ultracode|off": "設定強度或 Ultracode 編排：/reasoning high|xhigh|max|ultracode|off",
