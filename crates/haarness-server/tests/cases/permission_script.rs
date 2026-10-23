@@ -837,3 +837,208 @@ async fn a_backgrounded_cd_names_the_script_where_the_shell_stays() {
         std::fs::remove_file(fixture.0.join("top.txt")).unwrap();
     }
 }
+
+/// Turn the chat's approval mode to `setting`.
+async fn set_mode(
+    runtime: &AgentRuntime,
+    thread: &Thread,
+    setting: haarness_protocol::ApprovalModeSetting,
+) {
+    let revision = runtime.approval_mode(thread.id).await.unwrap().revision;
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: setting,
+                revision: Some(revision),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn in_auto_a_card_the_reviewer_leaves_to_a_person_shows_the_script_and_once_checks_it() {
+    let fixture = Fixture::new();
+    let script = fixture.0.join("x.sh");
+    std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "{} [review:ask]",
+                bash(json!({"command": "sh x.sh"}))
+            )),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert_eq!(
+        pending.review.as_ref().map(|review| review.status),
+        Some(haarness_protocol::PermissionReviewStatus::Asked)
+    );
+    let shown = pending.script.clone().expect("the card carries the script");
+    assert!(shown.content.contains("printf shown"), "{shown:?}");
+    // The announcement carries both the note and the script.
+    let event = requested(&runtime);
+    assert_eq!(event["review"]["status"], "asked");
+    assert!(
+        event["script"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("printf shown")),
+        "{event}"
+    );
+    // The file changes while the person reads the card: Allow once refuses.
+    std::fs::write(&script, "printf swapped > swapped.txt\n").unwrap();
+    answer(&runtime, &pending.permission_id, Reply::Once).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let errors = tool_errors(&runtime, &thread).await;
+    assert_eq!(
+        errors.last().map(String::as_str),
+        Some(CHANGED),
+        "{errors:?}"
+    );
+    assert!(!fixture.0.join("swapped.txt").exists());
+    assert!(!fixture.0.join("shown.txt").exists());
+}
+
+#[tokio::test]
+async fn in_auto_an_ask_a_person_configured_shows_the_script() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf mine > mine.txt\n").unwrap();
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(PermissionRule {
+        pattern: "bash:sh x*".into(),
+        decision: D::Ask,
+    });
+    let runtime = plain_runtime(&fixture.0, config);
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({"command": "sh x.sh"}))),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    // The person's own ask, unreviewed, with the script on its card.
+    assert!(pending.review.is_none(), "{:?}", pending.review);
+    assert!(
+        pending
+            .script
+            .as_ref()
+            .is_some_and(|script| script.content.contains("printf mine")),
+        "{:?}",
+        pending.script
+    );
+    assert!(requested(&runtime)["script"].is_object());
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert!(!fixture.0.join("mine.txt").exists());
+}
+
+#[tokio::test]
+async fn in_auto_a_reviewer_approval_reads_no_script_and_runs_what_is_there() {
+    let fixture = Fixture::new();
+    let script = fixture.0.join("x.sh");
+    std::fs::write(&script, "printf first > ran.txt\n").unwrap();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _capture = tracing::subscriber::set_default(Messages {
+        wanted: "reading the script a command runs for its permission prompt",
+        seen: Arc::clone(&seen),
+    });
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    tracing::callsite::rebuild_interest_cache();
+    // A slow review: the file changes before the reviewer approves.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "{} [review:slow]",
+                bash(json!({"command": "sh x.sh"}))
+            )),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(&script, "printf second > ran.txt\n").unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    // No card, no script read, and no check: what is there runs.
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("ran.txt")).unwrap(),
+        "second"
+    );
+}
+
+#[tokio::test]
+async fn a_card_announced_again_when_auto_turns_on_keeps_its_script() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "{} [review:stall]",
+                bash(json!({"command": "sh x.sh"}))
+            )),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert!(pending.script.is_some());
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Auto,
+    )
+    .await;
+    let event = requested(&runtime);
+    assert_eq!(event["review"]["status"], "reviewing", "{event}");
+    assert!(
+        event["script"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("printf shown")),
+        "{event}"
+    );
+    set_mode(
+        &runtime,
+        &thread,
+        haarness_protocol::ApprovalModeSetting::Review,
+    )
+    .await;
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+}

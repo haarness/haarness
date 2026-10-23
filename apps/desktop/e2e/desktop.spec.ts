@@ -4149,6 +4149,47 @@ test("Auto's reviewer notes what it leaves to you, blocks with a reason and says
   await settled();
   expect(await readFile(join(workspace, "review-asked.txt"), "utf8").catch(() => null)).toBeNull();
 
+  // On a command that runs a script, the card has both: the note under the
+  // command and the script's toggle under the note, there from its first
+  // paint, so nothing moves as it settles.
+  await writeFile(join(workspace, "review-script.sh"), "printf scripted > review-script.txt\n");
+  await start("sh review-script.sh", "ask");
+  await expect(card).toBeVisible();
+  const scriptToggle = card.locator(".approval-script-toggle");
+  await expect(note).toHaveText("Auto review · Test rule: Test verdict: ask.");
+  await expect(scriptToggle).toBeVisible();
+  // The gaps between the note, the toggle and the answers: the card itself
+  // may still be easing in.
+  const layout = async () => {
+    const top = async (target: Locator) => (await target.boundingBox())!.y;
+    const [noteTop, toggleTop, denyTop] = [
+      await top(note),
+      await top(scriptToggle),
+      await top(card.getByRole("button", { name: "Deny", exact: true })),
+    ];
+    return { toggle: Math.round(toggleTop - noteTop), deny: Math.round(denyTop - toggleTop) };
+  };
+  const first = await layout();
+  expect(first.toggle).toBeGreaterThan(0);
+  expect(first.deny).toBeGreaterThan(0);
+  await page.evaluate(async () => {
+    await Promise.all(
+      document
+        .getAnimations()
+        .filter((item) => item.effect?.getComputedTiming().iterations !== Infinity)
+        .map((item) => item.finished.catch(() => undefined)),
+    );
+    await new Promise(requestAnimationFrame);
+  });
+  // Within a pixel: the card's own ease-in scales what it holds.
+  const settledLayout = await layout();
+  expect(Math.abs(settledLayout.toggle - first.toggle)).toBeLessThanOrEqual(1);
+  expect(Math.abs(settledLayout.deny - first.deny)).toBeLessThanOrEqual(1);
+  await shots("auto-review-script", card);
+  await card.getByRole("button", { name: "Deny", exact: true }).click();
+  await settled();
+  expect(await readFile(join(workspace, "review-script.txt"), "utf8").catch(() => null)).toBeNull();
+
   // Blocked: the row says so in the quiet style of a refused step, and its
   // detail is the reason, not the text written for the model.
   await start("printf blocked > review-blocked.txt", "deny");
