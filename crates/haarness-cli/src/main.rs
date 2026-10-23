@@ -5203,29 +5203,46 @@ struct RunWatch {
 /// What a `--auto` run with nobody to ask refused.
 #[derive(Default)]
 struct Refusals {
-    /// Refused since a call last succeeded in the chat that asked.
+    /// Refused since a call last succeeded anywhere in the run.
     in_a_row: u32,
     total: u32,
-    /// Calls that had succeeded in each chat when it last asked.
-    succeeded: HashMap<ThreadId, usize>,
+    /// Calls that had succeeded in the run's chats (its own and its agents')
+    /// at the last refusal.
+    succeeded: Option<usize>,
 }
 
 impl Refusals {
-    /// Count a refusal in `thread`, where `succeeded` calls have succeeded so
-    /// far (when known); true once [`REFUSALS_IN_A_ROW`] came with no call
-    /// succeeding in between.
-    fn count(&mut self, thread: ThreadId, succeeded: Option<usize>) -> bool {
+    /// Count a refusal, `succeeded` calls having succeeded in the whole run
+    /// so far (when known); true once [`REFUSALS_IN_A_ROW`] came with no call
+    /// succeeding anywhere in between.
+    fn count(&mut self, succeeded: Option<usize>) -> bool {
         self.total += 1;
-        let before = self.succeeded.get(&thread).copied();
-        if let Some(now) = succeeded {
-            self.succeeded.insert(thread, now);
-        }
-        let progressed = before
+        let progressed = self
+            .succeeded
             .zip(succeeded)
             .is_some_and(|(before, now)| now > before);
+        if succeeded.is_some() {
+            self.succeeded = succeeded;
+        }
         self.in_a_row = if progressed { 1 } else { self.in_a_row + 1 };
         self.in_a_row >= REFUSALS_IN_A_ROW
     }
+}
+
+/// `root` and every chat under it (its agents, theirs, …).
+fn run_tree(root: ThreadId, threads: &[haarness_protocol::Thread]) -> Vec<ThreadId> {
+    let mut tree = vec![root];
+    let mut index = 0;
+    while let Some(&parent) = tree.get(index) {
+        let children: Vec<ThreadId> = threads
+            .iter()
+            .filter(|thread| thread.parent_id == Some(parent) && !tree.contains(&thread.id))
+            .map(|thread| thread.id)
+            .collect();
+        tree.extend(children);
+        index += 1;
+    }
+    tree
 }
 
 /// A `--auto` run with nobody to ask stops after this many refusals with no
@@ -5325,27 +5342,37 @@ impl RunWatch {
             .total
     }
 
-    /// Count a refusal in `thread`; true once [`REFUSALS_IN_A_ROW`] were
-    /// refused with no call succeeding in between in the chat that asked.
-    async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, thread: ThreadId) -> bool {
-        let succeeded = client.items(thread).await.ok().map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.data,
-                        ItemData::ToolResult {
-                            is_error: false,
-                            ..
-                        }
-                    )
-                })
-                .count()
-        });
+    /// Count a refusal in the run under `root`; true once
+    /// [`REFUSALS_IN_A_ROW`] were refused with no call succeeding anywhere in
+    /// the run in between, so agents working side by side never stop it.
+    async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> bool {
+        let succeeded = async {
+            let threads = client.threads_including_archived().await.ok()?;
+            let mut count = 0;
+            for thread in run_tree(root, &threads) {
+                count += client
+                    .items(thread)
+                    .await
+                    .ok()?
+                    .iter()
+                    .filter(|item| {
+                        matches!(
+                            item.data,
+                            ItemData::ToolResult {
+                                is_error: false,
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+            }
+            Some(count)
+        }
+        .await;
         self.refusals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .count(thread, succeeded)
+            .count(succeeded)
     }
 
     /// A scheduled run: nobody watches. Its turn approves its own requests
@@ -5493,7 +5520,7 @@ impl RunWatch {
                         })
                     );
                 }
-                if self.tally_refusal(client, pending.thread_id).await {
+                if self.tally_refusal(client, root).await {
                     let _ = client.interrupt_session(root, false).await;
                     anyhow::bail!(
                         "Stopped: {REFUSALS_IN_A_ROW} requests in a row needed a person, and nobody can answer in this run. Allow what the agent needs with permission rules, or run it at a terminal."
@@ -14933,6 +14960,16 @@ request_timeout = 0
             request: ProviderRequest,
             _cancel: CancellationToken,
         ) -> CoreResult<ProviderStream> {
+            // Auto's reviewer, asked here, takes its time: never answers.
+            if request
+                .output_schema
+                .as_ref()
+                .and_then(|schema| schema.get("description"))
+                .and_then(serde_json::Value::as_str)
+                == Some(haarness_core::auto_review::VERDICT_SCHEMA_DESCRIPTION)
+            {
+                return Ok(Box::pin(stream::pending()));
+            }
             let answered = request
                 .messages
                 .iter()
@@ -15187,6 +15224,116 @@ request_timeout = 0
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn an_unattended_auto_run_leaves_a_request_the_reviewer_is_deciding_to_it() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-cli-run-review-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = root.join("outside.txt");
+        let store = Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(OutsideWriteProvider(outside.clone()));
+        let runtime = Arc::new(AgentRuntime::new(
+            store,
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            haarness_core::EventBus::new(32),
+        ));
+        let (client, server) = run_client(&runtime, &workspace).await;
+        let chat = client
+            .create_thread(CreateThreadRequest {
+                provider: Some("outside-test".into()),
+                model: Some("outside-test-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .id;
+        let turn = client
+            .start_turn(
+                chat,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "write outside".into(),
+                    attachments: Vec::new(),
+                    synthetic: false,
+                    auto_approve: false,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    tools: None,
+                    command: None,
+                },
+            )
+            .await
+            .unwrap();
+        let review = || async {
+            client
+                .pending_permissions()
+                .await
+                .unwrap()
+                .first()
+                .map(|pending| pending.review.as_ref().map(|review| review.status))
+        };
+        let until = |wanted: Option<Option<haarness_protocol::PermissionReviewStatus>>| async move {
+            for _ in 0..500 {
+                if review().await == wanted {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the request never read {wanted:?}");
+        };
+        until(Some(None)).await;
+        // Auto turns on with the request shown: the reviewer decides it.
+        let mode = |mode| haarness_protocol::SetApprovalModeRequest {
+            mode,
+            revision: None,
+        };
+        client
+            .set_approval_mode(chat, &mode(haarness_protocol::ApprovalModeSetting::Auto))
+            .await
+            .unwrap();
+        until(Some(Some(
+            haarness_protocol::PermissionReviewStatus::Reviewing,
+        )))
+        .await;
+        let headless = RunWatch {
+            approver: Approver::Nobody,
+            yolo: false,
+            auto: true,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            activity: None,
+        };
+        headless.answer(&client, chat).await.unwrap();
+        assert_eq!(headless.refused(), 0, "the reviewer's to answer");
+        assert_eq!(
+            review().await,
+            Some(Some(haarness_protocol::PermissionReviewStatus::Reviewing))
+        );
+        // Back in Review the request is plain again, and nobody can answer it.
+        client
+            .set_approval_mode(chat, &mode(haarness_protocol::ApprovalModeSetting::Review))
+            .await
+            .unwrap();
+        until(Some(None)).await;
+        headless.answer(&client, chat).await.unwrap();
+        assert_eq!(headless.refused(), 1);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &headless),
+        )
+        .await
+        .expect("the run goes on")
+        .unwrap();
+        assert!(!outside.exists());
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_refusal_says_why_in_haarnesss_words_and_five_in_a_row_stop_the_run() {
         use haarness_protocol::{PermissionReview, PermissionReviewStatus};
@@ -15224,21 +15371,29 @@ request_timeout = 0
             assert!(!feedback.contains("user"), "{feedback}");
         }
 
-        // Five refusals with nothing succeeding in between stop the run; a
-        // call that succeeded in the chat that asks starts the count again.
-        let (one, two) = (ThreadId::new(), ThreadId::new());
+        // Five refusals with nothing succeeding anywhere in the run in
+        // between stop it; a call that succeeded anywhere starts the count
+        // again.
         let mut refusals = Refusals::default();
-        assert!(!refusals.count(one, Some(0)));
-        assert!(!refusals.count(two, Some(3)));
-        assert!(!refusals.count(one, Some(0)));
-        assert!(!refusals.count(one, None));
-        assert!(!refusals.count(one, Some(2)), "progress in that chat");
-        assert_eq!(refusals.in_a_row, 1);
-        for _ in 0..3 {
-            assert!(!refusals.count(two, Some(3)));
+        for _ in 0..4 {
+            assert!(!refusals.count(Some(3)));
         }
-        assert!(refusals.count(one, Some(2)));
+        assert!(!refusals.count(Some(4)), "progress somewhere in the run");
+        assert_eq!(refusals.in_a_row, 1);
+        assert!(!refusals.count(None), "unknown counts as no progress");
+        for _ in 0..2 {
+            assert!(!refusals.count(Some(4)));
+        }
+        assert!(refusals.count(Some(4)));
         assert_eq!(refusals.total, 9);
+
+        // Five agents side by side, each refused once while the others get
+        // work done: never five in a row.
+        let mut refusals = Refusals::default();
+        for done in 1..=5 {
+            assert!(!refusals.count(Some(done)));
+        }
+        assert_eq!(refusals.in_a_row, 1);
     }
 
     #[test]

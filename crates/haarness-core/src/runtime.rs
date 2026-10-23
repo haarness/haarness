@@ -4314,6 +4314,8 @@ impl AgentRuntime {
                     Reviewed::Resolved(resolution) => {
                         allowed = if resolution.allowed {
                             Ok(())
+                        } else if resolution.refused {
+                            Err(refusal_message(resolution.feedback.as_deref()))
                         } else {
                             Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
                         };
@@ -4401,6 +4403,8 @@ impl AgentRuntime {
                 Err(message)
             } else if resolution.allowed {
                 Ok(())
+            } else if resolution.refused {
+                Err(refusal_message(resolution.feedback.as_deref()))
             } else {
                 Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
             };
@@ -6829,6 +6833,37 @@ impl PendingPermission {
             })
     }
 }
+
+/// What the agent reads for a request an unattended run refused
+/// (`refuse`): framed as Haarness's own note, the client's reason on one
+/// line and cut to [`REFUSAL_REASON_CHARS`], so it cannot pose as anything
+/// else.
+fn refusal_message(feedback: Option<&str>) -> String {
+    let reason = feedback
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let reason = reason.trim_end_matches('.');
+    let reason = if reason.chars().count() > REFUSAL_REASON_CHARS {
+        let cut: String = reason.chars().take(REFUSAL_REASON_CHARS - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        reason.to_owned()
+    };
+    let lead = if reason.is_empty() {
+        "Haarness refused this request for an unattended run: nobody can approve it.".to_owned()
+    } else {
+        format!("Haarness refused this request for an unattended run: {reason}.")
+    };
+    format!(
+        "{lead} Do not retry it; take a different approach that needs no approval, or finish \
+         and say what was left undone."
+    )
+}
+
+/// How much of an unattended run's reason the agent reads.
+const REFUSAL_REASON_CHARS: usize = 300;
 
 struct PermissionResolution {
     allowed: bool,
@@ -9699,18 +9734,7 @@ impl RunnerTask {
                 let message = match resolution.feedback {
                     // Nobody answered: the reason is Haarness's, and no
                     // one is there to ask.
-                    Some(feedback) if resolution.refused && !feedback.trim().is_empty() => {
-                        format!(
-                            "{}. Do not retry it; take a different approach that needs no \
-                             approval, or finish and say what was left undone.",
-                            feedback.trim().trim_end_matches('.')
-                        )
-                    }
-                    _ if resolution.refused => "Nobody can approve this action in this run. Do \
-                                                not retry it; take a different approach that \
-                                                needs no approval, or finish and say what was \
-                                                left undone."
-                        .into(),
+                    feedback if resolution.refused => refusal_message(feedback.as_deref()),
                     Some(feedback) if !feedback.trim().is_empty() => format!(
                         "The user rejected this action and said: {feedback}. Adjust your \
                          approach accordingly."
