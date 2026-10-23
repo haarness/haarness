@@ -1166,7 +1166,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                         std::time::Duration::from_secs(5),
                     );
                 }
-                app.notice = notice;
+                app.refuse_command(notice);
             } else if !app.composer.text().trim().is_empty() || !app.attachments.is_empty() {
                 // Resolve before taking the draft; a failed settings read must
                 // preserve text and attachments for retry.

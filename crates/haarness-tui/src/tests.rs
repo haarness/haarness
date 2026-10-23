@@ -19841,6 +19841,94 @@ async fn enter_on_an_unknown_command_keeps_the_draft_and_sends_nothing() {
     );
 }
 
+/// A notice that stopped being true goes: an unknown command's once a
+/// dialog opens or another command runs, and "Viewing … Ctrl+End returns to
+/// latest" once the view is back at the latest message.
+#[tokio::test]
+async fn notices_go_when_they_stop_being_true() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let client = offline_client();
+    app.composer.set_text("/hepl".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.notice.starts_with("Unknown command /hepl"),
+        "{}",
+        app.notice
+    );
+    // (With the line still there, Ctrl+P moves through its suggestions.)
+    app.composer.clear();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "", "the palette took over");
+    app.close_overlay();
+    app.composer.set_text("/hepl".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.composer.set_text("/tools show".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.notice.starts_with("Tool details shown"),
+        "{}",
+        app.notice
+    );
+
+    let viewing = "Viewing assistant message · #3 · Ctrl+End returns to latest".to_owned();
+    app.notice.clone_from(&viewing);
+    app.scrolled_notice = Some(viewing.clone());
+    app.viewport_offset = 12;
+    app.expire_notice(std::time::Instant::now());
+    assert_eq!(app.notice, viewing, "true while scrolled back");
+    app.scroll_to_bottom();
+    app.expire_notice(std::time::Instant::now());
+    assert_eq!(app.notice, "");
+}
+
+/// A dialog keeps its top edge while a filter shortens its list.
+#[test]
+fn a_filtered_dialog_keeps_its_top_edge() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.open_overlay(crate::state::Overlay::Commands);
+    let top = |app: &App| {
+        frame_text(app, (100, 40))
+            .lines()
+            .position(|row| row.contains("Commands"))
+            .expect("dialog title")
+    };
+    let opened = top(&app);
+    for filter in ["mo", "models", "zzz-nothing"] {
+        app.overlay_filter = filter.into();
+        assert_eq!(top(&app), opened, "{filter}");
+    }
+    // Opened again it centres on what it shows then.
+    app.close_overlay();
+    app.open_overlay(crate::state::Overlay::Commands);
+    assert_eq!(top(&app), opened);
+}
+
 fn undo_fixture() -> (App, Thread) {
     let thread = fixture_thread();
     let items = vec![

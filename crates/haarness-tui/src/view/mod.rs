@@ -868,7 +868,27 @@ fn apply_dialog(
     };
     let card_height = card.lines.len().min(height.saturating_sub(2));
     let left = width.saturating_sub(card_width) / 2;
-    let top = height.saturating_sub(card_height) / 2;
+    // A list being filtered keeps its top edge where it opened: it shortens
+    // from the bottom instead of jumping to stay centred.
+    let anchored = if app.overlay.is_filterable() {
+        let key = match &app.overlay {
+            Overlay::Options { title, .. } => title.clone(),
+            other => format!("{:?}", std::mem::discriminant(other)),
+        };
+        let mut anchor = app.dialog_anchor.borrow_mut();
+        let tallest = match anchor.as_ref() {
+            Some((open, screen, tallest)) if *open == key && *screen == height => {
+                (*tallest).max(card_height)
+            }
+            _ => card_height,
+        };
+        *anchor = Some((key, height, tallest));
+        tallest
+    } else {
+        *app.dialog_anchor.borrow_mut() = None;
+        card_height
+    };
+    let top = height.saturating_sub(anchored) / 2;
     hits.clear();
     // A margin of a few cells shows only fragments of the dimmed screen
     // beside the card — the last digit of the version, half a word — so it

@@ -321,6 +321,7 @@ impl App {
                     "Viewing {role} message · #{} · Ctrl+End returns to latest",
                     item.sequence
                 );
+                self.scrolled_notice = Some(self.notice.clone());
             }
             "copy" => {
                 crate::terminal::copy_to_clipboard(&crate::prompt_context::plain(text));
