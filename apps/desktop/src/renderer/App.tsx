@@ -50,7 +50,7 @@ import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
 import { exportLogs } from "./Diagnostics";
 import { SideChatPanel, closeFrontSideThread, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
-import { SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
+import { CHAT_MIN, DOCK_MIN, SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
 type Dock = "files" | "diff" | "context" | "browser";
 
 /** Workbench panels and their launcher copy. */
@@ -206,12 +206,39 @@ export function App() {
   const [sideWidth, setSideWidth] = createSignal(SIDE_WIDTH);
   const [sideFront, setSideFront] = createSignal(true);
   const [workbenchWidth, setWorkbenchWidth] = createSignal(1050);
-  // The side panel lies over the whole workbench in a window this narrow (shell.css).
-  const narrowQuery = window.matchMedia("(max-width: 1100px)");
-  const [narrow, setNarrow] = createSignal(narrowQuery.matches);
-  const followNarrow = () => setNarrow(narrowQuery.matches);
-  narrowQuery.addEventListener("change", followNarrow);
-  onCleanup(() => narrowQuery.removeEventListener("change", followNarrow));
+  const [windowWidth, setWindowWidth] = createSignal(window.innerWidth);
+  const followWindow = () => setWindowWidth(window.innerWidth);
+  window.addEventListener("resize", followWindow);
+  onCleanup(() => window.removeEventListener("resize", followWindow));
+  /** The room the conversation and the side panel need side by side. */
+  const besideRoom = CHAT_MIN + 1 + DOCK_MIN;
+  /** The side panel lies over the conversation when the workbench has no
+   * room for both (shell.css, `.dock-over`). */
+  const dockCovers = () => workbenchWidth() < besideRoom;
+  /** Shown again by the person while the sidebar made room for the side
+   * panel; it then stays until the panel closes. */
+  const [keepSidebar, setKeepSidebar] = createSignal(false);
+  /** The sidebar steps aside, before the side panel covers the chat, when
+   * that alone gives the two room side by side. */
+  const sidebarYields = () =>
+    sidebarVisible() &&
+    !keepSidebar() &&
+    dockVisible() &&
+    !dockExpanded() &&
+    windowWidth() - sidebarWidth() - 1 < besideRoom &&
+    windowWidth() >= besideRoom;
+  const sidebarShown = () => sidebarVisible() && !sidebarYields();
+  createEffect(() => {
+    if (!dockVisible()) setKeepSidebar(false);
+  });
+  function showSidebar() {
+    setSidebarVisible(true);
+    if (dockVisible()) setKeepSidebar(true);
+  }
+  function toggleSidebar() {
+    if (sidebarShown()) setSidebarVisible(false);
+    else showSidebar();
+  }
   /** Whether the sidebar groups chats under their project or lists them flat. */
   const [sidebarLayout, setSidebarLayout] = createSignal<"project" | "flat">(
     "project",
@@ -239,8 +266,8 @@ export function App() {
     sidePlace({
       width: workbenchWidth(),
       wanted: sideWidth(),
-      // In a narrow window the side panel lies over everything, expanded or not.
-      dock: !dockVisible() ? "none" : narrow() ? "overlay" : dockExpanded() ? "expanded" : "column",
+      // Without room beside the chat the side panel lies over everything, expanded or not.
+      dock: !dockVisible() ? "none" : dockCovers() ? "overlay" : dockExpanded() ? "expanded" : "column",
     }),
   );
   /** Both show side by side, or the one in front does. */
@@ -549,7 +576,7 @@ export function App() {
   /** Shows the sidebar and puts the keyboard on the open chat's row, opening
    * its project and checkout when they are collapsed. */
   async function focusSidebar() {
-    setSidebarVisible(true);
+    showSidebar();
     const project = app.currentProject();
     if (project) await app.expandProject(project.id, true);
     const location = app.project();
@@ -772,9 +799,9 @@ export function App() {
       {
         key: "sidebar",
         group: "Commands",
-        name: sidebarVisible() ? t("Hide sidebar") : t("Show sidebar"),
+        name: sidebarShown() ? t("Hide sidebar") : t("Show sidebar"),
         icon: "sidebar",
-        action: () => setSidebarVisible((value) => !value),
+        action: toggleSidebar,
       },
       {
         key: "focus-sidebar",
@@ -1078,7 +1105,7 @@ export function App() {
       }
       data-platform={state.platform}
       style={{
-        "--sidebar-width": sidebarVisible() ? sidebarWidth() + "px" : "0px",
+        "--sidebar-width": sidebarShown() ? sidebarWidth() + "px" : "0px",
         "--dock-width": dockWidth() + "px",
         "--terminal-height": terminalHeight() + "px",
       }}
@@ -1087,9 +1114,9 @@ export function App() {
         <div class="window-toolbar">
           <Button
             icon="sidebar"
-            label={sidebarVisible() ? t("Hide sidebar") : t("Show sidebar")}
-            active={sidebarVisible()}
-            onClick={() => setSidebarVisible((value) => !value)}
+            label={sidebarShown() ? t("Hide sidebar") : t("Show sidebar")}
+            active={sidebarShown()}
+            onClick={toggleSidebar}
           />
         </div>
         <div class="titlebar-session">
@@ -1157,7 +1184,7 @@ export function App() {
       <div class="app-body">
         <aside
           class="sidebar"
-          style={{ display: sidebarVisible() ? "flex" : "none" }}
+          style={{ display: sidebarShown() ? "flex" : "none" }}
         >
           <div class="sidebar-brand">
             <Wordmark class="wordmark" />
@@ -1324,7 +1351,7 @@ export function App() {
             </button>
           </footer>
         </aside>
-        <Show when={sidebarVisible()}>
+        <Show when={sidebarShown()}>
           <ResizeHandle
             label={t("Resize sidebar")}
             value={sidebarWidth()}
@@ -1342,6 +1369,7 @@ export function App() {
             ref={workbench}
             classList={{
               "has-dock": dockOnScreen(),
+              "dock-over": dockOnScreen() && dockCovers(),
               "dock-expanded": dockOnScreen() && dockExpanded(),
               "side-over": sideOnScreen() && side().place === "over",
               "side-column": sideOnScreen() && side().place === "column",
@@ -1531,6 +1559,19 @@ export function App() {
               style={{ display: dockOnScreen() ? "flex" : "none" }}
             >
               <div class="dock-tabs">
+                {/* Laid over the chat, the strip leads with the way back to
+                    it; the side panel button brings the panel back. */}
+                <Show when={dockCovers()}>
+                  <button
+                    class="dock-return"
+                    aria-label={t("Return to chat")}
+                    onClick={() => setDock(null)}
+                  >
+                    <Icon name="chat" size="sm" />
+                    {t("Chat")}
+                  </button>
+                  <span class="dock-tabs-rule" aria-hidden="true" />
+                </Show>
                 <For each={(panelTabs.ordered() as Dock[]).filter((tab) => tab !== "browser" || browserHere())}>
                   {(tab) => (
                     <div
