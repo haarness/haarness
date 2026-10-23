@@ -9567,6 +9567,12 @@ fn auto_reviews_note_its_block_and_a_slow_review_read_quietly() {
         ),
         "{card}"
     );
+    // In a chat already in Auto, Once + Auto has nothing to switch to.
+    assert!(card.contains("Once + Auto"), "{card}");
+    app.auto_permissions = true;
+    let card = frame_text(&app, (120, 40));
+    assert!(!card.contains("Once + Auto"), "{card}");
+    assert!(card.contains("Allow once"), "{card}");
     pending.review = Some(PermissionReview {
         status: PermissionReviewStatus::Failed,
         risk: None,

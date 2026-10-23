@@ -81,6 +81,11 @@ impl PermissionChoice {
         {
             choices.insert(3, Self::Repository);
         }
+        // A chat already in Auto (its reviewer left this one to a person)
+        // has nothing to switch to.
+        if app.auto_permissions {
+            choices.retain(|choice| *choice != Self::Auto);
+        }
         choices
     }
 
