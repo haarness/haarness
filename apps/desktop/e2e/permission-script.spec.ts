@@ -278,6 +278,32 @@ test("a card never takes the keyboard from the message box: typing as it comes a
   expect(await readFile(join(project, "keyboard.txt"), "utf8")).toBe("keyboard");
 });
 
+test("a card that takes the keyboard because nothing had it sends what is typed to the message box", async () => {
+  const box = page.locator("[data-composer-input]");
+  await box.fill(" !tool bash " + JSON.stringify({ command: "printf idle > idle.txt" }));
+  await page.locator(".send-button").click();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect(card()).toBeVisible();
+  await expect(card()).toBeFocused();
+  // The card binds no key: typing there goes to the message box, and
+  // neither Space nor Enter answers it.
+  await page.keyboard.type("hi there");
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue("hi there");
+  expect((await api("listPermissions")).length).toBe(1);
+  // The Always slot is as wide as the wider of its button and its menu, so
+  // the answers keep their places whichever it shows.
+  const widths = await card().locator(".prompt-always-slot").evaluate((slot) => [
+    slot.getBoundingClientRect().width,
+    ...[...slot.children].map((child) => child.getBoundingClientRect().width),
+  ]);
+  expect(widths).toHaveLength(3);
+  expect(Math.abs(widths[0] - Math.max(widths[1], widths[2]))).toBeLessThan(1);
+  await card().getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  await box.fill("");
+});
+
 test("under the default rules the outside folder's card offers the script that runs there", async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
