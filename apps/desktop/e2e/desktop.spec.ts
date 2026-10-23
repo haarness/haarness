@@ -4105,6 +4105,76 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   expect(errors).toEqual([]);
 });
 
+test("Auto's reviewer notes what it leaves to you, blocks with a reason and says Reviewing… only when slow", async () => {
+  test.setTimeout(120000);
+  // The test provider's reviewer answers by the marker after the call.
+  const thread = await client.createThread({
+    title: "Auto review verification",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title);
+  await page.getByRole("option").filter({ hasText: thread.title }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title);
+  await client.setApprovalMode(thread.id, { mode: "auto" });
+  const toggle = page.getByRole("button", { name: "Approvals: Auto", exact: true });
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveAttribute("title", /a reviewer model approves routine permission requests/);
+  const start = (command: string, verdict: string) =>
+    client.startTurn(thread.id, {
+      requestId: crypto.randomUUID(),
+      text: `!tool bash ${JSON.stringify({ command })} [review:${verdict}]`,
+    });
+  const shots = async (name: string, target: Locator) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await target.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+    await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  };
+
+  // Left to the person: the ordinary card, with the reviewer's note in it from
+  // its first paint.
+  await start("printf asked > review-asked.txt", "ask");
+  const card = page.getByRole("alert", { name: "Permission request" });
+  await expect(card).toBeVisible();
+  const note = card.locator(".approval-review");
+  await expect(note).toHaveText("Auto review · Test rule: Test verdict: ask.");
+  // One quiet line under the command, never a second card or a toast.
+  await expect(page.locator(".toast")).toHaveCount(0);
+  await shots("auto-review-card", card);
+  await card.getByRole("button", { name: "Deny", exact: true }).click();
+  await settled();
+  expect(await readFile(join(workspace, "review-asked.txt"), "utf8").catch(() => null)).toBeNull();
+
+  // Blocked: the row says so in the quiet style of a refused step, and its
+  // detail is the reason, not the text written for the model.
+  await start("printf blocked > review-blocked.txt", "deny");
+  await settled();
+  expect(await client.listPermissions()).toHaveLength(0);
+  const row = page.locator(".tool-call").filter({ hasText: "Blocked by Auto review" }).last();
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute("data-status", "failed");
+  await row.locator("summary").click();
+  await expect(row.locator(".tool-output")).toHaveText("Test verdict: deny.");
+  await shots("auto-review-blocked", row);
+  await row.locator("summary").click();
+  expect(await readFile(join(workspace, "review-blocked.txt"), "utf8").catch(() => null)).toBeNull();
+
+  // A slow review: the activity line says so after a moment; a quick one
+  // (above) never did.
+  await start("printf slow > review-slow.txt", "slow");
+  const activity = page.locator(".assistant-activity");
+  await expect(activity).toContainText("Reviewing…", { timeout: 5000 });
+  await shots("auto-review-reviewing", activity);
+  await settled();
+  expect(await readFile(join(workspace, "review-slow.txt"), "utf8")).toBe("slow");
+  await client.setApprovalMode(thread.id, { mode: "review" });
+  expect(errors).toEqual([]);
+});
+
 test("Auto from a child view leaves its parent and siblings in Review", async () => {
   const parent = await client.createThread({
     title: "Selective Auto parent",

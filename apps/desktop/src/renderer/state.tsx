@@ -214,6 +214,7 @@ function createApp(saved?: Preferences) {
     questions: [],
     streams: {},
     tasks: {},
+    reviews: {},
     providers: [],
     agents: [],
     commands: [],

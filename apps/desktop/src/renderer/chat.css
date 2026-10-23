@@ -1927,6 +1927,14 @@ html[dir="rtl"] .tool-target {
 .approval-target code {
   font-family: var(--mono);
 }
+/* Why Auto's reviewer left the request to the person: quieter than the
+   request itself, which is what is being decided. */
+.approval-review {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
+}
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */
 .approval-changes {

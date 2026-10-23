@@ -136,3 +136,43 @@ test("a slash command's message shows what the command expanded to, live and aft
   const landed = landItems([message("/review src")], [event("item.updated", message("Review src carefully."))], "thread");
   assert.equal(landed[0].data.type === "user_message" && landed[0].data.text, "Review src carefully.");
 });
+
+test("a review runs from its reviewing status until any other status or the turn's end", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  let eventId = 0;
+  const event = (type: string, payload: unknown) =>
+    reduceEvent(state, set, {
+      eventId: ++eventId,
+      type,
+      payload,
+      threadId: "thread",
+      turnId: "turn",
+      serverInstanceId: "instance",
+    } as EventEnvelope);
+  // Read through a function: an assertion would narrow the store's field.
+  const review = () => state.reviews?.turn;
+  event("turn.status", { state: "tool", tool: "bash", callId: "call-1" });
+  assert.equal(review(), undefined);
+  const before = Date.now();
+  event("turn.status", { state: "reviewing", tool: "bash", callId: "call-1" });
+  assert.equal(review()?.callId, "call-1");
+  const at = review()!.at;
+  assert.ok(at >= before);
+  // A repeated status keeps the time the review started.
+  event("turn.status", { state: "reviewing", tool: "bash", callId: "call-1" });
+  assert.equal(review()?.at, at);
+  event("turn.status", { state: "waiting_permission" });
+  assert.equal(review(), undefined);
+  event("turn.status", { state: "reviewing", tool: "bash", callId: "call-2" });
+  assert.equal(review()?.callId, "call-2");
+  event("turn.finished", { id: "turn", status: "completed" });
+  assert.equal(review(), undefined);
+});

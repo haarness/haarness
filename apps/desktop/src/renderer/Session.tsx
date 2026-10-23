@@ -44,7 +44,7 @@ import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
-import { canAutoApprove, describeAlwaysRule } from "./approval-mode";
+import { canAutoApprove, describeAlwaysRule, reviewNote } from "./approval-mode";
 import {
   chromeApproval,
   chromeApprovalLines,
@@ -114,6 +114,8 @@ import {
 /* The plan already has a home above the composer, so its bookkeeping calls do
    not also belong in the transcript. */
 const PLAN_TOOLS = ["todo", "todowrite", "todoread"];
+/** How long Auto's reviewer runs before the activity line says so. */
+const REVIEW_NOTICE_MS = 800;
 
 /** Four openings for a conversation in the selected project. */
 interface Starter {
@@ -183,11 +185,18 @@ export function Session() {
   // What the approval pill's mode does, worded after the server's default
   // rules (permissions/mod.rs): Review does not ask before every edit or
   // command, and browser sites ask only when Settings → Browser says so.
+  // A server that asks a reviewer in Auto says so in its capabilities.
+  const reviewer = () =>
+    !!state.connection?.info.capabilities.includes("approval-review.v1");
   const approvalModeHint = () =>
     app.isAutoApproval()
-      ? state.selected
-        ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
-        : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
+      ? reviewer()
+        ? state.selected
+          ? t("Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.")
+          : t("Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.")
+        : state.selected
+          ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
+          : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
       : state.selected
         ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
         : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
@@ -1641,6 +1650,7 @@ export function Session() {
       ? latestThought(stream()?.reasoning ?? "")
       : "",
   );
+  const [reviewClock, setReviewClock] = createSignal(0);
   const activity = createMemo(() => {
     const turn = active();
     if (!turn) return "";
@@ -1657,8 +1667,23 @@ export function Session() {
     const tool = tools.at(-1)?.data as
       | Extract<T.ItemData, { type: "tool_call" }>
       | undefined;
+    // Auto's reviewer deciding a request: said only once it takes a moment,
+    // so a quick review never flashes a word.
+    const review = state.reviews?.[turn.id];
+    if (review && reviewClock() - review.at >= REVIEW_NOTICE_MS)
+      return t("Reviewing…");
     if (tool) return toolActivity(tool.name, tool.arguments);
     return stream()?.text ? t("Writing a reply") : t("Thinking");
+  });
+  // Re-read the activity when a running review reaches the notice delay.
+  createEffect(() => {
+    const turn = active();
+    const review = turn ? state.reviews?.[turn.id] : undefined;
+    if (!review) return;
+    const wait = REVIEW_NOTICE_MS - (Date.now() - review.at);
+    if (wait <= 0) return setReviewClock(Date.now());
+    const timer = setTimeout(() => setReviewClock(Date.now()), wait);
+    onCleanup(() => clearTimeout(timer));
   });
   /**
    * Where the next message will run. Each choice says which checkout it is and
@@ -3034,6 +3059,11 @@ function Permission(props: {
             </Show>
           </p>
         </Show>
+      </Show>
+      {/* Why Auto's reviewer left this to the person: one quiet line, there
+          from the card's first paint. */}
+      <Show when={reviewNote(props.permission.review, t)}>
+        {(note) => <p class="approval-review">{note()}</p>}
       </Show>
       <Show when={changes().length}>
         <div class="approval-changes">

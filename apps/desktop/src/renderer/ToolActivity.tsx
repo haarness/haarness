@@ -30,6 +30,7 @@ import {
   toolFailed,
   toolVerb,
   ranInChrome,
+  reviewBlock,
   routineEditOutput,
   changeRows,
   changeStats,
@@ -91,7 +92,11 @@ export function ToolActivity(props: {
   // approval, "Wrote" once done, "Tried to write" when the tool errored or
   // was refused. A command that ran and exited non-zero still "Ran". The
   // forms are English keys; a batch's label arrives already translated.
+  // Auto's reviewer refused the call: the row says so, and its body gives
+  // the reason rather than the text written for the model.
+  const blocked = createMemo(() => reviewBlock(props.result));
   const verb = () => {
+    if (blocked() !== undefined) return t("Blocked by Auto review");
     const form = props.result
       ? props.result.is_error
         ? shape().attempt
@@ -108,7 +113,9 @@ export function ToolActivity(props: {
   const stats = createMemo(() => changeStats(changes()));
   const input = createMemo(() => toolInput(props.name, props.args));
   const output = createMemo(
-    () => props.result && toolOutput(props.name, props.result.output),
+    () =>
+      props.result &&
+      (blocked() || toolOutput(props.name, props.result.output)),
   );
   // An MCP tool whose server pairs it with a page: the page shows under the
   // row, once its server's apps are known to be on. With them off the row is

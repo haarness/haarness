@@ -1,4 +1,4 @@
-import type { PendingPermissionInfo, Thread } from "@haarness/sdk";
+import type { PendingPermissionInfo, PermissionReview, Thread } from "@haarness/sdk";
 import { isExplicitPermission } from "../chrome";
 
 export type ApprovalModes = Record<string, Record<string, boolean>>;
@@ -171,4 +171,23 @@ export function describeAlwaysRule(
   if (permission === "media_generate" && pattern === "video:*")
     return t("Any video generation");
   return pattern;
+}
+
+/** Why Auto's reviewer left a request to the person, in one line: "Auto
+ * review · <rule>: <reason>", or that it was unavailable or paused. Empty
+ * when it did not review the request. */
+export function reviewNote(
+  review: PermissionReview | null | undefined,
+  t: (key: string) => string,
+): string {
+  if (!review) return "";
+  const lead =
+    review.status === "failed"
+      ? t("Auto review unavailable")
+      : review.status === "paused"
+        ? t("Auto review paused")
+        : t("Auto review");
+  const rule = review.rule?.trim();
+  const reason = review.rationale?.trim();
+  return lead + (rule ? " · " + rule : "") + (reason ? ": " + reason : "");
 }

@@ -157,3 +157,27 @@ test("always rules read as plain words, never as stored permission patterns", ()
   assert.equal(say("browser_site", "browser_site:https://example.com"), "https://example.com");
   assert.equal(say("multiple", "browser:navigate:https://example.com"), "browser:navigate:https://example.com");
 });
+
+test("the reviewer's note reads as one quiet line, and only for a reviewed request", async () => {
+  const { reviewNote } = await import("../src/renderer/approval-mode");
+  const t = (key: string) => key;
+  assert.equal(reviewNote(undefined, t), "");
+  assert.equal(reviewNote(null, t), "");
+  assert.equal(
+    reviewNote(
+      {
+        status: "asked",
+        risk: "high",
+        rule: "Shared state",
+        rationale: "It pushes to main, which your messages do not ask for.",
+      },
+      t,
+    ),
+    "Auto review · Shared state: It pushes to main, which your messages do not ask for.",
+  );
+  assert.equal(
+    reviewNote({ status: "failed", rationale: " It took longer than 60 seconds. " }, t),
+    "Auto review unavailable: It took longer than 60 seconds.",
+  );
+  assert.equal(reviewNote({ status: "paused" }, t), "Auto review paused");
+});
