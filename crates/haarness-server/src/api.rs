@@ -1616,11 +1616,19 @@ async fn start_turn(
         .into());
     }
     let resources = std::mem::take(&mut request.resources);
+    let agent =
+        state
+            .runtime
+            .message_agent(id, request.agent.as_deref(), request.command.as_deref());
     let turn = admit(resources.is_empty(), async move {
-        read_mentions(
+        let _reading = read_mentions(
             &state,
             &headers,
-            id,
+            Mentioning {
+                chat: id,
+                request: request.request_id,
+                agent,
+            },
             resources,
             &mut request.text,
             &mut request.attachments,
@@ -1663,15 +1671,23 @@ async fn execute_command(
             }
         });
     }
+    let agent = state
+        .runtime
+        .message_agent(id, request.agent.as_deref(), Some(&request.name));
     // Boxed: a command's future is large.
     let response = admit(
         resources.is_empty(),
         Box::pin(async move {
+            let mut reading = None;
             if let Some(mut text) = text {
-                read_mentions(
+                reading = read_mentions(
                     &state,
                     &headers,
-                    id,
+                    Mentioning {
+                        chat: id,
+                        request: request.request_id,
+                        agent,
+                    },
                     resources,
                     &mut text,
                     &mut request.attachments,
@@ -1679,7 +1695,9 @@ async fn execute_command(
                 .await?;
                 request.arguments = Some(Value::String(text));
             }
-            Ok(crate::command::execute(&state, id, request).await?)
+            let response = crate::command::execute(&state, id, request).await?;
+            drop(reading);
+            Ok(response)
         }),
     )
     .await?;
@@ -2399,11 +2417,17 @@ async fn queue_input(
     Json(mut request): Json<QueueInputRequest>,
 ) -> ApiResult<(StatusCode, Json<QueueInputResponse>)> {
     let resources = std::mem::take(&mut request.resources);
+    // Steering, or waiting in the queue, it joins the running turn's agent.
+    let agent = state.runtime.message_agent(id, None, None);
     let response = admit(resources.is_empty(), async move {
-        read_mentions(
+        let _reading = read_mentions(
             &state,
             &headers,
-            id,
+            Mentioning {
+                chat: id,
+                request: request.request_id,
+                agent,
+            },
             resources,
             &mut request.text,
             &mut request.attachments,
@@ -2416,19 +2440,24 @@ async fn queue_input(
 }
 
 /// The MCP resources a message to chat `id` mentions, read into it when it
-/// arrives, so a queued message holds what was read; the chat's rules keep
-/// from it what they keep from the model. A published chat's viewers cannot
+/// arrives, so a queued message holds what was read; the chat's rules under
+/// the agent the message runs with (`agent`, else the chat's) keep from it
+/// what they keep from the model. A published chat's viewers cannot
 /// read the owner's MCP servers, so a mention from one is refused.
+///
+/// The returned gate is held until the message is admitted: a retry of the
+/// same request meanwhile waits for it, then finds the message taken and
+/// reads nothing again.
 async fn read_mentions(
     state: &ServerState,
     headers: &HeaderMap,
-    id: ThreadId,
+    message: Mentioning,
     resources: Vec<haarness_protocol::ResourceMention>,
     text: &mut String,
     attachments: &mut Vec<String>,
-) -> ApiResult<()> {
+) -> ApiResult<Option<Reading>> {
     if resources.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     if crate::remote_scope::root(headers).is_some() {
         return Err(CoreError::PermissionDenied(
@@ -2436,9 +2465,18 @@ async fn read_mentions(
         )
         .into());
     }
+    let Mentioning {
+        chat: id,
+        request,
+        agent,
+    } = message;
+    let reading = Reading::start(id, request).await;
+    if state.runtime.request_admitted(id, request).await? {
+        return Ok(Some(reading));
+    }
     let policy = state
         .runtime
-        .resource_mention_policy(Some(id), None)
+        .resource_mention_policy(Some(id), agent.as_deref())
         .await?;
     crate::mcp_resources::read_mentions(
         state.mcp.as_ref(),
@@ -2450,7 +2488,50 @@ async fn read_mentions(
         attachments,
     )
     .await?;
-    Ok(())
+    Ok(Some(reading))
+}
+
+/// The message whose mentions are read: its chat, its request, and the
+/// agent it runs under (`None` for the chat's).
+struct Mentioning {
+    chat: ThreadId,
+    request: haarness_protocol::RequestId,
+    agent: Option<String>,
+}
+
+type ReadingKey = (ThreadId, haarness_protocol::RequestId);
+/// The messages whose mentions are being read and admitted, by chat and
+/// request.
+static READING: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<ReadingKey, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// One message's reads and admission, held from the first read until it is
+/// admitted; a retry of the same request waits for it.
+struct Reading {
+    key: ReadingKey,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+impl Reading {
+    async fn start(id: ThreadId, request: haarness_protocol::RequestId) -> Self {
+        let gate = READING.lock().entry((id, request)).or_default().clone();
+        Self {
+            key: (id, request),
+            _held: gate.lock_owned().await,
+        }
+    }
+}
+impl Drop for Reading {
+    fn drop(&mut self) {
+        let mut reading = READING.lock();
+        // The map's and this one's: nobody else waits.
+        if reading
+            .get(&self.key)
+            .is_some_and(|gate| Arc::strong_count(gate) <= 2)
+        {
+            reading.remove(&self.key);
+        }
+    }
 }
 
 /// Admits a message. One that mentions resources is read and admitted on a

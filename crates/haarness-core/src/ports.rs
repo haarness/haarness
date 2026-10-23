@@ -142,6 +142,14 @@ pub trait ThreadRepository: Send + Sync {
     ) -> CoreResult<bool> {
         Ok(false)
     }
+    /// Whether request `request` of chat `id` already started a turn.
+    async fn has_turn_for_request(
+        &self,
+        _id: ThreadId,
+        _request: haarness_protocol::RequestId,
+    ) -> CoreResult<bool> {
+        Ok(false)
+    }
     async fn input_queue(&self, _id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         Ok(Default::default())
     }
