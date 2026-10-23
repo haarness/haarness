@@ -89,9 +89,10 @@ async fn list(client: &ApiClient) -> Option<Vec<Resource>> {
 }
 
 /// The resource rows for what follows `@`: matched by name only, names that
-/// start with it first, at most [`ROWS`].
+/// start with it first, at most [`ROWS`]. None while a queued message is
+/// edited: its edit saves text only, so a mention would not be read.
 pub(crate) fn suggestions(app: &App, query: &str) -> Vec<String> {
-    if !offered(app) {
+    if !offered(app) || app.queue_edit.is_some() {
         return Vec::new();
     }
     let query = query.to_lowercase();
@@ -375,6 +376,17 @@ mod tests {
         };
         assert_eq!(names(&app, "UP"), ["upload", "setup"]);
         assert_eq!(names(&app, "tables"), ["tables"]);
+        // A queued message's edit saves text only, so it is offered none.
+        app.queue_edit = Some(crate::state::QueueEdit {
+            id: haarness_protocol::RequestId::new(),
+            original: (String::new(), Vec::new()),
+            draft: app.composer.set_aside(),
+            attachments: Vec::new(),
+            shell: false,
+            conflict: None,
+        });
+        assert!(suggestions(&app, "up").is_empty());
+        app.queue_edit = None;
         app.mention_resources.list = (0..80)
             .map(|index| resource("docs", &format!("docs://{index}"), &format!("page {index}")))
             .collect();
