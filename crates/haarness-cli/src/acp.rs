@@ -857,8 +857,14 @@ fn script_content(payload: &Value) -> Option<String> {
         }
         longest
     };
-    let fence = "`".repeat(longest(content).max(2) + 1);
     let span = "`".repeat(longest(path) + 1);
+    // The command writes it before it runs it: one quiet line, no text.
+    if script["rewritten"] == true {
+        return Some(format!(
+            "This command writes {span} {path} {span} before running it, so its contents can't be shown."
+        ));
+    }
+    let fence = "`".repeat(longest(content).max(2) + 1);
     let mut text = format!(
         "Script: {span} {path} {span}\n\n{fence}\n{}\n{fence}",
         content.strip_suffix('\n').unwrap_or(content)
@@ -1368,6 +1374,19 @@ mod tests {
             .as_deref(),
             Some(
                 "Script: ` /work/x.sh `\n\n`````\ncat <<'EOF'\n````\nEOF\n`````\n\nOnly the start of the file is shown."
+            )
+        );
+    }
+
+    #[test]
+    fn a_script_the_command_writes_first_is_one_line() {
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/gen.sh", "content": "", "rewritten": true,
+            }}))
+            .as_deref(),
+            Some(
+                "This command writes ` /work/gen.sh ` before running it, so its contents can't be shown."
             )
         );
     }

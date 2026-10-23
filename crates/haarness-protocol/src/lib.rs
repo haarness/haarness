@@ -1051,9 +1051,12 @@ pub struct PendingPermissionInfo {
     pub operation: String,
     #[serde(default)]
     pub detail: Value,
-    /// For a `bash` request, the script its command runs (`bash x.sh`,
-    /// `./x.sh`, `source x.sh`), read when it asked, for the person who
-    /// answers. Display only: it changes no pattern or rule.
+    /// For any request a shell command raises (`bash`, and under the
+    /// default rules `external_directory`), the script the command runs
+    /// (`bash x.sh`, `./x.sh`, `source ./env.sh`; a `source` name without a
+    /// slash is not claimed), read when it asked, for the person who
+    /// answers. Display only: it changes no pattern or rule. An Allow once
+    /// does not run the command if the file is no longer what was read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<PermissionScript>,
     /// Permission category (bash, edit, external_directory, …).
@@ -1091,6 +1094,11 @@ pub struct PermissionScript {
     /// The file goes on past `content`.
     #[serde(default)]
     pub truncated: bool,
+    /// The command writes this file before it runs it (`curl -o x.sh … &&
+    /// bash x.sh`, `cat > x.sh <<EOF`), so what runs is not on disk yet:
+    /// `content` is empty, and a card says so instead of showing it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rewritten: bool,
 }
 
 /// One unanswered model question, listable so clients can hydrate every

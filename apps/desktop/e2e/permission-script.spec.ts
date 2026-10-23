@@ -190,6 +190,17 @@ test("a long script scrolls in its box and says only its start is shown", async 
   await idle();
 });
 
+test("a script the command writes before it runs it is named in one quiet line, with no toggle", async () => {
+  await send("cat > scripts/gen.sh <<'EOF'\necho NEW\nEOF\nsh scripts/gen.sh");
+  await expect(card().locator(".approval-script-note")).toHaveText(
+    "This command writes scripts/gen.sh before running it, so its contents can't be shown.",
+  );
+  await expect(toggle()).toHaveCount(0);
+  await pictures(card(), "card-rewritten");
+  await card().getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+});
+
 test("in Arabic the card reads right to left while the script keeps left to right", async () => {
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe("rtl");

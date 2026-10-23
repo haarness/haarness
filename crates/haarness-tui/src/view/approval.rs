@@ -391,6 +391,18 @@ fn script_rows(
         .map(|root| root.trim_end_matches('/'))
         .and_then(|root| script.path.strip_prefix(root)?.strip_prefix('/'))
         .unwrap_or(&script.path);
+    // The command writes it before it runs it: one quiet line says so, as
+    // what is on disk now is not what runs.
+    if script.rewritten {
+        let note = language.format(
+            "This command writes {path} before running it, so its contents can't be shown.",
+            &[("path", path)],
+        );
+        return textwrap::wrap(&note, (width + 2).max(10))
+            .into_iter()
+            .map(|row| (Row::ScriptCut, row.into_owned()))
+            .collect();
+    }
     let text = script.content.strip_suffix('\n').unwrap_or(&script.content);
     let lines: Vec<&str> = if text.is_empty() {
         Vec::new()

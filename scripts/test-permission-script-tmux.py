@@ -186,6 +186,19 @@ try:
     keys('n')
     finish(started)
 
+    # A script the command writes before it runs it is named, not shown.
+    started = turn("cat > scripts/gen.sh <<'EOF'\necho NEW\nEOF\nsh scripts/gen.sh")
+    approval()
+    screen = until(
+        lambda: (text if 'before running it' in (text := capture()) else None),
+        'rewritten note',
+    )
+    assert 'This command writes scripts/gen.sh before running it' in screen, screen
+    assert 'Script:' not in screen, screen
+    check('a script the command writes before it runs it is named in one quiet line', 'rewritten')
+    keys('n')
+    finish(started)
+
     for command in ['source .env.local', 'source ./.envrc', 'printf plain']:
         started = turn(command)
         pending = approval()

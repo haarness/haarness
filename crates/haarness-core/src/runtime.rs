@@ -4309,8 +4309,11 @@ impl AgentRuntime {
                 result = receiver => result.map_err(|_| CoreError::Cancelled),
             }?;
             allowed = match &shown {
-                Some(shown) if resolution.once && !shown.seal.holds().await => {
-                    Err(script_changed(&shown.script.path, &self.workspace))
+                Some(crate::permissions::script::Shown {
+                    script,
+                    seal: Some(seal),
+                }) if resolution.once && !seal.holds().await => {
+                    Err(script_changed(&script.path, &self.workspace))
                 }
                 _ if resolution.allowed => Ok(()),
                 _ => Err(resolution.feedback.unwrap_or_else(|| operation.clone())),
@@ -9686,8 +9689,9 @@ impl RunnerTask {
         // The person approved what the card showed: a script that changed
         // since, or is gone, does not run in its place.
         if let Some(shown) = &shown
+            && let Some(seal) = &shown.seal
             && resolution.as_ref().is_ok_and(|resolution| resolution.once)
-            && !shown.seal.holds().await
+            && !seal.holds().await
         {
             tracing::info!(
                 permission = id,

@@ -462,7 +462,13 @@ test("a shell permission shows the script its command runs, and nothing when the
     path: "scripts/x.sh",
     lines: ["echo hi", "echo there"],
     truncated: false,
+    rewritten: false,
   });
+  // A script the command writes first is named, with no text.
+  assert.deepEqual(
+    permissionScript({ script: { path: "/work/app/gen.sh", content: "", rewritten: true } }, "/work/app"),
+    { path: "gen.sh", lines: [], truncated: false, rewritten: true },
+  );
   // Outside the project, the path stays whole.
   assert.equal(permissionScript({ permission: "bash", script }, "/work/other")?.path, "/work/app/scripts/x.sh");
   assert.equal(permissionScript({ permission: "bash", script: { ...script, truncated: true } })?.truncated, true);
