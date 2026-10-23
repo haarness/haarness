@@ -2,13 +2,14 @@
 """Real TUI in tmux, echo provider: a command the agent runs says it is an agent's and names its chat.
 
 The TUI starts the way a `haarness` started by another chat's agent command does: its environment
-holds that chat's HAARNESS_SESSION_ID and AGENT=0, HAARNESS=0, with no AI_AGENT. In its chat, the
-model's command, a slash command's !`…` block, a background child agent's command and a workflow's
-`shell()` each get AGENT=1, HAARNESS=1, AI_AGENT=haarness and the id of the chat they run in; the
-person's own `!` command, a terminal, an MCP server, a language server and a formatter get no chat id
-and no markers. The server logs one `agent shell environment set` line per agent command, saying the
-stale id was replaced. Then `haarness run` under an outer agent (AI_AGENT=outer-agent) keeps that
-marker and logs that it did.
+holds that command's markers, AGENT=1, HAARNESS=1, AI_AGENT=haarness and the other chat's
+HAARNESS_SESSION_ID. The server it starts leaves them out. In its chat, the model's command, a slash
+command's !`…` block, a background child agent's command and a workflow's `shell()` each get
+AGENT=1, HAARNESS=1, AI_AGENT=haarness and the id of the chat they run in; the person's own `!`
+command, a terminal, an MCP server, a language server and a formatter get no chat id and no markers.
+The server logs one `agent shell environment set` line per agent command, with no outer marker kept.
+Then `haarness run` under an outer agent (AI_AGENT=outer-agent, AGENT=1) keeps that agent's
+AI_AGENT, in its commands and in the person's own, and logs that it did.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-agent-shell-env-tmux.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -30,7 +31,7 @@ STALE = 'stale-outer-chat'
 def show(file):
     return (f"printf '%s|%s|%s|%s' \"${{AGENT-unset}}\" \"${{HAARNESS-unset}}\" \"${{AI_AGENT-unset}}\" "
             f"\"${{HAARNESS_SESSION_ID-unset}}\" > '{file}'")
-UNMARKED = '0|0|unset|unset'  # the server's own environment, without its stale chat id
+UNMARKED = 'unset|unset|unset|unset'
 
 (project/'.haarness/commands/marks.md').write_text(
     "---\ndescription: Show the agent markers\n---\nMARKS !`" + show(project/'snippet.txt') + f"; cat '{project/'snippet.txt'}'`\n")
@@ -111,9 +112,8 @@ stopped = []
 
 try:
     # A `haarness` that another chat's agent command started.
-    nested = {**env, 'HAARNESS_SESSION_ID': STALE, 'AGENT': '0', 'HAARNESS': '0'}
-    nested.pop('AI_AGENT', None)
-    command = e2e_tmux.pane_command(nested, ['env', '-u', 'AI_AGENT', binary, '--workspace', project, '--trust-project'])
+    nested = {**env, 'AGENT': '1', 'HAARNESS': '1', 'AI_AGENT': 'haarness', 'HAARNESS_SESSION_ID': STALE}
+    command = e2e_tmux.pane_command(nested, [binary, '--workspace', project, '--trust-project'])
     run(['tmux', 'new-session', '-d', '-x', '200', '-y', '50', '-c', str(root), '-s', session, command])
     stopped.append(project)
     until(lambda: 'echo' in capture().lower(), 'TUI did not open')
@@ -125,7 +125,7 @@ try:
     assert len(chats) == 1, chats
     chat = chats[0]['id']
     assert seen == f'1|1|haarness|{chat}', seen
-    check("the model's command is marked as an agent's and names its chat, not the stale one it inherited")
+    check("the model's command is marked as an agent's and names its chat, not the one the TUI inherited")
 
     keys('!'); until(lambda: 'shell' in capture(), 'shell mode did not open')
     run(['tmux', 'send-keys', '-l', '-t', session, show(project/'person.txt')]); keys('Enter')
@@ -170,21 +170,22 @@ try:
     assert until(lambda: read(project/'terminal.txt'), 'the terminal did not start') == UNMARKED, read(project/'terminal.txt')
     check('a terminal gets no chat id and no markers')
 
-    # Model, slash command block, background child and workflow: one line each, each replacing the
-    # inherited id; the person's command and the write tool log none.
+    # Model, slash command block, background child and workflow: one line each, none with an outer
+    # marker (the TUI's AI_AGENT=haarness was Haarness's own) or a stale id; the person's command and
+    # the write tool log none.
     lines = until(lambda: len(logged()) >= 4 and logged(), 'the server did not log the agent commands')
     time.sleep(1)
     lines = logged()
     assert len(lines) == 4, lines
     named = sorted(re.search(r'thread_id=(\S+)', line).group(1) for line in lines)
     assert named == sorted([chat, chat, children[0], runs[0]]), (named, lines)
-    assert all('outer_marker_kept=false stale_id_replaced=true' in line and ' INFO ' in line for line in lines), lines
+    assert all('outer_marker_kept=false stale_id_replaced=false' in line and ' INFO ' in line for line in lines), lines
     assert not any(STALE in line for line in lines), lines
-    check('the server logs one line per agent command with its chat id, saying the stale id was replaced')
+    check('the server logs one line per agent command with its chat id, no outer marker and no stale id')
     (root/'pane.txt').write_text(capture())
 
     # `haarness run` under an outer agent keeps its marker.
-    outer_env = {**env, 'AI_AGENT': 'outer-agent'}
+    outer_env = {**env, 'AI_AGENT': 'outer-agent', 'AGENT': '1'}
     outer_env.pop('HAARNESS_SESSION_ID', None)
     stopped.append(outer)
     reply = run([str(binary), '--workspace', str(outer), '--trust-project', 'run',
@@ -194,7 +195,10 @@ try:
     assert len(threads) == 1 and seen == f"1|1|outer-agent|{threads[0]['id']}", (seen, threads, reply)
     line = next(line for line in logged() if threads[0]['id'] in line)
     assert 'outer_marker_kept=true stale_id_replaced=false' in line and 'outer-agent' not in line, line
-    check('haarness run under an outer agent keeps its AI_AGENT and logs that it did')
+    api(outer)(f"/threads/{threads[0]['id']}/shell", {'command': show(outer/'person.txt')})
+    seen = until(lambda: read(outer/'person.txt'), "the person's command did not run")
+    assert seen == 'unset|unset|outer-agent|unset', seen
+    check("haarness run under an outer agent keeps that agent's AI_AGENT, in its command and the person's, and logs it")
     print(f'PASS {len(checks)} agent shell environment scenarios.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
