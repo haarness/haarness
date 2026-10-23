@@ -611,3 +611,37 @@ test("an edit's preview opens its file in Review, and an added file reads in one
     await close();
   }
 });
+
+
+test("the queue's Steer now has an arrow of its own, and Remove hands the keyboard on", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("!linger 15000 long running task");
+    await input.press("Enter");
+    await expect(page.getByRole("button", { name: "Stop response", exact: true })).toBeVisible();
+    for (const text of ["first queued", "second queued"]) {
+      await input.fill(text);
+      await input.press("Alt+Enter");
+      await expect(page.locator(".input-queue")).toContainText(text);
+    }
+    const tray = page.locator(".input-queue");
+    const steer = tray.getByRole("button", { name: "Steer now", exact: true }).first();
+    const send = page.locator(".send-button svg");
+    await input.fill("draft");
+    expect(await steer.locator("svg").innerHTML()).not.toBe(await send.innerHTML());
+    await input.fill("");
+    const remove = tray.getByRole("button", { name: "Remove queued message", exact: true });
+    await remove.first().focus();
+    await page.keyboard.press("Enter");
+    await expect(tray.locator(".input-queue-row")).toHaveCount(1);
+    await expect(remove.first()).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(tray).toHaveCount(0);
+    await expect(input).toBeFocused();
+    await page.getByRole("button", { name: "Stop response", exact: true }).click();
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
