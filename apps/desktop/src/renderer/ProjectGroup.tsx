@@ -1,7 +1,7 @@
 import { language, t } from "./i18n";
 import { splitSchedules } from "./schedule-data";
 import { conversationRoot } from "../thread-kinds";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import {
   type DesktopProject,
   groupProjects,
@@ -22,6 +22,7 @@ import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
 import { chatTitle } from "./chat-title";
 import { relativeAge } from "./relative-age";
+import { revealInList } from "./reveal";
 import {
   drawnChats,
   emptySelection,
@@ -181,6 +182,18 @@ function ProjectGroup(props: {
           void app.run(() => app.fileProjectBeside(source, props.project.id, position)),
       },
     );
+  let row!: HTMLDivElement;
+  // The current project's heading comes into view when it becomes current,
+  // and when the chat chosen in it has no row drawn: on New chat, or with
+  // the project collapsed. A chosen chat's own row shows itself.
+  const chosen = createMemo(() =>
+    active() ? `${state.connection?.id}\n${state.selected}` : "",
+  );
+  createEffect(
+    on(chosen, (now, before) => {
+      if (now && (!before || !expanded() || !state.selected)) revealInList(row);
+    }),
+  );
   return (
     <section
       class="project-group"
@@ -188,7 +201,7 @@ function ProjectGroup(props: {
       aria-label={t("Project {name}", { name: props.project.label })}
       {...drop()}
     >
-      <div class="project-row">
+      <div class="project-row" ref={row}>
         <button
           class="project-disclosure"
           aria-label={
@@ -216,7 +229,9 @@ function ProjectGroup(props: {
           aria-description={pinned() ? t("Pinned") : undefined}
           onClick={() =>
             app.run(async () => {
-              await app.expandProject(props.project.id, !expanded());
+              // Another project's name opens it, its list shown; the current
+              // project's name shows or hides its list.
+              await app.expandProject(props.project.id, active() ? !expanded() : true);
               if (await app.selectProject(props.project.id))
                 app.set("panel", "chat");
             })
@@ -693,11 +708,13 @@ export function SessionList(props: {
               app.attachFiles(sessionKey(location.id, thread.id), files),
             ]));
           });
-          const selected = () =>
-            state.connection?.id === row().location.id &&
-            conversationRoot(state.threads, state.selected) ===
-              row().thread.id &&
-            state.panel === "chat";
+          /** The open chat is this one (or one of its agents'). */
+          const open = createMemo(
+            () =>
+              state.connection?.id === row().location.id &&
+              conversationRoot(state.threads, state.selected) === row().thread.id,
+          );
+          const selected = () => open() && state.panel === "chat";
           const picking = () => selecting(scope());
           const picked = () => picking() && !!selection()?.chats.includes(key);
           /** In Select chats, a click picks the row (Shift: the rows since
@@ -743,7 +760,12 @@ export function SessionList(props: {
             <div
               class="session-row"
               {...sort}
-              ref={(element) => { sort.ref(element); fileDrop.ref(element); }}
+              ref={(element) => {
+                sort.ref(element);
+                fileDrop.ref(element);
+                // The chosen chat's row comes into view, however it was chosen.
+                createEffect(on(open, (now) => now && revealInList(element)));
+              }}
               classList={{ selected: selected(), "file-drop-active": fileDrop.dragging() }}
               data-pick-scope={scope()}
               data-pick-key={key}

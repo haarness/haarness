@@ -756,6 +756,50 @@ for (const gesture of ["keyboard", "drag"] as const) {
   });
 }
 
+/** Whether `locator` is wholly inside the sidebar's scrolled list. */
+async function inList(locator: Locator) {
+  const list = (await page.locator(".sidebar-lists").boundingBox())!;
+  const box = await locator.boundingBox();
+  return !!box && box.y >= list.y - 1 && box.y + box.height <= list.y + list.height + 1;
+}
+
+test("sidebar a project's name opens it with its chats shown; the chosen chat's row and its project's heading stay in view", async () => {
+  const alpha = await open("alpha");
+  for (let i = 1; i <= 40; i++) await alpha.createThread({ title: `Alpha ${i}`, provider: "echo", model: "echo-1" });
+  const beta = await open("beta");
+  await beta.createThread({ title: "Beta chat", provider: "echo", model: "echo-1" });
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "true");
+  // Another project's name opens it and keeps its list shown.
+  await heading("alpha").click();
+  await expect(project("alpha")).toHaveClass(/current/);
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  // The current project's name shows and hides its list.
+  await heading("alpha").click();
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "false");
+  await heading("alpha").click();
+  await expect(heading("alpha")).toHaveAttribute("aria-expanded", "true");
+  // A chat chosen in Search far down the list comes into view, below its
+  // project's heading, which stays at the top of the list.
+  const oldest = project("alpha").getByRole("button", { name: "Alpha 1", exact: true });
+  expect(await inList(oldest)).toBe(false);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Alpha 1");
+  await page.keyboard.press("Enter");
+  await expect(oldest).toHaveAttribute("aria-current", "true");
+  await expect.poll(() => inList(oldest)).toBe(true);
+  await expect.poll(() => inList(heading("alpha"))).toBe(true);
+  const top = (await heading("alpha").boundingBox())!;
+  expect((await oldest.boundingBox())!.y).toBeGreaterThanOrEqual(top.y + top.height - 1);
+  // Another project's chat, chosen from Search: its row comes into view too.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Beta chat");
+  await page.keyboard.press("Enter");
+  const other = project("beta").getByRole("button", { name: "Beta chat", exact: true });
+  await expect(other).toHaveAttribute("aria-current", "true");
+  await expect.poll(() => inList(other)).toBe(true);
+});
+
 test("sidebar Alt and an arrow step the chats the sidebar shows; on a focused row they still move it", async () => {
   const alpha = await open("alpha");
   for (const title of ["One", "Two", "Three"])

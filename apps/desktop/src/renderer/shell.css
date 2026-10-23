@@ -306,6 +306,21 @@
   position: relative;
   border-radius: var(--r-md);
 }
+/* A project's heading stays at the top of the list while its chats scroll
+   under it, so every row in view says which project it belongs to; the next
+   project's heading pushes it away. Opaque, and square so no row shows
+   through its corners. */
+.project-list .project-row {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--sidebar);
+  border-radius: 0;
+}
+/* Rows brought into view (a chat chosen, a row walked to) stop below it. */
+.project-group .session-row {
+  scroll-margin-block: 34px var(--s1);
+}
 .project-row > .project-heading {
   flex: 1;
   min-width: 0;
