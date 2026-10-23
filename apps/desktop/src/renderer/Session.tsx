@@ -640,8 +640,9 @@ export function Session() {
   /** The step whose opening paused following, until something else moves the view. */
   // By item, not element: the list may draw the row anew in between.
   let pausedByToggle: string | undefined;
-  /** The list's height when a running step was opened: following waits for more. */
-  let quietUntil: number | undefined;
+  /** The list's and the view's heights when a running step was opened:
+   * following waits for more to be written, or for the view to change. */
+  let quietUntil: { height: number; view: number } | undefined;
   function holdToggled(event: MouseEvent) {
     const control = (event.target as Element | null)?.closest("summary, button[aria-expanded]");
     const row = control?.closest<HTMLElement>("[data-index]");
@@ -717,7 +718,7 @@ export function Session() {
       item?.data.type === "tool_call" &&
       !toolResult(state.items, item)
     ) {
-      quietUntil = scrolling.scrollHeight;
+      quietUntil = { height: scrolling.scrollHeight, view: scrolling.clientHeight };
       return;
     }
     if (grown > 0 && below > 4) {
@@ -737,8 +738,12 @@ export function Session() {
       // User input can arrive after a stream delta scheduled this frame.
       if (!follow() || !scrolling) return;
       // A running step just opened holds the view until more is written.
-      if (quietUntil !== undefined) {
-        if (scrolling.scrollHeight <= quietUntil + 1) return;
+      if (quietUntil) {
+        if (
+          scrolling.scrollHeight <= quietUntil.height + 1 &&
+          Math.abs(scrolling.clientHeight - quietUntil.view) < 1
+        )
+          return;
         quietUntil = undefined;
       }
       scrolling.scrollTop = scrolling.scrollHeight;
