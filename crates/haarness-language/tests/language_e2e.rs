@@ -398,3 +398,73 @@ async fn capacity_reaps_idle_clients_but_preserves_inflight_requests() {
     assert_eq!(statuses[1].status, "running");
     service.shutdown().await;
 }
+
+/// A server started by an agent's shell command inherits that command's chat
+/// id (`HAARNESS_SESSION_ID`), which names none of its own chats: its language
+/// servers and formatters do not get it. Run again in a process whose own
+/// environment holds one.
+#[cfg(unix)]
+#[tokio::test]
+async fn language_servers_and_formatters_never_inherit_a_chat_id() {
+    const NAME: &str = "language_servers_and_formatters_never_inherit_a_chat_id";
+    if std::env::var_os("HAARNESS_LANGUAGE_INHERITED_ID").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env("HAARNESS_LANGUAGE_INHERITED_ID", "1")
+            .env("HAARNESS_SESSION_ID", "outer-chat")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("no chat id inherited"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let workspace = Workspace::new();
+    // Each process writes the id it got before it does its work.
+    let record = r#"printf %s "${HAARNESS_SESSION_ID-unset}" > "$0"; exec python3 "$@""#;
+    let lsp = workspace.0.join("lsp-id");
+    let format = workspace.0.join("formatter-id");
+    let mut lsp_server = server(&[".mock"]);
+    lsp_server.command = ["sh", "-c", record, &lsp.display().to_string()]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([fixture("mock_lsp.py")])
+        .collect();
+    let mut mock_formatter = formatter(&[".mock"]);
+    mock_formatter.command = ["sh", "-c", record, &format.display().to_string()]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([fixture("mock_formatter.py"), "$FILE".into()])
+        .collect();
+    let service = LanguageService::new(
+        workspace.0.clone(),
+        LspConfig {
+            builtins: false,
+            diagnostic_timeout_ms: 2_000,
+            request_timeout_ms: 2_000,
+            servers: BTreeMap::from([("mock".into(), lsp_server)]),
+            ..LspConfig::default()
+        },
+        FormatterConfig {
+            enabled: true,
+            builtins: false,
+            formatters: BTreeMap::from([("mockfmt".into(), mock_formatter)]),
+        },
+    );
+    let source = workspace.0.join("sample.mock");
+    tokio::fs::write(&source, "entity BADFMT BROKEN\n")
+        .await
+        .unwrap();
+    let report = service
+        .process_file(source.clone(), CancellationToken::new())
+        .await;
+    assert_eq!(report.formatted_by, ["mockfmt"]);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(std::fs::read_to_string(&lsp).unwrap(), "unset");
+    assert_eq!(std::fs::read_to_string(&format).unwrap(), "unset");
+    service.shutdown().await;
+    println!("no chat id inherited");
+}

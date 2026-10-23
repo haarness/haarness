@@ -811,6 +811,61 @@ mod tests {
         assert!(manager.list().is_empty());
     }
 
+    /// A server started by an agent's shell command inherits that command's
+    /// chat id, which names none of its own chats: its terminals, a person's,
+    /// do not get it and are not marked as an agent's. Run again in a process
+    /// whose own environment holds one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminal_never_inherits_a_chat_id_or_gets_the_agent_markers() {
+        const NAME: &str = "tests::a_terminal_never_inherits_a_chat_id_or_gets_the_agent_markers";
+        if std::env::var_os("HAARNESS_PTY_INHERITED_ID").is_none() {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", NAME, "--nocapture"])
+                .env("HAARNESS_PTY_INHERITED_ID", "1")
+                .env("HAARNESS_SESSION_ID", "outer-chat");
+            for name in ["AGENT", "HAARNESS", "AI_AGENT"] {
+                command.env_remove(name);
+            }
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("no chat id inherited"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let manager = PtyManager::new(std::env::current_dir().unwrap(), EventBus::new(64));
+        let info = manager
+            .create(PtyCreateRequest {
+                command: Some("/bin/sh".into()),
+                args: vec![
+                    "-c".into(),
+                    r#"printf 'seen=%s|%s|%s|%s\n' "${HAARNESS_SESSION_ID-unset}" "${AGENT-unset}" "${HAARNESS-unset}" "${AI_AGENT-unset}"; sleep 5"#.into(),
+                ],
+                ..PtyCreateRequest::default()
+            })
+            .unwrap();
+        let mut subscription = manager.subscribe(info.id, Some(0)).unwrap();
+        let mut output = String::from_utf8_lossy(&subscription.replay).into_owned();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !output.contains('\n') {
+            let chunk = tokio::time::timeout_at(deadline, subscription.receiver.recv())
+                .await
+                .expect("the shell answers")
+                .unwrap();
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(
+            output.contains("seen=unset|unset|unset|unset"),
+            "{output:?}"
+        );
+        manager.delete(info.id).unwrap();
+        println!("no chat id inherited");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn pty_survives_subscriber_detach_replays_and_resizes() {
