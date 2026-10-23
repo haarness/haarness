@@ -27,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 /// - `::mdslow` — emits Markdown in delayed chunks for live-rendering E2E.
 /// - `::scrollstream` — reflows delayed Markdown while scroll tests are paused.
 /// - `::long <n>` — emits `n` numbered marker lines.
+/// - `[review:<verdict>]` after a `!tool` directive's arguments picks the
+///   verdict of Auto's deterministic reviewer (see
+///   [`haarness_core::auto_review::test_review`]).
 pub struct EchoProvider;
 
 #[async_trait]
@@ -58,6 +61,10 @@ impl ModelProvider for EchoProvider {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
+        // Auto's reviewer asks for a verdict: answer deterministically.
+        if let Some(review) = haarness_core::auto_review::test_review(&request, &cancel) {
+            return Ok(review);
+        }
         let mut last_user_index = None;
         let mut last_tool_result = None;
         for (index, message) in request.messages.iter().enumerate() {
@@ -375,7 +382,13 @@ fn parse_tool_script(script: &str) -> (String, serde_json::Value) {
     let (name, rest) = script
         .split_once(char::is_whitespace)
         .unwrap_or((script, ""));
-    let arguments = serde_json::from_str(rest.trim()).unwrap_or_else(|_| serde_json::json!({}));
+    // The arguments are the first JSON value; text after it (such as a
+    // `[review:…]` marker) is not part of the call.
+    let arguments = serde_json::Deserializer::from_str(rest.trim())
+        .into_iter::<serde_json::Value>()
+        .next()
+        .and_then(Result::ok)
+        .unwrap_or_else(|| serde_json::json!({}));
     (name.to_owned(), arguments)
 }
 

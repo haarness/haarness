@@ -389,8 +389,13 @@ fn sanitize_item(item: &mut Item) {
             detail,
             patterns,
             always_patterns,
+            review,
             ..
         } => {
+            // The reviewer's note describes the action it is about.
+            if let Some(rationale) = review.as_mut().and_then(|review| review.rationale.as_mut()) {
+                *rationale = redact(rationale, "permission-review", item.id);
+            }
             *operation = redact(operation, "permission-operation", item.id);
             *detail = redacted_value("permission-detail", item.id, detail);
             for (index, pattern) in patterns.iter_mut().enumerate() {

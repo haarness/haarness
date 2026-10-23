@@ -314,6 +314,9 @@ pub enum ItemData {
         /// e.g. `bash:git status *`.
         #[serde(default)]
         always_patterns: Vec<String>,
+        /// Why Auto's reviewer left it to a person, when it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<PermissionReview>,
     },
     Question {
         question_id: String,
@@ -1068,6 +1071,10 @@ pub struct PendingPermissionInfo {
     #[serde(default)]
     pub agent: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Set when Auto's reviewer left this request to a person: it asked,
+    /// could not decide, or paused for the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<PermissionReview>,
 }
 
 /// One unanswered model question, listable so clients can hydrate every

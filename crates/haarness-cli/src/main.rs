@@ -6241,6 +6241,7 @@ fn compose_runtime_sources(
         persisted_rules,
         yolo,
     )?;
+    runtime_config.auto_review = json_layers.auto_review.clone();
     runtime_config.disabled_agents = capability_state::disabled(paths, workspace, trust, "agent")?;
     runtime_config
         .disabled_agents
@@ -9033,6 +9034,24 @@ struct FileConfig {
     compatibility: Option<CompatibilitySection>,
     /// Extra skill folders and remote skill indexes (`skills`).
     skills: Option<SkillsSection>,
+    /// How Auto's reviewer works. The configuration loader merges it layer
+    /// by layer, keeping a project to stricter settings
+    /// (`JsonLayers::auto_review`).
+    #[serde(alias = "autoReview")]
+    auto_review: Option<AutoReviewSection>,
+}
+
+/// `auto_review` / `[auto_review]` of one configuration file.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+struct AutoReviewSection {
+    enabled: Option<bool>,
+    model: Option<String>,
+    environment: Vec<String>,
+    allow: Vec<String>,
+    block: Vec<String>,
+    /// Seconds.
+    timeout: Option<u64>,
 }
 
 /// `[compatibility]` / `{"compatibility": …}`: ecosystem file discovery that
@@ -9954,6 +9973,7 @@ fn runtime_config(
         commands: Vec::new(),
         custom_agents: Vec::new(),
         disabled_agents: Vec::new(),
+        auto_review: haarness_core::AutoReviewSettings::default(),
     })
 }
 
@@ -14859,6 +14879,7 @@ request_timeout = 0
             turn_id: None,
             agent: None,
             created_at: chrono::Utc::now(),
+            review: None,
         };
         assert!(super::yolo_answers(&pending(None)));
         assert!(super::yolo_answers(&pending(Some(true))));
@@ -14892,6 +14913,7 @@ request_timeout = 0
             turn_id: None,
             agent: None,
             created_at: chrono::Utc::now(),
+            review: None,
         };
         let replies = Arc::new(std::sync::Mutex::new(
             Vec::<(String, serde_json::Value)>::new(),
@@ -15065,6 +15087,7 @@ request_timeout = 0
             turn_id: None,
             agent: Some("w1".into()),
             created_at: chrono::Utc::now(),
+            review: None,
         };
         // The first listing is empty; the agent's request lands right after.
         let listings = Arc::new(AtomicUsize::new(0));

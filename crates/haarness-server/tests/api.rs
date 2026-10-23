@@ -215,12 +215,15 @@ impl ModelProvider for Capturing {
     async fn stream(
         &self,
         request: ProviderRequest,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
         if let Some(title) = title_fixture(&request) {
             return title;
         }
         self.requests.lock().unwrap().push(request.clone());
+        if let Some(review) = haarness_core::auto_review::test_review(&request, &cancel) {
+            return Ok(review);
+        }
         let mut last_user_index = None;
         let mut last_tool_result = None;
         for (index, message) in request.messages.iter().enumerate() {
@@ -252,8 +255,11 @@ impl ModelProvider for Capturing {
                     .trim()
                     .split_once(char::is_whitespace)
                     .unwrap_or((script.trim(), ""));
-                let arguments: Value =
-                    serde_json::from_str(rest.trim()).unwrap_or(serde_json::json!({}));
+                let arguments: Value = serde_json::Deserializer::from_str(rest.trim())
+                    .into_iter::<Value>()
+                    .next()
+                    .and_then(Result::ok)
+                    .unwrap_or(serde_json::json!({}));
                 vec![
                     Ok(ProviderEvent::ReasoningDelta("Inspecting".into())),
                     Ok(ProviderEvent::TextDelta(String::new())),
@@ -277,8 +283,11 @@ impl ModelProvider for Capturing {
                     .trim()
                     .split_once(char::is_whitespace)
                     .unwrap_or((script.trim(), ""));
-                let arguments: Value =
-                    serde_json::from_str(rest.trim()).unwrap_or(serde_json::json!({}));
+                let arguments: Value = serde_json::Deserializer::from_str(rest.trim())
+                    .into_iter::<Value>()
+                    .next()
+                    .and_then(Result::ok)
+                    .unwrap_or(serde_json::json!({}));
                 vec![Ok(ProviderEvent::ToolCall {
                     call_id: "cap-call-1".into(),
                     name: name.to_owned(),
@@ -292,7 +301,12 @@ impl ModelProvider for Capturing {
             if last_tool_result > last_user_index {
                 vec![Ok(ProviderEvent::TextDelta("All tools finished".into()))]
             } else {
-                let calls: Vec<Value> = serde_json::from_str(script.trim()).unwrap();
+                // A `[review:…]` marker may follow the calls.
+                let calls: Vec<Value> = serde_json::Deserializer::from_str(script.trim())
+                    .into_iter()
+                    .next()
+                    .unwrap()
+                    .unwrap();
                 calls
                     .iter()
                     .enumerate()
@@ -12732,6 +12746,9 @@ mod inherited_ceilings;
 
 #[path = "cases/shell_readings.rs"]
 mod shell_readings;
+
+#[path = "cases/auto_review.rs"]
+mod auto_review;
 
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {

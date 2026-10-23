@@ -3,6 +3,7 @@
 mod agents;
 mod approval_mode;
 pub mod attachments;
+pub mod auto_review;
 mod background;
 mod config;
 pub mod definitions;
@@ -33,6 +34,7 @@ pub use agents::{
     SystemPromptContext, ULTRACODE_SYSTEM_SECTION, builtin_profiles, system_prompt_for,
     system_prompt_with_context,
 };
+pub use auto_review::AutoReviewSettings;
 pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
 pub use events::{

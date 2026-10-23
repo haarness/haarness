@@ -491,6 +491,7 @@ impl App {
                             turn_id: event.turn_id,
                             agent: event.payload["agent"].as_str().map(str::to_owned),
                             created_at: event.created_at,
+                            review: serde_json::from_value(event.payload["review"].clone()).ok(),
                         });
                     }
                     if self.pending_permissions.len() == 1 {
