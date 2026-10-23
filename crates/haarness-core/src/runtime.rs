@@ -4191,7 +4191,17 @@ impl AgentRuntime {
             }
             let always_rules = plan.always_rules();
             let card = plan.card_detail(&arguments, asked);
-            let script = plan.script(&arguments, &self.workspace, &engine);
+            // The script is read for a person, so not in Auto, which approves
+            // this without one (the check under the gate below is the one
+            // that counts). When the Auto reviewer hands a request to a
+            // person, it reads the script there with `script_for_person`.
+            let shown = if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
+                None
+            } else {
+                plan.script_for_person(&arguments, &self.workspace, engine.clone())
+                    .await
+            };
+            let script = shown.as_ref().map(|shown| shown.script.clone());
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
@@ -4294,10 +4304,12 @@ impl AgentRuntime {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
                 result = receiver => result.map_err(|_| CoreError::Cancelled),
             }?;
-            allowed = if resolution.allowed {
-                Ok(())
-            } else {
-                Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
+            allowed = match &shown {
+                Some(shown) if resolution.allowed && !shown.seal.holds().await => {
+                    Err(script_changed(&shown.script.path, &self.workspace))
+                }
+                _ if resolution.allowed => Ok(()),
+                _ => Err(resolution.feedback.unwrap_or_else(|| operation.clone())),
             };
         }
         // Permission and hook evaluation may wait for arbitrary user input.
@@ -6072,6 +6084,19 @@ struct PendingPermission {
     agent: Option<String>,
     created_at: DateTime<Utc>,
     sender: oneshot::Sender<PermissionResolution>,
+}
+
+/// Why a command whose script changed after its card showed it does not
+/// run, for the model.
+fn script_changed(path: &str, workspace: &Path) -> String {
+    let root = workspace.to_string_lossy();
+    let shown = path
+        .strip_prefix(root.trim_end_matches('/'))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(path);
+    format!(
+        "{shown} changed after it was shown to the user; run the command again to show the new version."
+    )
 }
 
 struct PendingPermissionCleanup {
@@ -9412,13 +9437,21 @@ impl RunnerTask {
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
-        // Read before the gate is taken: a file read never holds up a mode
-        // change or another chat's answer.
-        let script = plan.script(
-            detail,
-            &self.workspace,
-            &self.permission_engine_with_session_rules(agent, &self.session_rules.lock()),
-        );
+        // The script is read for a person, so not in Auto, which approves
+        // this without one (the check under the gate below is the one that
+        // counts), and before the gate is taken, so a slow disk never holds
+        // up a mode change or another chat's answer. When the Auto reviewer
+        // hands a request to a person, it reads the script there with
+        // `script_for_person`.
+        let shown = if !forced && !explicit && self.approval_modes.is_auto(self.thread.id).await {
+            None
+        } else {
+            let engine =
+                self.permission_engine_with_session_rules(agent, &self.session_rules.lock());
+            plan.script_for_person(detail, &self.workspace, engine)
+                .await
+        };
+        let script = shown.as_ref().map(|shown| shown.script.clone());
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         // A chat in Auto approves eligible requests once, without a prompt.
@@ -9561,6 +9594,23 @@ impl RunnerTask {
             );
         }
         self.publish_task_update("running");
+        // The person approved what the card showed: a script that changed
+        // since, or is gone, does not run in its place.
+        if let Some(shown) = &shown
+            && resolution
+                .as_ref()
+                .is_ok_and(|resolution| resolution.allowed)
+            && !shown.seal.holds().await
+        {
+            tracing::info!(
+                permission = id,
+                "refused: the script changed after it was shown"
+            );
+            return Err(CoreError::PermissionRejected(script_changed(
+                &shown.script.path,
+                &self.workspace,
+            )));
+        }
         resolution
     }
     /// A `PermissionRequest` hook answered Always: remember what Always in
@@ -11889,29 +11939,31 @@ impl AskPlan {
             ),
         }
     }
-    /// For a bash request, the script its command runs, read now for the
-    /// person answering (`permissions::script`). It shows only what this
-    /// chat may read without asking: `engine`'s `read` rules (the built-in
-    /// secret rules and every configured deny or ask) must allow both the
-    /// file named and where it leads. Display only: it decides nothing, and
-    /// hooks, Auto and rules never see it.
-    fn script(
+    /// For a bash request, the script its command runs, read for the person
+    /// the request is announced to (`permissions::script`): off the async
+    /// workers, within a short deadline, and only what this chat may read
+    /// without asking (`engine`'s `read` rules, the built-in secret rules and
+    /// every configured deny or ask, must allow both the file named and
+    /// where it leads). Display only: it decides nothing, and hooks, Auto and
+    /// rules never see it. Its seal is checked when the person answers.
+    async fn script_for_person(
         &self,
         detail: &serde_json::Value,
         workspace: &Path,
-        engine: &PermissionEngine,
-    ) -> Option<haarness_protocol::PermissionScript> {
+        engine: PermissionEngine,
+    ) -> Option<crate::permissions::script::Shown> {
         if self.permission != "bash" {
             return None;
         }
-        let command = detail.get("command")?.as_str()?;
+        let command = detail.get("command")?.as_str()?.to_owned();
         let cwd = match detail.get("workdir").and_then(serde_json::Value::as_str) {
             Some(workdir) => crate::permissions::resolve_permission_path(workspace, workdir),
             None => workspace.to_path_buf(),
         };
-        crate::permissions::script::bash_script(command, &cwd, |path| {
+        crate::permissions::script::for_prompt(command, cwd, move |path| {
             engine.evaluate(&format!("read:{}", path.display())) == PermissionDecision::Allow
         })
+        .await
     }
     /// The tool's arguments as a prompt about `patterns` shows them: with
     /// the rule a command met because a limit stopped reading it

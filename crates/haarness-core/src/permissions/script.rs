@@ -4,13 +4,20 @@
 //! changes a pattern or decides a request.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use haarness_protocol::PermissionScript;
+use sha2::{Digest as _, Sha256};
 
 /// The most of a script a request carries; a longer one is cut here and
 /// marked [`PermissionScript::truncated`].
 pub const MAX_SCRIPT_BYTES: usize = 30_000;
+
+/// How long reading a script may take, for the prompt and again before the
+/// command runs: a hung network or FUSE mount gives no script rather than a
+/// stalled prompt.
+pub const READ_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// How many of a command's script files are tried before giving up: a
 /// program run by its path may be a binary (`/usr/bin/git status && bash
@@ -40,17 +47,63 @@ const KEY_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
 /// Key and certificate stores, by extension.
 const KEY_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
 
+/// A script read for a prompt, and what it was read from.
+#[derive(Debug, Clone)]
+pub struct Shown {
+    pub script: PermissionScript,
+    /// Checked again when the person answers: see [`Seal::holds`].
+    pub seal: Seal,
+}
+
+/// What a shown script was read from. The person may answer minutes later,
+/// and approves what the card showed, not what the file says by then.
+#[derive(Debug, Clone)]
+pub struct Seal {
+    /// The file as the command names it.
+    file: PathBuf,
+    /// Where it led.
+    real: PathBuf,
+    /// The bytes read, up to one past the cap, hashed.
+    digest: [u8; 32],
+}
+
+impl Seal {
+    /// Whether the command still runs what the card showed: the file it
+    /// names leads to the same place and reads the same, read again off the
+    /// async workers within [`READ_TIMEOUT`]. A file gone, changed, moved
+    /// behind its link or too slow to read again does not hold.
+    pub async fn holds(&self) -> bool {
+        let seal = self.clone();
+        let check = tokio::task::spawn_blocking(move || {
+            seal.file.canonicalize().is_ok_and(|real| real == seal.real)
+                && read_bytes(&seal.real).is_some_and(|bytes| digest(&bytes) == seal.digest)
+        });
+        matches!(
+            tokio::time::timeout(READ_TIMEOUT, check).await,
+            Ok(Ok(true))
+        )
+    }
+}
+
+/// [`find`] off the async workers, within [`READ_TIMEOUT`]: nothing when the
+/// disk is too slow, so a stalled mount never holds up a prompt.
+pub async fn for_prompt(
+    command: String,
+    cwd: PathBuf,
+    readable: impl Fn(&Path) -> bool + Send + 'static,
+) -> Option<Shown> {
+    tracing::debug!("reading the script a command runs for its permission prompt");
+    let read = tokio::task::spawn_blocking(move || find(&command, &cwd, readable));
+    tokio::time::timeout(READ_TIMEOUT, read).await.ok()?.ok()?
+}
+
 /// The first script `command` runs from `cwd` that reads as text (see
 /// [`super::bash::script_files`] for what counts) and that `readable` lets
 /// this chat read. Nothing for a secret-named file (the built-in `read`
 /// rules), a credential file ([`is_credential`]), a binary, a folder, a
 /// device or a missing file.
 #[must_use]
-pub fn bash_script(
-    command: &str,
-    cwd: &Path,
-    readable: impl Fn(&Path) -> bool,
-) -> Option<PermissionScript> {
+pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Option<Shown> {
     super::bash::script_files(command, cwd)
         .iter()
         .take(MAX_TRIED)
@@ -82,7 +135,7 @@ pub fn is_credential(path: &Path) -> bool {
 
 /// `file` (absolute, as the command names it) read where it really is,
 /// links followed.
-fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<PermissionScript> {
+fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
     let shown = super::normalize_absolute(file);
     let real = file.canonicalize().ok()?;
     if [&shown, &real]
@@ -91,16 +144,12 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<PermissionScri
     {
         return None;
     }
-    let file = open(&real).ok()?;
-    // Checked on the open file: a folder or a pipe put there after the
-    // path was resolved is still refused, and a pipe never blocks the open.
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_SCRIPT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let mut bytes = read_bytes(&real)?;
+    let seal = Seal {
+        file: file.to_path_buf(),
+        real,
+        digest: digest(&bytes),
+    };
     let truncated = bytes.len() > MAX_SCRIPT_BYTES;
     bytes.truncate(MAX_SCRIPT_BYTES);
     if bytes.contains(&0) {
@@ -110,19 +159,49 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<PermissionScri
         // A character the cut split in two is left out whole.
         bytes.truncate(complete_utf8(&bytes));
     }
-    Some(PermissionScript {
-        path: shown.to_string_lossy().into_owned(),
-        content: displayed(&String::from_utf8_lossy(&bytes)),
-        truncated,
+    Some(Shown {
+        script: PermissionScript {
+            path: shown.to_string_lossy().into_owned(),
+            content: displayed(&String::from_utf8_lossy(&bytes)),
+            truncated,
+        },
+        seal,
     })
 }
 
+/// The bytes of the regular file at `real` (a resolved path), up to one
+/// past the cap. A pipe or device is never opened, and the open file is
+/// checked again in case one was put there since.
+fn read_bytes(real: &Path) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    tests::wait_if_slow(real);
+    if !std::fs::metadata(real).ok()?.is_file() {
+        return None;
+    }
+    let file = open(real).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SCRIPT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+fn digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+/// The resolved path opened without following a link at its end: one put
+/// there after it was resolved cannot lead past the checks above. A pipe
+/// never blocks the open.
 #[cfg(unix)]
 fn open(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
         .open(path)
 }
 
@@ -175,7 +254,23 @@ fn displayed(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    /// Files a test makes slow to read, as a hung network mount is.
+    static SLOW: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn wait_if_slow(path: &Path) {
+        if SLOW.lock().unwrap().iter().any(|slow| slow == path) {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    fn bash_script(
+        command: &str,
+        cwd: &Path,
+        readable: impl Fn(&Path) -> bool,
+    ) -> Option<PermissionScript> {
+        find(command, cwd, readable).map(|shown| shown.script)
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
@@ -341,6 +436,67 @@ mod tests {
             std::os::unix::fs::symlink(fixture.0.join("private/run.sh"), fixture.0.join("run.sh"))
                 .unwrap();
             assert!(bash_script("./run.sh", &fixture.0, readable).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_disk_gives_no_script_and_does_not_hold_up_the_prompt() {
+        let fixture = Fixture::new();
+        let slow = fixture.write("slow.sh", "echo slow\n");
+        SLOW.lock().unwrap().push(slow.clone());
+        let started = std::time::Instant::now();
+        let shown = for_prompt("bash slow.sh".into(), fixture.0.clone(), |_| true).await;
+        assert!(shown.is_none());
+        assert!(started.elapsed() < Duration::from_millis(900));
+        fixture.write("quick.sh", "echo quick\n");
+        let shown = for_prompt("bash quick.sh".into(), fixture.0.clone(), |_| true)
+            .await
+            .unwrap();
+        assert_eq!(shown.script.content, "echo quick\n");
+    }
+
+    #[tokio::test]
+    async fn the_seal_holds_only_while_the_file_reads_as_it_was_shown() {
+        let fixture = Fixture::new();
+        let file = fixture.write("x.sh", "echo shown\n");
+        let shown = for_prompt("bash x.sh".into(), fixture.0.clone(), |_| true)
+            .await
+            .unwrap();
+        assert!(shown.seal.holds().await);
+        // Changed, even back to the same length.
+        std::fs::write(&file, "echo other\n").unwrap();
+        assert!(!shown.seal.holds().await);
+        std::fs::write(&file, "echo shown\n").unwrap();
+        assert!(shown.seal.holds().await);
+        // The rest of a cut file was never shown; a cut file made whole is
+        // another file.
+        let long = fixture.write("long.sh", "a".repeat(MAX_SCRIPT_BYTES + 10));
+        let cut = for_prompt("sh long.sh".into(), fixture.0.clone(), |_| true)
+            .await
+            .unwrap();
+        std::fs::write(&long, "a".repeat(MAX_SCRIPT_BYTES + 20)).unwrap();
+        assert!(cut.seal.holds().await);
+        std::fs::write(&long, "a".repeat(MAX_SCRIPT_BYTES)).unwrap();
+        assert!(!cut.seal.holds().await);
+        // Gone, or too slow to read again.
+        SLOW.lock().unwrap().push(file.clone());
+        assert!(!shown.seal.holds().await);
+        std::fs::remove_file(&file).unwrap();
+        assert!(!shown.seal.holds().await);
+        // A link moved to another file with the same text.
+        #[cfg(unix)]
+        {
+            let first = fixture.write("one/run.sh", "echo same\n");
+            fixture.write("two/run.sh", "echo same\n");
+            let link = fixture.0.join("run.sh");
+            std::os::unix::fs::symlink(&first, &link).unwrap();
+            let shown = for_prompt("./run.sh".into(), fixture.0.clone(), |_| true)
+                .await
+                .unwrap();
+            assert!(shown.seal.holds().await);
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(fixture.0.join("two/run.sh"), &link).unwrap();
+            assert!(!shown.seal.holds().await);
         }
     }
 

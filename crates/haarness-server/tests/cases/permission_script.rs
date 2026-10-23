@@ -292,3 +292,212 @@ async fn a_script_the_chat_may_not_read_or_a_credential_file_is_not_shown() {
         wait_done(&runtime, &turn).await;
     }
 }
+
+/// The tool errors in a chat, oldest first.
+async fn tool_errors(runtime: &AgentRuntime, thread: &Thread) -> Vec<String> {
+    runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::ToolResult {
+                is_error: true,
+                output,
+                ..
+            } => Some(output),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_script_that_changed_after_it_was_shown_does_not_run() {
+    let fixture = Fixture::new();
+    let script = fixture.0.join("x.sh");
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    for (change, decision) in [("edit", Reply::Once), ("remove", Reply::Always)] {
+        std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&bash(json!({"command": "sh x.sh"}))),
+            )
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        assert!(pending.script.is_some());
+        // While the person reads the card, the file changes, or goes.
+        if change == "edit" {
+            std::fs::write(&script, "printf swapped > swapped.txt\n").unwrap();
+        } else {
+            std::fs::remove_file(&script).unwrap();
+        }
+        answer(&runtime, &pending.permission_id, decision).await;
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+        let errors = tool_errors(&runtime, &thread).await;
+        assert_eq!(
+            errors.last().map(String::as_str),
+            Some(
+                "x.sh changed after it was shown to the user; run the command again to show the new version."
+            ),
+            "{change}: {errors:?}"
+        );
+        assert!(!fixture.0.join("swapped.txt").exists(), "{change}");
+        assert!(!fixture.0.join("shown.txt").exists(), "{change}");
+    }
+    // Unchanged, it runs, as without a card.
+    std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({"command": "sh x.sh"}))),
+        )
+        .await
+        .unwrap();
+    // The Always above covers `sh *` now, so it runs without a card.
+    wait_done(&runtime, &turn).await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("shown.txt")).unwrap(),
+        "shown"
+    );
+}
+
+#[tokio::test]
+async fn a_slash_command_shell_block_whose_script_changed_does_not_run() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("context.sh"), "printf CONTEXT\n").unwrap();
+    let mut config = RuntimeConfig::default();
+    config.commands.push(haarness_protocol::CommandInfo {
+        name: "probe".into(),
+        description: "Dynamic context".into(),
+        source: None,
+        agent: None,
+        model: None,
+        argument_hint: None,
+        template: "Context: !`sh context.sh`".into(),
+        plugin: None,
+        execution: haarness_protocol::DefinitionExecution::default(),
+    });
+    let runtime = runtime(&fixture.0, config);
+    let thread = echo_thread(&runtime).await;
+    let mut request = turn_request("");
+    request.command = Some("probe".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert!(pending.script.is_some());
+    std::fs::write(
+        fixture.0.join("context.sh"),
+        "printf swapped > swapped.txt\n",
+    )
+    .unwrap();
+    answer(&runtime, &pending.permission_id, Reply::Once).await;
+    wait_done(&runtime, &turn).await;
+    assert!(!fixture.0.join("swapped.txt").exists());
+}
+
+/// Counts the events on this thread whose message is `wanted`: the runtime
+/// of a `#[tokio::test]` runs its turns on the test's own thread.
+struct Messages {
+    wanted: &'static str,
+    seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl tracing::Subscriber for Messages {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        if message.0 == self.wanted {
+            self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn auto_reads_no_script_since_it_shows_no_card() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("x.sh"), "printf ran >> ran.txt\n").unwrap();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _capture = tracing::subscriber::set_default(Messages {
+        wanted: "reading the script a command runs for its permission prompt",
+        seen: Arc::clone(&seen),
+    });
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    let mode = |setting| {
+        let runtime = &runtime;
+        async move {
+            let revision = runtime.approval_mode(thread.id).await.unwrap().revision;
+            runtime
+                .set_approval_mode(
+                    thread.id,
+                    haarness_protocol::SetApprovalModeRequest {
+                        mode: setting,
+                        revision: Some(revision),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+    mode(haarness_protocol::ApprovalModeSetting::Auto).await;
+    // Tests on other threads may have cached what this thread's capture
+    // wants to see as unwanted: ask every call site again.
+    tracing::callsite::rebuild_interest_cache();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({"command": "sh x.sh"}))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("ran.txt")).unwrap(),
+        "ran"
+    );
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // In Review the same command shows its script, read once.
+    mode(haarness_protocol::ApprovalModeSetting::Review).await;
+    tracing::callsite::rebuild_interest_cache();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({"command": "sh x.sh"}))),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert!(pending.script.is_some());
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+}
