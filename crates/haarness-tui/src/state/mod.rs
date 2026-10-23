@@ -135,6 +135,17 @@ impl PermissionChoice {
     }
 }
 
+/// What a notice is true for, when that ends before its time runs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeLasts {
+    /// While the conversation is scrolled back ("Viewing … Ctrl+End returns
+    /// to latest").
+    WhileScrolledBack,
+    /// Until a dialog opens or another command runs: why a command would
+    /// not run as typed.
+    UntilNextCommand,
+}
+
 /// A one-key answer (`y`, `n`, a Chrome card's `a`) lit on its chip and not
 /// sent yet: its letter, the request it answers, and when the letter was
 /// typed (read from the terminal).
@@ -757,12 +768,9 @@ pub struct App {
     /// session list leads with the chats they wait in.
     pub waiting: std::collections::HashMap<String, WaitingRequest>,
     pub notice: String,
-    /// The last command run would not run as typed; see
-    /// [`App::refuse_command`].
-    pub command_refused: bool,
-    /// A notice true only while the conversation is scrolled back ("Viewing …
-    /// Ctrl+End returns to latest"): it goes when the view returns.
-    pub scrolled_notice: Option<String>,
+    /// A notice that stops being true before its time runs out, and when: it
+    /// goes then if it is still the one on the band.
+    pub notice_lasts: Option<(String, NoticeLasts)>,
     /// The session whose actions are open, and the sessions list's filter,
     /// for ← and Esc to return to.
     pub session_return: Option<(ThreadId, String)>,
@@ -1142,8 +1150,7 @@ impl App {
             notice,
             notice_shown: None,
             undo_draft: None,
-            command_refused: false,
-            scrolled_notice: None,
+            notice_lasts: None,
             session_return: None,
             input_delivery: None,
             custom_status_line: None,
@@ -1510,6 +1517,34 @@ impl App {
         }
     }
 
+    /// Show `text` on the band for as long as it `lasts`.
+    pub(crate) fn notice_lasting(&mut self, text: impl Into<String>, lasts: NoticeLasts) {
+        self.notice = text.into();
+        self.notice_lasts = Some((self.notice.clone(), lasts));
+    }
+
+    /// Whether the band still shows the notice set to last `lasts`.
+    pub(crate) fn shows_notice_lasting(&self, lasts: NoticeLasts) -> bool {
+        self.notice_lasts
+            .as_ref()
+            .is_some_and(|(text, until)| *until == lasts && *text == self.notice)
+    }
+
+    /// The time a notice set to last `lasts` was true for is over: it goes,
+    /// unless another notice took its place meanwhile.
+    pub(crate) fn end_notice(&mut self, lasts: NoticeLasts) {
+        if self
+            .notice_lasts
+            .as_ref()
+            .is_some_and(|(_, until)| *until == lasts)
+        {
+            if self.shows_notice_lasting(lasts) {
+                self.notice.clear();
+            }
+            self.notice_lasts = None;
+        }
+    }
+
     /// Age the status-line notice. Notices are set from many places, so the
     /// render tick notes when the text changes and clears it once it has
     /// been on screen for [`NOTICE_TTL`]. A notice that describes a state
@@ -1517,14 +1552,8 @@ impl App {
     /// message being edited, a folder operation in flight.
     pub fn expire_notice(&mut self, now: std::time::Instant) {
         // A notice about reading back stops being true at the latest message.
-        if let Some(text) = self.scrolled_notice.take()
-            && text == self.notice
-        {
-            if self.effective_viewport_offset() == 0 && self.pending_message_jump.get().is_none() {
-                self.notice.clear();
-            } else {
-                self.scrolled_notice = Some(text);
-            }
+        if self.effective_viewport_offset() == 0 && self.pending_message_jump.get().is_none() {
+            self.end_notice(NoticeLasts::WhileScrolledBack);
         }
         if self.notice.is_empty() {
             self.notice_shown = None;
@@ -2467,9 +2496,7 @@ impl App {
 
     pub fn open_overlay(&mut self, overlay: Overlay) {
         // A refused command's notice is done with once a dialog takes over.
-        if std::mem::take(&mut self.command_refused) {
-            self.notice.clear();
-        }
+        self.end_notice(NoticeLasts::UntilNextCommand);
         *self.dialog_anchor.get_mut() = None;
         self.overlay = overlay;
         self.overlay_filter.clear();

@@ -317,11 +317,13 @@ impl App {
                 self.selection_range = None;
                 self.pending_message_jump
                     .set(Some((self.thread.id, item.id)));
-                self.notice = format!(
-                    "Viewing {role} message · #{} · Ctrl+End returns to latest",
-                    item.sequence
+                self.notice_lasting(
+                    format!(
+                        "Viewing {role} message · #{} · Ctrl+End returns to latest",
+                        item.sequence
+                    ),
+                    crate::state::NoticeLasts::WhileScrolledBack,
                 );
-                self.scrolled_notice = Some(self.notice.clone());
             }
             "copy" => {
                 crate::terminal::copy_to_clipboard(&crate::prompt_context::plain(text));

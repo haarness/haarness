@@ -1119,8 +1119,7 @@ impl App {
     /// Say why a command will not run as typed (a usage line, a name nothing
     /// answers to). Typed at the prompt, its line stays there to be fixed.
     pub(crate) fn refuse_command(&mut self, reason: impl Into<String>) {
-        self.notice = reason.into();
-        self.command_refused = true;
+        self.notice_lasting(reason, crate::state::NoticeLasts::UntilNextCommand);
     }
 
     /// The status-line answer to a command nothing answers to, naming the
@@ -2282,9 +2281,7 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub async fn execute_command(&mut self, raw: &str, client: &ApiClient) -> Result<AppAction> {
         // What the last refused command said no longer applies.
-        if std::mem::take(&mut self.command_refused) {
-            self.notice.clear();
-        }
+        self.end_notice(crate::state::NoticeLasts::UntilNextCommand);
         let command = raw.trim().trim_start_matches('/');
         let (name, arguments) = command
             .split_once(char::is_whitespace)
