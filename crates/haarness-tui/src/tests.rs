@@ -10933,15 +10933,20 @@ async fn background_root_completion_notifies_after_activity_snapshot_race() {
     );
 }
 
-/// While a request waits for approval nothing runs: the call that asked
-/// shows a still ⚠ and the calls after it a quiet ○, never a spinner.
+/// While a request waits for a person nothing runs: the call that asked
+/// shows a still ⚠ (? under a question) and the calls after it a quiet ○,
+/// never a spinner. No status names the asking call, so it is the earliest
+/// call of the asking turn with no result; with that turn unknown, no call is
+/// marked either way.
 #[tokio::test]
 async fn calls_waiting_on_an_approval_do_not_spin() {
     let thread = fixture_thread();
+    let turn = TurnId::new();
     let call = |sequence, id: &str, name: &str, arguments| {
-        message_item(
+        message_item_for_turn(
             sequence,
             &thread,
+            turn,
             ItemData::ToolCall {
                 call_id: id.into(),
                 name: name.into(),
@@ -10950,13 +10955,27 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
             },
         )
     };
+    let done = message_item_for_turn(
+        2,
+        &thread,
+        turn,
+        ItemData::ToolResult {
+            call_id: "c0".into(),
+            name: "read".into(),
+            output: "notes".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
     let items = vec![
-        call(1, "c1", "bash", serde_json::json!({"command": "echo one"})),
-        call(2, "c2", "bash", serde_json::json!({"command": "echo two"})),
-        call(3, "c3", "read", serde_json::json!({"path": "README.md"})),
+        call(1, "c0", "read", serde_json::json!({"path": "notes.txt"})),
+        done,
+        call(3, "c1", "bash", serde_json::json!({"command": "echo one"})),
+        call(4, "c2", "bash", serde_json::json!({"command": "echo two"})),
+        call(5, "c3", "read", serde_json::json!({"path": "README.md"})),
     ];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
-    app.active_turn = Some(haarness_protocol::TurnId::new());
+    app.active_turn = Some(turn);
     let client = offline_client();
     let status = |state: &str, call: Option<&str>| {
         fixture_event(
@@ -10965,15 +10984,25 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
             thread.id,
             serde_json::json!({
                 "state": state,
-                "tool": call.map(|_| "bash"),
+                "tool": call.map(|_| "read"),
                 "callId": call,
                 "startedAt": Utc::now(),
             }),
         )
     };
-    app.reduce(status("tool", Some("c1")), &client)
+    let spins = |text: &str| {
+        ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇']
+            .iter()
+            .any(|frame| text.contains(*frame))
+    };
+    // The last tool status names another call (a parallel read); the request
+    // belongs to the turn, whose first unfinished call is the one asking.
+    app.reduce(status("tool", Some("c3")), &client)
         .await
         .unwrap();
+    let mut pending = pending_permission_fixture(&thread, "perm-asks");
+    pending.turn_id = Some(turn);
+    app.pending_permissions = vec![pending];
     app.reduce(status("waiting_permission", None), &client)
         .await
         .unwrap();
@@ -10984,50 +11013,45 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
     );
     assert!(text.contains("○ bash echo two  queued"), "{text}");
     assert!(text.contains("○ read README.md  queued"), "{text}");
-    for frame in ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇'] {
-        assert!(!text.contains(frame), "{text}");
-    }
+    assert!(!spins(&text), "{text}");
     // Answered, the call runs again and so does its spinner.
+    app.pending_permissions.clear();
     app.reduce(status("tool", Some("c1")), &client)
         .await
         .unwrap();
     let text = frame_text(&app, (100, 30));
     assert!(!text.contains("waiting for approval"), "{text}");
     assert!(text.contains("○ bash echo two  queued"), "{text}");
-    // A call waiting for a question's answer waits as still, marked ?.
+    // A question waits on its turn's first unfinished call the same way.
+    app.pending_questions = vec![haarness_protocol::PendingQuestionInfo {
+        question_id: "q1".into(),
+        prompt: "Which one?".into(),
+        choices: vec![],
+        multiple: false,
+        custom: true,
+        thread_id: thread.id,
+        root_thread_id: Some(thread.id),
+        turn_id: Some(turn),
+        created_at: Utc::now(),
+    }];
     app.reduce(status("waiting_question", None), &client)
         .await
         .unwrap();
     let text = frame_text(&app, (100, 30));
     assert!(text.contains("? bash echo one"), "{text}");
     assert!(text.contains("○ bash echo two  queued"), "{text}");
-    for frame in ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇'] {
-        assert!(!text.contains(frame), "{text}");
-    }
-    // A question asked with no tool status before it is the question call's.
-    let mut app = App::new(
-        thread.clone(),
-        vec![thread.clone()],
-        vec![
-            call(1, "c1", "bash", serde_json::json!({"command": "echo one"})),
-            call(
-                2,
-                "q1",
-                "question",
-                serde_json::json!({"prompt": "Which one?"}),
-            ),
-        ],
-        vec![],
-        vec![],
-    );
-    app.active_turn = Some(haarness_protocol::TurnId::new());
-    app.reduce(status("waiting_question", None), &client)
+    assert!(!spins(&text), "{text}");
+    // With the asking turn unknown, nothing claims to wait or to be queued.
+    app.pending_questions.clear();
+    let mut unknown = pending_permission_fixture(&thread, "perm-unknown");
+    unknown.turn_id = None;
+    app.pending_permissions = vec![unknown];
+    app.reduce(status("waiting_permission", None), &client)
         .await
         .unwrap();
     let text = frame_text(&app, (100, 30));
-    assert!(text.contains("? question Which one?"), "{text}");
-    assert!(!text.contains("question Which one?  queued"), "{text}");
-    assert!(text.contains("○ bash echo one  queued"), "{text}");
+    assert!(!text.contains("queued"), "{text}");
+    assert!(!text.contains("waiting for approval  "), "{text}");
 }
 
 /// Before a first token the band says the turn is working; it says thinking

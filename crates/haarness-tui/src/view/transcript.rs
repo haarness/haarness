@@ -1487,6 +1487,37 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         )
     });
     let asks_approval = person_wait.is_some_and(|phase| phase.state == "waiting_permission");
+    // The call a person is asked about. No status names it (and the last
+    // tool status may name another call of a parallel batch), so it is the
+    // earliest call of the asking turn with no result yet; with that turn
+    // unknown, no call is marked waiting or queued.
+    let asked_call = person_wait
+        .and_then(|_| {
+            if asks_approval {
+                app.pending_permissions
+                    .iter()
+                    .find(|pending| pending.thread_id == app.thread.id)
+                    .and_then(|pending| pending.turn_id)
+            } else {
+                app.pending_questions
+                    .iter()
+                    .find(|pending| pending.thread_id == app.thread.id)
+                    .and_then(|pending| pending.turn_id)
+            }
+        })
+        .and_then(|turn| {
+            app.items.iter().find_map(|item| match &item.data {
+                ItemData::ToolCall { call_id, name, .. }
+                    if item.turn_id == Some(turn)
+                        && name != "task"
+                        && !call_id.trim().is_empty()
+                        && paired_result(app, item, call_id).is_none() =>
+                {
+                    Some(call_id.as_str())
+                }
+                _ => None,
+            })
+        });
     // Off screen, the sidebar leaves one row in its place: the plan's
     // progress where it last changed, which opens the sidebar.
     let plan_at = (app.plan_inline.get() && open_plan(app))
@@ -1736,13 +1767,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 };
                 // While a request waits for a person nothing runs: the call
                 // that asked waits still, and the calls after it queue.
-                let awaiting = unfinished
-                    && person_wait.is_some_and(|phase| match phase.call_id.as_deref() {
-                        Some(active) => this_call(active),
-                        // A question the server asked without naming its
-                        // call (no tool status came first) is this call's.
-                        None => phase.state == "waiting_question" && same_tool(name, "question"),
-                    });
+                let awaiting = unfinished && asked_call.is_some_and(this_call);
                 let queued = unfinished
                     && !awaiting
                     && app
@@ -1753,7 +1778,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 .call_id
                                 .as_deref()
                                 .is_some_and(|active| !this_call(active)),
-                            "waiting_permission" | "waiting_question" => true,
+                            "waiting_permission" | "waiting_question" => asked_call.is_some(),
                             _ => false,
                         });
                 let color = child_state.map_or_else(
