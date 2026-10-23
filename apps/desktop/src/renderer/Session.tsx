@@ -1012,6 +1012,18 @@ export function Session() {
             toolName((item.data as { name: string }).name ?? ""),
           )
         ) &&
+        // A question still being asked is the card above the message box;
+        // its row comes once it is answered, with the answer.
+        !(
+          item.data.type === "tool_call" &&
+          toolName(item.data.name) === "question" &&
+          // A question announced live may not name its turn.
+          state.questions.some(
+            (question) =>
+              question.threadId === item.threadId && (!question.turnId || question.turnId === item.turnId),
+          ) &&
+          !toolResult(state.items, item)
+        ) &&
         (!("call_id" in item.data) ||
           !tasks().has(taskKey(item.turnId, item.data.call_id)) ||
           tasks().get(taskKey(item.turnId, item.data.call_id))?.item.id ===

@@ -633,6 +633,26 @@ html[dir="rtl"] .tool-target {
 .tool-call[open] > summary .tool-chevron {
   transform: rotate(90deg);
 }
+/* A question reads as words, not as a command: what was asked, then the
+   answer it got. */
+.tool-question > summary .tool-target {
+  flex: 0 1 auto;
+  font-family: var(--sans);
+  font-size: var(--ui);
+}
+.tool-answer {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.tool-answer::before {
+  content: "·";
+  margin-inline-end: var(--s2);
+  color: var(--faint);
+}
 .tool-batch > summary strong {
   min-width: 0;
   flex: 1;
@@ -759,12 +779,49 @@ html[dir="rtl"] .tool-target {
 .change-lines .diff-line code {
   white-space: pre;
 }
+/* Added or removed says itself in a quiet gutter, not by colour alone; a
+   copied selection takes the code without it. */
+.change-lines .diff-sign {
+  flex: none;
+  width: 1.5ch;
+  margin-inline-end: var(--s2);
+  color: var(--faint);
+  user-select: none;
+}
+.change-lines .diff-line.add .diff-sign {
+  color: color-mix(in srgb, var(--green) 70%, var(--faint));
+}
+.change-lines .diff-line.remove .diff-sign {
+  color: color-mix(in srgb, var(--danger) 70%, var(--faint));
+}
 .change-more {
   margin: 0;
   padding: var(--s1) var(--s3);
   border-top: 1px solid var(--hairline);
   font-size: var(--ui-xs);
   color: var(--muted);
+}
+/* The way to the whole file: one quiet link at the end of the preview. */
+.change-review {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: var(--control-sm);
+  padding-block: 0;
+}
+.change-review-link {
+  margin-inline-start: auto;
+  min-height: 0;
+  padding: 2px var(--s1);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.change-review-link:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 /* Separate sibling targets keep stopping independent from opening the row. */
@@ -2127,10 +2184,14 @@ html[dir="rtl"] .tool-target {
   min-height: var(--control-sm);
   font-size: var(--ui-sm);
 }
+/* The chosen answer reads as chosen in every palette, dark ones included:
+   the text colour's own edge, on the selection tint. */
 .question-options .active {
-  background: var(--primary-soft);
-  color: var(--primary);
-  border-color: var(--primary-edge);
+  background: var(--selected);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 70%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 70%, transparent);
+  font-weight: 500;
 }
 
 /* --------------------------------------------------- slash command popover */

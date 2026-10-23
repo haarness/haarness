@@ -9698,8 +9698,10 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   await expect(activity.locator(":scope > summary")).toContainText("Edited");
   await activity.locator(":scope > summary").click();
   await expect(activity.locator(".change-preview")).toBeVisible();
-  await expect(activity.locator(".change-lines .add")).toHaveText("false");
-  await expect(activity.locator(".change-lines .remove")).toHaveText("true");
+  await expect(activity.locator(".change-lines .add code")).toHaveText("false");
+  await expect(activity.locator(".change-lines .remove code")).toHaveText("true");
+  await expect(activity.locator(".change-lines .add .diff-sign")).toHaveText("+");
+  await expect(activity.locator(".change-lines .remove .diff-sign")).toHaveText("−");
   await expect(activity).not.toContainText('"old":');
   const waiting = await client.startTurn(thread.id, {
     requestId: crypto.randomUUID(),
