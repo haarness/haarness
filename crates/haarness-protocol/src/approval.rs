@@ -7,10 +7,17 @@ use utoipa::ToSchema;
 /// for chats in Auto. Clients must not auto-reply on such a server.
 pub const APPROVAL_MODE_CAPABILITY: &str = "approval-mode.v1";
 
+/// Servers advertising this ask a reviewer model in Auto (it is on there): a
+/// request it leaves to a person carries [`PermissionReview`], and a call it
+/// blocks fails with a `review` of status `blocked` in its result's metadata.
+/// Without it, Auto approves eligible requests once.
+pub const APPROVAL_REVIEW_CAPABILITY: &str = "approval-review.v1";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
-    /// Eligible requests are approved once, without a prompt.
+    /// Eligible requests go to a reviewer model, which approves them once,
+    /// blocks them, or leaves them to a person.
     Auto,
     #[default]
     Review,
@@ -49,4 +56,45 @@ pub struct SetApprovalModeRequest {
     /// to apply the change regardless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+}
+
+/// Why Auto's reviewer left a request to a person, or blocked a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionReviewStatus {
+    /// The reviewer asked for a person's decision.
+    Asked,
+    /// No review happened: no model answered, the review timed out, or the
+    /// action was too long to review whole.
+    Failed,
+    /// Reviewing paused for the rest of the turn after repeated blocks.
+    Paused,
+    /// The reviewer refused the call (tool results only).
+    Blocked,
+}
+
+/// The risk the reviewer rated an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRisk {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Auto's reviewer's note: on a permission request it left to a person, and
+/// in the metadata (`review`) of a tool result it blocked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionReview {
+    pub status: PermissionReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<ReviewRisk>,
+    /// A short category the reviewer named (Destructive action, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// One or two sentences for the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }

@@ -1821,6 +1821,7 @@ impl AgentRuntime {
         let mut pending: Vec<PendingPermissionInfo> = self
             .permissions
             .iter()
+            .filter(|entry| entry.value().announced)
             .map(|entry| entry.value().info(entry.key()))
             .collect();
         pending.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -3862,8 +3863,15 @@ impl AgentRuntime {
         arguments: serde_json::Value,
         cancel: CancellationToken,
     ) -> CoreResult<DirectToolResult> {
-        self.run_direct_tool_as(thread_id, name, arguments, cancel, RunStance::default())
-            .await
+        self.run_direct_tool_as(
+            thread_id,
+            name,
+            arguments,
+            cancel,
+            RunStance::default(),
+            false,
+        )
+        .await
     }
 
     /// [`run_direct_tool`](Self::run_direct_tool) for a workflow's own
@@ -3879,10 +3887,13 @@ impl AgentRuntime {
         cancel: CancellationToken,
     ) -> CoreResult<DirectToolResult> {
         let stance = self.run_stances.of(thread_id).unwrap_or_default();
-        self.run_direct_tool_as(thread_id, name, arguments, cancel, stance)
+        self.run_direct_tool_as(thread_id, name, arguments, cancel, stance, true)
             .await
     }
 
+    /// `agent_work`: a workflow's call, which Auto's reviewer answers in a
+    /// chat in Auto. A person's own call (`!`, a client's tool call) is
+    /// approved once there, as they asked for it.
     async fn run_direct_tool_as(
         &self,
         thread_id: ThreadId,
@@ -3890,6 +3901,7 @@ impl AgentRuntime {
         mut arguments: serde_json::Value,
         cancel: CancellationToken,
         stance: RunStance,
+        agent_work: bool,
     ) -> CoreResult<DirectToolResult> {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -4099,6 +4111,11 @@ impl AgentRuntime {
         let mut pending_plans = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
+        // Asks a person configured about something narrower than a whole
+        // tool: in Auto they go to a person, not to the reviewer.
+        let mut personal = HashSet::new();
+        // Why Auto's reviewer refused the call, when it did.
+        let mut blocked = None;
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -4138,6 +4155,11 @@ impl AgentRuntime {
                             && !plan.is_resolved(pattern)
                             && constraint != Some(PermissionDecision::Ask) => {}
                     PermissionDecision::Ask => {
+                        if evaluation.configured
+                            && !evaluation.matched.as_deref().is_some_and(whole_tool_rule)
+                        {
+                            personal.insert(operation.clone());
+                        }
                         if evaluation.protected {
                             protected.insert(operation);
                         }
@@ -4191,10 +4213,43 @@ impl AgentRuntime {
             }
             let always_rules = plan.always_rules();
             let card = plan.card_detail(&arguments, asked);
-            // Same rule as model calls: a chat in Auto approves eligible
-            // requests once, ordered with mode changes by the gate.
+            // Same rule as model calls: in a chat in Auto the reviewer
+            // answers a workflow's eligible requests (with it off, they are
+            // approved once), ordered with mode changes by the gate. A
+            // person's own call there is approved once.
+            let review_on = components.config.auto_review.enabled;
+            let reviewable = !asked
+                .iter()
+                .any(|pattern| personal.contains(&plan.operation(pattern)));
+            let reviewer =
+                (agent_work && !forced && !explicit && reviewable && review_on).then(|| {
+                    Arc::new(crate::auto_review::Reviewer {
+                        request: crate::auto_review::ReviewRequest {
+                            permission: plan.permission.clone(),
+                            patterns: asked.clone(),
+                            detail: card.clone(),
+                            tool: Some((name.to_owned(), call_id.clone())),
+                            thread_id,
+                            root_thread_id: root,
+                            turn_id: None,
+                        },
+                        repository: Arc::clone(&self.repository),
+                        providers: Arc::clone(&components.providers),
+                        settings: components.config.auto_review.clone(),
+                        policy: components
+                            .config
+                            .prompts
+                            .text(crate::PromptName::AutoReview),
+                        small_model: components.config.small_model.clone(),
+                        model: (thread.provider.clone(), thread.model.clone()),
+                        workspace: self.workspace.clone(),
+                        state: Arc::clone(&self.approval_modes.reviews),
+                        cancel: cancel.clone(),
+                    })
+                });
             let approval_gate = self.approval_modes.gate.lock().await;
-            if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
+            let auto = !forced && !explicit && self.approval_modes.is_auto(thread_id).await;
+            if auto && (!review_on || !agent_work) {
                 tracing::info!(
                     thread = %thread_id,
                     operation = %operation_for_log(&operation),
@@ -4202,8 +4257,9 @@ impl AgentRuntime {
                 );
                 continue;
             }
+            let review_now = auto && reviewer.is_some();
             let id = uuid::Uuid::now_v7().to_string();
-            let (sender, receiver) = oneshot::channel();
+            let (sender, mut receiver) = oneshot::channel();
             self.permissions.insert(
                 id.clone(),
                 PendingPermission {
@@ -4224,6 +4280,15 @@ impl AgentRuntime {
                     agent: Some(thread.agent.clone()),
                     created_at: Utc::now(),
                     sender,
+                    announced: !review_now,
+                    stage: if review_now {
+                        ReviewStage::Reviewing
+                    } else {
+                        ReviewStage::Unreviewed
+                    },
+                    review: None,
+                    reviewer: reviewer.clone(),
+                    review_abort: review_now.then(CancellationToken::new),
                 },
             );
             drop(approval_gate);
@@ -4234,6 +4299,38 @@ impl AgentRuntime {
                 permissions: Arc::clone(&self.permissions),
                 id: id.clone(),
             };
+            if let Some(reviewer) = reviewer.as_ref().filter(|_| review_now) {
+                match review_registered(
+                    &self.permissions,
+                    &self.approval_modes,
+                    &id,
+                    thread_id,
+                    reviewer,
+                    &cancel,
+                    &mut receiver,
+                )
+                .await?
+                {
+                    Reviewed::Resolved(resolution) => {
+                        allowed = if resolution.allowed {
+                            Ok(())
+                        } else {
+                            Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
+                        };
+                        continue;
+                    }
+                    Reviewed::Blocked(review) => {
+                        allowed = Err(crate::auto_review::blocked_message(&review));
+                        blocked = Some(review);
+                        continue;
+                    }
+                    Reviewed::Show => {}
+                }
+            }
+            let review = self
+                .permissions
+                .get(&id)
+                .and_then(|entry| entry.review.clone());
             let prompt = self
                 .repository
                 .append_item(
@@ -4246,6 +4343,7 @@ impl AgentRuntime {
                         permission: plan.permission.clone(),
                         patterns: asked.clone(),
                         always_patterns: always_rules.clone(),
+                        review: review.clone(),
                     },
                 )
                 .await?;
@@ -4263,20 +4361,26 @@ impl AgentRuntime {
                 Some(root),
                 None,
                 None,
-                json!({
-                    "permissionId": id,
-                    "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                    "allowAlways": !forced,
-                    "explicit": explicit,
-                    "operation": operation,
-                    "detail": card,
-                    "permission": plan.permission,
-                    "patterns": asked,
-                    "alwaysPatterns": always_rules,
-                    "threadId": thread_id,
-                    "rootThreadId": root,
-                    "agent": thread.agent,
-                }),
+                {
+                    let mut requested = json!({
+                        "permissionId": id,
+                        "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
+                        "allowAlways": !forced,
+                        "explicit": explicit,
+                        "operation": operation,
+                        "detail": card,
+                        "permission": plan.permission,
+                        "patterns": asked,
+                        "alwaysPatterns": always_rules,
+                        "threadId": thread_id,
+                        "rootThreadId": root,
+                        "agent": thread.agent,
+                    });
+                    if let Some(review) = &review {
+                        requested["review"] = json!(review);
+                    }
+                    requested
+                },
             );
             if let Some(hooks) = &components.hooks {
                 let hooks = Arc::clone(hooks);
@@ -4291,7 +4395,11 @@ impl AgentRuntime {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
                 result = receiver => result.map_err(|_| CoreError::Cancelled),
             }?;
-            allowed = if resolution.allowed {
+            allowed = if let Some(review) = resolution.review {
+                let message = crate::auto_review::blocked_message(&review);
+                blocked = Some(review);
+                Err(message)
+            } else if resolution.allowed {
                 Ok(())
             } else {
                 Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
@@ -4381,13 +4489,24 @@ impl AgentRuntime {
                     ),
                 }
             }
-            Err(denied) => (
-                ToolOutput {
-                    text: format!("permission denied: {denied}"),
-                    metadata: serde_json::Value::Null,
-                },
-                true,
-            ),
+            // A block by Auto's reviewer says so, so clients tell it from
+            // a person's reject.
+            Err(denied) => match blocked {
+                Some(review) => (
+                    ToolOutput {
+                        text: denied,
+                        metadata: json!({ "review": review }),
+                    },
+                    true,
+                ),
+                None => (
+                    ToolOutput {
+                        text: format!("permission denied: {denied}"),
+                        metadata: serde_json::Value::Null,
+                    },
+                    true,
+                ),
+            },
         };
         drop(execution_authority);
         if let Some(context) = hook_context {
@@ -4465,9 +4584,11 @@ impl AgentRuntime {
         })
     }
     pub async fn reply_permission(&self, id: &str, reply: PermissionReply) -> CoreResult<()> {
+        // A request under review is not shown yet: it is answered by the
+        // reviewer or shown, as for an unknown id.
         let (_, pending) = self
             .permissions
-            .remove(id)
+            .remove_if(id, |_, pending| pending.announced)
             .ok_or_else(|| CoreError::NotFound(format!("permission {id}")))?;
         // What only a person may approve lasts for this chat at most: the
         // folder and repository choices act as "Allow in this chat", and only
@@ -4562,6 +4683,10 @@ impl AgentRuntime {
             }
             PermissionReplyDecision::Reject => false,
         };
+        // A person's answer ends a review that turning Auto on started.
+        if let Some(abort) = &pending.review_abort {
+            abort.cancel();
+        }
         if !allowed {
             // Rejecting one prompt rejects every other prompt in the same
             // root conversation: the model is being told to stop, and
@@ -4575,10 +4700,9 @@ impl AgentRuntime {
             for other in siblings {
                 if let Some((_, other_pending)) = self.permissions.remove(&other) {
                     self.publish_permission_resolved(&other, &other_pending, false);
-                    let _ = other_pending.sender.send(PermissionResolution {
-                        allowed: false,
-                        feedback: reply.feedback.clone(),
-                    });
+                    let _ = other_pending
+                        .sender
+                        .send(PermissionResolution::rejected(reply.feedback.clone()));
                 }
             }
         }
@@ -4586,8 +4710,15 @@ impl AgentRuntime {
         let _ = pending.sender.send(PermissionResolution {
             allowed,
             feedback: reply.feedback,
+            review: None,
         });
         Ok(())
+    }
+
+    /// Whether Auto asks its reviewer model (`auto_review.enabled`).
+    #[must_use]
+    pub fn auto_review_enabled(&self) -> bool {
+        self.components().config.auto_review.enabled
     }
 
     /// The approval mode that applies to a chat, with what decided it.
@@ -4626,26 +4757,65 @@ impl AgentRuntime {
             .map(|mode| mode.thread_id)
             .collect();
         let mut released = Vec::new();
+        let mut reviews_started = 0;
+        let review_on = self.components().config.auto_review.enabled;
         if info.mode == haarness_protocol::ApprovalMode::Auto {
             let waiting: Vec<String> = self
                 .permissions
                 .iter()
                 .filter(|entry| {
-                    !entry.value().forced
+                    entry.value().announced
+                        && !entry.value().forced
                         && entry.value().explicit_operations.is_empty()
                         && auto.contains(&entry.value().thread_id)
                 })
                 .map(|entry| entry.key().clone())
                 .collect();
             for permission_id in waiting {
+                // With the reviewer on, a waiting request is reviewed, not
+                // released outright; one it already left to a person, and
+                // an ask a person configured, stay theirs.
+                if review_on {
+                    let Some(mut entry) = self.permissions.get_mut(&permission_id) else {
+                        continue;
+                    };
+                    if entry.stage != ReviewStage::Unreviewed {
+                        continue;
+                    }
+                    let Some(reviewer) = entry.reviewer.clone() else {
+                        continue;
+                    };
+                    let abort = CancellationToken::new();
+                    entry.stage = ReviewStage::Reviewing;
+                    entry.review_abort = Some(abort.clone());
+                    drop(entry);
+                    tokio::spawn(review_waiting(
+                        Arc::clone(&self.permissions),
+                        self.events.clone(),
+                        Arc::clone(&self.approval_modes),
+                        permission_id,
+                        reviewer,
+                        abort,
+                    ));
+                    reviews_started += 1;
+                    continue;
+                }
                 if let Some((_, pending)) = self.permissions.remove(&permission_id) {
                     self.publish_permission_resolved(&permission_id, &pending, true);
-                    let _ = pending.sender.send(PermissionResolution {
-                        allowed: true,
-                        feedback: None,
-                    });
+                    let _ = pending.sender.send(PermissionResolution::allowed());
                     released.push(permission_id);
                 }
+            }
+        }
+        // A review still deciding a request of a chat that left Auto ends
+        // now, so its prompt shows at once; it is never approved after this.
+        for entry in self.permissions.iter() {
+            if entry.stage == ReviewStage::Reviewing
+                && followers.contains(&entry.thread_id)
+                && !auto.contains(&entry.thread_id)
+                && let Some(abort) = &entry.review_abort
+            {
+                abort.cancel();
             }
         }
         tracing::info!(
@@ -4653,6 +4823,7 @@ impl AgentRuntime {
             mode = ?info.mode,
             explicit = info.explicit,
             released = released.len(),
+            reviewed = reviews_started,
             "approval mode changed"
         );
         // Published under the gate, so two quick changes reach clients in order.
@@ -6067,6 +6238,33 @@ struct PendingPermission {
     agent: Option<String>,
     created_at: DateTime<Utc>,
     sender: oneshot::Sender<PermissionResolution>,
+    /// Shown to clients. A request Auto's reviewer is deciding is registered,
+    /// so a mode change, a sibling's reject and an Always that covers it all
+    /// see it, but it is announced only once the review leaves it to a
+    /// person: until then it is not listed and cannot be answered.
+    announced: bool,
+    /// Where Auto's reviewer is with it.
+    stage: ReviewStage,
+    /// The reviewer's note, when it left the request to a person.
+    review: Option<haarness_protocol::PermissionReview>,
+    /// What reviewing it takes; `None` for a request only a person answers
+    /// in Auto (forced, explicit, or an ask a person configured).
+    reviewer: Option<Arc<crate::auto_review::Reviewer>>,
+    /// Ends a running review at once: the chat left Auto, or a person
+    /// answered the request.
+    review_abort: Option<CancellationToken>,
+}
+
+/// Where Auto's reviewer is with a waiting request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewStage {
+    /// Not reviewed (yet), or its review ended without a verdict.
+    Unreviewed,
+    /// The reviewer is deciding it now.
+    Reviewing,
+    /// The reviewer left it to a person: turning Auto on again does not
+    /// review it again.
+    Reviewed,
 }
 
 struct PendingPermissionCleanup {
@@ -6148,6 +6346,10 @@ fn publish_permission_resolved(
     pending: &PendingPermission,
     allowed: bool,
 ) {
+    // A request under review was never shown, so no client knows it.
+    if !pending.announced {
+        return;
+    }
     events.publish_scoped(
         "permission.resolved",
         Some(pending.thread_id),
@@ -6160,6 +6362,145 @@ fn publish_permission_resolved(
             "operation": pending.operation,
         }),
     );
+}
+
+/// How a review of a registered, not yet announced request ended.
+enum Reviewed {
+    /// Settled without a prompt: approved once by the reviewer, or answered
+    /// while it decided (a sibling's reject, an Always that covers it).
+    Resolved(PermissionResolution),
+    /// Refused by the reviewer.
+    Blocked(haarness_protocol::PermissionReview),
+    /// For a person: the entry is now announced, with the reviewer's note
+    /// when it asked.
+    Show,
+}
+
+/// Reviews the registered, unannounced request `id` outside every lock, then
+/// settles it under the approval gate in the mode that holds then: only an
+/// Auto that still answers it acts on the verdict, and a chat that left Auto
+/// meanwhile gets its prompt, never an approval. Stop removes the request.
+async fn review_registered(
+    permissions: &DashMap<String, PendingPermission>,
+    approval_modes: &crate::approval_mode::ApprovalModes,
+    id: &str,
+    thread_id: ThreadId,
+    reviewer: &crate::auto_review::Reviewer,
+    cancel: &CancellationToken,
+    receiver: &mut oneshot::Receiver<PermissionResolution>,
+) -> CoreResult<Reviewed> {
+    loop {
+        let abort = permissions
+            .get(id)
+            .and_then(|entry| entry.review_abort.clone())
+            .unwrap_or_default();
+        let outcome = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                permissions.remove(id);
+                return Err(CoreError::Cancelled);
+            }
+            resolution = &mut *receiver => {
+                return resolution.map(Reviewed::Resolved).map_err(|_| CoreError::Cancelled);
+            }
+            () = abort.cancelled() => None,
+            outcome = reviewer.review() => Some(outcome),
+        };
+        let gate = approval_modes.gate.lock().await;
+        let auto = approval_modes.is_auto(thread_id).await;
+        let Some(mut entry) = permissions.get_mut(id) else {
+            drop(gate);
+            return receiver
+                .await
+                .map(Reviewed::Resolved)
+                .map_err(|_| CoreError::Cancelled);
+        };
+        match outcome {
+            // Out of Auto and back before the review saw it: review again.
+            None if auto => {
+                entry.review_abort = Some(CancellationToken::new());
+                continue;
+            }
+            Some(crate::auto_review::Outcome::Allow) if auto => {
+                drop(entry);
+                permissions.remove(id);
+                return Ok(Reviewed::Resolved(PermissionResolution::allowed()));
+            }
+            Some(crate::auto_review::Outcome::Deny(review)) if auto => {
+                drop(entry);
+                permissions.remove(id);
+                return Ok(Reviewed::Blocked(review));
+            }
+            Some(crate::auto_review::Outcome::Ask(review)) if auto => {
+                entry.review = Some(review);
+                entry.stage = ReviewStage::Reviewed;
+            }
+            _ => entry.stage = ReviewStage::Unreviewed,
+        }
+        entry.announced = true;
+        drop(entry);
+        drop(gate);
+        return Ok(Reviewed::Show);
+    }
+}
+
+/// Reviews a request already shown when its chat switched to Auto. It stays
+/// shown unless the reviewer approves or blocks it; a person's answer, Stop
+/// or a switch back to Review ends the review.
+async fn review_waiting(
+    permissions: Arc<DashMap<String, PendingPermission>>,
+    events: EventBus,
+    approval_modes: Arc<crate::approval_mode::ApprovalModes>,
+    id: String,
+    reviewer: Arc<crate::auto_review::Reviewer>,
+    abort: CancellationToken,
+) {
+    let outcome = tokio::select! {
+        () = reviewer.cancel.cancelled() => None,
+        () = abort.cancelled() => None,
+        outcome = reviewer.review() => Some(outcome),
+    };
+    let _gate = approval_modes.gate.lock().await;
+    let Some(mut entry) = permissions.get_mut(&id) else {
+        return;
+    };
+    entry.stage = ReviewStage::Unreviewed;
+    let thread_id = entry.thread_id;
+    drop(entry);
+    let Some(outcome) = outcome else {
+        return;
+    };
+    if !approval_modes.is_auto(thread_id).await {
+        return;
+    }
+    let resolution = match outcome {
+        crate::auto_review::Outcome::Allow => PermissionResolution::allowed(),
+        crate::auto_review::Outcome::Deny(review) => PermissionResolution {
+            allowed: false,
+            feedback: None,
+            review: Some(review),
+        },
+        crate::auto_review::Outcome::Ask(_) => {
+            if let Some(mut entry) = permissions.get_mut(&id) {
+                entry.stage = ReviewStage::Reviewed;
+            }
+            return;
+        }
+    };
+    if let Some((_, pending)) = permissions.remove(&id) {
+        publish_permission_resolved(&events, &id, &pending, resolution.allowed);
+        let _ = pending.sender.send(resolution);
+    }
+}
+
+/// A rule about a whole tool (`"bash": "ask"`, `"*": "ask"`): it says how
+/// strict Review is, rather than naming an action a person wants to see, so
+/// Auto's reviewer still answers what it asks.
+fn whole_tool_rule(pattern: &str) -> bool {
+    pattern == "*"
+        || pattern
+            .split_once(':')
+            .is_some_and(|(_, target)| target == "*")
 }
 
 /// Allows every waiting prompt that newly remembered `rules` cover, at once:
@@ -6178,10 +6519,7 @@ fn release_covered_permissions(
     for other in covered {
         if let Some((_, pending)) = permissions.remove(&other) {
             publish_permission_resolved(events, &other, &pending, true);
-            let _ = pending.sender.send(PermissionResolution {
-                allowed: true,
-                feedback: None,
-            });
+            let _ = pending.sender.send(PermissionResolution::allowed());
         }
     }
 }
@@ -6314,6 +6652,7 @@ impl PendingPermission {
             turn_id: self.turn_id,
             agent: self.agent.clone(),
             created_at: self.created_at,
+            review: self.review.clone(),
         }
     }
     /// Every asked pattern is covered by some rule in `rules`.
@@ -6339,6 +6678,26 @@ impl PendingPermission {
 struct PermissionResolution {
     allowed: bool,
     feedback: Option<String>,
+    /// Auto's reviewer refused it (a request it reviewed while it waited).
+    review: Option<haarness_protocol::PermissionReview>,
+}
+
+impl PermissionResolution {
+    fn allowed() -> Self {
+        Self {
+            allowed: true,
+            feedback: None,
+            review: None,
+        }
+    }
+
+    fn rejected(feedback: Option<String>) -> Self {
+        Self {
+            allowed: false,
+            feedback,
+            review: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8278,12 +8637,18 @@ impl RunnerTask {
                             // structured logs, but do not make the parent model
                             // or transcript parse transport JSON to understand
                             // why its child failed.
+                            // A block by Auto's reviewer says so, so clients
+                            // tell it from a person's reject.
+                            let metadata = match &error {
+                                CoreError::ReviewBlocked(review) => json!({ "review": review }),
+                                _ => serde_json::Value::Null,
+                            };
                             self.publish_item(ItemData::ToolResult {
                                 call_id: call_id.clone(),
                                 name: name.clone(),
                                 output: user_facing_error(&error),
                                 is_error: true,
-                                metadata: serde_json::Value::Null,
+                                metadata,
                             })
                             .await?;
                         }
@@ -9070,6 +9435,9 @@ impl RunnerTask {
         let mut pending_plans = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
+        // Asks a person configured about something narrower than a whole
+        // tool: in Auto they go to a person, not to the reviewer.
+        let mut personal = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -9119,6 +9487,11 @@ impl RunnerTask {
                         if evaluation.protected {
                             protected.insert(plan.operation(pattern));
                         }
+                        if evaluation.configured
+                            && !evaluation.matched.as_deref().is_some_and(whole_tool_rule)
+                        {
+                            personal.insert(plan.operation(pattern));
+                        }
                         asked.push(pattern.clone());
                     }
                     PermissionDecision::Allow => {}
@@ -9144,9 +9517,24 @@ impl RunnerTask {
                         .is_some_and(|tool| tool.explicit_approval(&arguments, operation))
                 })
                 .collect();
+            let reviewable = !plan
+                .patterns
+                .iter()
+                .any(|pattern| personal.contains(&plan.operation(pattern)));
             let resolution = self
-                .ask_permission(agent, &plan, &arguments, forced, explicit)
+                .ask_permission(
+                    agent,
+                    &plan,
+                    &arguments,
+                    forced,
+                    explicit,
+                    reviewable,
+                    (name, call_id),
+                )
                 .await?;
+            if let Some(review) = resolution.review {
+                return Err(CoreError::ReviewBlocked(Box::new(review)));
+            }
             if !resolution.allowed {
                 let message = match resolution.feedback {
                     Some(feedback) if !feedback.trim().is_empty() => format!(
@@ -9328,6 +9716,39 @@ impl RunnerTask {
         engine
     }
 
+    /// What Auto's reviewer needs to decide `plan`, raised by `tool`.
+    fn reviewer(
+        &self,
+        plan: &AskPlan,
+        detail: &serde_json::Value,
+        tool: (&str, &str),
+    ) -> crate::auto_review::Reviewer {
+        crate::auto_review::Reviewer {
+            request: crate::auto_review::ReviewRequest {
+                permission: plan.permission.clone(),
+                patterns: plan.patterns.clone(),
+                detail: detail.clone(),
+                tool: Some((tool.0.to_owned(), tool.1.to_owned())),
+                thread_id: self.thread.id,
+                root_thread_id: self.root_thread_id,
+                turn_id: Some(self.turn.id),
+            },
+            repository: Arc::clone(&self.repository),
+            providers: Arc::clone(&self.providers),
+            settings: self.config.auto_review.clone(),
+            policy: self.config.prompts.text(crate::PromptName::AutoReview),
+            small_model: self.config.small_model.clone(),
+            model: (self.turn.provider.clone(), self.turn.model.clone()),
+            workspace: self.workspace.clone(),
+            state: Arc::clone(&self.approval_modes.reviews),
+            cancel: self.cancel.clone(),
+        }
+    }
+
+    /// `reviewable`: Auto's reviewer may answer it (no asked pattern is one
+    /// a person configured an ask for). `tool`: the tool and call that raise
+    /// it.
+    #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
         agent: &str,
@@ -9335,6 +9756,8 @@ impl RunnerTask {
         detail: &serde_json::Value,
         forced: bool,
         explicit_operations: Vec<String>,
+        reviewable: bool,
+        tool: (&str, &str),
     ) -> CoreResult<PermissionResolution> {
         let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
@@ -9369,10 +9792,7 @@ impl RunnerTask {
                 operation = %operation_for_log(&operation),
                 "auto-approved (--yolo)"
             );
-            return Ok(PermissionResolution {
-                allowed: true,
-                feedback: None,
-            });
+            return Ok(PermissionResolution::allowed());
         }
         if let Some(hooks) = &self.hooks {
             // A hook answers Always only where a person's Always would be
@@ -9388,31 +9808,30 @@ impl RunnerTask {
             match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, always, detail).await
             {
                 HookAnswer::Refused(feedback) => {
-                    return Ok(PermissionResolution {
-                        allowed: false,
-                        feedback: Some(feedback),
-                    });
+                    return Ok(PermissionResolution::rejected(Some(feedback)));
                 }
                 HookAnswer::Allowed { always } if !forced && !explicit => {
                     if always {
                         self.remember_hook_always(&operation, &always_rules);
                     }
-                    return Ok(PermissionResolution {
-                        allowed: true,
-                        feedback: None,
-                    });
+                    return Ok(PermissionResolution::allowed());
                 }
                 HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
         let id = uuid::Uuid::now_v7().to_string();
-        let (sender, receiver) = oneshot::channel();
-        // A chat in Auto approves eligible requests once, without a prompt.
-        // The gate orders this with a mode change: either Auto is visible
-        // here, or the change sees the registered prompt and releases it.
+        let (sender, mut receiver) = oneshot::channel();
+        // In a chat in Auto, eligible requests go to the reviewer (or, with
+        // it off, are approved once). The gate orders this with a mode
+        // change: either Auto is visible here, or the change sees the
+        // registered prompt and reviews or releases it.
+        let review_on = self.config.auto_review.enabled;
+        let reviewer = (!forced && !explicit && reviewable && review_on)
+            .then(|| Arc::new(self.reviewer(plan, detail, tool)));
         let approval_gate = self.approval_modes.gate.lock().await;
         let auto = !forced && !explicit && self.approval_modes.is_auto(self.thread.id).await;
+        let review_now = auto && reviewer.is_some();
         // Re-evaluate while holding the same lock used to install an Always
         // rule, and register the prompt before releasing it. This closes the
         // late-sibling race: either the new rule is already visible and no
@@ -9433,21 +9852,15 @@ impl RunnerTask {
                     }
                 })
             {
-                return Ok(PermissionResolution {
-                    allowed: true,
-                    feedback: None,
-                });
+                return Ok(PermissionResolution::allowed());
             }
-            if auto {
+            if auto && !review_on {
                 tracing::info!(
                     thread = %self.thread.id,
                     operation = %operation_for_log(&operation),
                     "approved once (Auto)"
                 );
-                return Ok(PermissionResolution {
-                    allowed: true,
-                    feedback: None,
-                });
+                return Ok(PermissionResolution::allowed());
             }
             self.permissions.insert(
                 id.clone(),
@@ -9469,10 +9882,56 @@ impl RunnerTask {
                     agent: Some(self.thread.agent.clone()),
                     created_at: Utc::now(),
                     sender,
+                    announced: !review_now,
+                    stage: if review_now {
+                        ReviewStage::Reviewing
+                    } else {
+                        ReviewStage::Unreviewed
+                    },
+                    review: None,
+                    reviewer: reviewer.clone(),
+                    review_abort: review_now.then(CancellationToken::new),
                 },
             );
         }
         drop(approval_gate);
+        // The review runs with no lock held: a mode change, a reply to
+        // another request or a Stop is never held up by a model call.
+        if let Some(reviewer) = reviewer.as_ref().filter(|_| review_now) {
+            self.set_status("reviewing", Some(tool));
+            let settled = review_registered(
+                &self.permissions,
+                &self.approval_modes,
+                &id,
+                self.thread.id,
+                reviewer,
+                &self.cancel,
+                &mut receiver,
+            )
+            .await?;
+            match settled {
+                Reviewed::Resolved(resolution) => {
+                    self.set_status("tool", Some(tool));
+                    if resolution.allowed && resolution.review.is_none() {
+                        tracing::info!(
+                            thread = %self.thread.id,
+                            operation = %operation_for_log(&operation),
+                            "approved once (Auto review)"
+                        );
+                    }
+                    return Ok(resolution);
+                }
+                Reviewed::Blocked(review) => {
+                    self.set_status("tool", Some(tool));
+                    return Err(CoreError::ReviewBlocked(Box::new(review)));
+                }
+                Reviewed::Show => {}
+            }
+        }
+        let review = self
+            .permissions
+            .get(&id)
+            .and_then(|entry| entry.review.clone());
         self.publish_item(ItemData::PermissionRequest {
             permission_id: id.clone(),
             operation: operation.clone(),
@@ -9480,15 +9939,10 @@ impl RunnerTask {
             permission: plan.permission.clone(),
             patterns: plan.patterns.clone(),
             always_patterns: always_rules.clone(),
+            review: review.clone(),
         })
         .await?;
-        self.events.publish_scoped(
-            "permission.requested",
-            Some(self.thread.id),
-            Some(self.root_thread_id),
-            Some(self.turn.id),
-            None,
-            json!({
+        let mut requested = json!({
                 "permissionId": id,
                 "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
                 "allowAlways": !forced,
@@ -9502,7 +9956,17 @@ impl RunnerTask {
                 "rootThreadId": self.root_thread_id,
                 "turnId": self.turn.id,
                 "agent": self.thread.agent,
-            }),
+        });
+        if let Some(review) = &review {
+            requested["review"] = json!(review);
+        }
+        self.events.publish_scoped(
+            "permission.requested",
+            Some(self.thread.id),
+            Some(self.root_thread_id),
+            Some(self.turn.id),
+            None,
+            requested,
         );
         self.set_status("waiting_permission", None);
         if let Some(hooks) = &self.hooks {
@@ -11829,6 +12293,7 @@ impl AskPlan {
                 .insert(pattern.to_owned(), rule.clone().unwrap_or_default());
             return crate::permissions::Evaluation {
                 decision,
+                configured: rule.is_some(),
                 matched: rule,
                 protected: decision == PermissionDecision::Ask,
             };
@@ -11850,6 +12315,7 @@ impl AskPlan {
                 decision,
                 matched: Some(rule),
                 protected: decision == PermissionDecision::Ask,
+                configured: true,
             };
         }
         evaluation

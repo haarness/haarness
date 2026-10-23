@@ -42,6 +42,14 @@ pub struct BashAnalysis {
     /// [`MAX_PATTERN_BYTES`], or it is longer than [`MAX_COMMAND_BYTES`]):
     /// its written patterns may be clipped, and no rule allows it.
     pub unreadable: bool,
+    /// What `rm`, `rmdir` and `unlink` are given to delete, wherever the line
+    /// runs them (behind a wrapper, in text run again): each word as written,
+    /// its value after quotes, and whether that value is all literal. Auto's
+    /// reviewer places them (see [`outside_deletions`]).
+    pub deletions: Vec<(String, String, bool)>,
+    /// The line changes directory (`cd`, `pushd`), so a relative path after
+    /// it may land somewhere else.
+    pub changes_directory: bool,
 }
 
 /// One command as written in the line.
@@ -70,6 +78,9 @@ pub struct Derived {
 const PATH_COMMANDS: &[&str] = &[
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
 ];
+
+/// Commands whose non-flag arguments are paths they delete.
+const DELETERS: &[&str] = &["rm", "rmdir", "unlink"];
 
 /// How many strings deep commands are read: `bash -c "eval 'sh -c …'"`.
 const MAX_NESTING: u8 = 4;
@@ -838,6 +849,19 @@ impl Reader<'_> {
         };
         let (name, complete) = path_literal(program.node, source);
         let name = program_name(&name);
+        if complete && matches!(name.as_str(), "cd" | "pushd") {
+            self.analysis.changes_directory = true;
+        }
+        if complete && DELETERS.contains(&name.as_str()) {
+            for word in arguments {
+                let (argument, literal) = path_literal(word.node, source);
+                if !argument.starts_with('-') {
+                    self.analysis
+                        .deletions
+                        .push((word.raw.clone(), argument, literal));
+                }
+            }
+        }
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
         }
@@ -1493,6 +1517,34 @@ fn fallback(command: &str) -> BashAnalysis {
         always,
         ..BashAnalysis::default()
     }
+}
+
+/// The paths outside `workspace` that `command` deletes when it runs from
+/// `workdir` (the project when `None`), placed where they really lead. A path
+/// with a variable or a substitution cannot be placed, and neither can a
+/// relative one in a line that changes directory: both count as outside, and
+/// are given as written.
+#[must_use]
+pub fn outside_deletions(command: &str, workspace: &Path, workdir: Option<&Path>) -> Vec<String> {
+    let analysis = analyze(command, workspace);
+    let base = workdir.unwrap_or(workspace);
+    let project = resolve(workspace, Path::new(""));
+    analysis
+        .deletions
+        .iter()
+        .filter_map(|(raw, value, complete)| {
+            let home = home_expansion(raw, value);
+            let relative = home.is_none() && !Path::new(value).is_absolute();
+            if !complete || (relative && analysis.changes_directory) {
+                return Some(raw.clone());
+            }
+            let resolved = match home {
+                Some(expanded) => resolve(base, &expanded),
+                None => resolve(base, Path::new(value)),
+            };
+            (!resolved.starts_with(&project)).then(|| resolved.display().to_string())
+        })
+        .collect()
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -2597,6 +2649,54 @@ mod readings {
                 "{command}"
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deletions_outside_the_project_are_placed_where_they_lead() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-deletions-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        std::fs::create_dir_all(outside.join("cache")).unwrap();
+        let outside_real = outside.canonicalize().unwrap();
+        let cache = outside_real.join("cache").display().to_string();
+        // Inside the project, as written or through `..` that stays there.
+        assert!(outside_deletions("rm -rf build", &workspace, None).is_empty());
+        assert!(outside_deletions("rm -rf ./build/../build", &workspace, None).is_empty());
+        for command in [
+            format!("rm -rf {}/cache", outside.display()),
+            format!("sudo rm -rf {}/cache", outside.display()),
+            format!("/bin/rm -r {}/cache", outside.display()),
+            format!("command rmdir {}/cache", outside.display()),
+            format!("bash -c 'unlink {}/cache'", outside.display()),
+            "rm -rf ../outside/cache".to_owned(),
+        ] {
+            assert_eq!(
+                outside_deletions(&command, &workspace, None),
+                vec![cache.clone()],
+                "{command}"
+            );
+        }
+        // A workdir places relative paths.
+        assert_eq!(
+            outside_deletions("rm -rf cache", &workspace, Some(&outside)),
+            vec![cache.clone()]
+        );
+        // A variable, or a relative path after `cd`, cannot be placed.
+        assert_eq!(
+            outside_deletions("rm -rf \"$TARGET\"", &workspace, None),
+            vec!["\"$TARGET\"".to_owned()]
+        );
+        assert_eq!(
+            outside_deletions("cd /tmp && rm -rf build", &workspace, None),
+            vec!["build".to_owned()]
+        );
+        // Other programs' arguments are not deletions.
+        assert!(
+            outside_deletions(&format!("ls {}", outside.display()), &workspace, None).is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

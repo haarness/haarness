@@ -3016,6 +3016,17 @@
               "permission_id": {
                 "type": "string"
               },
+              "review": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PermissionReview",
+                    "description": "Why Auto's reviewer left it to a person, when it did."
+                  }
+                ]
+              },
               "type": {
                 "enum": [
                   "permission_request"
@@ -4139,6 +4150,17 @@
               "null"
             ]
           },
+          "review": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PermissionReview",
+                "description": "Set when Auto's reviewer left this request to a person: it asked,\ncould not decide, or paused for the turn."
+              }
+            ]
+          },
           "rootThreadId": {
             "oneOf": [
               {
@@ -4252,6 +4274,52 @@
           "always_workspace",
           "always_repository",
           "reject"
+        ],
+        "type": "string"
+      },
+      "PermissionReview": {
+        "description": "Auto's reviewer's note: on a permission request it left to a person, and\nin the metadata (`review`) of a tool result it blocked.",
+        "properties": {
+          "rationale": {
+            "description": "One or two sentences for the person.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "risk": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReviewRisk"
+              }
+            ]
+          },
+          "rule": {
+            "description": "A short category the reviewer named (Destructive action, \u2026).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/PermissionReviewStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "PermissionReviewStatus": {
+        "description": "Why Auto's reviewer left a request to a person, or blocked a call.",
+        "enum": [
+          "asked",
+          "failed",
+          "paused",
+          "blocked"
         ],
         "type": "string"
       },
@@ -5007,6 +5075,16 @@
           "explanation"
         ],
         "type": "object"
+      },
+      "ReviewRisk": {
+        "description": "The risk the reviewer rated an action.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "type": "string"
       },
       "ScheduleOrigin": {
         "properties": {

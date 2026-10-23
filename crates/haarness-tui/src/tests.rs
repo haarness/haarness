@@ -2350,6 +2350,7 @@ fn new_item_kinds_render_in_the_transcript() {
                 permission: "bash".into(),
                 patterns: vec!["rm -rf target".into()],
                 always_patterns: vec!["bash:rm *".into()],
+                review: None,
             },
         ),
         message_item(
@@ -2437,6 +2438,7 @@ fn new_item_kinds_render_in_the_transcript() {
             turn_id: None,
             agent: None,
             created_at: chrono::Utc::now(),
+            review: None,
         });
     let text: String = app
         .lines((100, 40))
@@ -8300,6 +8302,7 @@ fn pending_permission_fixture(
         turn_id: None,
         agent: None,
         created_at: Utc::now(),
+        review: None,
     }
 }
 
@@ -8511,6 +8514,7 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
             turn_id: None,
             agent: None,
             created_at: Utc::now(),
+            review: None,
         });
     app.permission_focus = true;
 
@@ -9270,6 +9274,7 @@ async fn a_compact_terminal_shows_the_waiting_request_and_its_answers() {
             turn_id: None,
             agent: None,
             created_at: Utc::now(),
+            review: None,
         }],
         &offline_client(),
     )
@@ -10142,6 +10147,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
                 permission: "bash".into(),
                 patterns: vec!["echo hover".into()],
                 always_patterns: vec![],
+                review: None,
             },
         ),
     ];
@@ -10182,6 +10188,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             turn_id: None,
             agent: None,
             created_at: Utc::now(),
+            review: None,
         });
     app.children.insert(
         "task-hover".into(),
@@ -15617,6 +15624,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         turn_id: None,
         agent: None,
         created_at: chrono::Utc::now(),
+        review: None,
     };
     app.hydrate_permissions(
         vec![
