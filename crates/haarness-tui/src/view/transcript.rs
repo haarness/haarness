@@ -848,12 +848,13 @@ fn render_question(
             theme.muted,
         ));
     }
-    if active && question.multiple {
+    if active && !question.choices.is_empty() {
         transcript.push(line(
-            if question.custom {
-                "    ↑↓ move · space toggle · enter confirm · type custom"
-            } else {
-                "    ↑↓ move · space toggle · enter confirm"
+            match (question.multiple, question.custom) {
+                (true, true) => "    ↑↓ move · space toggle · enter confirm · type custom",
+                (true, false) => "    ↑↓ move · space toggle · enter confirm",
+                (false, true) => "    ↑↓ move · enter choose · type custom",
+                (false, false) => "    ↑↓ move · enter choose",
             },
             theme.muted,
         ));

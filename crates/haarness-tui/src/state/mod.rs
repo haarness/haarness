@@ -632,6 +632,9 @@ pub struct Toast {
     /// Repeats the approval card. It stays hidden while the card itself is on
     /// screen, and only shows where a dialog or a small terminal hides it.
     pub approval: bool,
+    /// Repeats a question waiting for an answer: hidden while the question
+    /// itself shows in the conversation.
+    pub question: bool,
 }
 
 /// A context estimate keyed by the shown thread's item count, last sequence
@@ -1449,6 +1452,7 @@ impl App {
             variant,
             expires_at: std::time::Instant::now() + duration,
             approval: false,
+            question: false,
         });
     }
 

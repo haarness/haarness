@@ -695,12 +695,16 @@ impl App {
                     }
                     let message = format!("Haarness needs your answer: {prompt}");
                     self.pending_notification = Some(message.clone());
+                    // Drawn only where the question itself is out of view.
                     self.show_toast(
                         None,
                         message,
                         ToastVariant::Warning,
                         std::time::Duration::from_secs(8),
                     );
+                    if let Some(toast) = &mut self.notification_toast {
+                        toast.question = true;
+                    }
                 }
             }
             "question.resolved" => {
