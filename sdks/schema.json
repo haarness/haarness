@@ -2685,6 +2685,17 @@
               "permission_id": {
                 "type": "string"
               },
+              "review": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PermissionReview",
+                    "description": "Why Auto's reviewer left it to a person, when it did."
+                  }
+                ]
+              },
               "type": {
                 "enum": [
                   "permission_request"
@@ -3726,6 +3737,17 @@
               "null"
             ]
           },
+          "review": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PermissionReview",
+                "description": "Set when Auto's reviewer left this request to a person: it asked,\ncould not decide, or paused for the turn."
+              }
+            ]
+          },
           "rootThreadId": {
             "oneOf": [
               {
@@ -3829,9 +3851,11 @@
       "PermissionReply": {
         "properties": {
           "decision": {
-            "$ref": "#/components/schemas/PermissionReplyDecision"
+            "$ref": "#/components/schemas/PermissionReplyDecision",
+            "description": "The answer. `once` allows this call; `always` allows it and what its\nrule covers until the server stops (in this chat only for a Chrome\nsite, whose rule names the chat); `always_workspace`\nalso persists the rule for this workspace, and `always_repository`\nfor every worktree of its Git repository (both act as `always` for a\nrequest only a person answers); `reject` is a person's no, which also\nrejects the other requests waiting in the same conversation, with\n`feedback` as their words. `refuse` is for unattended runners only\n(a run nobody can answer): it ends this one request, leaves the\nothers waiting, and the agent's error is worded as Haarness's, with\n`feedback` as the reason."
           },
           "feedback": {
+            "description": "For `reject`, what the person said; for `refuse`, why nobody could\nanswer. Ignored for the allowing answers.",
             "type": [
               "string",
               "null"
@@ -3849,7 +3873,67 @@
           "always",
           "always_workspace",
           "always_repository",
-          "reject"
+          "reject",
+          "refuse"
+        ],
+        "type": "string"
+      },
+      "PermissionReview": {
+        "description": "Auto's reviewer's note: on a permission request it left to a person, and\nin the metadata (`review`) of a tool result it blocked.",
+        "properties": {
+          "rationale": {
+            "description": "One or two sentences for the person: the reviewer's own words, or\nHaarness's in English when `reason` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReviewReason",
+                "description": "Set when Haarness wrote the note itself."
+              }
+            ]
+          },
+          "risk": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReviewRisk"
+              }
+            ]
+          },
+          "rule": {
+            "description": "A short category the reviewer named (Destructive action, \u2026).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/PermissionReviewStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "PermissionReviewStatus": {
+        "description": "Why Auto's reviewer left a request to a person, or blocked a call.",
+        "enum": [
+          "asked",
+          "failed",
+          "paused",
+          "blocked",
+          "reviewing",
+          "unknown"
         ],
         "type": "string"
       },
@@ -4634,6 +4718,278 @@
           "explanation"
         ],
         "type": "object"
+      },
+      "ReviewReason": {
+        "description": "What a note Haarness wrote itself says, so a client can word it in the\nperson's language; `rationale` carries the same in English for clients\nthat do not know the code.",
+        "oneOf": [
+          {
+            "description": "The review took longer than its deadline.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "timeout"
+                ],
+                "type": "string"
+              },
+              "seconds": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "seconds",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The action is too long to review whole.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "too_long"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No model was available to review it.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "no_model"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The reviewer's calls failed; `detail` is the last error.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "error"
+                ],
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "detail",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reviewing paused after `count` blocks in a row this turn.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "streak"
+                ],
+                "type": "string"
+              },
+              "count": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "count",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reviewing paused after `count` blocks this turn.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "turn_limit"
+                ],
+                "type": "string"
+              },
+              "count": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "count",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command deletes `path`, outside the project, which the person's\nmessages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unnamed_deletion"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command deletes `path` (as written: a variable, what `xargs`\npasses, a path after a directory change), which Haarness cannot place\nand the person's messages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unplaced_deletion"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command overwrites or empties the file at `path`, outside the\nproject, which the person's messages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unnamed_overwrite"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command overwrites the file at `path` (as written), which\nHaarness cannot place and the person's messages do not name.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unplaced_overwrite"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A shell (`program`) runs a here-document Haarness could not read.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unread_script"
+                ],
+                "type": "string"
+              },
+              "program": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "program",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command runs `program`'s inline code (`python3 -c`, `perl -e`),\nwhich plainly deletes or names a path outside the project, and the\nperson's messages do not ask for it.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "inline_code"
+                ],
+                "type": "string"
+              },
+              "program": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "program",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The reviewer rated the action's risk (see `risk`) and gave no reason.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "rated"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A code a newer server sends: show `rationale`.",
+            "properties": {
+              "code": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReviewRisk": {
+        "description": "The risk the reviewer rated an action.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical",
+          "unknown"
+        ],
+        "type": "string"
       },
       "ScheduleOrigin": {
         "properties": {

@@ -169,7 +169,10 @@ a second Ctrl-C or SIGTERM still exits at once); a run without a terminal,
 such as one under `nohup`, leaves SIGHUP as it found it. A permission prompt during
 `haarness run` is asked at the terminal; without one (a script, CI), the run
 refuses it and stops, naming what was asked: allow it with a permission rule,
-or pass `--yolo`. After an ungraceful server/process failure,
+or pass `--yolo`. `haarness run --auto` without a terminal instead refuses each
+request that still needs a person and goes on, stopping after five refusals in
+a row; it exits with status 3 when it finished but refused any (see
+[Auto approvals](AUTO-APPROVALS.md)). After an ungraceful server/process failure,
 Haarness preserves recorded transcript work and marks orphaned effects
 interrupted; it never blindly replays shell, edit, or other side-effecting tools.
 Any active goal is restored as paused—not falsely pursuing—until new user input
@@ -198,7 +201,11 @@ the next prompt starts, or can be answered from another Haarness app; after a
 reconnect or a gap in the event stream, the requests the server holds are read
 again, so one raised or settled meanwhile is not missed. "Allow
 while Haarness is running" is offered only where the request allows more
-than once.
+than once. In a session in Auto, a request Auto's reviewer leaves to a person
+carries its note in the title, and a call it blocks, the session's own or a
+subagent's, live or replayed by `session/load`, reads "Blocked by Auto review:
+<reason>" with the note as its raw output, never the text written for the
+model.
 
 `haarness attach <url>` is the first-class interactive client for an existing
 server; `tui --connect` remains an alias-shaped compatibility entrypoint, and
@@ -645,6 +652,8 @@ edits write only the keys they change, in the entry's own shape, and `haarness m
 --show-secrets` shows the entry as written.
 
 Answering an approval with **Always** (`a`) saves the rule shown on the card, which is a pattern rather than the exact call (approving `rm -rf build` allows every `rm` command), for every chat on that server until it stops. **This folder** (`w`) and **Repository** (`r`) answers are saved in the local database and apply after restarts. See [Permissions and approvals](https://haarness.ai/docs/security/permissions#what-does-always-remember). Global skills live in `~/.config/haarness/skills/<name>/SKILL.md` (where `haarness skill create` writes them); project skills live in `.haarness/skills/<name>/SKILL.md`.
+
+`auto_review` (`[auto_review]` in TOML) sets how Auto's reviewer works: `enabled` (default true), `model` (`provider/model`; default your global `small_model` when it is on the chat's provider, then the chat's model), `environment`, `allow` and `block` (plain-language lines), and `timeout` (seconds, default 60). A project file may only add `block` entries and lower `timeout`; its `small_model` never picks the reviewer. See [Auto's reviewer](AUTO-APPROVALS.md#autos-reviewer).
 
 The JSON/JSONC form (`haarness.json`, including legacy filename aliases) accepts the same sections plus the ecosystem keys `instructions` (extra instruction files: globs, `~/` paths, absolute paths and `http(s)://` URLs), `skills` (`paths` and remote `urls` indexes), and `compatibility.claude_code` (opt-in `instructions`, `agents`, `commands`, `skills` discovery of Claude Code files, all off by default). Markdown agents accept `hidden`, `color`, `steps`, `disable`, `temperature`, `top_p` and `variant`; commands accept `subtask: true` as `context: fork`; `@path` references in command templates attach file snapshots, directory listings or a subagent delegation hint. See [docs/CONFIGURATION-SCOPES.md](CONFIGURATION-SCOPES.md).
 

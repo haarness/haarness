@@ -76,6 +76,11 @@ pub struct JsonLayers {
     /// may report and continue for compatibility; hot reload rejects the
     /// whole candidate and retains the last-known-good generation.
     pub errors: Vec<String>,
+    /// `auto_review` from every layer: the base and global layers set it,
+    /// a project's only add `block` entries (kept apart) and lower `timeout`.
+    pub auto_review: haarness_core::AutoReviewSettings,
+    /// The project layers are loading.
+    pub(crate) project: bool,
 }
 
 pub struct HookSource {
@@ -157,6 +162,7 @@ pub fn load_layers_with_base(
         apply_json_config(&mut layers, &config_dir.join(name), true);
     }
     let global_providers = layers.native.providers.clone();
+    layers.project = true;
     // Project files override global defaults; nested worktree layers override ancestors.
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
@@ -185,6 +191,7 @@ pub fn load_layers_with_base(
             }
         }
     }
+    layers.project = false;
     layers.native.provider_notices =
         super::guard_project_providers(&global_providers, &mut layers.native.providers);
     // Plugin bundles: the user installed them, so their hooks/MCP are
@@ -833,7 +840,16 @@ fn apply_toml(layers: &mut JsonLayers, path: &Path) {
         return;
     }
     let result = (|| -> anyhow::Result<()> {
-        let config: super::FileConfig = toml::from_str(&fs::read_to_string(path)?)?;
+        let mut config: super::FileConfig = toml::from_str(&fs::read_to_string(path)?)?;
+        merge_auto_review(layers, config.auto_review.take(), path);
+        if let Some(small) = config
+            .defaults
+            .as_ref()
+            .and_then(|defaults| defaults.small_model.clone())
+            .filter(|_| !layers.project)
+        {
+            layers.auto_review.small_model = Some(small);
+        }
         if let Some(permissions) = &config.permissions {
             layers
                 .rules
@@ -850,6 +866,75 @@ fn apply_toml(layers: &mut JsonLayers, path: &Path) {
         layers
             .errors
             .push(format!("invalid configuration {}: {error}", path.display()));
+    }
+}
+
+/// One layer's `auto_review` onto what the layers below it set. A project's
+/// files come from the repository, so they may only make the review
+/// stricter: add `block` entries, which the reviewer reads as untrusted, and
+/// lower `timeout`. Anything else they set is left out, with a notice.
+fn merge_auto_review(
+    layers: &mut JsonLayers,
+    section: Option<super::AutoReviewSection>,
+    path: &Path,
+) {
+    let Some(section) = section else {
+        return;
+    };
+    let review = &mut layers.auto_review;
+    let timeout = section
+        .timeout
+        .map(|seconds| Duration::from_secs(seconds.max(1)));
+    if layers.project {
+        let mut ignored = Vec::new();
+        if section.enabled.is_some() {
+            ignored.push("enabled");
+        }
+        if section.model.is_some() {
+            ignored.push("model");
+        }
+        if !section.environment.is_empty() {
+            ignored.push("environment");
+        }
+        if !section.allow.is_empty() {
+            ignored.push("allow");
+        }
+        match timeout {
+            Some(timeout) if timeout <= review.timeout => review.timeout = timeout,
+            Some(_) => ignored.push("timeout"),
+            None => {}
+        }
+        review.project_block.extend(section.block);
+        if !ignored.is_empty() {
+            layers.notices.push(format!(
+                "{}: ignored auto_review.{}: a project may only add block entries and lower the timeout",
+                path.display(),
+                ignored.join(", auto_review.")
+            ));
+        }
+        return;
+    }
+    if let Some(enabled) = section.enabled {
+        review.enabled = enabled;
+    }
+    if let Some(model) = section.model {
+        if model
+            .split_once('/')
+            .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+        {
+            review.model = Some(model);
+        } else {
+            layers.notices.push(format!(
+                "{}: ignored auto_review.model {model:?}: write it as provider/model",
+                path.display()
+            ));
+        }
+    }
+    review.environment.extend(section.environment);
+    review.allow.extend(section.allow);
+    review.block.extend(section.block);
+    if let Some(timeout) = timeout {
+        review.timeout = timeout;
     }
 }
 
@@ -897,7 +982,10 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
             object.remove("mcp");
         }
         match serde_json::from_value::<super::FileConfig>(native) {
-            Ok(config) => super::merge_file_config(&mut layers.native, config),
+            Ok(mut config) => {
+                merge_auto_review(layers, config.auto_review.take(), path);
+                super::merge_file_config(&mut layers.native, config);
+            }
             Err(error) => layers
                 .errors
                 .push(format!("invalid configuration {}: {error}", path.display())),
@@ -917,6 +1005,11 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
     }
     if let Some(small) = value.get("small_model").and_then(Value::as_str) {
         layers.small_model = Some(small.to_owned());
+        // Auto's reviewer reads the person's messages: a project's file
+        // never picks where they go.
+        if !layers.project {
+            layers.auto_review.small_model = Some(small.to_owned());
+        }
     }
     if let Some(agent) = value.get("default_agent").and_then(Value::as_str) {
         layers.default_agent = Some(agent.to_owned());
@@ -2217,6 +2310,114 @@ mod tests {
             }
         }
         files
+    }
+
+    #[test]
+    fn a_project_may_only_make_auto_review_stricter() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-auto-review-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"auto_review": {
+                "model": "anthropic/claude-haiku",
+                "environment": ["origin is our GitHub org"],
+                "allow": ["Pushing feature branches"],
+                "block": ["Deploys"],
+                "timeout": 30
+            }}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"auto_review": {
+                "enabled": false,
+                "model": "attacker/model",
+                "allow": ["Everything"],
+                "block": ["Publishing packages"],
+                "timeout": 10
+            }}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let review = &layers.auto_review;
+        assert!(review.enabled, "a project cannot turn the reviewer off");
+        assert_eq!(review.model.as_deref(), Some("anthropic/claude-haiku"));
+        assert_eq!(review.environment, vec!["origin is our GitHub org"]);
+        assert_eq!(review.allow, vec!["Pushing feature branches"]);
+        assert_eq!(review.block, vec!["Deploys"]);
+        assert_eq!(review.project_block, vec!["Publishing packages"]);
+        assert_eq!(review.timeout, Duration::from_secs(10));
+        assert!(
+            layers.notices.iter().any(|notice| notice
+                .contains("ignored auto_review.enabled, auto_review.model, auto_review.allow")),
+            "{:?}",
+            layers.notices
+        );
+        // A project cannot raise the timeout either; without project
+        // configuration none of it applies.
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"auto_review": {"timeout": 300}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(layers.auto_review.timeout, Duration::from_secs(30));
+        // A project's small_model is the project's chats' default, never the
+        // reviewer's; the person's own is.
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"small_model": "openai/gpt-5", "auto_review": {"model": "openai/gpt-5"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(layers.small_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(layers.auto_review.small_model, None);
+        assert_eq!(
+            layers.auto_review.model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        fs::write(
+            config.join("config.toml"),
+            "[defaults]\nsmall_model = \"anthropic/claude-haiku\"\n",
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(
+            layers.auto_review.small_model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        fs::remove_file(config.join("config.toml")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"small_model": "anthropic/claude-haiku"}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(
+            layers.auto_review.small_model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        assert_eq!(
+            layers.auto_review.model, None,
+            "a project never names the reviewer"
+        );
+        let layers = load_layers_with_base(&config, None, None, &workspace, false, &[]);
+        assert!(layers.auto_review.project_block.is_empty());
+        // Defaults: on, the chat's models, a minute.
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let layers = load_layers_with_base(&empty, None, None, &empty, false, &[]);
+        assert_eq!(
+            layers.auto_review,
+            haarness_core::AutoReviewSettings::default()
+        );
+        assert!(layers.auto_review.enabled);
+        assert_eq!(layers.auto_review.timeout, Duration::from_secs(60));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

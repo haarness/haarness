@@ -124,9 +124,12 @@ struct Cli {
     #[arg(long, global = true, visible_alias = "dangerously-skip-permissions")]
     yolo: bool,
     /// Put the chat this command opens, starts or continues in Auto: its
-    /// server then approves eligible requests once, whichever app shows the
-    /// chat, until someone switches it back to Review. Permission denials
-    /// and requests that always ask still hold.
+    /// server's reviewer model then answers eligible requests (approving
+    /// routine ones once, leaving the rest to a person), whichever app shows
+    /// the chat, until someone switches it back to Review. Permission
+    /// denials and requests that always ask still hold. A `run` with no
+    /// terminal refuses each request that still needs a person and goes on
+    /// (five in a row stop it); it exits with status 3 when it refused any.
     #[arg(long, global = true, conflicts_with = "yolo")]
     auto: bool,
     /// Open a specific chat by id. `--session` is an alias.
@@ -1365,6 +1368,10 @@ struct ScheduleUpdateArgs {
 async fn main() -> Result<()> {
     let outcome = Box::pin(cli_main()).await;
     if let Err(error) = &outcome {
+        // Each refusal was already said on its own line.
+        if error.downcast_ref::<RunRefused>().is_some() {
+            std::process::exit(EXIT_REFUSED);
+        }
         record_start_failure(&format!("{error:#}"));
     }
     outcome
@@ -1718,7 +1725,7 @@ async fn cli_main() -> Result<()> {
             )
             .await
         }
-        Some(Command::Doctor) => doctor(&paths),
+        Some(Command::Doctor) => doctor(&paths, &workspace, project_config),
         Some(Command::Logs { .. }) => unreachable!("logs handled before project setup"),
         Some(Command::Upgrade(args)) => upgrade::run(args),
         }
@@ -1727,7 +1734,9 @@ async fn cli_main() -> Result<()> {
     .await;
     // Returned from main, the error reaches only stderr, which a detached
     // server does not have and the TUI hides: the log keeps why it ended.
-    if let Err(error) = &outcome {
+    if let Err(error) = &outcome
+        && error.downcast_ref::<RunRefused>().is_none()
+    {
         tracing::error!(
             command = command_name,
             error = %haarness_core::redact::log_text(&format!("{error:#}"), 2_000),
@@ -4661,7 +4670,7 @@ async fn run_command(
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
-            let mut watch = RunWatch::new(yolo);
+            let mut watch = RunWatch::new(yolo).auto(approvals.auto).json(json_output);
             if let Some(workflow) = args.workflow {
                 let mut values = serde_json::Map::new();
                 if !prompt.trim().is_empty() {
@@ -4723,7 +4732,7 @@ async fn run_command(
                                 ),
                             }
                         }
-                        return Ok(());
+                        return Ok(watch.refused());
                     }
                     _ => anyhow::bail!(
                         "workflow {} ended as {:?}: {}",
@@ -4803,7 +4812,8 @@ async fn run_command(
                 args.format,
                 &watch,
             )
-            .await
+            .await?;
+            Ok(watch.refused())
         })
         .await
     }
@@ -4816,7 +4826,12 @@ async fn run_command(
             json!({"type": "error", "threadID": chat, "message": format!("{error:#}")})
         );
     }
-    result
+    // The run went on past each refusal by design; its exit status still
+    // tells a script that something was left undone.
+    match result? {
+        0 => Ok(()),
+        refused => Err(RunRefused(refused).into()),
+    }
 }
 
 /// `--file` paths as the server reads them. A folder is refused here rather
@@ -5132,6 +5147,40 @@ async fn set_goal_for_run_client(
     Ok(())
 }
 
+/// Why Auto's reviewer left a request to a person, as a run prints it: one
+/// sentence, ending with its stop.
+fn review_note(review: &haarness_protocol::PermissionReview) -> String {
+    // On one line and safe to print, whatever the reviewer wrote.
+    terminal_safe(&review_sentence(review), false)
+}
+
+fn review_sentence(review: &haarness_protocol::PermissionReview) -> String {
+    let reason = review
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty());
+    let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Reviewing => {
+            return "Auto review is deciding it.".into();
+        }
+        haarness_protocol::PermissionReviewStatus::Failed => "Auto review was unavailable",
+        haarness_protocol::PermissionReviewStatus::Paused => "Auto review paused for this turn",
+        _ => "Auto review left it to a person",
+    };
+    let rule = review
+        .rule
+        .as_deref()
+        .filter(|rule| !rule.trim().is_empty())
+        .map(|rule| format!(" ({rule})"))
+        .unwrap_or_default();
+    match reason {
+        Some(reason) if reason.ends_with(['.', '!', '?']) => format!("{lead}{rule}: {reason}"),
+        Some(reason) => format!("{lead}{rule}: {reason}."),
+        None => format!("{lead}{rule}."),
+    }
+}
+
 /// Who answers a permission prompt raised while a run waits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Approver {
@@ -5150,7 +5199,237 @@ struct RunWatch {
     /// `--yolo`: the run approves its own requests once, as they come, and
     /// asks the approver only for those that must ask every time.
     yolo: bool,
+    /// `--auto`: with nobody to ask, a request that still needs a person is
+    /// refused with its reason and the run goes on.
+    auto: bool,
+    /// `--format json`: each refusal is also a `refused` record on stdout.
+    json: bool,
+    refusals: std::sync::Mutex<Refusals>,
+    /// The calls that succeed in the run, from its event stream, once a
+    /// `--auto` run with nobody to ask starts counting.
+    progress: std::sync::OnceLock<Progress>,
     activity: Option<RunActivity>,
+}
+
+/// Calls that succeeded in a run, counted from the server's events as they
+/// come: no listing of chats or transcripts on each refusal.
+struct Progress {
+    succeeded: Arc<std::sync::atomic::AtomicUsize>,
+    /// The stream was lost or replayed since the last refusal: the count may
+    /// have missed some.
+    lost: Arc<std::sync::atomic::AtomicBool>,
+    tasks: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl Progress {
+    /// Count the successful tool results of the run under `root`, its own
+    /// chat's and its agents'.
+    fn follow(client: &haarness_tui::api::ApiClient, root: ThreadId) -> Self {
+        use std::sync::atomic::Ordering;
+        let succeeded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut events, follower) = client.subscribe(None);
+        let reader = tokio::spawn({
+            let (succeeded, lost) = (succeeded.clone(), lost.clone());
+            async move {
+                while let Some(event) = events.recv().await {
+                    match event {
+                        haarness_tui::api::SubscriptionEvent::Event(event) => {
+                            let data = &event.payload["data"];
+                            if event.event_type == "item.created"
+                                && event.root_thread_id.is_none_or(|chat| chat == root)
+                                && data["type"] == "tool_result"
+                                && data["is_error"] == false
+                            {
+                                succeeded.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        haarness_tui::api::SubscriptionEvent::Reconnected => {}
+                        _ => lost.store(true, Ordering::SeqCst),
+                    }
+                }
+                lost.store(true, Ordering::SeqCst);
+            }
+        });
+        Self {
+            succeeded,
+            lost,
+            tasks: [follower, reader],
+        }
+    }
+
+    /// Calls that succeeded so far, or `None` when the count may have
+    /// missed some since it was last read.
+    fn read(&self) -> Option<usize> {
+        use std::sync::atomic::Ordering;
+        (!self.lost.swap(false, Ordering::SeqCst)).then(|| self.succeeded.load(Ordering::SeqCst))
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+/// What a `--auto` run with nobody to ask refused.
+struct Refusals {
+    /// Refused since a call last succeeded anywhere in the run.
+    in_a_row: u32,
+    total: u32,
+    /// Calls the event stream had seen succeed at the last refusal; it
+    /// starts at none, and is dropped when the stream may have missed some.
+    stream: Option<usize>,
+    /// Calls the run's transcripts held at the last refusal read from them.
+    transcripts: Option<usize>,
+}
+
+impl Default for Refusals {
+    fn default() -> Self {
+        Self {
+            in_a_row: 0,
+            total: 0,
+            stream: Some(0),
+            transcripts: None,
+        }
+    }
+}
+
+impl Refusals {
+    /// Count a refusal, given the calls that succeeded in the whole run so
+    /// far by the event stream, or (when the stream may have missed some) by
+    /// the run's transcripts; true once [`REFUSALS_IN_A_ROW`] came with no
+    /// call succeeding anywhere in between. A count with nothing to compare
+    /// with never moves the run toward a stop, nor starts the streak over.
+    fn count(&mut self, stream: Option<usize>, transcripts: Option<usize>) -> bool {
+        self.total += 1;
+        let mut confirm = |now: usize| self.transcripts.replace(now).map(|before| now > before);
+        let progressed = match (stream, transcripts) {
+            (Some(now), transcripts) => match self.stream.replace(now).map(|before| now > before) {
+                Some(true) => Some(true),
+                // The stream saw nothing: a stalled stream would say the
+                // same, so the transcripts confirm it before the streak
+                // grows.
+                _ => transcripts.and_then(&mut confirm),
+            },
+            (None, Some(now)) => {
+                self.stream = None;
+                confirm(now)
+            }
+            (None, None) => {
+                self.stream = None;
+                None
+            }
+        };
+        match progressed {
+            Some(true) => self.in_a_row = 1,
+            Some(false) => self.in_a_row += 1,
+            None => {}
+        }
+        self.in_a_row >= REFUSALS_IN_A_ROW
+    }
+}
+
+/// `root` and every chat under it (its agents, theirs, …).
+fn run_tree(root: ThreadId, threads: &[haarness_protocol::Thread]) -> Vec<ThreadId> {
+    let mut tree = vec![root];
+    let mut index = 0;
+    while let Some(&parent) = tree.get(index) {
+        let children: Vec<ThreadId> = threads
+            .iter()
+            .filter(|thread| thread.parent_id == Some(parent) && !tree.contains(&thread.id))
+            .map(|thread| thread.id)
+            .collect();
+        tree.extend(children);
+        index += 1;
+    }
+    tree
+}
+
+/// Calls that succeeded in the run under `root`, read from its chats'
+/// transcripts: what a refusal counts on when the event stream failed.
+async fn transcript_successes(
+    client: &haarness_tui::api::ApiClient,
+    root: ThreadId,
+) -> Option<usize> {
+    let threads = client.threads_including_archived().await.ok()?;
+    let mut count = 0;
+    for thread in run_tree(root, &threads) {
+        count += client
+            .items(thread)
+            .await
+            .ok()?
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.data,
+                    ItemData::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+    }
+    Some(count)
+}
+
+/// A `--auto` run with nobody to ask stops after this many refusals with no
+/// call succeeding in between: the agent is not getting anywhere.
+const REFUSALS_IN_A_ROW: u32 = 5;
+
+/// `haarness run` finished, but refused requests that needed a person.
+#[derive(Debug)]
+struct RunRefused(u32);
+
+impl std::fmt::Display for RunRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the run refused {} request(s) that needed a person",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RunRefused {}
+
+/// The exit status of a run that finished but refused requests that needed a
+/// person (`--auto` with nobody to ask).
+const EXIT_REFUSED: i32 = 3;
+
+/// What the agent reads when `--auto` refuses a request with nobody to ask:
+/// why, in Haarness's words, never as if a person had answered it.
+fn refusal_feedback(review: Option<&haarness_protocol::PermissionReview>) -> String {
+    let Some(review) = review else {
+        return "A permission rule leaves this to a person and nobody can answer in this run"
+            .into();
+    };
+    let lead = match review.status {
+        haarness_protocol::PermissionReviewStatus::Failed => {
+            "Auto review was unavailable, so this needs a person, and nobody can answer in this run"
+        }
+        haarness_protocol::PermissionReviewStatus::Paused => {
+            "Auto review paused for this turn, so this needs a person, and nobody can answer in this run"
+        }
+        _ => "Auto review left this to a person and nobody can answer in this run",
+    };
+    let words = |value: Option<&str>| {
+        value
+            .map(|value| value.trim().trim_end_matches('.').trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    match (
+        words(review.rule.as_deref()),
+        words(review.rationale.as_deref()),
+    ) {
+        (Some(rule), Some(reason)) => format!("{lead}: {rule}: {reason}"),
+        (None, Some(reason)) | (Some(reason), None) => format!("{lead}: {reason}"),
+        (None, None) => lead.into(),
+    }
 }
 
 impl RunWatch {
@@ -5167,8 +5446,61 @@ impl RunWatch {
                 Approver::Nobody
             },
             yolo,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: terminal.then(RunActivity::start),
         }
+    }
+
+    /// The run put its chat in Auto (`--auto`).
+    fn auto(mut self, auto: bool) -> Self {
+        self.auto = auto;
+        self
+    }
+
+    /// The run writes JSON records (`--format json`).
+    fn json(mut self, json: bool) -> Self {
+        self.json = json;
+        self
+    }
+
+    /// How many requests the run refused with nobody to ask.
+    fn refused(&self) -> u32 {
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .total
+    }
+
+    /// Count a refusal; true once [`REFUSALS_IN_A_ROW`] were refused with
+    /// no call succeeding anywhere in the run in between, so agents working
+    /// side by side never stop it.
+    async fn tally_refusal(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> bool {
+        let stream = self.progress.get().and_then(Progress::read);
+        // Progress the stream saw needs nothing more. Otherwise (the stream
+        // failed, or saw nothing, as a stalled one would) the transcripts
+        // say, so a stream can neither hold the streak off nor stop the run
+        // wrongly.
+        let progressed = {
+            let refusals = self
+                .refusals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            stream
+                .zip(refusals.stream)
+                .is_some_and(|(now, before)| now > before)
+        };
+        let transcripts = if progressed {
+            None
+        } else {
+            transcript_successes(client, root).await
+        };
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .count(stream, transcripts)
     }
 
     /// A scheduled run: nobody watches. Its turn approves its own requests
@@ -5178,6 +5510,10 @@ impl RunWatch {
         Self {
             approver: Approver::OtherClients,
             yolo: false,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         }
     }
@@ -5201,6 +5537,16 @@ impl RunWatch {
         if self.approver == Approver::OtherClients && !self.yolo {
             return Ok(());
         }
+        // A run that refuses counts the calls that succeed in it from now on,
+        // from its events and, to confirm, its transcripts.
+        if self.auto && self.approver == Approver::Nobody && self.progress.get().is_none() {
+            let transcripts = transcript_successes(client, root).await;
+            self.refusals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .transcripts = transcripts;
+            self.progress.get_or_init(|| Progress::follow(client, root));
+        }
         // One listing for both: a request that arrives after a separate
         // --yolo pass would otherwise reach the refusal below and stop a run
         // that was told to approve it.
@@ -5217,7 +5563,8 @@ impl RunWatch {
             if self.approver == Approver::OtherClients {
                 continue;
             }
-            let request = describe_permission(&pending);
+            // What the agent asked, safe to print: its command is its own.
+            let request = printed_request(&pending);
             let reply = |decision| PermissionReply {
                 decision,
                 feedback: None,
@@ -5234,7 +5581,7 @@ impl RunWatch {
                     .await;
                 anyhow::bail!(
                     "Stopped: the agent asked to use {} in Chrome, which always needs a person. Answer in the TUI or Desktop, or allow the site under Settings → Browser → Chrome.",
-                    chrome_sites(&pending).join(", ")
+                    terminal_safe(&chrome_sites(&pending).join(", "), false)
                 );
             }
             if self.approver == Approver::Nobody && pending.allow_always == Some(false) {
@@ -5250,6 +5597,79 @@ impl RunWatch {
                     "Stopped: the agent asked to {request}, which always needs an answer, and nobody can give one in this run. Run it at a terminal, or from the terminal UI or Desktop."
                 );
             }
+            let rule = allow_rule_example(&pending).map_or_else(
+                || "with a permission rule".to_owned(),
+                |rule| {
+                    format!(
+                        "by adding {rule} to haarness.json in the project or ~/.config/haarness/haarness.json"
+                    )
+                },
+            );
+            if self.approver == Approver::Nobody && self.auto {
+                // `--auto`: what still needs a person (the reviewer left it
+                // to one, or a rule asks for one) is refused with its reason,
+                // one line each, and the run goes on another way. A request
+                // the reviewer is deciding is the reviewer's to answer.
+                if pending.review.as_ref().is_some_and(|review| {
+                    review.status == haarness_protocol::PermissionReviewStatus::Reviewing
+                }) {
+                    continue;
+                }
+                let why = pending.review.as_ref().map_or_else(
+                    || "A permission rule asks a person for it.".to_owned(),
+                    review_note,
+                );
+                // Nobody's answer: it refuses this request alone, and the
+                // server frames the note as its own ("Haarness refused this
+                // request for an unattended run: <note>"). A server older
+                // than `refuse` takes a rejection, worded for the agent.
+                if let Err(error) = client
+                    .reply_permission(
+                        &pending.permission_id,
+                        PermissionReply {
+                            decision: PermissionReplyDecision::Refuse,
+                            feedback: Some(why.clone()),
+                        },
+                    )
+                    .await
+                {
+                    if haarness_tui::api::refusal_code(&error) == Some("not_found") {
+                        continue;
+                    }
+                    let _ = client
+                        .reply_permission(
+                            &pending.permission_id,
+                            PermissionReply {
+                                decision: PermissionReplyDecision::Reject,
+                                feedback: Some(refusal_feedback(pending.review.as_ref())),
+                            },
+                        )
+                        .await;
+                }
+                self.notice(&format!(
+                    "Refused: the agent asked to {request}. {why} Nobody can approve that in this run; allow it {rule}."
+                ));
+                if self.json {
+                    println!(
+                        "{}",
+                        json!({
+                            "type": "refused",
+                            "threadID": pending.thread_id,
+                            "permissionID": pending.permission_id,
+                            "request": request,
+                            "reason": why,
+                            "review": pending.review,
+                        })
+                    );
+                }
+                if self.tally_refusal(client, root).await {
+                    let _ = client.interrupt_session(root, false).await;
+                    anyhow::bail!(
+                        "Stopped: {REFUSALS_IN_A_ROW} requests in a row needed a person, and nobody can answer in this run. Allow what the agent needs with permission rules, or run it at a terminal."
+                    );
+                }
+                continue;
+            }
             if self.approver == Approver::Nobody {
                 // Stop first: refused, the agent would carry on another way,
                 // and a script is better served by a clear stop.
@@ -5260,14 +5680,6 @@ impl RunWatch {
                         reply(PermissionReplyDecision::Reject),
                     )
                     .await;
-                let rule = allow_rule_example(&pending).map_or_else(
-                    || "with a permission rule".to_owned(),
-                    |rule| {
-                        format!(
-                            "by adding {rule} to haarness.json in the project or ~/.config/haarness/haarness.json"
-                        )
-                    },
-                );
                 anyhow::bail!(
                     "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
                 );
@@ -5276,7 +5688,11 @@ impl RunWatch {
                 self.ask_explicit(&request, &permission_arguments(&pending))
                     .await?
             } else if self
-                .ask(&request, script_preview(pending.script.as_ref()).as_deref())
+                .ask(
+                    &request,
+                    pending.review.as_ref().map(review_note).as_deref(),
+                    script_preview(pending.script.as_ref()).as_deref(),
+                )
                 .await?
             {
                 PermissionReplyDecision::Once
@@ -5297,10 +5713,13 @@ impl RunWatch {
         Ok(())
     }
 
-    async fn ask(&self, request: &str, script: Option<&str>) -> Result<bool> {
+    /// `note`: why Auto's reviewer left the request to a person; `script`:
+    /// the first lines of the script the command runs.
+    async fn ask(&self, request: &str, note: Option<&str>, script: Option<&str>) -> Result<bool> {
         let _paused = self.activity.as_ref().map(RunActivity::pause);
         eprint!(
-            "The agent asks to {request}.\n{}Allow it once? [y/N] ",
+            "The agent asks to {request}.\n{}{}Allow it once? [y/N] ",
+            note.map(|note| format!("{note}\n")).unwrap_or_default(),
             script.unwrap_or_default()
         );
         let _ = io::stderr().flush();
@@ -5444,20 +5863,38 @@ fn chrome_sites(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<Strin
 /// it (`url`, `script`, `text`, `paths`, …) without the server's own
 /// preparation. Control and direction characters are escaped, so a page
 /// cannot redraw the prompt, and a long value says how much is not shown.
+/// What a run says the agent asked for, safe to print: the command or path
+/// in it is the agent's, so its control and direction characters are
+/// escaped and it stays on one line.
+fn printed_request(pending: &haarness_protocol::PendingPermissionInfo) -> String {
+    terminal_safe(&describe_permission(pending), false)
+}
+
+/// `text` safe to print: control and direction characters escaped
+/// (`\u{202e}`), so nothing in it can redraw the terminal or turn a line
+/// around; line breaks kept only where `lines` says so.
+fn terminal_safe(text: &str, lines: bool) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if (c.is_control() && !(lines && c == '\n'))
+            || matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+        {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn permission_arguments(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<String> {
     use std::fmt::Write as _;
     const LIMIT: usize = 2_000;
     let shown = |text: &str| -> String {
-        let mut out = String::new();
-        for c in text.chars() {
-            if (c.is_control() && c != '\n')
-                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-            {
-                out.extend(c.escape_unicode());
-            } else {
-                out.push(c);
-            }
-        }
+        let out = terminal_safe(text, true);
         let total = out.chars().count();
         if total > LIMIT {
             let mut cut: String = out.chars().take(LIMIT).collect();
@@ -5551,10 +5988,28 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
     }
 }
 
+/// `line` with its tabs as spaces to the next stop of four.
+fn expand_tabs(line: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+    let mut text = String::with_capacity(line.len());
+    let mut column = 0;
+    for character in line.chars() {
+        if character == '\t' {
+            let pad = TAB_WIDTH - column % TAB_WIDTH;
+            text.push_str(&" ".repeat(pad));
+            column += pad;
+        } else {
+            text.push(character);
+            column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    text
+}
+
 /// What a shell request's script says, for the terminal prompt: its path
 /// and first lines, indented and each cut to `PREVIEW_COLUMNS` cells, or why its
-/// text is not shown. The server has already made its text safe for a
-/// terminal.
+/// text is not shown. The server has already replaced what could act on a
+/// terminal; tabs are expanded and anything left is escaped here too.
 fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
     use haarness_protocol::ScriptWithheld;
     const LINES: usize = 6;
@@ -5565,21 +6020,25 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
         Some(ScriptWithheld::Written) => {
             return Some(format!(
                 "It writes {} before running it, so its contents can't be shown.\n",
-                script.path
+                terminal_safe(&script.path, false)
             ));
         }
         Some(ScriptWithheld::Changeable | ScriptWithheld::Unknown) => {
             return Some(format!(
                 "An earlier step of it can change {}, so its contents aren't shown.\n",
-                script.path
+                terminal_safe(&script.path, false)
             ));
         }
         None => {}
     }
     let lines: Vec<&str> = script.content.lines().collect();
-    let mut text = format!("It runs {}:\n", script.path);
+    let mut text = format!("It runs {}:\n", terminal_safe(&script.path, false));
     for line in lines.iter().take(LINES) {
         text.push_str("    ");
+        // What the file holds is printed, never run by the terminal: tabs
+        // to the next stop of four, as the terminal UI's card shows them,
+        // anything else that could act on the terminal escaped.
+        let line = terminal_safe(&expand_tabs(line), false);
         // Cut by the cells a terminal draws, so wide characters count twice.
         let mut used = 0;
         let cut = line.char_indices().find_map(|(at, character)| {
@@ -5591,7 +6050,7 @@ fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Optio
                 text.push_str(&line[..cut]);
                 text.push('…');
             }
-            None => text.push_str(line),
+            None => text.push_str(&line),
         }
         text.push('\n');
     }
@@ -6300,6 +6759,7 @@ fn compose_runtime_sources(
         persisted_rules,
         yolo,
     )?;
+    runtime_config.auto_review = json_layers.auto_review.clone();
     runtime_config.disabled_agents = capability_state::disabled(paths, workspace, trust, "agent")?;
     runtime_config
         .disabled_agents
@@ -9024,7 +9484,7 @@ fn require_system_certificates() -> Result<()> {
     Ok(())
 }
 
-fn doctor(paths: &Paths) -> Result<()> {
+fn doctor(paths: &Paths, workspace: &Path, project_config: bool) -> Result<()> {
     let report = haarness_opentui::doctor()?;
     println!("Haarness {}", env!("CARGO_PKG_VERSION"));
     println!("OpenTUI {} ({})", report.version, report.target);
@@ -9061,7 +9521,40 @@ fn doctor(paths: &Paths) -> Result<()> {
     }
     println!("{}", browser::doctor_line(&paths.data));
     println!("permissions: application-level policy (not an operating-system sandbox)");
+    let layers = jsonconfig::load_layers(
+        paths.config_dir(),
+        haarness_protocol::home_dir().as_deref(),
+        workspace,
+        project_config,
+        &[],
+    );
+    println!("{}", auto_review_line(&layers));
     Ok(())
+}
+
+/// Which model Auto's reviewer asks, as `haarness doctor` names it.
+fn auto_review_line(layers: &jsonconfig::JsonLayers) -> String {
+    let review = &layers.auto_review;
+    if !review.enabled {
+        return "auto review: off (Auto approves eligible requests once)".into();
+    }
+    let model = review.model.clone().map_or_else(
+        || {
+            review.small_model.as_ref().map_or_else(
+                || "each chat's own model".to_owned(),
+                |small| {
+                    format!(
+                        "{small} (small_model) for chats on its provider, then each chat's own model"
+                    )
+                },
+            )
+        },
+        |model| format!("{model} (auto_review.model)"),
+    );
+    format!(
+        "auto review: {model}, timeout {}s",
+        review.timeout.as_secs()
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -9092,6 +9585,24 @@ struct FileConfig {
     compatibility: Option<CompatibilitySection>,
     /// Extra skill folders and remote skill indexes (`skills`).
     skills: Option<SkillsSection>,
+    /// How Auto's reviewer works. The configuration loader merges it layer
+    /// by layer, keeping a project to stricter settings
+    /// (`JsonLayers::auto_review`).
+    #[serde(alias = "autoReview")]
+    auto_review: Option<AutoReviewSection>,
+}
+
+/// `auto_review` / `[auto_review]` of one configuration file.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+struct AutoReviewSection {
+    enabled: Option<bool>,
+    model: Option<String>,
+    environment: Vec<String>,
+    allow: Vec<String>,
+    block: Vec<String>,
+    /// Seconds.
+    timeout: Option<u64>,
 }
 
 /// `[compatibility]` / `{"compatibility": …}`: ecosystem file discovery that
@@ -10013,6 +10524,7 @@ fn runtime_config(
         commands: Vec::new(),
         custom_agents: Vec::new(),
         disabled_agents: Vec::new(),
+        auto_review: haarness_core::AutoReviewSettings::default(),
     })
 }
 
@@ -11759,6 +12271,16 @@ mod tests {
                 .as_deref(),
             Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
         );
+        // Tabs go to the next stop of four, as on the terminal UI's card;
+        // nothing reaches the terminal as an escape.
+        assert_eq!(
+            super::script_preview(Some(&script("\tif x; then\n\t\techo a\tb\n", false, None)))
+                .as_deref(),
+            Some("It runs /work/run.sh:\n        if x; then\n            echo a  b\n")
+        );
+        let escaped =
+            super::script_preview(Some(&script("echo \u{1b}[2J\n", false, None))).unwrap();
+        assert!(escaped.contains("echo \\u{1b}[2J"), "{escaped:?}");
     }
 
     /// Run in a process of its own (it installs the process's panic hook):
@@ -12258,9 +12780,10 @@ mod tests {
         wait_for_goal_client, write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
-        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
-        default_run_model_client, describe_permission, discard_refused_chat, requested_run_model,
-        run_attachments, wait_for_turn_client,
+        Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
+        auto_review_line, default_run_model_client, describe_permission, discard_refused_chat,
+        printed_request, refusal_feedback, requested_run_model, review_note, run_attachments,
+        run_tree, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -14740,6 +15263,16 @@ request_timeout = 0
             request: ProviderRequest,
             _cancel: CancellationToken,
         ) -> CoreResult<ProviderStream> {
+            // Auto's reviewer, asked here, takes its time: never answers.
+            if request
+                .output_schema
+                .as_ref()
+                .and_then(|schema| schema.get("description"))
+                .and_then(serde_json::Value::as_str)
+                == Some(haarness_core::auto_review::VERDICT_SCHEMA_DESCRIPTION)
+            {
+                return Ok(Box::pin(stream::pending()));
+            }
             let answered = request
                 .messages
                 .iter()
@@ -14818,6 +15351,10 @@ request_timeout = 0
         let watch = RunWatch {
             approver: Approver::Nobody,
             yolo: false,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -14922,6 +15459,10 @@ request_timeout = 0
         let yolo = RunWatch {
             approver: Approver::Nobody,
             yolo: true,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         tokio::time::timeout(
@@ -14944,6 +15485,10 @@ request_timeout = 0
         let nobody = RunWatch {
             approver: Approver::Nobody,
             yolo: false,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -14956,9 +15501,347 @@ request_timeout = 0
         .to_string();
         assert!(error.starts_with("Stopped: the agent asked to"), "{error}");
         assert!(!outside.exists());
+
+        // An --auto run refuses what still needs a person, with its reason,
+        // and goes on: the turn ends, nothing was written.
+        let auto = new_chat().await;
+        let turn = start(auto).await;
+        let headless = RunWatch {
+            approver: Approver::Nobody,
+            yolo: false,
+            auto: true,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
+            activity: None,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &headless),
+        )
+        .await
+        .expect("an --auto run goes on")
+        .unwrap();
+        assert_eq!(
+            client.turn(turn.id).await.unwrap().status,
+            TurnStatus::Completed
+        );
+        assert!(!outside.exists());
+        assert_eq!(headless.refused(), 1, "it exits with EXIT_REFUSED");
         server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unattended_auto_run_leaves_a_request_the_reviewer_is_deciding_to_it() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-cli-run-review-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = root.join("outside.txt");
+        let store = Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(OutsideWriteProvider(outside.clone()));
+        let runtime = Arc::new(AgentRuntime::new(
+            store,
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            haarness_core::EventBus::new(32),
+        ));
+        let (client, server) = run_client(&runtime, &workspace).await;
+        let chat = client
+            .create_thread(CreateThreadRequest {
+                provider: Some("outside-test".into()),
+                model: Some("outside-test-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .id;
+        let turn = client
+            .start_turn(
+                chat,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "write outside".into(),
+                    attachments: Vec::new(),
+                    synthetic: false,
+                    auto_approve: false,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    tools: None,
+                    command: None,
+                    resources: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let review = || async {
+            client
+                .pending_permissions()
+                .await
+                .unwrap()
+                .first()
+                .map(|pending| pending.review.as_ref().map(|review| review.status))
+        };
+        let until = |wanted: Option<Option<haarness_protocol::PermissionReviewStatus>>| async move {
+            for _ in 0..500 {
+                if review().await == wanted {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the request never read {wanted:?}");
+        };
+        until(Some(None)).await;
+        // Auto turns on with the request shown: the reviewer decides it.
+        let mode = |mode| haarness_protocol::SetApprovalModeRequest {
+            mode,
+            revision: None,
+        };
+        client
+            .set_approval_mode(chat, &mode(haarness_protocol::ApprovalModeSetting::Auto))
+            .await
+            .unwrap();
+        until(Some(Some(
+            haarness_protocol::PermissionReviewStatus::Reviewing,
+        )))
+        .await;
+        let headless = RunWatch {
+            approver: Approver::Nobody,
+            yolo: false,
+            auto: true,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
+            activity: None,
+        };
+        headless.answer(&client, chat).await.unwrap();
+        assert_eq!(headless.refused(), 0, "the reviewer's to answer");
+        assert_eq!(
+            review().await,
+            Some(Some(haarness_protocol::PermissionReviewStatus::Reviewing))
+        );
+        // Back in Review the request is plain again, and nobody can answer it.
+        client
+            .set_approval_mode(chat, &mode(haarness_protocol::ApprovalModeSetting::Review))
+            .await
+            .unwrap();
+        until(Some(None)).await;
+        headless.answer(&client, chat).await.unwrap();
+        assert_eq!(headless.refused(), 1);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &headless),
+        )
+        .await
+        .expect("the run goes on")
+        .unwrap();
+        assert!(!outside.exists());
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refusal_says_why_in_haarnesss_words_and_five_in_a_row_stop_the_run() {
+        use haarness_protocol::{PermissionReview, PermissionReviewStatus};
+        let review = |status, rule: Option<&str>, rationale: Option<&str>| PermissionReview {
+            status,
+            risk: None,
+            rule: rule.map(str::to_owned),
+            rationale: rationale.map(str::to_owned),
+            reason: None,
+        };
+        assert_eq!(
+            refusal_feedback(Some(&review(
+                PermissionReviewStatus::Asked,
+                Some("Shared state"),
+                Some("It pushes to main.")
+            ))),
+            "Auto review left this to a person and nobody can answer in this run: Shared state: It pushes to main"
+        );
+        assert_eq!(
+            refusal_feedback(Some(&review(
+                PermissionReviewStatus::Failed,
+                None,
+                Some("It took longer than 60 seconds.")
+            ))),
+            "Auto review was unavailable, so this needs a person, and nobody can answer in this run: It took longer than 60 seconds"
+        );
+        assert_eq!(
+            refusal_feedback(None),
+            "A permission rule leaves this to a person and nobody can answer in this run"
+        );
+        for feedback in [
+            refusal_feedback(None),
+            refusal_feedback(Some(&review(PermissionReviewStatus::Paused, None, None))),
+        ] {
+            assert!(!feedback.contains("user"), "{feedback}");
+        }
+
+        // Five refusals with nothing succeeding anywhere in the run in
+        // between stop it; a call that succeeded anywhere starts the count
+        // again. The run reads its transcripts as it starts following.
+        let mut refusals = Refusals {
+            transcripts: Some(0),
+            ..Refusals::default()
+        };
+        assert!(!refusals.count(Some(3), None), "progress the stream saw");
+        assert_eq!(refusals.in_a_row, 1);
+        // The stream sees nothing: the transcripts confirm it.
+        for expected in 2..=4 {
+            assert!(!refusals.count(Some(3), Some(0)));
+            assert_eq!(refusals.in_a_row, expected);
+        }
+        assert!(refusals.count(Some(3), Some(0)));
+        assert_eq!(refusals.total, 5);
+
+        // A stream stalled silently: the transcripts show the progress, so
+        // the run goes on.
+        let mut refusals = Refusals {
+            transcripts: Some(0),
+            ..Refusals::default()
+        };
+        for done in 1..=6 {
+            assert!(!refusals.count(Some(0), Some(done)));
+            assert_eq!(refusals.in_a_row, 1);
+        }
+        // With nothing to confirm with, a refusal neither moves the run
+        // toward a stop nor starts the streak over.
+        assert!(!refusals.count(Some(0), None));
+        assert!(!refusals.count(None, None));
+        assert_eq!(refusals.in_a_row, 1);
+        // A stream that keeps failing counts on the transcripts alone.
+        assert!(!refusals.count(None, Some(6)));
+        assert_eq!(refusals.in_a_row, 2);
+        assert!(
+            !refusals.count(None, Some(7)),
+            "progress in the transcripts"
+        );
+        assert_eq!(refusals.in_a_row, 1);
+        for _ in 0..3 {
+            assert!(!refusals.count(None, Some(7)));
+        }
+        assert!(refusals.count(None, Some(7)));
+
+        // Five agents side by side, each refused once while the others get
+        // work done: never five in a row.
+        let mut refusals = Refusals::default();
+        for done in 1..=5 {
+            assert!(!refusals.count(Some(done), None));
+        }
+        assert_eq!(refusals.in_a_row, 1);
+
+        // The run's chats: the root, its agents and theirs, not another run's.
+        let thread = |id: ThreadId, parent: Option<ThreadId>| {
+            let mut thread: haarness_protocol::Thread = serde_json::from_value(json!({
+                "id": id, "title": "t", "parentId": parent, "archived": false,
+                "agent": "build", "provider": "echo", "model": "echo-1",
+                "createdAt": "2026-10-23T12:00:00Z", "updatedAt": "2026-10-23T12:00:00Z",
+            }))
+            .unwrap();
+            thread.parent_id = parent;
+            thread
+        };
+        let (root, child, grandchild, other) = (
+            ThreadId::new(),
+            ThreadId::new(),
+            ThreadId::new(),
+            ThreadId::new(),
+        );
+        let threads = [
+            thread(other, None),
+            thread(grandchild, Some(child)),
+            thread(child, Some(root)),
+            thread(root, None),
+        ];
+        let tree = run_tree(root, &threads);
+        assert_eq!(tree.len(), 3, "{tree:?}");
+        for chat in [root, child, grandchild] {
+            assert!(tree.contains(&chat));
+        }
+        assert!(!tree.contains(&other));
+    }
+
+    #[test]
+    fn a_run_says_why_auto_review_left_a_request_to_a_person() {
+        use haarness_protocol::{PermissionReview, PermissionReviewStatus};
+        let note = |status, rule: Option<&str>, rationale: Option<&str>| {
+            review_note(&PermissionReview {
+                status,
+                risk: None,
+                rule: rule.map(str::to_owned),
+                rationale: rationale.map(str::to_owned),
+                reason: None,
+            })
+        };
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                Some("Destructive action"),
+                Some("This deletes /tmp/cache, outside the project.")
+            ),
+            "Auto review left it to a person (Destructive action): This deletes /tmp/cache, outside the project."
+        );
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Failed,
+                None,
+                Some("It took longer than 60 seconds.")
+            ),
+            "Auto review was unavailable: It took longer than 60 seconds."
+        );
+        assert_eq!(
+            note(PermissionReviewStatus::Paused, None, None),
+            "Auto review paused for this turn."
+        );
+        // A reason without its stop still ends the sentence.
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                None,
+                Some("It pushes to main")
+            ),
+            "Auto review left it to a person: It pushes to main."
+        );
+        let mut layers = super::jsonconfig::JsonLayers::default();
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: each chat's own model, timeout 60s"
+        );
+        // A project's small_model is not the reviewer's.
+        layers.small_model = Some("openai/gpt-5".into());
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: each chat's own model, timeout 60s"
+        );
+        layers.auto_review.small_model = Some("anthropic/claude-haiku".into());
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: anthropic/claude-haiku (small_model) for chats on its provider, then each chat's own model, timeout 60s"
+        );
+        layers.auto_review.model = Some("openai/gpt-mini".into());
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: openai/gpt-mini (auto_review.model), timeout 60s"
+        );
+        layers.auto_review.enabled = false;
+        assert_eq!(
+            auto_review_line(&layers),
+            "auto review: off (Auto approves eligible requests once)"
+        );
+        // Whatever the reviewer wrote, the note is one line and safe to print.
+        assert_eq!(
+            note(
+                PermissionReviewStatus::Asked,
+                Some("Shared\u{202e}state"),
+                Some("It deletes\n~/x\u{061c}\u{1b}[2J.")
+            ),
+            "Auto review left it to a person (Shared\\u{202e}state): It deletes\\u{a}~/x\\u{61c}\\u{1b}[2J."
+        );
     }
 
     #[test]
@@ -14979,6 +15862,7 @@ request_timeout = 0
             turn_id: None,
             agent: None,
             created_at: chrono::Utc::now(),
+            review: None,
         };
         assert!(super::yolo_answers(&pending(None)));
         assert!(super::yolo_answers(&pending(Some(true))));
@@ -15013,6 +15897,7 @@ request_timeout = 0
             turn_id: None,
             agent: None,
             created_at: chrono::Utc::now(),
+            review: None,
         };
         let replies = Arc::new(std::sync::Mutex::new(
             Vec::<(String, serde_json::Value)>::new(),
@@ -15048,6 +15933,10 @@ request_timeout = 0
         RunWatch {
             approver: Approver::OtherClients,
             yolo: true,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         }
         .answer(&client, root)
@@ -15057,6 +15946,10 @@ request_timeout = 0
         let error = RunWatch {
             approver: Approver::Nobody,
             yolo: true,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         }
         .answer(&client, root)
@@ -15128,14 +16021,14 @@ request_timeout = 0
             ]
         );
         pending.detail = serde_json::json!({
-            "url": "https://bank.example/transfer?to=x&amount=9\u{202e}",
+            "url": "https://bank.example/transfer?to=x&amount=9\u{202e}\u{061c}",
             "paths": ["report.pdf"],
             "text": "x".repeat(2_005),
         });
         let lines = super::permission_arguments(&pending);
         assert_eq!(
             lines[0],
-            "  url: https://bank.example/transfer?to=x&amount=9\\u{202e}"
+            "  url: https://bank.example/transfer?to=x&amount=9\\u{202e}\\u{61c}"
         );
         assert_eq!(lines[1], "  paths: [\"report.pdf\"]");
         assert!(
@@ -15187,6 +16080,7 @@ request_timeout = 0
             turn_id: None,
             agent: Some("w1".into()),
             created_at: chrono::Utc::now(),
+            review: None,
         };
         // The first listing is empty; the agent's request lands right after.
         let listings = Arc::new(AtomicUsize::new(0));
@@ -15230,6 +16124,10 @@ request_timeout = 0
         let watch = RunWatch {
             approver: Approver::Nobody,
             yolo: true,
+            auto: false,
+            json: false,
+            refusals: std::sync::Mutex::default(),
+            progress: std::sync::OnceLock::new(),
             activity: None,
         };
 
@@ -15345,6 +16243,19 @@ request_timeout = 0
         assert_eq!(
             describe_permission(&pending),
             "generate an image or video (image:generate)"
+        );
+        // What a run prints of the agent's command is safe to print.
+        pending.permission = "bash".into();
+        pending.patterns = Vec::new();
+        pending.detail = serde_json::json!({"command": "rm -rf x\u{1b}[2J\u{202e}\nok"});
+        let printed = printed_request(&pending);
+        assert!(
+            !printed.contains(['\u{1b}', '\u{202e}', '\n']),
+            "{printed:?}"
+        );
+        assert!(
+            printed.contains("rm -rf x\\u{1b}[2J\\u{202e}\\u{a}ok"),
+            "{printed:?}"
         );
     }
 

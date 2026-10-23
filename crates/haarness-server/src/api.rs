@@ -822,6 +822,13 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             (state.browser.is_some() && state.management.is_some())
                 .then(|| "browser-extension.v1".into()),
         )
+        // Auto asks a reviewer model here (`auto_review.enabled`).
+        .chain(
+            state
+                .runtime
+                .auto_review_enabled()
+                .then(|| haarness_protocol::APPROVAL_REVIEW_CAPABILITY.into()),
+        )
         .chain(state.management.as_ref().into_iter().flat_map(|_| {
             [
                 "input-settings.v1".into(),
@@ -2874,6 +2881,7 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         CoreError::Conflict(_) => (StatusCode::CONFLICT, "conflict", true),
         CoreError::PermissionDenied(_) => (StatusCode::FORBIDDEN, "permission_denied", false),
         CoreError::PermissionRejected(_) => (StatusCode::FORBIDDEN, "permission_rejected", false),
+        CoreError::ReviewBlocked(_) => (StatusCode::FORBIDDEN, "review_blocked", false),
         CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
         CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
         CoreError::ProviderBlocked(_) => (StatusCode::BAD_GATEWAY, "provider_blocked", false),

@@ -39,10 +39,13 @@ impl App {
         // the new chat's requests from here.
         match client.info().await {
             Ok(info) => {
-                self.approval_server = info
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY);
+                let has = |name: &str| {
+                    info.capabilities
+                        .iter()
+                        .any(|capability| capability == name)
+                };
+                self.approval_server = has(haarness_protocol::APPROVAL_MODE_CAPABILITY);
+                self.approval_reviewer = has(haarness_protocol::APPROVAL_REVIEW_CAPABILITY);
             }
             Err(error) => tracing::debug!(%error, "could not read the server's capabilities"),
         }
@@ -63,7 +66,7 @@ impl App {
                     .is_none_or(|info| info.thread_id != self.thread.id)
                 {
                     self.approval_mode = None;
-                    self.auto_permissions = false;
+                    self.keep_permission_choice(|app| app.auto_permissions = false);
                 }
             }
         }
@@ -73,7 +76,9 @@ impl App {
         if info.thread_id != self.thread.id {
             return;
         }
-        self.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        self.keep_permission_choice(|app| {
+            app.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        });
         self.approval_mode = Some(info);
     }
 
@@ -98,7 +103,9 @@ impl App {
         match client.set_approval_mode(self.thread.id, &request).await {
             Ok(info) => {
                 self.show_approval_mode(info);
-                self.notice = if enabled {
+                self.notice = if enabled && self.approval_reviewer {
+                    "Auto on for this chat · a reviewer model answers requests · ctrl+y to review"
+                } else if enabled {
                     "Auto on for this chat · requests are allowed once · ctrl+y to review"
                 } else {
                     "Review · asks before risky steps · ctrl+y for Auto"
@@ -410,13 +417,23 @@ impl App {
                 }
             }
             "turn.status" => {
+                let state = event.payload["state"].as_str().unwrap_or("").to_owned();
+                // A review that goes on keeps the moment it was first heard of.
+                let received = event
+                    .thread_id
+                    .and_then(|thread| self.live_threads.get(&thread))
+                    .and_then(|live| live.phase.as_ref())
+                    .filter(|phase| phase.state == state)
+                    .and_then(|phase| phase.received)
+                    .unwrap_or_else(std::time::Instant::now);
                 let phase = PhaseInfo {
-                    state: event.payload["state"].as_str().unwrap_or("").to_owned(),
                     tool: event.payload["tool"].as_str().map(str::to_owned),
                     call_id: event.payload["callId"].as_str().map(str::to_owned),
                     since: event.payload["startedAt"]
                         .as_str()
                         .and_then(|value| value.parse().ok()),
+                    received: Some(received),
+                    state,
                 };
                 if let Some(thread_id) = event.thread_id {
                     self.live_threads.entry(thread_id).or_default().phase = Some(phase.clone());
@@ -512,11 +529,21 @@ impl App {
                 // Full metadata rides on the event, so prompts from child
                 // threads surface here without any extra fetch.
                 if let Some(id) = event.payload["permissionId"].as_str() {
-                    if !self
+                    // Announced again (Auto's reviewer took up a request
+                    // already shown, or left it to the person): the card
+                    // takes the new note in place, nothing else moves.
+                    let known = self
                         .pending_permissions
-                        .iter()
-                        .any(|pending| pending.permission_id == id)
-                    {
+                        .iter_mut()
+                        .find(|pending| pending.permission_id == id);
+                    let again = known.is_some();
+                    if let Some(known) = known {
+                        // Announced again (Auto turned on, the reviewer left
+                        // it to the person): its note and its script as they
+                        // are now.
+                        known.review = serde_json::from_value(event.payload["review"].clone()).ok();
+                        known.script = serde_json::from_value(event.payload["script"].clone()).ok();
+                    } else {
                         self.pending_permissions.push(PendingPermissionInfo {
                             allow_always: event.payload["allowAlways"].as_bool(),
                             explicit: event.payload["explicit"].as_bool().unwrap_or(false),
@@ -543,7 +570,12 @@ impl App {
                             turn_id: event.turn_id,
                             agent: event.payload["agent"].as_str().map(str::to_owned),
                             created_at: event.created_at,
+                            review: serde_json::from_value(event.payload["review"].clone()).ok(),
                         });
+                    }
+                    // Nothing new to point at: no focus change, no toast.
+                    if again {
+                        return Ok(());
                     }
                     if self.pending_permissions.len() == 1 {
                         // A fresh head prompt starts at the first chip, with

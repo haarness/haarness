@@ -130,8 +130,33 @@ test("Allow once + Auto never enables after a failed reply or after navigation/r
   assert.equal(enabled, 0);
   assert.equal(acknowledged, 1);
   current = true;
-  await approveAndEnable({ ...callbacks, reply: async () => {} });
+  assert.equal(await approveAndEnable({ ...callbacks, reply: async () => {} }), false);
   assert.equal(enabled, 1);
+  // Answered already (Auto's reviewer, another window): Auto still turns on,
+  // and the caller hears the request was settled.
+  const { alreadySettled } = await import("../src/renderer/approval-mode");
+  assert.equal(
+    await approveAndEnable({
+      ...callbacks,
+      settled: alreadySettled,
+      reply: async () => {
+        throw Error("not found: permission 0199");
+      },
+    }),
+    true,
+  );
+  assert.equal(enabled, 2);
+  // Any other failure still enables nothing.
+  await assert.rejects(
+    approveAndEnable({
+      ...callbacks,
+      settled: alreadySettled,
+      reply: async () => {
+        throw Error("offline");
+      },
+    }),
+  );
+  assert.equal(enabled, 2);
 });
 
 test("always rules read as plain words, never as stored permission patterns", () => {
@@ -156,4 +181,114 @@ test("always rules read as plain words, never as stored permission patterns", ()
   // Without a plainer reading the rule is still shown, minus its prefix.
   assert.equal(say("browser_site", "browser_site:https://example.com"), "https://example.com");
   assert.equal(say("multiple", "browser:navigate:https://example.com"), "browser:navigate:https://example.com");
+});
+
+test("the reviewer's note reads as one quiet line, and only for a reviewed request", async () => {
+  const { reviewNote } = await import("../src/renderer/approval-mode");
+  const t = (key: string) => key;
+  assert.equal(reviewNote(undefined, t), "");
+  assert.equal(reviewNote(null, t), "");
+  assert.equal(
+    reviewNote(
+      {
+        status: "asked",
+        risk: "high",
+        rule: "Shared state",
+        rationale: "It pushes to main, which your messages do not ask for.",
+      },
+      t,
+    ),
+    "Auto review · Shared state: It pushes to main, which your messages do not ask for.",
+  );
+  assert.equal(
+    reviewNote({ status: "failed", rationale: " It took longer than 60 seconds. " }, t),
+    "Auto review unavailable: It took longer than 60 seconds.",
+  );
+  assert.equal(reviewNote({ status: "paused" }, t), "Auto review paused");
+  // Haarness's own notes are worded by their code, in the person's language.
+  const words = (key: string, values: Record<string, string | number> = {}) =>
+    "«" + key.replace(/\{(\w+)\}/g, (_, name) => String(values[name])) + "»";
+  assert.equal(
+    reviewNote({ status: "failed", reason: { code: "timeout", seconds: 60 }, rationale: "English" }, words),
+    "«Auto review unavailable»: «It took more than 60 s.»",
+  );
+  assert.equal(
+    reviewNote({ status: "paused", reason: { code: "streak", count: 3 }, rationale: "English" }, words),
+    "«Auto review paused»: «It blocked 3 actions in a row, so the rest of this turn is yours to approve.»",
+  );
+  // Haarness's own rule is translated too, and a path or an error keeps its
+  // own direction in the sentence (FSI … PDI).
+  assert.equal(
+    reviewNote(
+      { status: "asked", rule: "Destructive action", reason: { code: "unnamed_deletion", path: "/tmp/x" } },
+      words,
+    ),
+    "«Auto review» · «Destructive action»: «This deletes \u2068/tmp/x\u2069, outside the project, and your messages do not name it.»",
+  );
+  assert.equal(
+    reviewNote(
+      { status: "asked", rule: "Destructive action", reason: { code: "unplaced_deletion", path: "\"$TARGET\"" } },
+      words,
+    ),
+    "«Auto review» · «Destructive action»: «This deletes \u2068\"$TARGET\"\u2069, a path Haarness can't place, and your messages do not name it.»",
+  );
+  assert.equal(
+    reviewNote({ status: "asked", reason: { code: "unnamed_overwrite", path: "/etc/hosts" } }, words),
+    "«Auto review»: «This overwrites \u2068/etc/hosts\u2069, outside the project, and your messages do not name it.»",
+  );
+  assert.equal(
+    reviewNote({ status: "asked", reason: { code: "unread_script", program: "bash" } }, words),
+    "«Auto review»: «This runs a here-document Haarness could not read with \u2068bash\u2069, and your messages do not ask for it.»",
+  );
+  assert.equal(
+    reviewNote({ status: "asked", rule: "Destructive action", reason: { code: "inline_code", program: "python3 -c" } }, words),
+    "«Auto review» · «Destructive action»: «This runs \u2068python3 -c\u2069 code that deletes files or reaches outside the project, and your messages do not ask for it.»",
+  );
+  assert.equal(
+    reviewNote({ status: "failed", reason: { code: "error", detail: "HTTP 500" } }, words),
+    "«Auto review unavailable»: «It could not decide (\u2068HTTP 500\u2069).»",
+  );
+  // The reviewer's own rule is shown as it wrote it.
+  assert.equal(
+    reviewNote({ status: "asked", rule: "Shared state", rationale: "Pushes to main." }, words),
+    "«Auto review» · Shared state: Pushes to main.",
+  );
+  const { reviewNoteParts } = await import("../src/renderer/approval-mode");
+  assert.deepEqual(
+    reviewNoteParts({ status: "asked", rule: "Shared state", rationale: "Pushes to main." }, t),
+    { lead: "Auto review", rule: "Shared state", reason: "Pushes to main." },
+  );
+  assert.deepEqual(reviewNoteParts({ status: "paused" }, t), {
+    lead: "Auto review paused",
+    rule: undefined,
+    reason: undefined,
+  });
+  assert.equal(
+    reviewNote({ status: "asked", risk: "critical", reason: { code: "rated" } }, words),
+    "«Auto review»: «It rated this action critical risk.»",
+  );
+  // A code from a newer server shows its English.
+  assert.equal(
+    reviewNote({ status: "asked", reason: { code: "unknown" }, rationale: "As written." }, words),
+    "«Auto review»: As written.",
+  );
+  assert.equal(reviewNote({ status: "reviewing" }, words), "«Auto review is deciding…»");
+});
+
+test("a reply the server no longer knows was settled already", async () => {
+  const { alreadySettled } = await import("../src/renderer/approval-mode");
+  assert.equal(alreadySettled(new Error("not found: permission 0199")), true);
+  assert.equal(alreadySettled(new Error("conflict: busy")), false);
+});
+
+test("the shield says Auto asks a reviewer only where the server's does", async () => {
+  const { autoApprovalHint } = await import("../src/renderer/approval-mode");
+  const t = (key: string) => key;
+  assert.match(autoApprovalHint(true, true, t), /a reviewer model approves routine permission requests in this chat/);
+  assert.match(autoApprovalHint(false, true, t), /in new chats here once, and asks you about the rest/);
+  // auto_review.enabled false, or an older server: no approval-review.v1.
+  assert.equal(
+    autoApprovalHint(true, false, t),
+    "Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.",
+  );
 });

@@ -6,9 +6,10 @@
  * reasoned about and tested on their own.
  */
 import type { IconName } from "./icons";
-import type { FileDiff, Item } from "@haarness/sdk";
+import type { FileDiff, Item, PermissionReview } from "@haarness/sdk";
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
+import { reviewReason } from "./approval-mode";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -407,6 +408,15 @@ export function ranInChrome(name: string, args: unknown, result?: ToolResult) {
 /** A question a `PreToolUse` hook answered, so nobody was asked. */
 export function answeredByHook(name: string, result?: ToolResult) {
   return toolName(name) === "question" && object(result?.metadata)?.answeredBy === "hook";
+}
+/** The reason Auto's reviewer gave for blocking the call (`metadata.review`
+ * of status `blocked`), in the person's language when Haarness wrote it;
+ * empty when it gave none, undefined when it did not block it. */
+export function reviewBlock(result?: ToolResult): string | undefined {
+  if (!result?.is_error) return undefined;
+  const review = object(object(result.metadata)?.review);
+  if (review?.status !== "blocked") return undefined;
+  return reviewReason(review as unknown as PermissionReview, t);
 }
 export function toolFailed(name: string, result?: ToolResult) {
   if (!result) return false;

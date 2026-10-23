@@ -316,6 +316,13 @@ pub enum ItemData {
         /// e.g. `bash:git status *`.
         #[serde(default)]
         always_patterns: Vec<String>,
+        /// Why Auto's reviewer left it to a person, when it did.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_review"
+        )]
+        review: Option<PermissionReview>,
     },
     Question {
         question_id: String,
@@ -646,10 +653,33 @@ pub struct ForkThreadRequest {
     pub before_item_id: Option<ItemId>,
 }
 
+/// How a message another chat's agent sends (`session_message`) starts. It
+/// is stored as an ordinary message of the chat it reaches, so this is what
+/// tells it apart from the person's words; a person who types it only makes
+/// Auto's review of their request stricter.
+pub const SESSION_MESSAGE_PREFIX: &str = "Message from session #";
+
+/// How a message a Haarness agent sends to a Cloud session's chat
+/// (`cloud_agent_session` or `cloud_chat` ask) starts, for the same reason.
+pub const AGENT_MESSAGE_PREFIX: &str = "Message from another Haarness agent:\n";
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionReply {
+    /// The answer. `once` allows this call; `always` allows it and what its
+    /// rule covers until the server stops (in this chat only for a Chrome
+    /// site, whose rule names the chat); `always_workspace`
+    /// also persists the rule for this workspace, and `always_repository`
+    /// for every worktree of its Git repository (both act as `always` for a
+    /// request only a person answers); `reject` is a person's no, which also
+    /// rejects the other requests waiting in the same conversation, with
+    /// `feedback` as their words. `refuse` is for unattended runners only
+    /// (a run nobody can answer): it ends this one request, leaves the
+    /// others waiting, and the agent's error is worded as Haarness's, with
+    /// `feedback` as the reason.
     pub decision: PermissionReplyDecision,
+    /// For `reject`, what the person said; for `refuse`, why nobody could
+    /// answer. Ignored for the allowing answers.
     pub feedback: Option<String>,
 }
 
@@ -670,6 +700,11 @@ pub enum PermissionReplyDecision {
     /// Remember explicitly across linked worktrees of this Git repository.
     AlwaysRepository,
     Reject,
+    /// Nobody can answer (a run with no terminal): refuses this request
+    /// alone. Unlike `reject` it is no person's answer, so the chat's other
+    /// requests stay, and the agent reads `feedback` as why Haarness refused
+    /// it.
+    Refuse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1092,6 +1127,14 @@ pub struct PendingPermissionInfo {
     #[serde(default)]
     pub agent: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Set when Auto's reviewer left this request to a person: it asked,
+    /// could not decide, or paused for the turn.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_review"
+    )]
+    pub review: Option<PermissionReview>,
 }
 
 /// The script file a shell command runs, as the server read it when the

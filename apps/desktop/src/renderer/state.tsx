@@ -9,6 +9,7 @@ import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-contro
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
 import {
+  alreadySettled,
   autoApproval,
   approveAndEnable,
   canAutoApprove,
@@ -216,6 +217,7 @@ function createApp(saved?: Preferences) {
     questions: [],
     streams: {},
     tasks: {},
+    reviews: {},
     providers: [],
     agents: [],
     commands: [],
@@ -447,12 +449,15 @@ function createApp(saved?: Preferences) {
     });
     await saveApprovalModes();
   }
+  /** Allow `request` once and turn Auto on; true when the request had been
+   * answered already (Auto turns on all the same). */
   async function allowOnceAndAuto(request: T.PendingPermissionInfo) {
     const connection = state.connection?.id;
-    if (!connection || !canAutoApprove(request)) return;
+    if (!connection || !canAutoApprove(request)) return false;
     const revision = approvalRevision;
     const selected = state.selected;
-    await approveAndEnable({
+    return await approveAndEnable({
+      settled: alreadySettled,
       reply: () =>
         window.haarness.api(connection, "replyPermission", [
           request.permissionId,
@@ -2143,7 +2148,9 @@ function createApp(saved?: Preferences) {
 
     if (item.type === "permission.resolved")
       retainPermissionErrors(state.connection!.id, state.permissions);
-    if (item.type === "assets.updated")
+    // A reloaded configuration can change models, agents, commands and the
+    // server's capabilities (Auto's reviewer turned on or off).
+    if (item.type === "assets.updated" || item.type === "configuration.reloaded")
       void catalogs().catch((error) => set("error", String(error)));
     if (
       ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
