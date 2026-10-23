@@ -20628,14 +20628,13 @@ async fn the_band_cuts_a_notice_to_the_room_left_after_the_folder() {
     });
     let band = |app: &App, width| line_text(app.lines((width, 30)).last().unwrap());
     app.notice =
-        "Unknown command /frobnicate-everything-twice · start with a space to send it as text"
-            .into();
+        "Unknown command /frobnicate-everything · start with a space to send it as text".into();
     let narrow = band(&app, 80);
     assert!(!narrow.contains("project  main"), "{narrow}");
     // Beside the model, as much of the notice as the row holds.
     assert!(narrow.contains("GPT-5.4"), "{narrow}");
     assert!(
-        narrow.contains("Unknown command /frobnicate-everything-twice · start"),
+        narrow.contains("Unknown command /frobnicate-everything · start"),
         "{narrow}"
     );
     assert!(narrow.trim_end().ends_with('…'), "{narrow}");
@@ -20652,6 +20651,29 @@ async fn the_band_cuts_a_notice_to_the_room_left_after_the_folder() {
         narrow.contains("Approval pending: Access outside the project"),
         "{narrow}"
     );
+}
+
+/// In Review the band's left side follows one rule at every width: the model
+/// stays beside a notice cut to fit while the cut keeps two thirds of it, and
+/// gives way to the notice past that.
+#[test]
+fn the_band_keeps_the_model_beside_a_notice_by_one_rule_at_every_width() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let notice = "Unknown command /frobnicate · start with a space to send it as text";
+    app.notice = notice.into();
+    let band = |width| line_text(app.lines((width, 30)).last().unwrap());
+    let wide = band(100);
+    assert!(wide.contains("GPT-5.4") && wide.contains(notice), "{wide}");
+    let middle = band(80);
+    assert!(middle.contains("GPT-5.4"), "{middle}");
+    assert!(middle.trim_end().ends_with('…'), "{middle}");
+    let narrow = band(60);
+    assert!(!narrow.contains("GPT-5.4"), "{narrow}");
+    assert!(narrow.contains("Unknown command /frobnicate"), "{narrow}");
+    for (width, text) in [(100, wide), (80, middle), (60, narrow)] {
+        assert_eq!(text.width(), width, "{text}");
+    }
 }
 
 /// Typing in a child agent's read-only view says so instead of vanishing.
