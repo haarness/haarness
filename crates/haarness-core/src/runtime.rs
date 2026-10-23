@@ -2298,6 +2298,20 @@ impl AgentRuntime {
                 .get(&thread_id)
                 .map(|entry| Arc::clone(entry.value()));
             if let Some(active) = active_turn {
+                // This request started the running turn (a retry racing the
+                // steer that found the chat idle): it is that turn, not a
+                // message to steer into it.
+                if active.request_id == request.request_id {
+                    let turn = self.repository.get_turn(active.id).await?;
+                    if let Some(handoff) = handoff {
+                        handoff.release();
+                    }
+                    return Ok(QueueInputResponse {
+                        queued: false,
+                        item: None,
+                        turn: Some(turn),
+                    });
+                }
                 let changed = active.changed.notified();
                 let accepting = active.accepting.lock().await;
                 if *accepting {
