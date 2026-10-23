@@ -858,11 +858,19 @@ fn script_content(payload: &Value) -> Option<String> {
         longest
     };
     let span = "`".repeat(longest(path) + 1);
-    // The command writes it before it runs it: one quiet line, no text.
-    if script["rewritten"] == true {
-        return Some(format!(
-            "This command writes {span} {path} {span} before running it, so its contents can't be shown."
-        ));
+    // Its text may not be what runs: one quiet line says why.
+    match script["withheld"].as_str() {
+        Some("written") => {
+            return Some(format!(
+                "This command writes {span} {path} {span} before running it, so its contents can't be shown."
+            ));
+        }
+        Some(_) => {
+            return Some(format!(
+                "An earlier step of this command can change {span} {path} {span}, so its contents aren't shown."
+            ));
+        }
+        None => {}
     }
     let fence = "`".repeat(longest(content).max(2) + 1);
     let mut text = format!(
@@ -1379,10 +1387,19 @@ mod tests {
     }
 
     #[test]
-    fn a_script_the_command_writes_first_is_one_line() {
+    fn a_script_whose_text_may_not_be_what_runs_is_one_line() {
         assert_eq!(
             script_content(&json!({"script": {
-                "path": "/work/gen.sh", "content": "", "rewritten": true,
+                "path": "/work/run.sh", "content": "", "withheld": "changeable",
+            }}))
+            .as_deref(),
+            Some(
+                "An earlier step of this command can change ` /work/run.sh `, so its contents aren't shown."
+            )
+        );
+        assert_eq!(
+            script_content(&json!({"script": {
+                "path": "/work/gen.sh", "content": "", "withheld": "written",
             }}))
             .as_deref(),
             Some(

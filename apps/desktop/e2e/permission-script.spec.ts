@@ -190,13 +190,22 @@ test("a long script scrolls in its box and says only its start is shown", async 
   await idle();
 });
 
-test("a script the command writes before it runs it is named in one quiet line, with no toggle", async () => {
+test("a script whose text may not be what runs is named in one quiet line, with no toggle", async () => {
   await send("cat > scripts/gen.sh <<'EOF'\necho NEW\nEOF\nsh scripts/gen.sh");
   await expect(card().locator(".approval-script-note")).toHaveText(
     "This command writes scripts/gen.sh before running it, so its contents can't be shown.",
   );
   await expect(toggle()).toHaveCount(0);
   await pictures(card(), "card-rewritten");
+  await card().getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  // After a step that may change it, its own line.
+  await send("git checkout -- scripts/deploy.sh && sh scripts/deploy.sh");
+  await expect(card().locator(".approval-script-note")).toHaveText(
+    "An earlier step of this command can change scripts/deploy.sh, so its contents aren't shown.",
+  );
+  await expect(toggle()).toHaveCount(0);
+  await pictures(card(), "card-changeable");
   await card().getByRole("button", { name: "Deny", exact: true }).click();
   await idle();
 });

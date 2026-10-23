@@ -1733,6 +1733,7 @@
   "Hide script": "隱藏指令碼",
   "Only the start of the file is shown.": "僅顯示檔案的開頭部分。",
   "This command writes {path} before running it, so its contents can't be shown.": "此命令會在執行前寫入 {path}，因此無法顯示其內容。",
+  "An earlier step of this command can change {path}, so its contents aren't shown.": "此命令的前一步可能會變更 {path}，因此不顯示其內容。",
   "every file edit": "所有檔案編輯",
   "every shell command": "所有 shell 命令",
   "every file read": "所有檔案讀取",

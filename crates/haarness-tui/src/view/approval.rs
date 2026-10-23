@@ -14,7 +14,7 @@
 
 use crate::width::DisplayWidth as _;
 use haarness_opentui::{Line, Span, attr};
-use haarness_protocol::{PendingPermissionInfo, PermissionScript};
+use haarness_protocol::{PendingPermissionInfo, PermissionScript, ScriptWithheld};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::locale::Language;
@@ -391,13 +391,18 @@ fn script_rows(
         .map(|root| root.trim_end_matches('/'))
         .and_then(|root| script.path.strip_prefix(root)?.strip_prefix('/'))
         .unwrap_or(&script.path);
-    // The command writes it before it runs it: one quiet line says so, as
-    // what is on disk now is not what runs.
-    if script.rewritten {
-        let note = language.format(
-            "This command writes {path} before running it, so its contents can't be shown.",
-            &[("path", path)],
-        );
+    // What is on disk now may not be what runs: one quiet line says why.
+    if let Some(reason) = script.withheld {
+        let note = match reason {
+            ScriptWithheld::Written => language.format(
+                "This command writes {path} before running it, so its contents can't be shown.",
+                &[("path", path)],
+            ),
+            ScriptWithheld::Changeable => language.format(
+                "An earlier step of this command can change {path}, so its contents aren't shown.",
+                &[("path", path)],
+            ),
+        };
         return textwrap::wrap(&note, (width + 2).max(10))
             .into_iter()
             .map(|row| (Row::ScriptCut, row.into_owned()))

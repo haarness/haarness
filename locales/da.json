@@ -1733,6 +1733,7 @@
   "Hide script": "Skjul script",
   "Only the start of the file is shown.": "Kun begyndelsen af filen vises.",
   "This command writes {path} before running it, so its contents can't be shown.": "Denne kommando skriver {path}, før den kører den, så indholdet kan ikke vises.",
+  "An earlier step of this command can change {path}, so its contents aren't shown.": "Et tidligere trin i denne kommando kan ændre {path}, så indholdet vises ikke.",
   "every file edit": "hver filredigering",
   "every shell command": "hver shell-kommando",
   "every file read": "hver fillæsning",

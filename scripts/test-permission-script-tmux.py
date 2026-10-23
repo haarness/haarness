@@ -199,6 +199,19 @@ try:
     keys('n')
     finish(started)
 
+    # After a step that may change any file, it is named with its own line.
+    started = turn('git checkout -- scripts/deploy.sh; sh scripts/deploy.sh')
+    approval()
+    screen = until(
+        lambda: (text if 'An earlier step' in (text := capture()) else None),
+        'changeable note',
+    )
+    assert 'An earlier step of this command can change scripts/deploy.sh' in screen, screen
+    assert '│ #!/bin/sh' not in screen, screen
+    check('a script after a step that may change it is named in its own quiet line', 'changeable')
+    keys('n')
+    finish(started)
+
     for command in ['source .env.local', 'source ./.envrc', 'printf plain']:
         started = turn(command)
         pending = approval()

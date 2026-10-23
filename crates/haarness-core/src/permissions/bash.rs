@@ -108,6 +108,12 @@ const STDIN_PATHS: &[&str] = &["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
 
 /// How many script files [`script_files`] gathers from one line.
 const MAX_SCRIPT_FILES: usize = 16;
+/// How many files the line writes [`script_files`] keeps track of; past it
+/// any later script may have been written.
+const MAX_WRITES: usize = 256;
+/// How many `cd`s [`script_files`] follows; past it a relative script is
+/// not placed.
+const MAX_MOVES: usize = 64;
 
 /// Analyze `command` as it would run from `workspace`. Parse failures fall
 /// back to treating the whole command as one opaque pattern (never silently
@@ -180,6 +186,19 @@ struct Reader<'w> {
     text_depth: u8,
     /// The script files the line runs, when [`script_files`] asks.
     scripts: Option<Scripts>,
+    /// The written command being read, for [`script_files`].
+    step: Option<Step>,
+}
+
+/// Where a command of the line as written stands, for [`script_files`].
+#[derive(Clone, Copy)]
+struct Step {
+    /// Where it starts: for one in a substitution, where the command that
+    /// expands it starts, as it runs before that one.
+    start: usize,
+    /// Where it has run by: its end, or for one in a substitution, the
+    /// start of the command that expands it.
+    before: usize,
 }
 
 /// What [`script_files`] gathers from a line as written.
@@ -187,10 +206,19 @@ struct Reader<'w> {
 struct Scripts {
     /// Each script file, with where its word starts in the line.
     found: Vec<(usize, PathBuf)>,
-    /// Each `cd` (or `pushd`, `popd`, `eval`), in order.
+    /// Each `cd` (or `pushd`, `popd`, `eval`), in order, at most
+    /// [`MAX_MOVES`] and then one to somewhere unknown.
     moves: Vec<Move>,
-    /// Each file the line writes, with where the writing command starts.
+    /// Each file the line writes, with where the writing command starts,
+    /// at most [`MAX_WRITES`].
     writes: Vec<(usize, Target)>,
+    /// Where a step that may change any file has run by: a program not
+    /// known to leave files alone, or a write past [`MAX_WRITES`]. A script
+    /// after it may not be what is on disk.
+    changeable: Option<usize>,
+    /// Commands inside a substitution, by node id, with the start of the
+    /// command that expands it.
+    expanded_by: HashMap<usize, usize>,
 }
 
 /// A file a command line writes: a redirect's target, or what `tee`, `cp`,
@@ -207,9 +235,10 @@ enum Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptFile {
     pub path: PathBuf,
-    /// The line writes it before it runs it (`curl -o x.sh … && bash
-    /// x.sh`, `cat > x.sh <<EOF`): what is on disk now is not what runs.
-    pub rewritten: bool,
+    /// Why what is on disk now may not be what runs: the line writes it
+    /// first (`curl -o x.sh … && bash x.sh`, `cat > x.sh <<EOF`), or an
+    /// earlier step may change it (`make && ./x.sh`).
+    pub withheld: Option<haarness_protocol::ScriptWithheld>,
 }
 
 /// Where one `cd` in a line moves the shell, for the scripts after it.
@@ -303,6 +332,7 @@ impl<'w> Reader<'w> {
             overflow: false,
             text_depth: 0,
             scripts: None,
+            step: None,
         }
     }
 }
@@ -361,6 +391,7 @@ impl Reader<'_> {
             && let Some(scripts) = &mut self.scripts
         {
             scripts.moves = moves(tree.root_node(), command);
+            scripts.expanded_by = expanded_by(tree.root_node());
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
 
@@ -429,6 +460,20 @@ impl Reader<'_> {
                 previous: &previous,
                 wrappers: &wrappers,
             };
+            self.step = self
+                .scripts
+                .as_ref()
+                .filter(|_| depth.text == 0)
+                .map(|scripts| match scripts.expanded_by.get(&node.id()) {
+                    Some(&start) => Step {
+                        start,
+                        before: start,
+                    },
+                    None => Step {
+                        start: node.start_byte(),
+                        before: node.end_byte(),
+                    },
+                });
             self.unwrap(&words, Some(stdin), command, depth);
         }
         self.text_depth = outer_depth;
@@ -458,12 +503,16 @@ impl Reader<'_> {
                 // counts from the start of that command (`bash x.sh >
                 // x.sh`). A redirect the tree hangs on a whole list counts
                 // where it stands.
-                let at = statement
+                let body = statement
                     .filter(|statement| statement.kind() == "redirected_statement")
                     .and_then(|statement| statement.child_by_field_name("body"))
-                    .filter(|body| body.kind() == "command")
-                    .unwrap_or(redirect)
-                    .start_byte();
+                    .filter(|body| body.kind() == "command");
+                let at = body
+                    .and_then(|body| {
+                        let scripts = self.scripts.as_ref()?;
+                        scripts.expanded_by.get(&body.id()).copied()
+                    })
+                    .unwrap_or_else(|| body.unwrap_or(redirect).start_byte());
                 self.note_write(at, dest, command);
             }
             if let Some(dir) =
@@ -477,6 +526,8 @@ impl Reader<'_> {
 
     /// A file the line as written writes, for [`script_files`]: `node` is
     /// the word or redirect target naming it, `at` where its command starts.
+    /// One the line names neither by path nor by name (`> "$out"`) may be
+    /// any file.
     fn note_write(&mut self, at: usize, node: tree_sitter::Node<'_>, source: &str) {
         let Some(scripts) = &mut self.scripts else {
             return;
@@ -494,18 +545,20 @@ impl Reader<'_> {
                 .unwrap_or_default()
                 .to_owned();
             if name.is_empty() || name.contains(['$', '`', '*', '?', '[', '{']) {
+                scripts.changeable = Some(scripts.changeable.map_or(at, |known| known.min(at)));
                 return;
             }
             Target::Named(name)
         };
-        scripts.writes.push((at, target));
+        self.push_write(at, target);
     }
 
-    /// The files a command writes, for [`script_files`]: `tee`'s, the
-    /// destination of `cp`, `mv`, `install` and `ln`, what `curl -o`/`-O`
-    /// and `wget` save, and the files `sed -i` and `perl -i` edit. Generous
-    /// where options are not read: a word taken for a file that is not one
-    /// only keeps a script's text off the card.
+    /// The files a command writes, for [`script_files`]: `tee`'s and
+    /// `touch`'s, the destination of `cp`, `mv`, `install` and `ln` (a
+    /// folder counts for every file in it), what `curl -o`/`-O` and `wget`
+    /// save, and the files `sed -i` and `perl -i` edit. Generous where
+    /// options are not read: a word taken for a file that is not one only
+    /// keeps a script's text off the card.
     fn note_writes<'t>(
         &mut self,
         name: &str,
@@ -517,78 +570,91 @@ impl Reader<'_> {
         if self.scripts.is_none() || depth.text > 0 {
             return;
         }
-        let at = program.node.start_byte();
-        let plain: Vec<&Word<'_>> = arguments
+        let at = self
+            .step
+            .map_or(program.node.start_byte(), |step| step.start);
+        let plain: Vec<&Word<'t>> = arguments
             .iter()
             .filter(|word| !word.value.starts_with('-'))
             .collect();
-        let mut written: Vec<tree_sitter::Node<'t>> = Vec::new();
-        let mut files: Vec<PathBuf> = Vec::new();
-        // Into a folder, each source keeps its name.
-        let into = |folder: &str, sources: &[&Word<'_>]| -> Vec<PathBuf> {
-            sources
-                .iter()
-                .filter_map(|source| Path::new(&source.value).file_name())
-                .map(|file| Path::new(folder).join(file))
-                .collect()
+        // Files named by a whole word, and files known some other way.
+        let mut words: Vec<tree_sitter::Node<'t>> = Vec::new();
+        let mut targets: Vec<Target> = Vec::new();
+        // A value given attached (`-o~/x.sh`, `--output=x.sh`): as written,
+        // and by its name in case the folder is not what it seems.
+        let attached = |value: &str, targets: &mut Vec<Target>| {
+            targets.push(Target::File(PathBuf::from(value)));
+            if let Some(file) = Path::new(value).file_name() {
+                targets.push(Target::Named(file.to_string_lossy().into_owned()));
+            }
         };
-        // What a URL saves to under its own name, in `folder` if given.
-        let downloads = |folder: Option<&String>| -> Vec<PathBuf> {
-            plain
-                .iter()
-                .filter(|word| word.value.contains("://"))
-                .filter_map(|url| remote_name(&url.value))
-                .map(|file| {
-                    folder.map_or_else(
-                        || PathBuf::from(&file),
-                        |folder| Path::new(folder).join(&file),
-                    )
-                })
-                .collect()
-        };
-        let mut take = |values: Vec<(Option<tree_sitter::Node<'t>>, String)>,
-                        files: &mut Vec<PathBuf>| {
-            for (node, value) in values {
-                match node {
-                    Some(node) => written.push(node),
-                    None => files.push(PathBuf::from(value)),
+        // What URLs save to under their own names, in `folder`: where it is
+        // spelled out, or by name.
+        let downloads = |folder: Option<(Option<tree_sitter::Node<'t>>, String)>,
+                         targets: &mut Vec<Target>| {
+            let folder = match &folder {
+                None => Some(PathBuf::new()),
+                Some((Some(node), value)) => {
+                    let raw = node_text(*node, source);
+                    let (_, complete) = literal(*node, source);
+                    complete.then(|| {
+                        home_expansion(&raw, value).unwrap_or_else(|| PathBuf::from(value))
+                    })
+                }
+                Some((None, _)) => None,
+            };
+            for url in plain.iter().filter(|word| word.value.contains("://")) {
+                if let Some(file) = remote_name(&url.value) {
+                    targets.push(match &folder {
+                        Some(folder) => Target::File(folder.join(&file)),
+                        None => Target::Named(file),
+                    });
                 }
             }
         };
         match name {
-            "tee" => {
-                take(
-                    plain
-                        .iter()
-                        .map(|word| (Some(word.node), String::new()))
-                        .collect(),
-                    &mut files,
-                );
-            }
+            "tee" | "touch" => words.extend(plain.iter().map(|word| word.node)),
             "cp" | "mv" | "install" | "ln" => {
-                if let Some((_, folder)) =
-                    option_values(arguments, Some('t'), "target-directory").first()
+                let destination = match option_values(arguments, Some('t'), "target-directory")
+                    .into_iter()
+                    .next()
                 {
-                    files.extend(into(folder, &plain));
-                } else if let Some((destination, sources)) = plain.split_last() {
-                    take(vec![(Some(destination.node), String::new())], &mut files);
-                    files.extend(into(&destination.value, sources));
+                    Some((Some(node), _)) => Some(node),
+                    Some((None, folder)) => {
+                        targets.push(Target::File(PathBuf::from(folder)));
+                        None
+                    }
+                    None => plain.last().map(|word| word.node),
+                };
+                if let Some(node) = destination {
+                    words.push(node);
+                    // Where the destination is not spelled out, each file it
+                    // receives is known by its name.
+                    if !literal(node, source).1 {
+                        for source_file in &plain {
+                            if let Some(file) = Path::new(&source_file.value).file_name() {
+                                targets.push(Target::Named(file.to_string_lossy().into_owned()));
+                            }
+                        }
+                    }
                 }
             }
             "curl" => {
-                take(option_values(arguments, Some('o'), "output"), &mut files);
+                for (node, value) in option_values(arguments, Some('o'), "output") {
+                    match node {
+                        Some(node) => words.push(node),
+                        None => attached(&value, &mut targets),
+                    }
+                }
                 let remote = arguments.iter().any(|word| {
                     matches!(word.value.as_str(), "--remote-name" | "--remote-name-all")
-                        || (word.value.starts_with('-')
-                            && !word.value.starts_with("--")
-                            && word.value.contains('O'))
+                        || (short_cluster(&word.value).is_some_and(|cluster| cluster.contains('O')))
                 });
                 if remote {
                     let folder = option_values(arguments, None, "output-dir")
                         .into_iter()
-                        .next()
-                        .map(|(_, folder)| folder);
-                    files.extend(downloads(folder.as_ref()));
+                        .next();
+                    downloads(folder, &mut targets);
                 }
             }
             "wget" => {
@@ -596,40 +662,59 @@ impl Reader<'_> {
                 if outputs.is_empty() {
                     let folder = option_values(arguments, Some('P'), "directory-prefix")
                         .into_iter()
-                        .next()
-                        .map(|(_, folder)| folder);
-                    files.extend(downloads(folder.as_ref()));
-                } else {
-                    take(outputs, &mut files);
+                        .next();
+                    downloads(folder, &mut targets);
+                }
+                for (node, value) in outputs {
+                    match node {
+                        Some(node) => words.push(node),
+                        None => attached(&value, &mut targets),
+                    }
                 }
             }
-            "sed" | "gsed" | "perl" => {
-                let in_place = arguments.iter().any(|word| {
-                    word.value.starts_with("--in-place")
-                        || (word.value.starts_with('-')
-                            && !word.value.starts_with("--")
-                            && word.value.contains('i'))
-                });
-                if in_place {
-                    take(
-                        plain
-                            .iter()
-                            .map(|word| (Some(word.node), String::new()))
-                            .collect(),
-                        &mut files,
-                    );
-                }
+            "sed" | "gsed" | "perl" if edits_in_place(name, arguments) => {
+                words.extend(plain.iter().map(|word| word.node));
             }
             _ => {}
         }
-        for node in written {
+        for node in words {
             self.note_write(at, node, source);
         }
-        if let Some(scripts) = &mut self.scripts {
-            scripts
-                .writes
-                .extend(files.into_iter().map(|file| (at, Target::File(file))));
+        for target in targets {
+            self.push_write(at, target);
         }
+    }
+
+    /// One file the line writes, within [`MAX_WRITES`].
+    fn push_write(&mut self, at: usize, target: Target) {
+        let Some(scripts) = &mut self.scripts else {
+            return;
+        };
+        if scripts.writes.len() >= MAX_WRITES {
+            // Past the cap, any later script may have been written.
+            scripts.changeable = Some(scripts.changeable.map_or(at, |known| known.min(at)));
+            return;
+        }
+        scripts.writes.push((at, target));
+    }
+
+    /// One step of the line as written, for [`script_files`]: one not
+    /// known to leave files alone (or to write only files it names) may
+    /// change any script that runs after it.
+    fn note_step(&mut self, program: &Word<'_>, arguments: &[Word<'_>], depth: Depth) {
+        let (Some(scripts), Some(step)) = (&mut self.scripts, self.step) else {
+            return;
+        };
+        if depth.text > 0
+            || (program.literal && leaves_files_alone(&program_name(&program.value), arguments))
+        {
+            return;
+        }
+        scripts.changeable = Some(
+            scripts
+                .changeable
+                .map_or(step.before, |known| known.min(step.before)),
+        );
     }
 
     /// A command as written, which its readings come from.
@@ -856,6 +941,7 @@ impl Reader<'_> {
         let Some((program, arguments)) = words.split_first() else {
             return;
         };
+        self.note_step(program, arguments, depth);
         if !program.literal {
             return;
         }
@@ -1378,13 +1464,16 @@ fn shell_script(arguments: &[Word<'_>], input: impl FnOnce() -> Input, source: &
 /// `/tmp/x.sh`), also through the wrappers [`analyze`] reads through
 /// (`sudo`, `env`, `timeout`, `nohup` …). A file named relative to the
 /// folder a `cd` earlier in the line moved to is taken from there, and left
-/// out when the line does not say where that is. One the line writes before
-/// it runs it (a redirect, `tee`, `cp`, `mv`, `install`, `ln`, `curl`,
-/// `wget`, `sed -i`, `perl -i`) is marked [`ScriptFile::rewritten`]. For the
-/// person answering a permission request only (see `permissions::script`):
-/// it decides nothing.
+/// out when the line does not say where that is. Its text is withheld
+/// ([`ScriptFile::withheld`]) unless every step before it is known to
+/// leave it alone: one the line writes first (a redirect, `tee`, `touch`,
+/// `cp`, `mv`, `install`, `ln`, `curl`, `wget`, `sed -i`, `perl -i`) is
+/// `Written`, and one after a program not known to leave files alone is
+/// `Changeable`. For the person answering a permission request only (see
+/// `permissions::script`): it decides nothing.
 #[must_use]
 pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
+    use haarness_protocol::ScriptWithheld;
     if command.len() > MAX_COMMAND_BYTES {
         return Vec::new();
     }
@@ -1393,65 +1482,162 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     if !reader.read(command, Depth::default()) {
         return Vec::new();
     }
+    let overflow = reader.overflow;
     let Some(Scripts {
         mut found,
-        mut moves,
+        moves,
         writes,
+        mut changeable,
+        ..
     }) = reader.scripts
     else {
         return Vec::new();
     };
+    // A line too large to read whole: nothing in it is known to leave
+    // files alone.
+    if overflow {
+        changeable = Some(0);
+    }
     found.sort_by_key(|(at, _)| *at);
-    moves.sort_by_key(|step| step.at);
-    // Where a file named at `at` is, after the `cd`s before it: `None`
-    // when the line does not say.
-    let place = |at: usize, file: &Path| -> Option<PathBuf> {
-        let mut folder = cwd.to_path_buf();
-        // Rooted is where it says on every system (`/tmp/x.sh` has no
-        // drive on Windows).
-        if !file.has_root() {
-            for step in moves
-                .iter()
-                .filter(|step| step.at < at && step.until.is_none_or(|until| at < until))
-            {
-                folder.push(step.to.as_ref()?);
-            }
-        }
-        Some(folder.join(file))
-    };
-    let writes: Vec<(usize, Option<PathBuf>, Option<String>)> = writes
-        .into_iter()
-        .map(|(at, target)| match target {
-            Target::File(file) => {
-                let name = file
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned());
-                let path = place(at, &file).map(|path| super::normalize_absolute(&path));
-                (at, path, name)
-            }
-            Target::Named(name) => (at, None, Some(name)),
+    let mut places = Placer::new(cwd, &moves);
+    let scripts: Vec<(usize, Option<PathBuf>)> = found
+        .iter()
+        .map(|(at, file)| (*at, places.place(*at, file)))
+        .collect();
+    // Only the writes that could be one of these scripts, or a folder
+    // holding one, are placed.
+    let wanted: HashSet<String> = scripts
+        .iter()
+        .filter_map(|(_, path)| path.as_deref())
+        .flat_map(|path| {
+            super::normalize_absolute(path)
+                .components()
+                .filter_map(|part| match part {
+                    Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
-    found
+    let named = |target: &Target| match target {
+        Target::File(file) => file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        Target::Named(name) => Some(name.clone()),
+    };
+    let mut writes: Vec<(usize, Target)> = writes
         .into_iter()
-        .filter_map(|(at, file)| {
-            let path = place(at, &file)?;
+        .filter(|(_, target)| named(target).is_some_and(|name| wanted.contains(&name)))
+        .collect();
+    writes.sort_by_key(|(at, _)| *at);
+    let mut places = Placer::new(cwd, &moves);
+    // Each write where the line puts it, or by its name where it does not.
+    let writes: Vec<(usize, Result<PathBuf, String>)> = writes
+        .into_iter()
+        .filter_map(|(at, target)| {
+            let name = named(&target)?;
+            Some(match target {
+                Target::File(file) => match places.place(at, &file) {
+                    Some(path) => (at, Ok(super::normalize_absolute(&path))),
+                    None => (at, Err(name)),
+                },
+                Target::Named(name) => (at, Err(name)),
+            })
+        })
+        .collect();
+    scripts
+        .into_iter()
+        .filter_map(|(at, path)| {
+            let path = path?;
             let lexical = super::normalize_absolute(&path);
-            let name = path
+            let name = lexical
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned());
-            // Written earlier in the line: where the line says, or, where it
-            // does not, by its name.
-            let rewritten = writes.iter().any(|(written_at, written, written_name)| {
-                *written_at < at
+            // Written by the time it runs: the file itself, or a folder
+            // holding it, where the line says; by its name where it does not.
+            let written = writes.iter().any(|(written_at, written)| {
+                *written_at <= at
                     && match written {
-                        Some(written) => *written == lexical,
-                        None => written_name.is_some() && *written_name == name,
+                        Ok(target) => lexical.starts_with(target),
+                        Err(written) => name.as_ref() == Some(written),
                     }
             });
-            Some(ScriptFile { path, rewritten })
+            let withheld = if written {
+                Some(ScriptWithheld::Written)
+            } else if changeable.is_some_and(|step| step <= at) {
+                Some(ScriptWithheld::Changeable)
+            } else {
+                None
+            };
+            Some(ScriptFile { path, withheld })
         })
         .collect()
+}
+
+/// How long a folder [`Placer`] builds may get: no file past the system's
+/// own path limit can be opened, and a line of `cd`s cannot grow it further.
+const MAX_PLACED_BYTES: usize = 4096;
+
+/// Where files named at increasing places in a line are, after the `cd`s
+/// before each: one pass over the moves serves them all, and a folder is
+/// laid again only when a subshell's moves end.
+struct Placer<'m> {
+    cwd: &'m Path,
+    moves: &'m [Move],
+    /// The first move not passed yet.
+    next: usize,
+    /// The moves in effect, in order.
+    active: Vec<&'m Move>,
+    /// Where they lead, `None` when one goes somewhere unknown.
+    folder: Option<PathBuf>,
+}
+
+impl<'m> Placer<'m> {
+    fn new(cwd: &'m Path, moves: &'m [Move]) -> Self {
+        Self {
+            cwd,
+            moves,
+            next: 0,
+            active: Vec::new(),
+            folder: Some(cwd.to_path_buf()),
+        }
+    }
+
+    /// Where `file`, named at `at` (no earlier than the last one asked), is.
+    fn place(&mut self, at: usize, file: &Path) -> Option<PathBuf> {
+        let ended = self.active.len();
+        self.active
+            .retain(|step| step.until.is_none_or(|until| at < until));
+        if self.active.len() != ended {
+            self.folder =
+                self.active
+                    .iter()
+                    .try_fold(self.cwd.to_path_buf(), |mut folder, step| {
+                        folder.push(step.to.as_ref()?);
+                        Some(folder)
+                    });
+        }
+        while let Some(step) = self.moves.get(self.next).filter(|step| step.at < at) {
+            self.next += 1;
+            if step.until.is_none_or(|until| at < until) {
+                self.active.push(step);
+                self.folder = self.folder.take().and_then(|mut folder| {
+                    folder.push(step.to.as_ref()?);
+                    Some(folder)
+                });
+            }
+        }
+        self.folder = self
+            .folder
+            .take()
+            .filter(|folder| folder.as_os_str().len() <= MAX_PLACED_BYTES);
+        // Rooted is where it says on every system (`/tmp/x.sh` has no drive
+        // on Windows).
+        if file.has_root() {
+            return Some(file.to_path_buf());
+        }
+        Some(self.folder.as_ref()?.join(file))
+    }
 }
 
 /// The values a command's option is given, written `-o file`, `-ofile`,
@@ -1591,7 +1777,9 @@ fn moves(root: tree_sitter::Node<'_>, source: &str) -> Vec<Move> {
         known: bool,
         until: Option<usize>,
     }
-    let mut moves = Vec::new();
+    // The commands that may move the shell, by a cheap look at their
+    // program's name; only the first [`MAX_MOVES`] are read.
+    let mut candidates = Vec::new();
     let mut stack = vec![(
         root,
         Scope {
@@ -1601,16 +1789,15 @@ fn moves(root: tree_sitter::Node<'_>, source: &str) -> Vec<Move> {
     )];
     while let Some((node, scope)) = stack.pop() {
         if node.kind() == "command"
-            && let Some(destination) = movement(node, source)
+            && node.child_by_field_name("name").is_some_and(|name| {
+                let (name, _) = literal(name, source);
+                matches!(
+                    program_name(&name).as_str(),
+                    "cd" | "pushd" | "popd" | "eval" | "builtin" | "command"
+                )
+            })
         {
-            moves.push(Move {
-                at: node.start_byte(),
-                to: match destination {
-                    Destination::Folder(folder) if scope.known => Some(folder),
-                    _ => None,
-                },
-                until: scope.until,
-            });
+            candidates.push((node, scope));
         }
         let inner = match node.kind() {
             "program" | "list" | "redirected_statement" | "compound_statement" => scope,
@@ -1625,8 +1812,138 @@ fn moves(root: tree_sitter::Node<'_>, source: &str) -> Vec<Move> {
         };
         stack.extend(node.children(&mut node.walk()).map(|child| (child, inner)));
     }
-    moves.sort_by_key(|step| step.at);
+    candidates.sort_by_key(|(node, _)| node.start_byte());
+    let mut moves = Vec::new();
+    for (node, scope) in candidates {
+        let Some(destination) = movement(node, source) else {
+            continue;
+        };
+        if moves.len() == MAX_MOVES {
+            // Past the cap, where the shell is is not followed.
+            moves.push(Move {
+                at: node.start_byte(),
+                to: None,
+                until: None,
+            });
+            break;
+        }
+        moves.push(Move {
+            at: node.start_byte(),
+            to: match destination {
+                Destination::Folder(folder) if scope.known => Some(folder),
+                _ => None,
+            },
+            until: scope.until,
+        });
+    }
     moves
+}
+
+/// The commands inside a substitution (`$( … )`, `<( … )`, backquotes) of
+/// another command, by node id, with the start of that command: they run
+/// before it does.
+fn expanded_by(root: tree_sitter::Node<'_>) -> HashMap<usize, usize> {
+    let mut found = HashMap::new();
+    let mut stack = vec![(root, None)];
+    while let Some((node, outer)) = stack.pop() {
+        if node.kind() == "command"
+            && let Some(outer) = outer
+        {
+            found.insert(node.id(), outer);
+        }
+        let inner = if node.kind() == "command" {
+            outer.or(Some(node.start_byte()))
+        } else {
+            outer
+        };
+        stack.extend(node.children(&mut node.walk()).map(|child| (child, inner)));
+    }
+    found
+}
+
+/// A short option cluster (`-sSLo` is `sSLo`), not a long option.
+fn short_cluster(value: &str) -> Option<&str> {
+    value
+        .strip_prefix('-')
+        .filter(|cluster| !cluster.is_empty() && !cluster.starts_with('-'))
+}
+
+/// Whether `sed` or `perl` edits files in place (`-i`, `-i.bak`, `-pi`,
+/// `--in-place`), reading their short options as they do: a letter that
+/// takes a value ends its cluster, so perl's `-Mstrict`, `-I/lib` or `-e`
+/// and sed's `-e`, `-f` or `-l` are not `-i`.
+fn edits_in_place(name: &str, arguments: &[Word<'_>]) -> bool {
+    let valued = if name == "perl" {
+        "eEMmIFdDxCl0"
+    } else {
+        "efl"
+    };
+    for word in arguments {
+        if word.value == "--" {
+            break;
+        }
+        if word.value.starts_with("--in-place") {
+            return true;
+        }
+        let Some(cluster) = short_cluster(&word.value) else {
+            continue;
+        };
+        for letter in cluster.chars() {
+            if letter == 'i' {
+                return true;
+            }
+            if valued.contains(letter) {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a program is known to write no file of its own, or only files
+/// it names (tracked as writes), so a script after it reads as it is. Its
+/// redirects are writes of their own, tracked too; a wrapper is judged by
+/// the command it runs. Anything else (`make`, `git`, `npm`, `tar`,
+/// `rsync`, `dd`, `python3 -c`, `bash -c`, `eval`, a function) may change
+/// any file.
+fn leaves_files_alone(name: &str, arguments: &[Word<'_>]) -> bool {
+    let any = |test: &dyn Fn(&str) -> bool| arguments.iter().any(|word| test(&word.value));
+    match name {
+        // Builtins, and programs that only read, print, wait or change what
+        // is not a file's text.
+        ":" | "true" | "false" | "test" | "[" | "echo" | "printf" | "cd" | "pushd" | "popd"
+        | "export" | "set" | "unset" | "shift" | "read" | "local" | "declare" | "typeset"
+        | "readonly" | "source" | "." | "ls" | "cat" | "grep" | "egrep" | "fgrep" | "rg"
+        | "head" | "tail" | "wc" | "cut" | "tr" | "diff" | "cmp" | "which" | "type" | "hash"
+        | "pwd" | "printenv" | "date" | "whoami" | "id" | "uname" | "basename" | "dirname"
+        | "realpath" | "readlink" | "stat" | "file" | "sleep" | "chmod" | "chown" | "chgrp"
+        | "mkdir"
+        // Wrappers: the command they run is judged on its own.
+        | "command" | "builtin" | "exec" | "nohup" | "setsid" | "nice" | "timeout"
+        | "gtimeout" | "time" | "stdbuf" | "caffeinate" | "busybox" | "pkexec" | "xargs"
+        // They write the files they name, which are tracked.
+        | "tee" | "touch" | "cp" | "mv" | "install" | "ln" | "wget" => true,
+        // Reads unless told to act on what it finds (`-exec` runs a command
+        // judged on its own).
+        "find" => !any(&|value| {
+            matches!(
+                value,
+                "-delete" | "-fprint" | "-fprint0" | "-fprintf" | "-fls"
+            )
+        }),
+        // Wrappers, but `sudo -e` edits and `env -S` runs text.
+        "sudo" | "doas" => !any(&|value| {
+            value == "--edit" || short_cluster(value).is_some_and(|cluster| cluster.contains('e'))
+        }),
+        "env" => !any(&|value| value.starts_with("-S") || value.starts_with("--split-string")),
+        // Unless the server names the file (`-J`).
+        "curl" => !any(&|value| {
+            value == "--remote-header-name"
+                || short_cluster(value).is_some_and(|cluster| cluster.contains('J'))
+        }),
+        "sed" | "gsed" | "perl" => edits_in_place(name, arguments),
+        _ => false,
+    }
 }
 
 /// Where a command moves the shell to.
@@ -3250,12 +3567,13 @@ mod scripts {
             .collect()
     }
 
-    /// Whether the first script `command` runs is one the line writes first.
-    fn rewritten(command: &str) -> Option<bool> {
+    /// Why the first script `command` runs is not shown, if it is not.
+    fn withheld(command: &str) -> Option<haarness_protocol::ScriptWithheld> {
         script_files(command, &cwd())
             .into_iter()
             .next()
-            .map(|file| file.rewritten)
+            .unwrap_or_else(|| panic!("no script in {command}"))
+            .withheld
     }
 
     fn first(command: &str) -> Option<PathBuf> {
@@ -3441,7 +3759,8 @@ mod scripts {
     }
 
     #[test]
-    fn a_script_the_line_writes_before_it_runs_it_is_marked_rewritten() {
+    fn a_script_the_line_writes_before_it_runs_it_is_written() {
+        use haarness_protocol::ScriptWithheld::Written;
         for command in [
             "cat > gen.sh <<'EOF'\necho NEW\nEOF\nbash gen.sh",
             "echo 'echo hi' > run.sh && ./run.sh",
@@ -3451,11 +3770,13 @@ mod scripts {
             "sh run.sh > run.sh",
             "echo x | tee run.sh && sh run.sh",
             "echo x | sudo tee -a ./run.sh > /dev/null && sh run.sh",
+            "touch run.sh && sh run.sh",
             "cp new.sh run.sh && ./run.sh",
             "mv -f new.sh run.sh && ./run.sh",
             "install -m 755 new.sh run.sh && ./run.sh",
             "cp new.sh bin/ && bin/new.sh",
             "cp -t bin new.sh && sh bin/new.sh",
+            "cp -r tmpl/ build && ./build/run.sh",
             "ln -sf other.sh run.sh && ./run.sh",
             "sed -i 's/a/b/' run.sh && ./run.sh",
             "sed -i.bak -e 's/a/b/' run.sh && ./run.sh",
@@ -3469,26 +3790,150 @@ mod scripts {
             "wget -P bin https://example.test/run.sh && sh bin/run.sh",
             "cd sub && cat > x.sh <<EOF\necho\nEOF\ncd .. && sh sub/x.sh",
             "cat > \"$DIR/gen.sh\" <<EOF\necho\nEOF\nbash ./gen.sh",
+            // Into the home folder, spelled with `~`, and an attached value
+            // known by its name.
+            "cp run.sh ~/bin/ && ~/bin/run.sh",
+            "cp -t ~/bin run.sh && ~/bin/run.sh",
+            "wget -P ~/bin https://example.test/run.sh && sh ~/bin/run.sh",
+            "curl --output-dir ~/bin -O https://example.test/run.sh && sh ~/bin/run.sh",
+            "curl -o~/x.sh https://example.test/x && bash ~/x.sh",
         ] {
-            assert_eq!(rewritten(command), Some(true), "{command}");
+            assert_eq!(withheld(command), Some(Written), "{command}");
         }
     }
 
     #[test]
-    fn a_script_the_line_only_reads_or_writes_after_it_runs_is_not() {
+    fn a_script_after_a_step_that_may_change_it_is_changeable() {
+        use haarness_protocol::ScriptWithheld::Changeable;
+        for command in [
+            "bash -c 'printf x > run.sh' && ./run.sh",
+            "bash -c 'echo x > run.sh' && ./run.sh",
+            "bash <<EOF\nprintf x > run.sh\nEOF\n./run.sh",
+            "rsync -a src/ ./ && ./run.sh",
+            "dd if=new.sh of=run.sh && ./run.sh",
+            "python3 -c 'open(\"run.sh\", \"w\")' && ./run.sh",
+            "git checkout -- run.sh && ./run.sh",
+            "tar -xzf a.tgz && ./run.sh",
+            "unzip -o a.zip && ./run.sh",
+            "patch -p1 < fix.diff && ./run.sh",
+            "curl -OJ https://example.test/dl && ./run.sh",
+            "curl -fsSL https://example.test/a.tgz | tar xz && ./install.sh",
+            "for f in a; do make; done; ./run.sh",
+            "f() { make; }; f; ./run.sh",
+            "eval \"$X\"; /tmp/run.sh",
+            "make && ./run.sh",
+            "npm install && ./run.sh",
+            "sed 's/a/b/' run.sh > out.txt && ./run.sh",
+            "perl -Milib -e 'print' && ./run.sh",
+            "./run.sh \"$(make)\"",
+            "$CMD && ./run.sh",
+            "echo x > \"$OUT\" && ./run.sh",
+            "sudo -e run.sh && ./run.sh",
+            "env -S 'make' && ./run.sh",
+            "find . -delete && ./run.sh",
+        ] {
+            assert_eq!(withheld(command), Some(Changeable), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_script_after_steps_known_to_leave_it_alone_is_shown() {
         for command in [
             "bash run.sh",
-            "cp run.sh backup.sh && ./run.sh",
-            "cat run.sh > out.txt && ./run.sh",
             "./run.sh > /dev/null 2>&1",
             "./run.sh; echo x > run.sh",
-            "sed 's/a/b/' run.sh > out.txt && ./run.sh",
+            "chmod +x run.sh && ./run.sh",
+            "cd dir && ./run.sh",
+            "export X=1 && ./run.sh",
+            "X=1; ./run.sh",
+            "mkdir -p out && ./run.sh",
+            "echo start && printf 'x\\n' && ./run.sh",
+            "ls && grep -q x f && cat f | wc -l && ./run.sh",
+            "source venv/bin/activate && ./run.sh",
+            "test -f run.sh && ./run.sh",
+            "[ -x run.sh ] && ./run.sh",
+            "which bash && command -v sh && ./run.sh",
+            "find . -name '*.sh' | head && ./run.sh",
+            "curl -fsSL https://example.test/health | grep ok && ./run.sh",
+            "sudo ./run.sh",
+            "timeout 5 ./run.sh",
+            "cp run.sh backup.sh && ./run.sh",
+            "cat run.sh > out.txt && ./run.sh",
             "cd sub && echo x > run.sh; cd .. && ./run.sh",
             "curl -o other.sh https://example.test/run.sh && sh run.sh",
-            "bash -c 'echo x > run.sh' && ./run.sh",
+            "sed -i -e 's/a/b/' other.sh && ./run.sh",
+            "sleep 1; ./run.sh",
         ] {
-            assert_eq!(rewritten(command), Some(false), "{command}");
+            assert_eq!(withheld(command), None, "{command}");
         }
+    }
+
+    /// The bookkeeping of a line as written: its scripts, `cd`s and writes.
+    fn records(command: &str) -> (usize, usize, usize) {
+        let mut reader = Reader::new(Path::new("/project"));
+        reader.scripts = Some(Scripts::default());
+        assert!(reader.read(command, Depth::default()));
+        let scripts = reader.scripts.unwrap();
+        (
+            scripts.found.len(),
+            scripts.moves.len(),
+            scripts.writes.len(),
+        )
+    }
+
+    /// Lines as long as a command may be, built to cost the most: every
+    /// record stays within its cap, and the whole reading stays quick (a
+    /// cost that grew with the square of the line would take minutes).
+    #[test]
+    fn the_cost_of_a_line_at_the_size_limit_is_bounded() {
+        let fill = |unit: &str, tail: &str| {
+            let mut line = unit.repeat((MAX_COMMAND_BYTES - tail.len()) / unit.len());
+            line.push_str(tail);
+            line
+        };
+        let long_folder = format!("cd /tmp/{};", "a".repeat(200));
+        let half = format!(
+            "{}{}",
+            long_folder.repeat(MAX_COMMAND_BYTES / 2 / long_folder.len()),
+            ":>b;".repeat(MAX_COMMAND_BYTES / 2 / 4 - 16)
+        );
+        let sources = (0..60_000)
+            .map(|index| format!("a{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The reviewer's line (long `cd`s, then writes), writes alone, and
+        // one `cp` of many files. At this size reading the line costs about
+        // what the permission check's own reading does.
+        for line in [
+            format!("{half}./run.sh"),
+            fill(":>run.sh;", "./run.sh"),
+            format!("cp {sources} dest/ && ./dest/run.sh"),
+        ] {
+            assert!(line.len() <= MAX_COMMAND_BYTES);
+            let started = std::time::Instant::now();
+            let files = script_files(&line, &cwd());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{:?} for a line of {} bytes",
+                started.elapsed(),
+                line.len()
+            );
+            assert!(files.len() <= MAX_SCRIPT_FILES);
+            for file in &files {
+                assert!(file.path.as_os_str().len() <= MAX_PLACED_BYTES + 64);
+            }
+            let (found, moves, writes) = records(&line);
+            assert!(found <= MAX_SCRIPT_FILES, "{found}");
+            assert!(moves <= MAX_MOVES + 1, "{moves}");
+            assert!(writes <= MAX_WRITES, "{writes}");
+        }
+        // Past the caps a later script is not shown: too many writes, or
+        // too many `cd`s to follow.
+        assert_eq!(
+            withheld(&format!("{}./run.sh", ":>b;".repeat(MAX_WRITES + 1))),
+            Some(haarness_protocol::ScriptWithheld::Changeable)
+        );
+        assert!(found(&format!("{}./run.sh", "cd a;".repeat(MAX_MOVES + 1))).is_empty());
     }
 
     #[test]

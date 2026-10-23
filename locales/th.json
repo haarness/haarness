@@ -1733,6 +1733,7 @@
   "Hide script": "ซ่อนสคริปต์",
   "Only the start of the file is shown.": "แสดงเฉพาะส่วนต้นของไฟล์",
   "This command writes {path} before running it, so its contents can't be shown.": "คำสั่งนี้เขียน {path} ก่อนเรียกใช้ จึงแสดงเนื้อหาไม่ได้",
+  "An earlier step of this command can change {path}, so its contents aren't shown.": "ขั้นตอนก่อนหน้าของคำสั่งนี้อาจเปลี่ยน {path} จึงไม่แสดงเนื้อหา",
   "every file edit": "การแก้ไขไฟล์ทั้งหมด",
   "every shell command": "คำสั่งเชลล์ทั้งหมด",
   "every file read": "การอ่านไฟล์ทั้งหมด",

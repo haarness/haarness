@@ -1733,6 +1733,7 @@
   "Hide script": "Sakrij skriptu",
   "Only the start of the file is shown.": "Prikazan je samo početak datoteke.",
   "This command writes {path} before running it, so its contents can't be shown.": "Ova naredba zapisuje {path} prije pokretanja, pa se njen sadržaj ne može prikazati.",
+  "An earlier step of this command can change {path}, so its contents aren't shown.": "Raniji korak ove naredbe može promijeniti {path}, pa se njen sadržaj ne prikazuje.",
   "every file edit": "svako uređivanje datoteke",
   "every shell command": "svaka shell naredba",
   "every file read": "svako čitanje datoteke",

@@ -3850,13 +3850,20 @@
             "description": "The file the command names, as an absolute path (links are followed\nto read it, not here), with the replacements `content` has and its\ntabs and line breaks as `\ufffd` too.",
             "type": "string"
           },
-          "rewritten": {
-            "description": "The command writes this file before it runs it (`curl -o x.sh \u2026 &&\nbash x.sh`, `cat > x.sh <<EOF`), so what runs is not on disk yet:\n`content` is empty, and a card says so instead of showing it.",
-            "type": "boolean"
-          },
           "truncated": {
             "description": "The file goes on past `content`.",
             "type": "boolean"
+          },
+          "withheld": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScriptWithheld",
+                "description": "Why the text is not shown (`content` is empty, and a card names the\nfile instead): what runs may not be what is on disk now."
+              }
+            ]
           }
         },
         "required": [
@@ -4604,6 +4611,14 @@
           "global",
           "local",
           "both"
+        ],
+        "type": "string"
+      },
+      "ScriptWithheld": {
+        "description": "Why a script's text is not shown on its card.",
+        "enum": [
+          "written",
+          "changeable"
         ],
         "type": "string"
       },

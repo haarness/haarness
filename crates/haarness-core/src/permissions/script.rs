@@ -7,7 +7,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use haarness_protocol::PermissionScript;
+use haarness_protocol::{PermissionScript, ScriptWithheld};
 use sha2::{Digest as _, Sha256};
 
 /// The most of a script a request carries; a longer one is cut here and
@@ -111,25 +111,22 @@ pub fn find(command: &str, cwd: &Path, readable: impl Fn(&Path) -> bool) -> Opti
     super::bash::script_files(command, cwd)
         .iter()
         .take(MAX_TRIED)
-        .find_map(|file| {
-            if file.rewritten {
-                Some(rewritten(&file.path))
-            } else {
-                read(&file.path, &readable)
-            }
+        .find_map(|file| match file.withheld {
+            Some(reason) => Some(withheld(&file.path, reason)),
+            None => read(&file.path, &readable),
         })
 }
 
-/// A script the command writes before it runs it: what is on disk now is
-/// not what runs, so nothing of it is read or shown, only its path, and
-/// there is nothing to check again.
-fn rewritten(file: &Path) -> Shown {
+/// A script whose text may not be what runs (the command writes it first,
+/// or an earlier step may change it): nothing of it is read or shown, only
+/// its path, and there is nothing to check again.
+fn withheld(file: &Path, reason: ScriptWithheld) -> Shown {
     Shown {
         script: PermissionScript {
             path: shown_path(&super::normalize_absolute(file)),
             content: String::new(),
             truncated: false,
-            rewritten: true,
+            withheld: Some(reason),
         },
         seal: None,
     }
@@ -194,7 +191,7 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
             path: shown_path(&shown),
             content,
             truncated,
-            rewritten: false,
+            withheld: None,
         },
         seal: Some(seal),
     })
@@ -596,7 +593,7 @@ mod tests {
             |_| true,
         )
         .unwrap();
-        assert!(shown.script.rewritten);
+        assert_eq!(shown.script.withheld, Some(ScriptWithheld::Written));
         assert_eq!(shown.script.content, "");
         assert_eq!(Path::new(&shown.script.path), fixture.0.join("gen.sh"));
         // Nothing to check again: what runs was never shown.
@@ -608,11 +605,16 @@ mod tests {
             |_| true,
         )
         .unwrap();
-        assert!(shown.script.rewritten);
+        assert_eq!(shown.script.withheld, Some(ScriptWithheld::Written));
         assert_eq!(Path::new(&shown.script.path), fixture.0.join("fresh.sh"));
+        // After a step that may change any file, the text is withheld too.
+        let shown = find("make && bash gen.sh", &fixture.0, |_| true).unwrap();
+        assert_eq!(shown.script.withheld, Some(ScriptWithheld::Changeable));
+        assert_eq!(shown.script.content, "");
+        assert!(shown.seal.is_none());
         // Read as it is when the line only reads it.
         let shown = find("cp gen.sh copy.sh && bash gen.sh", &fixture.0, |_| true).unwrap();
-        assert!(!shown.script.rewritten);
+        assert_eq!(shown.script.withheld, None);
         assert_eq!(shown.script.content, "echo OLD\n");
         assert!(shown.seal.is_some());
     }
@@ -622,8 +624,11 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("tool", [0x7f, b'E', 0, 1]);
         fixture.write("x.sh", "echo second\n");
+        // The program may change any file, so the script after it is named
+        // with no text.
         let script = bash_script("./tool && bash x.sh", &fixture.0, |_| true).unwrap();
-        assert_eq!(script.content, "echo second\n");
+        assert_eq!(script.withheld, Some(ScriptWithheld::Changeable));
+        assert_eq!(Path::new(&script.path), fixture.0.join("x.sh"));
     }
 
     #[test]

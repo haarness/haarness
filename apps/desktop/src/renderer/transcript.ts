@@ -592,8 +592,8 @@ export function permissionCommand(detail: unknown) {
 /**
  * The script a shell command's request runs, as the server read it when it
  * asked: its path (inside the project, relative to it), its lines without
- * the final line break, whether the file goes on, and whether the command
- * writes it before it runs it (then it has no text). Any card a shell
+ * the final line break, whether the file goes on, and why its text is
+ * withheld when what runs may not be what is on disk. Any card a shell
  * command raises carries one (under the default rules, the one about a
  * folder outside the project); nothing for an older server that sends none.
  */
@@ -603,7 +603,7 @@ export function permissionScript(
 ) {
   const script = permission.script;
   if (!script || typeof script !== "object") return undefined;
-  const { path, content, truncated, rewritten } = script as Record<string, unknown>;
+  const { path, content, truncated, withheld } = script as Record<string, unknown>;
   if (typeof path !== "string" || typeof content !== "string") return undefined;
   const text = content.replace(/\n$/, "");
   const root = workspace.replace(/\/+$/, "");
@@ -611,8 +611,9 @@ export function permissionScript(
     path: root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path,
     lines: text ? text.split("\n").map(expandTabs) : [],
     truncated: truncated === true,
-    // The command writes it before it runs it: there is nothing to show.
-    rewritten: rewritten === true,
+    // Why its text is not shown, when it is not: the command writes it
+    // first ("written"), or an earlier step may change it ("changeable").
+    withheld: withheld === "written" || withheld === "changeable" ? withheld : undefined,
   };
 }
 
