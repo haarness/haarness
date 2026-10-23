@@ -9767,7 +9767,19 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
     .poll(() => page.locator(".transcript").evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
     .toBeLessThan(5);
   await live.locator(":scope > summary").click();
+  // Its steps draw a moment after it opens, and the batch then comes up
+  // for them to show: aim at the first one once it has stopped there.
   const reading = live.locator(".tool-child").first();
+  await expect(reading.locator("summary")).toBeInViewport({ ratio: 1 });
+  let aimed = "";
+  await expect
+    .poll(async () => {
+      const box = JSON.stringify(await reading.locator("summary").boundingBox());
+      const still = box === aimed;
+      aimed = box;
+      return still;
+    })
+    .toBe(true);
   await reading.locator("summary").click();
   await expect(reading.locator(".tool-empty")).toHaveText(
     "Waiting for output…",
