@@ -26,6 +26,8 @@
 .titlebar input {
   -webkit-app-region: no-drag;
 }
+/* The sidebar toggle keeps its place when it is pressed: at the start of the
+   bar, after the traffic lights on macOS, with the sidebar shown or not. */
 .window-toolbar {
   width: var(--sidebar-width);
   height: 100%;
@@ -33,7 +35,7 @@
   padding-inline: var(--s3) var(--s2);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   flex: none;
   min-width: 46px;
 }
@@ -1153,25 +1155,46 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 }
 
 /* --------------------------------------------------------------- narrow UI */
-@media (max-width: 1100px) {
-  .workbench.has-dock .chat-pane {
-    visibility: hidden;
-  }
-  .workbench.has-dock.dock-expanded .chat-pane {
-    display: none;
-  }
-  .workbench.has-dock > .resize-handle {
-    display: none;
-  }
-  .side-panel {
-    position: absolute;
-    top: 0;
-    inset-inline-end: 0;
-    width: 100%;
-    height: 100%;
-    z-index: 10;
-    border-inline-start: 1px solid var(--hairline);
-  }
+/* With no room for the conversation beside it (App.tsx measures the
+   workbench, after the sidebar has stepped aside), the side panel lies over
+   the conversation, and its strip leads with the way back. */
+.workbench.dock-over .chat-pane {
+  visibility: hidden;
+}
+.workbench.dock-over > .resize-handle {
+  display: none;
+}
+.workbench.dock-over .side-panel {
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+  border-inline-start: 1px solid var(--hairline);
+}
+.dock-return {
+  flex: none;
+  height: 26px;
+  min-height: 0;
+  padding-block: 0;
+  padding-inline: var(--s2);
+  gap: var(--s1);
+  border: 0;
+  border-radius: var(--r-md);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.dock-return:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.dock-tabs-rule {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin-inline: var(--s1);
+  background: var(--hairline);
 }
 @media (max-width: 940px) {
   .titlebar-actions {

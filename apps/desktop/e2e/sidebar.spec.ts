@@ -916,6 +916,51 @@ test("sidebar chat rows are one tab stop, and Delete on a row archives it as its
   expect(await row("Keep one").evaluate(element => element.matches(":focus-visible") && !document.documentElement.hasAttribute("data-pointer-focus"))).toBe(true);
 });
 
+test("sidebar the toggle keeps its place, and a side panel without room takes the sidebar's place before the chat's", async () => {
+  const alpha = await open("alpha");
+  await alpha.createThread({ title: "Roomy", provider: "echo", model: "echo-1" });
+  await project("alpha").getByRole("button", { name: "Roomy", exact: true }).click();
+  // The toggle does not move under the pointer, either way.
+  const hide = page.getByRole("button", { name: "Hide sidebar", exact: true });
+  const shown = (await hide.boundingBox())!;
+  await hide.click();
+  const show = page.getByRole("button", { name: "Show sidebar", exact: true });
+  const hidden = (await show.boundingBox())!;
+  expect([hidden.x, hidden.y]).toEqual([shown.x, shown.y]);
+  await show.click();
+  await expect(page.locator(".sidebar")).toBeVisible();
+  const size = await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const size = win.getContentSize();
+    win.setContentSize(1000, 700);
+    return size;
+  });
+  try {
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    const workbench = page.locator(".workbench");
+    await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+    await page.getByRole("button", { name: "Open Files", exact: true }).click();
+    // The sidebar steps aside, so the chat and the panel stand side by side.
+    await expect(page.locator(".sidebar")).toBeHidden();
+    await expect(page.getByRole("button", { name: "Show sidebar", exact: true })).toBeVisible();
+    await expect(workbench).not.toHaveClass(/dock-over/);
+    await expect(composer).toBeVisible();
+    await expect(page.getByRole("button", { name: "Return to chat", exact: true })).toHaveCount(0);
+    // Asked back, the sidebar stays; the panel then lies over the chat and
+    // its strip leads with the way back to it.
+    await page.getByRole("button", { name: "Show sidebar", exact: true }).click();
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await expect(workbench).toHaveClass(/dock-over/);
+    await expect(composer).toBeHidden();
+    await page.getByRole("button", { name: "Return to chat", exact: true }).click();
+    await expect(page.locator(".side-panel")).toBeHidden();
+    await expect(composer).toBeVisible();
+    await expect(page.locator(".sidebar")).toBeVisible();
+  } finally {
+    await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setContentSize(size[0], size[1]), size);
+  }
+});
+
 test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {
   const alpha = await open("alpha");
   const thread = await alpha.createThread({ title: "Long talk", provider: "echo", model: "echo-1" });
