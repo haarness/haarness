@@ -624,6 +624,12 @@ mod tests {
                 detail: "401 from https://internal.example/secret-endpoint".into(),
             },
             ReviewReason::Timeout { seconds: 60 },
+            ReviewReason::UnnamedOverwrite {
+                path: "/Users/someone/secret-project/notes.txt".into(),
+            },
+            ReviewReason::UnplacedOverwrite {
+                path: "/Users/someone/secret-project/\"$F\"".into(),
+            },
         ]
         .into_iter()
         .enumerate()
@@ -661,7 +667,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(reviews.len(), 3);
+        assert_eq!(reviews.len(), 5);
         for review in &reviews {
             assert_eq!(review.status, PermissionReviewStatus::Asked);
             assert_eq!(review.risk, Some(ReviewRisk::High));
@@ -679,5 +685,13 @@ mod tests {
             reviews[2].reason,
             Some(ReviewReason::Timeout { seconds: 60 })
         );
+        assert!(matches!(
+            &reviews[3].reason,
+            Some(ReviewReason::UnnamedOverwrite { path }) if path.starts_with("[redacted:")
+        ));
+        assert!(matches!(
+            &reviews[4].reason,
+            Some(ReviewReason::UnplacedOverwrite { path }) if path.starts_with("[redacted:")
+        ));
     }
 }

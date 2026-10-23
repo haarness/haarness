@@ -19222,6 +19222,63 @@ fn a_lost_server_says_what_this_client_does_about_it() {
 }
 
 #[test]
+fn overwrite_and_unread_document_notes_are_worded_by_their_code() {
+    use haarness_protocol::{PermissionReview, PermissionReviewStatus, ReviewReason};
+    let thread = fixture_thread();
+    let note = |reason: ReviewReason, language| {
+        let mut pending = pending_permission_fixture(&thread, "worded");
+        pending.review = Some(PermissionReview {
+            status: PermissionReviewStatus::Asked,
+            risk: None,
+            rule: None,
+            rationale: Some("English".into()),
+            reason: Some(reason),
+        });
+        crate::view::approval::review_note(&pending, language).unwrap()
+    };
+    let english = crate::locale::Language::English;
+    assert_eq!(
+        note(
+            ReviewReason::UnnamedOverwrite {
+                path: "/etc/hosts".into()
+            },
+            english
+        ),
+        "Auto review: This overwrites /etc/hosts, outside the project, and your messages do not name it."
+    );
+    assert_eq!(
+        note(
+            ReviewReason::UnplacedOverwrite {
+                path: "/etc/\"$F\"".into()
+            },
+            english
+        ),
+        "Auto review: This overwrites /etc/\"$F\", a path Haarness can't place, and your messages do not name it."
+    );
+    assert_eq!(
+        note(
+            ReviewReason::UnreadScript {
+                program: "bash".into()
+            },
+            english
+        ),
+        "Auto review: This runs a here-document Haarness could not read with bash, and your messages do not ask for it."
+    );
+    // In another language, from the catalog, never the English rationale.
+    let german = note(
+        ReviewReason::UnnamedOverwrite {
+            path: "/etc/hosts".into(),
+        },
+        crate::locale::Language::German,
+    );
+    assert!(
+        german.contains("/etc/hosts") && german.contains("überschreibt"),
+        "{german}"
+    );
+    assert!(!german.contains("English"), "{german}");
+}
+
+#[test]
 fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
     use haarness_protocol::{PermissionReview, PermissionReviewStatus, ReviewReason};
     let thread = fixture_thread();
