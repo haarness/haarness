@@ -4760,7 +4760,7 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   expect(errors).toEqual([]);
 });
 
-test("an open-ended question opens in its answer field unless a draft is being typed, and Enter replies", async () => {
+test("an open-ended question leaves the keyboard in the message box, its answer field a Shift+Tab away, and Enter replies", async () => {
   const thread = await client.createThread({
     title: "Open-ended question focus",
     provider: "echo",
@@ -4785,10 +4785,14 @@ test("an open-ended question opens in its answer field unless a draft is being t
   };
   await expect(composer).toBeEnabled();
 
-  // The message box stays in view during a question, but an empty one is idle.
+  // The message box stays in view during a question and keeps the keyboard,
+  // even empty: what is typed there is the next message, not an answer. The
+  // answer field is the card's last stop before it.
   await composer.focus();
   await ask({ prompt: "What should the release be called?" });
   await expect(question).toContainText("What should the release be called?");
+  await expect(composer).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   await expect(answer).toBeFocused();
   await page.screenshot({ path: test.info().outputPath("question-open-ended-focus.png") });
   await page.keyboard.type("Aurora");
@@ -4812,12 +4816,11 @@ test("an open-ended question opens in its answer field unless a draft is being t
   await expect(composer).toHaveValue("half-written follow-up");
   await composer.fill("");
 
-  // With choices to pick, the dock opens on its first choice, as the message
-  // box was idle; typed text still replies with Enter.
+  // With choices to pick, the dock waits for one; typed text still replies with Enter.
   await composer.focus();
   await ask({ prompt: "Pick a fixture color", choices: ["Green", "Blue"] });
   await expect(question).toContainText("Pick a fixture color");
-  await expect(question.getByRole("button", { name: "Green", exact: true })).toBeFocused();
+  await expect(composer).toBeFocused();
   await answer.fill("Teal");
   await answer.press("Enter");
   await settled();
@@ -4888,10 +4891,6 @@ test("a question answers from the keyboard, and only a deliberate key sends it",
   // On a question that takes several answers, Enter marks and unmarks and never
   // sends; Cmd/Ctrl+Enter replies with what is marked, from a choice or the field.
   await ask({ prompt: "Which platforms?", choices: ["macOS", "Linux", "Windows"], multiple: true });
-  // The card took the keyboard on its first choice as it came; a key
-  // pressed in that moment is not an answer, so wait it out.
-  await expect(choice("macOS")).toBeFocused();
-  await expect(question).not.toHaveAttribute("data-arming");
   await choice("macOS").press("Enter");
   await choice("Linux").press("Enter");
   await choice("Windows").press("Enter");

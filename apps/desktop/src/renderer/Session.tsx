@@ -93,7 +93,8 @@ import { attachable, attachmentName, relabelAttachments, type Attachment } from 
 import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
-import { isTextEntry, typingElsewhere } from "./text-entry";
+import { isTextEntry } from "./text-entry";
+import { selection as chatSelection } from "./sidebar-selection";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
 import { ConversationOutline } from "./ConversationOutline";
@@ -2577,7 +2578,8 @@ export function Session() {
                     return;
                   }
                   // Esc in an empty message box stops the work, as Stop
-                  // does; a menu or popover of the box takes it first.
+                  // does; a menu or popover of the box, Find, or the
+                  // sidebar's chat selection takes it first.
                   if (
                     event.key === "Escape" &&
                     !event.shiftKey &&
@@ -2585,7 +2587,8 @@ export function Session() {
                     !event.metaKey &&
                     !event.ctrlKey &&
                     showStop() &&
-                    !findOpen()
+                    !findOpen() &&
+                    !chatSelection()
                   ) {
                     event.preventDefault();
                     if (!event.repeat && !stopping()) void app.run(stop);
@@ -3424,14 +3427,15 @@ function Permission(props: {
       : []),
   ];
   let dock!: HTMLElement;
-  const cardFocus = holdCardFocus(() => dock, () => allowOnce);
+  const holdKeyboard = cardKeyboard(() => dock);
   return (
     <section
       ref={(element) => {
         dock = element;
-        cardFocus.attach(element);
+        holdKeyboard(element);
       }}
       class="prompt-dock approval"
+      tabindex="-1"
       role="alert"
       aria-label={t("Permission request")}
     >
@@ -3748,51 +3752,30 @@ function chromeRequestText(category: ChromeField) {
 }
 /** How long a card answered elsewhere says so before it goes. */
 const SETTLED_NOTE_MS = 1500;
-/** How long a card that took the keyboard by itself keeps keys that were
- * meant for the message box: a key pressed as it came was not an answer. */
-const CARD_ARMING_MS = 400;
-/** Whether a card that just docked may take the keyboard: it was in the
- * message box (holding no draft) or one of its controls, or nowhere. */
-function cardMayTakeKeyboard(dock: Element) {
-  const active = document.activeElement;
-  if (!active || active === document.body) return true;
-  if (dock.contains(active) || !active.closest(".composer")) return false;
-  return !typingElsewhere(active, dock, document.querySelector("[data-composer-input]"));
-}
 /**
- * The keyboard around a card docked above the message box. A card that may
- * take it (`may`) takes it on `primary` as it comes; one answered with the
- * keyboard inside it gives the keyboard back to the message box (or, in an
- * agent's chat, to the transcript). Enter and Space held down never answer.
- * For a moment after the card took the keyboard by itself, and until the
- * person moves in it, Enter on that button does nothing and what is typed
- * there goes back to the message box, so typing that went on as it came is
- * neither an answer nor lost. The card says so with `data-arming`.
+ * The keyboard around a card docked above the message box. A card never
+ * takes the keyboard from where it is: the message box stays in view under
+ * it, so what is typed there stays the next message, and Shift+Tab or the
+ * pointer reaches the card's answers. Only when nothing has the keyboard, or
+ * in an agent's chat, which has no message box, the card itself takes it
+ * (never one of its answers), so Tab reaches them and no key answers by
+ * itself. Answered with the keyboard inside it, a card gives the keyboard
+ * back to the message box, or to the transcript in an agent's chat.
  */
-function holdCardFocus(
-  dock: () => HTMLElement | undefined,
-  primary: () => HTMLElement | undefined,
-  may: (dock: Element) => boolean = cardMayTakeKeyboard,
-) {
+function cardKeyboard(dock: () => HTMLElement | undefined) {
   let holding = false;
-  let arming: { target: HTMLElement; timer: ReturnType<typeof setTimeout> } | undefined;
-  const disarm = () => {
-    if (!arming) return;
-    clearTimeout(arming.timer);
-    arming = undefined;
-    delete dock()?.dataset.arming;
-  };
   onMount(() => {
-    const element = dock(),
-      target = primary();
-    if (!element || !target || !may(element)) return;
-    target.focus({ preventScroll: true });
-    if (document.activeElement !== target || !(target instanceof HTMLButtonElement)) return;
-    element.dataset.arming = "";
-    arming = { target, timer: setTimeout(disarm, CARD_ARMING_MS) };
+    const element = dock();
+    if (!element) return;
+    const active = document.activeElement;
+    const idle = !active || active === document.body;
+    const agentChat =
+      !document.querySelector("[data-composer-input]") &&
+      !!active?.closest(".conversation") &&
+      !isTextEntry(active);
+    if (idle || agentChat) element.focus({ preventScroll: true });
   });
   onCleanup(() => {
-    disarm();
     if (!holding) return;
     queueMicrotask(() => {
       const active = document.activeElement;
@@ -3804,43 +3787,13 @@ function holdCardFocus(
       });
     });
   });
-  return {
-    attach(element: HTMLElement) {
-      element.addEventListener("focusin", (event) => {
-        holding = true;
-        if (arming && event.target !== arming.target) disarm();
-      });
-      element.addEventListener("focusout", (event) => {
-        // Focus lost with its button (answered, disabled) is still held here.
-        const next = event.relatedTarget;
-        if (next instanceof Node && !element.contains(next)) holding = false;
-      });
-      element.addEventListener("pointerdown", disarm, true);
-      const guard = (event: KeyboardEvent) => {
-        if (!(event.target instanceof HTMLButtonElement)) return;
-        const answers = event.key === "Enter" || event.key === " ";
-        if (answers && event.repeat) {
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        if (!arming || event.target !== arming.target || event.metaKey || event.ctrlKey || event.altKey) return;
-        const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
-        if (event.key === "Enter" || (event.key.length === 1 && box && !box.disabled)) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
-        if (event.type !== "keydown" || event.key.length !== 1 || !box || box.disabled) return;
-        disarm();
-        box.focus({ preventScroll: true });
-        if (!document.execCommand("insertText", false, event.key)) {
-          box.setRangeText(event.key, box.selectionStart, box.selectionEnd, "end");
-          box.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-      };
-      element.addEventListener("keydown", guard, true);
-      element.addEventListener("keyup", guard, true);
-    },
+  return (element: HTMLElement) => {
+    element.addEventListener("focusin", () => (holding = true));
+    element.addEventListener("focusout", (event) => {
+      // Focus lost with its button (answered, disabled) is still held here.
+      const next = event.relatedTarget;
+      if (next instanceof Node && !element.contains(next)) holding = false;
+    });
   };
 }
 /** Enter that confirms an input method's composition belongs to the input method. */
@@ -3875,23 +3828,7 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       }
     });
   };
-  let firstChoice: HTMLButtonElement | undefined;
-  const choosing = () => !!props.question.choices?.length;
-  // A question with nothing to pick is answered by typing, so it opens in
-  // its answer field, unless someone is typing elsewhere. One with choices
-  // opens on its first choice, as a permission opens on Allow once.
-  const cardFocus = holdCardFocus(
-    () => dock,
-    () => (choosing() ? firstChoice : input),
-    (element) => {
-      if (choosing()) return cardMayTakeKeyboard(element);
-      const active = document.activeElement;
-      return !(
-        active?.closest("dialog, [role='dialog']") ||
-        typingElsewhere(active, element, document.querySelector("[data-composer-input]"))
-      );
-    },
-  );
+  const holdKeyboard = cardKeyboard(() => dock);
   // One answer, and nothing to write instead: choosing it is the reply, as
   // Enter on it is (and as in the TUI).
   const answersOnClick = () => !props.question.multiple && props.question.custom === false;
@@ -3899,9 +3836,10 @@ function Question(props: { question: T.PendingQuestionInfo }) {
     <section
       ref={(element) => {
         dock = element;
-        cardFocus.attach(element);
+        holdKeyboard(element);
       }}
       class="prompt-dock question"
+      tabindex="-1"
       aria-label={t("A question for you")}
       onKeyDown={(event) => {
         // Cmd/Ctrl+Enter replies from anywhere in the card, with what is
@@ -3926,11 +3864,8 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       <p class="question-prompt">{props.question.prompt}</p>
       <div class="question-options">
         <For each={props.question.choices ?? []}>
-          {(choice, index) => (
+          {(choice) => (
             <button
-              ref={(button) => {
-                if (index() === 0) firstChoice = button;
-              }}
               classList={{ active: choices().includes(choice) }}
               aria-pressed={choices().includes(choice)}
               onClick={() => {

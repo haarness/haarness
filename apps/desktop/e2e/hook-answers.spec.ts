@@ -217,10 +217,18 @@ test("a question a hook answered shows its answer and says the hook answered it"
   // While it is asked, the card stands for it: no row says "Asking" too.
   const asked = page.locator(".tool-call").filter({ hasText: "Which color?" });
   await expect(asked).toHaveCount(0);
-  // It takes the keyboard on its first choice; a key pressed as it came is
-  // not an answer, so the answer waits for that moment to pass.
-  await expect(card.getByRole("button", { name: "Blue", exact: true })).toBeFocused();
-  await expect(card).not.toHaveAttribute("data-arming");
+  // The card leaves the keyboard where it was (here the send button): a
+  // sentence typed in the message box as it comes, spaces and Enter
+  // included, answers nothing and stays the person's own message (sent as
+  // guidance).
+  await expect(card.locator(":focus")).toHaveCount(0);
+  await box.focus();
+  await page.keyboard.type("use bun instead");
+  await expect(box).toHaveValue("use bun instead");
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("");
+  await page.waitForTimeout(300);
+  expect(await api("listQuestions")).toHaveLength(1);
   await card.getByRole("button", { name: "Blue", exact: true }).press("Enter");
   await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
   // Answered from the keyboard, the keyboard goes back to the message box.

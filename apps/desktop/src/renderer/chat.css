@@ -2033,6 +2033,15 @@ html[dir="rtl"] .tool-target {
   background: var(--raised);
   animation: fade-up var(--fast) var(--ease);
 }
+/* A card that took the keyboard itself (nothing had it, or in an agent's
+   chat) says so quietly; Tab goes on to its answers. */
+.prompt-dock:focus {
+  outline: none;
+}
+:root:not([data-pointer-focus]) .prompt-dock:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
+}
 /* Tucked under whatever follows in the tray, the way the plan is. */
 .approvals:has(~ .plan-dock, ~ .composer) {
   margin-bottom: calc(-1 * var(--s2));
