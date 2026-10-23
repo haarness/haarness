@@ -44,7 +44,7 @@
   background: color-mix(in srgb, var(--scrim) 78%, transparent);
   backdrop-filter: blur(6px);
 }
-/* Scaled to fill the room (ImageViewer.tsx); without a size yet it fits it. */
+/* At its own size, or scaled down to fit the room (ImageViewer.tsx); without a size yet it fits it. */
 .image-viewer-image {
   max-width: 100%;
   max-height: 100%;

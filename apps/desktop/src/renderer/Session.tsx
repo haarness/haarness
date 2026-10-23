@@ -79,7 +79,7 @@ import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
-import { openImage } from "./ImageViewer";
+import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
@@ -2632,17 +2632,16 @@ function Message(props: {
                 >
                   {(attachment) =>
                     attachment.startsWith("data:image/") ? (
-                      // An attached image opens full size.
-                      <button
-                        type="button"
+                      <span
                         class="attachment-chip attachment-image"
-                        data-image-open=""
-                        aria-haspopup="dialog"
-                        aria-label={t("Attached image")}
-                        onClick={(event) => openImage(event.currentTarget)}
+                        ref={(element) => {
+                          // Shown smaller than it is, an attached image opens full size.
+                          const opening = watchOpenImages(element, () => t("Attached image"));
+                          onCleanup(opening.dispose);
+                        }}
                       >
                         <img src={attachment} alt={t("Attached image")} />
-                      </button>
+                      </span>
                     ) : (
                       <span class="attachment-chip">
                         <Icon name="file" size="sm" />

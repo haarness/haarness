@@ -392,15 +392,20 @@ const room = (viewer: Locator) =>
     ];
   });
 
-/** Whether `shown` fills `space` along one side, its ratio kept. */
-const fills = (shown: number[], natural: number[], space: number[]) => {
-  const scale = Math.min(space[0] / natural[0], space[1] / natural[1]);
-  return Math.abs(shown[0] - natural[0] * scale) <= 1 && Math.abs(shown[1] - natural[1] * scale) <= 1;
+/** The size the viewer shows an image at: its own, or smaller to fit `space` with its ratio kept, never larger. */
+const fitted = (natural: number[], space: number[]) => {
+  const scale = Math.min(1, space[0] / natural[0], space[1] / natural[1]);
+  return [Math.floor(natural[0] * scale), Math.floor(natural[1] * scale)];
 };
 
-test("an image shown smaller than it is opens to fill the window; Esc, a click outside or Close shut it", async () => {
-  const attached = `data:image/png;base64,${png(64, 48, (x) => [x * 4, 120, 200]).toString("base64")}`;
-  const message = await reply("With an attachment: ![Wide](out/wide.png)\n\nAt its own size: ![Weekly chart](out/chart.png)", [attached]);
+test("an image shown smaller than it is opens at its own size, or fitted to the window; Esc, a click outside or Close shut it", async () => {
+  const attachment = (width: number, height: number) =>
+    `data:image/png;base64,${png(width, height, (x, y) => [(x * 3) % 256, 120, (y * 2) % 256]).toString("base64")}`;
+  const [photo, icon] = [attachment(600, 400), attachment(64, 48)];
+  const message = await reply("With attachments: ![Wide](out/wide.png)\n\nAt its own size: ![Weekly chart](out/chart.png)", [
+    photo,
+    icon,
+  ]);
   const viewer = page.locator("dialog.image-viewer");
   const wide = message.locator("img.project-image-loaded[data-project-path='out/wide.png']");
   const own = message.locator("img.project-image-loaded[data-project-path='out/chart.png']");
@@ -412,20 +417,30 @@ test("an image shown smaller than it is opens to fill the window; Esc, a click o
   await expect(own).not.toHaveAttribute("role");
   expect(await own.evaluate((image) => getComputedStyle(image).cursor)).toBe("auto");
   expect(await wide.evaluate((image) => getComputedStyle(image).cursor)).toBe("zoom-in");
+  // So are attachments: a photo shown as a thumbnail opens, a small icon shown whole does not.
+  const attached = page.locator(".message.user").last().locator(".attachment-image img");
+  await expect(attached.first()).toHaveAttribute("data-image-open", "");
+  await expect(attached.last()).toHaveJSProperty("naturalWidth", 64);
+  await expect(attached.last()).not.toHaveAttribute("data-image-open");
+  await attached.last().click();
+  await expect(viewer).toHaveCount(0);
 
   await wide.click();
   await expect(viewer).toBeVisible();
   const full = viewer.locator("img.image-viewer-image");
   await expect(full).toHaveAttribute("src", (await wide.getAttribute("src"))!);
   const space = await room(viewer);
-  await expect.poll(async () => fills((await size(full)).shown, [2400, 320], space)).toBe(true);
+  // Larger than the window, it is scaled down to fit it.
+  await expect.poll(async () => (await size(full)).shown).toEqual(fitted([2400, 320], space));
+  expect((await size(full)).shown[0]).toBe(space[0]);
   await pictures(page, "image-viewer");
 
-  // The arrow keys step through the conversation's images: before it, the attachment of its message.
+  // The arrow keys step through the conversation's images: before it, the photo its message attached.
   await page.keyboard.press("ArrowLeft");
-  await expect(full).toHaveAttribute("src", attached);
-  // A small attachment is scaled up to fill the window too.
-  await expect.poll(async () => fills((await size(full)).shown, [64, 48], space)).toBe(true);
+  await expect(full).toHaveAttribute("src", photo);
+  // Smaller than the window, it shows at its own size, never larger.
+  await expect.poll(async () => (await size(full)).shown).toEqual([600, 400]);
+  await pictures(page, "image-viewer-own-size");
   await page.keyboard.press("ArrowRight");
   await expect(full).toHaveAttribute("src", (await wide.getAttribute("src"))!);
   // Esc closes it, and the keyboard is back on the image that opened it.
@@ -441,11 +456,12 @@ test("an image shown smaller than it is opens to fill the window; Esc, a click o
   await own.click();
   await expect(viewer).toHaveCount(0);
 
-  // An attachment always opens, and a read's preview shown smaller does too; Close shuts it.
-  await page.locator(".message.user").last().locator(".attachment-image").click();
-  await expect(full).toHaveAttribute("src", attached);
+  // An attachment and a read's preview shown smaller open the same way; Close shuts it.
+  await attached.first().click();
+  await expect(full).toHaveAttribute("src", photo);
   await viewer.getByRole("button", { name: "Close", exact: true }).click();
   await expect(viewer).toHaveCount(0);
+  await expect(attached.first()).toBeFocused();
   const preview = await openPreview(page.locator(".tool-call").filter({ hasText: "wide.png" }).last());
   await expect(preview).toHaveAttribute("data-image-open", "");
   await preview.click();
