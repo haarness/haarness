@@ -1613,19 +1613,19 @@ impl AgentRuntime {
                 .is_some())
     }
 
-    /// The agent a message to chat `thread_id` runs under, when it is not
-    /// the chat's own: the one it names, else the one its command `command`
-    /// names, else, for a message that steers (`steer`), the running turn's.
-    /// A queued message runs later as a turn of its own, under the chat's
-    /// agent. `None` means the chat's agent.
+    /// The agent of the turn running in chat `thread_id`, if one runs.
     #[must_use]
-    pub fn message_agent(
-        &self,
-        thread_id: ThreadId,
-        named: Option<&str>,
-        command: Option<&str>,
-        steer: bool,
-    ) -> Option<String> {
+    pub fn running_agent(&self, thread_id: ThreadId) -> Option<String> {
+        self.active
+            .get(&thread_id)
+            .map(|active| active.agent.id.clone())
+    }
+
+    /// The agent a turn a message to chat `thread_id` starts runs under,
+    /// when it is not the chat's own: the one it names, else the one its
+    /// command `command` names. `None` means the chat's agent.
+    #[must_use]
+    pub fn message_agent(&self, named: Option<&str>, command: Option<&str>) -> Option<String> {
         if let Some(named) = named {
             return Some(named.to_owned());
         }
@@ -1640,12 +1640,7 @@ impl AgentRuntime {
         {
             return Some(agent);
         }
-        if !steer {
-            return None;
-        }
-        self.active
-            .get(&thread_id)
-            .map(|active| active.agent.id.clone())
+        None
     }
 
     /// The rules a person's `@` mentions of MCP resources follow in chat

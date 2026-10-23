@@ -644,41 +644,60 @@ async fn a_mention_follows_the_agent_its_message_runs_under() {
             .error_for_status()
             .unwrap();
     }
-    // Queued, a message runs later as a turn of its own, under the chat's
-    // agent, so its mention is read.
-    fixture
-        .client
-        .post(format!("{}/v1/threads/{}/input", fixture.base, thread.id))
-        .json(&json!({
+    // Queued while that turn runs, it may still join it as the turn ends, so
+    // both agents must allow its mention.
+    let input = |text: &str, delivery: &str| {
+        let client = fixture.client.clone();
+        let url = format!("{}/v1/threads/{}/input", fixture.base, thread.id);
+        let body = json!({
             "requestId": RequestId::new(),
-            "delivery": "queue",
-            "text": "Then this",
+            "delivery": delivery,
+            "text": text,
             "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
-        }))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    provider.release_first.add_permits(1);
-    let sent = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let sent = user_messages(&fixture.items(&thread).await);
-            if sent.len() == 3 {
-                return sent;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        async move {
+            client
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
         }
-    })
-    .await
-    .expect("the queued message runs");
+    };
+    input("Then this", "queue").await;
+    provider.release_first.add_permits(1);
+    let settled = |count: usize| {
+        let fixture = &fixture;
+        let thread = &thread;
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let sent = user_messages(&fixture.items(thread).await);
+                    if sent.len() == count {
+                        return sent;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the messages run")
+        }
+    };
+    let sent = settled(3).await;
+    for (at, text) in [(1, "And this"), (2, "Then this")] {
+        assert!(
+            sent[at].starts_with(text)
+                && sent[at].contains("a rule keeps this resource from the model"),
+            "{sent:?}"
+        );
+    }
+    // With no turn running, only the chat's agent decides.
+    input("Now this", "queue").await;
+    let sent = settled(4).await;
     assert!(
-        sent[1].starts_with("And this")
-            && sent[1].contains("a rule keeps this resource from the model"),
-        "{sent:?}"
-    );
-    assert!(
-        sent[2].starts_with("Then this") && sent[2].contains("# docs setup"),
+        sent[3].starts_with("Now this") && sent[3].contains("# docs setup"),
         "{sent:?}"
     );
     assert_eq!(*fixture.docs.reads.lock().unwrap(), ["docs:docs://setup"]);

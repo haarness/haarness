@@ -401,15 +401,19 @@ is not asked (the person picked it, as they attach a file): a deny for
 away, keeps it out. The rest of the message is still sent. The same server and
 URI twice is read once; two servers with one URI are two mentions. The rules are those of
 the agent the message runs under: the request's `agent` (or its command's),
-else the running turn's for `/input` with `delivery: steer`, else the chat's
-(also for `delivery: queue`: a queued message runs later as a turn of its
-own). No `PreToolUse` hook runs: a mention is no tool call. A message with
-mentions is read and admitted on the server's own time, so a client that goes
-away meanwhile does not lose it; a retry with the same `requestId` (a turn, a
-queued message, or a message steered into a running turn, which is recorded
-for this) finds it without reading or delivering it again, and one sent while
-the first is still reading waits for it. A published chat's request with `resources` is refused (`403`), and
-its `/v1/info` leaves the capability out. Servers advertise
+else the chat's. An `/input` sent while a turn runs may join that turn or run
+as a turn of its own (a steer can arrive as the turn ends, a queued message
+can be steered in), so both the running turn's agent and the chat's must
+allow a mention; a deny from either keeps it out. Its rules are those at
+arrival: if the chat's agent changes before a queued message runs, what was
+read stays. No `PreToolUse` hook runs: a mention is no tool call. A message
+with mentions is read and admitted on the server's own time, so a client that
+goes away meanwhile does not lose it; a retry with the same `requestId` (a
+turn, a queued message, a message steered into a running turn, or one that
+started a turn, each recorded for this) finds it without reading or
+delivering it again, even when retries race, and one sent while the first is
+still reading waits for it. A published chat's request with `resources` is
+refused (`403`), and its `/v1/info` leaves the capability out. Servers advertise
 `mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
 resources only when it is there. `GET /v1/mcp?threadId=<id>&agent=<agent>` (either one alone works; a named
 agent wins over the chat's) marks each server those rules take away with

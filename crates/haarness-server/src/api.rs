@@ -1616,12 +1616,11 @@ async fn start_turn(
         .into());
     }
     let resources = std::mem::take(&mut request.resources);
-    let agent = state.runtime.message_agent(
-        id,
-        request.agent.as_deref(),
-        request.command.as_deref(),
-        false,
-    );
+    let agents = vec![
+        state
+            .runtime
+            .message_agent(request.agent.as_deref(), request.command.as_deref()),
+    ];
     let turn = admit(resources.is_empty(), async move {
         let _reading = read_mentions(
             &state,
@@ -1629,7 +1628,7 @@ async fn start_turn(
             Mentioning {
                 chat: id,
                 request: request.request_id,
-                agent,
+                agents,
             },
             resources,
             &mut request.text,
@@ -1673,10 +1672,11 @@ async fn execute_command(
             }
         });
     }
-    let agent =
+    let agents = vec![
         state
             .runtime
-            .message_agent(id, request.agent.as_deref(), Some(&request.name), false);
+            .message_agent(request.agent.as_deref(), Some(&request.name)),
+    ];
     // Boxed: a command's future is large.
     let response = admit(
         resources.is_empty(),
@@ -1689,7 +1689,7 @@ async fn execute_command(
                     Mentioning {
                         chat: id,
                         request: request.request_id,
-                        agent,
+                        agents,
                     },
                     resources,
                     &mut text,
@@ -2420,14 +2420,13 @@ async fn queue_input(
     Json(mut request): Json<QueueInputRequest>,
 ) -> ApiResult<(StatusCode, Json<QueueInputResponse>)> {
     let resources = std::mem::take(&mut request.resources);
-    // Steering, it joins the running turn's agent; queued, it runs later as a
-    // turn of its own under the chat's.
-    let agent = state.runtime.message_agent(
-        id,
-        None,
-        None,
-        request.delivery == haarness_protocol::InputDelivery::Steer,
-    );
+    // Steered, it joins the running turn; queued (or steered as that turn
+    // ends) it runs as a turn of its own under the chat's agent. Both must
+    // allow a mention.
+    let mut agents = vec![None];
+    if let Some(running) = state.runtime.running_agent(id) {
+        agents.push(Some(running));
+    }
     let response = admit(resources.is_empty(), async move {
         let _reading = read_mentions(
             &state,
@@ -2435,7 +2434,7 @@ async fn queue_input(
             Mentioning {
                 chat: id,
                 request: request.request_id,
-                agent,
+                agents,
             },
             resources,
             &mut request.text,
@@ -2450,9 +2449,9 @@ async fn queue_input(
 
 /// The MCP resources a message to chat `id` mentions, read into it when it
 /// arrives, so a queued message holds what was read; the chat's rules under
-/// the agent the message runs with (`agent`, else the chat's) keep from it
-/// what they keep from the model. A published chat's viewers cannot
-/// read the owner's MCP servers, so a mention from one is refused.
+/// each agent the message may run with keep from it what they keep from the
+/// model. A published chat's viewers cannot read the owner's MCP servers, so
+/// a mention from one is refused.
 ///
 /// The returned gate is held until the message is admitted: a retry of the
 /// same request meanwhile waits for it, then finds the message taken and
@@ -2477,21 +2476,26 @@ async fn read_mentions(
     let Mentioning {
         chat: id,
         request,
-        agent,
+        agents,
     } = message;
     let reading = Reading::start(id, request).await;
     if state.runtime.request_admitted(id, request).await? {
         return Ok(Some(reading));
     }
-    let policy = state
-        .runtime
-        .resource_mention_policy(Some(id), agent.as_deref())
-        .await?;
+    let mut policies = Vec::new();
+    for agent in &agents {
+        policies.push(
+            state
+                .runtime
+                .resource_mention_policy(Some(id), agent.as_deref())
+                .await?,
+        );
+    }
     crate::mcp_resources::read_mentions(
         state.mcp.as_ref(),
         &state.workspace,
         resources,
-        &|server, uri| policy.denies(server, uri),
+        &|server, uri| policies.iter().any(|policy| policy.denies(server, uri)),
         crate::mcp_resources::MENTION_BUDGET,
         text,
         attachments,
@@ -2501,11 +2505,12 @@ async fn read_mentions(
 }
 
 /// The message whose mentions are read: its chat, its request, and the
-/// agent it runs under (`None` for the chat's).
+/// agents it may run under (`None` for the chat's), each of whose rules
+/// must allow a mention.
 struct Mentioning {
     chat: ThreadId,
     request: haarness_protocol::RequestId,
-    agent: Option<String>,
+    agents: Vec<Option<String>>,
 }
 
 type ReadingKey = (ThreadId, haarness_protocol::RequestId);
