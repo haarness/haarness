@@ -871,6 +871,51 @@ test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the 
   await expect(row).toBeFocused();
 });
 
+test("sidebar chat rows are one tab stop, and Delete on a row archives it as its button does", async () => {
+  const alpha = await open("alpha");
+  for (const title of ["Keep one", "Archive me", "Keep two"])
+    await alpha.createThread({ title, provider: "echo", model: "echo-1" });
+  const row = (title: string) => project("alpha").getByRole("button", { name: title, exact: true });
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Keep two", "Archive me", "Keep one"]);
+  await row("Keep two").click();
+  await expect(row("Keep two")).toHaveAttribute("aria-current", "true");
+  // Tab reaches the open chat's row and then leaves the list: no other row
+  // and no archive button is a stop of its own.
+  await expect(project("alpha").locator(".session-row > button[tabindex='0']")).toHaveCount(1);
+  await expect(project("alpha").locator(".session-row > .icon-button:not([tabindex='-1'])")).toHaveCount(0);
+  await project("alpha").getByRole("button", { name: "Project options for alpha", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(row("Keep two")).toBeFocused();
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => !!document.activeElement?.closest(".session-row"))).toBe(false);
+  // The row last walked to is the stop from then on.
+  await row("Keep two").focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(row("Archive me")).toBeFocused();
+  await expect(row("Archive me")).toHaveAttribute("tabindex", "0");
+  await expect(row("Keep two")).toHaveAttribute("tabindex", "-1");
+  // Delete archives it and leaves the keyboard on the row below; the open
+  // chat stays open.
+  await page.keyboard.press("Delete");
+  await expect(row("Archive me")).toHaveCount(0);
+  await expect(row("Keep one")).toBeFocused();
+  await expect(row("Keep two")).toHaveAttribute("aria-current", "true");
+  await expect.poll(async () => (await alpha.listThreads({ archived: true })).find(thread => thread.title === "Archive me")?.archived).toBe(true);
+  // Backspace on the open chat's row archives it too; the chat stays on
+  // screen with its Restore line.
+  await row("Keep two").focus();
+  await page.keyboard.press("Backspace");
+  await expect(row("Keep two")).toHaveCount(0);
+  await expect(page.locator(".archived-notice")).toContainText("This chat is archived.");
+  await expect(row("Keep one")).toBeFocused();
+  // Focus sidebar chosen in Search with the pointer still shows the ring.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Focus sidebar");
+  await page.getByRole("option", { name: "Focus sidebar", exact: true }).click();
+  await expect(row("Keep one")).toBeFocused();
+  expect(await row("Keep one").evaluate(element => element.matches(":focus-visible") && !document.documentElement.hasAttribute("data-pointer-focus"))).toBe(true);
+});
+
 test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {
   const alpha = await open("alpha");
   const thread = await alpha.createThread({ title: "Long talk", provider: "echo", model: "echo-1" });
