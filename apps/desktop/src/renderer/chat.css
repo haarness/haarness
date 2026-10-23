@@ -1966,10 +1966,18 @@ html[dir="rtl"] .tool-target {
   align-self: stretch;
 }
 /* Code keeps left-to-right order in Arabic too, as in the diff view. */
-.approval-script-body .change-path,
 .approval-script-body .change-lines {
   direction: ltr;
   text-align: left;
+}
+/* A long path gives way from its start, so the file's own name stays in
+   view; the path itself still reads left to right. */
+.approval-script-body .change-path {
+  direction: rtl;
+  text-align: left;
+}
+.approval-script-body .change-path bdi {
+  direction: ltr;
 }
 .approval-script-body .change-lines {
   max-height: 200px;

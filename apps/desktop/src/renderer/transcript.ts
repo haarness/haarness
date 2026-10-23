@@ -590,16 +590,17 @@ export function permissionCommand(detail: unknown) {
 }
 
 /**
- * The script a shell request's command runs, as the server read it when it
+ * The script a shell command's request runs, as the server read it when it
  * asked: its path (inside the project, relative to it), its lines without
- * the final line break, and whether the file goes on. Nothing for any other
- * request, or an older server that sends none.
+ * the final line break, and whether the file goes on. Any card a shell
+ * command raises carries one (under the default rules, the one about a
+ * folder outside the project); nothing for an older server that sends none.
  */
 export function permissionScript(
   permission: { permission?: string; script?: unknown },
   workspace = "",
 ) {
-  const script = permission.permission === "bash" ? permission.script : undefined;
+  const script = permission.script;
   if (!script || typeof script !== "object") return undefined;
   const { path, content, truncated } = script as Record<string, unknown>;
   if (typeof path !== "string" || typeof content !== "string") return undefined;

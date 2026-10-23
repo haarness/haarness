@@ -93,21 +93,17 @@ async fn a_shell_request_carries_the_script_its_command_runs_and_nothing_else_ch
         .unwrap();
     wait_pending_permissions(&runtime, 1).await;
     let pending = runtime.pending_permissions().remove(0);
-    let expected = haarness_protocol::PermissionScript {
-        path: fixture.0.join("scripts/deploy.sh").display().to_string(),
-        content: "printf deployed > deployed.txt\n".into(),
-        truncated: false,
-    };
-    assert_eq!(pending.script.as_ref(), Some(&expected));
+    let script = pending.script.clone().unwrap();
+    assert_eq!(
+        Path::new(&script.path),
+        fixture.0.join("scripts").join("deploy.sh")
+    );
+    assert_eq!(script.content, "printf deployed > deployed.txt\n");
+    assert!(!script.truncated);
     // The listing and the live event carry the same script.
-    assert_eq!(
-        serde_json::to_value(&pending).unwrap()["script"],
-        json!({"path": expected.path, "content": expected.content, "truncated": false})
-    );
-    assert_eq!(
-        requested(&runtime)["script"]["path"],
-        expected.path.as_str()
-    );
+    let listed = json!({"path": script.path, "content": script.content, "truncated": false});
+    assert_eq!(serde_json::to_value(&pending).unwrap()["script"], listed);
+    assert_eq!(requested(&runtime)["script"], listed);
     // Shown, never asked about: one request, with the patterns and rules the
     // command has without it.
     assert_eq!(pending.permission, "bash");
@@ -311,13 +307,16 @@ async fn tool_errors(runtime: &AgentRuntime, thread: &Thread) -> Vec<String> {
         .collect()
 }
 
+/// What the model is told when the script changed after the card showed it.
+const CHANGED: &str = "The command did not run: x.sh changed after the user saw it. Run it again so they see the new version.";
+
 #[tokio::test]
-async fn a_script_that_changed_after_it_was_shown_does_not_run() {
+async fn a_script_that_changed_after_it_was_allowed_once_does_not_run() {
     let fixture = Fixture::new();
     let script = fixture.0.join("x.sh");
     let runtime = runtime(&fixture.0, RuntimeConfig::default());
     let thread = echo_thread(&runtime).await;
-    for (change, decision) in [("edit", Reply::Once), ("remove", Reply::Always)] {
+    for change in ["edit", "remove"] {
         std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
         let turn = runtime
             .start_turn(
@@ -335,7 +334,7 @@ async fn a_script_that_changed_after_it_was_shown_does_not_run() {
         } else {
             std::fs::remove_file(&script).unwrap();
         }
-        answer(&runtime, &pending.permission_id, decision).await;
+        answer(&runtime, &pending.permission_id, Reply::Once).await;
         assert_eq!(
             wait_done(&runtime, &turn).await.status,
             TurnStatus::Completed
@@ -343,9 +342,7 @@ async fn a_script_that_changed_after_it_was_shown_does_not_run() {
         let errors = tool_errors(&runtime, &thread).await;
         assert_eq!(
             errors.last().map(String::as_str),
-            Some(
-                "x.sh changed after it was shown to the user; run the command again to show the new version."
-            ),
+            Some(CHANGED),
             "{change}: {errors:?}"
         );
         assert!(!fixture.0.join("swapped.txt").exists(), "{change}");
@@ -360,11 +357,44 @@ async fn a_script_that_changed_after_it_was_shown_does_not_run() {
         )
         .await
         .unwrap();
-    // The Always above covers `sh *` now, so it runs without a card.
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    answer(&runtime, &pending.permission_id, Reply::Once).await;
     wait_done(&runtime, &turn).await;
     assert_eq!(
         std::fs::read_to_string(fixture.0.join("shown.txt")).unwrap(),
         "shown"
+    );
+}
+
+#[tokio::test]
+async fn an_always_answer_runs_the_script_as_it_is_since_a_retry_would_anyway() {
+    let fixture = Fixture::new();
+    let script = fixture.0.join("x.sh");
+    std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({"command": "sh x.sh"}))),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    std::fs::write(&script, "printf swapped > swapped.txt\n").unwrap();
+    // Always remembers `sh *`: refusing now would only send the model back
+    // to run it again without a card.
+    answer(&runtime, &pending.permission_id, Reply::Always).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(tool_errors(&runtime, &thread).await.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("swapped.txt")).unwrap(),
+        "swapped"
     );
 }
 
@@ -500,4 +530,163 @@ async fn auto_reads_no_script_since_it_shows_no_card() {
     assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
     answer(&runtime, &pending.permission_id, Reply::Reject).await;
     wait_done(&runtime, &turn).await;
+}
+
+/// A runtime with the default rules: `bash` runs without asking, and a
+/// command that reaches outside the project asks `external_directory`.
+fn plain_runtime(workspace: &Path, config: RuntimeConfig) -> AgentRuntime {
+    AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.to_owned())),
+        EventBus::new(2048),
+        workspace.to_owned(),
+        String::new(),
+        config,
+    )
+}
+
+#[tokio::test]
+async fn under_the_default_rules_the_outside_folder_card_shows_the_script() {
+    let fixture = Fixture::new();
+    let outside = Fixture::new();
+    std::fs::write(outside.0.join("run.sh"), "printf ran > ran.txt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            outside.0.join("run.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let runtime = plain_runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    let command = format!("cd {} && ./run.sh", outside.0.display());
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({ "command": command }))),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    // The only card is about the folder; it still shows what runs there.
+    assert_eq!(pending.permission, "external_directory");
+    let script = pending.script.clone().unwrap();
+    assert_eq!(Path::new(&script.path), outside.0.join("run.sh"));
+    assert_eq!(script.content, "printf ran > ran.txt\n");
+    assert_eq!(requested(&runtime)["script"]["content"], script.content);
+    answer(&runtime, &pending.permission_id, Reply::Once).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.0.join("ran.txt")).unwrap(),
+        "ran"
+    );
+    // That card is sealed too.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({ "command": command }))),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    std::fs::write(outside.0.join("run.sh"), "printf swapped > swapped.txt\n").unwrap();
+    answer(&runtime, &pending.permission_id, Reply::Once).await;
+    wait_done(&runtime, &turn).await;
+    assert!(!outside.0.join("swapped.txt").exists());
+    let errors = tool_errors(&runtime, &thread).await;
+    assert!(
+        errors
+            .last()
+            .is_some_and(|error| error.starts_with("The command did not run: ")),
+        "{errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_script_in_a_folder_an_external_directory_rule_denies_is_not_shown() {
+    let fixture = Fixture::new();
+    let asked = Fixture::new();
+    let denied = Fixture::new();
+    std::fs::write(denied.0.join("run.sh"), "echo hidden\n").unwrap();
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(PermissionRule {
+        pattern: format!("external_directory:{}/*", denied.0.display()),
+        decision: D::Deny,
+    });
+    let runtime = plain_runtime(&fixture.0, config);
+    let thread = echo_thread(&runtime).await;
+    // The card asks about the folder `cd` goes to; the script is named in
+    // the denied one.
+    let command = format!(
+        "cd {} && {}",
+        asked.0.display(),
+        denied.0.join("run.sh").display()
+    );
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash(json!({ "command": command }))),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert_eq!(pending.permission, "external_directory");
+    assert!(pending.script.is_none());
+    answer(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+}
+
+#[tokio::test]
+async fn a_direct_shell_call_shows_its_script_and_does_not_run_one_that_changed() {
+    let fixture = Fixture::new();
+    let script = fixture.0.join("x.sh");
+    std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
+    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let thread = echo_thread(&runtime).await;
+    let call = || {
+        runtime.run_workflow_tool(
+            thread.id,
+            "bash",
+            json!({"command": "sh x.sh"}),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    };
+    // As the card showed it, it runs.
+    let (result, ()) = tokio::join!(call(), async {
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        assert_eq!(
+            pending.script.map(|script| script.content).as_deref(),
+            Some("printf shown > shown.txt\n")
+        );
+        answer(&runtime, &pending.permission_id, Reply::Once).await;
+    });
+    assert!(!result.unwrap().is_error);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("shown.txt")).unwrap(),
+        "shown"
+    );
+    // Changed while the card waited, it does not.
+    let (result, ()) = tokio::join!(call(), async {
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions().remove(0);
+        assert!(pending.script.is_some());
+        std::fs::write(&script, "printf swapped > swapped.txt\n").unwrap();
+        answer(&runtime, &pending.permission_id, Reply::Once).await;
+    });
+    let result = result.unwrap();
+    assert!(result.is_error);
+    assert_eq!(result.output.text, format!("permission denied: {CHANGED}"));
+    assert!(!fixture.0.join("swapped.txt").exists());
 }
