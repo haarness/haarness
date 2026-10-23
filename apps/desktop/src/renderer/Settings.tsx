@@ -74,7 +74,9 @@ export function Settings() {
       marked = element;
       element.classList.add("setting-search-target");
       element.scrollIntoView({ block: "center", behavior: "instant" });
+      // A choice of options takes the keyboard on the option that is chosen.
       const control =
+        element.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]:not(:disabled)') ??
         element.querySelector<HTMLElement>(
           "input:not(:disabled), button:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
         ) ?? element;
