@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "Den blokkerte {count} handlinger i denne runden, så resten må du godkjenne selv.",
   "This deletes {path}, outside the project, and your messages do not name it.": "Dette sletter {path}, utenfor prosjektet, og meldingene dine nevner det ikke.",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "Dette sletter {path}, en sti Haarness ikke kan plassere, og meldingene dine nevner den ikke.",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "Dette kjører {program}-kode som sletter filer eller går utenfor prosjektet, og meldingene dine ber ikke om det.",
   "Destructive action": "Destruktiv handling",
   "Already answered": "Allerede besvart",
   "It rated this action critical risk.": "Den vurderte handlingen som kritisk risiko.",

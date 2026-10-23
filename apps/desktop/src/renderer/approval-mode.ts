@@ -216,6 +216,8 @@ export function reviewReasonText(
       return t("This deletes {path}, outside the project, and your messages do not name it.", { path: isolate(reason.path) });
     case "unplaced_deletion":
       return t("This deletes {path}, a path Haarness can't place, and your messages do not name it.", { path: isolate(reason.path) });
+    case "inline_code":
+      return t("This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.", { program: isolate(reason.program) });
     case "rated":
       return review.risk === "critical"
         ? t("It rated this action critical risk.")

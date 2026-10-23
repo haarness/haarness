@@ -118,6 +118,10 @@ pub enum ReviewReason {
     /// passes, a path after a directory change), which Haarness cannot place
     /// and the person's messages do not name.
     UnplacedDeletion { path: String },
+    /// The command runs `program`'s inline code (`python3 -c`, `perl -e`),
+    /// which plainly deletes or names a path outside the project, and the
+    /// person's messages do not ask for it.
+    InlineCode { program: String },
     /// The reviewer rated the action's risk (see `risk`) and gave no reason.
     Rated,
     /// A code a newer server sends: show `rationale`.

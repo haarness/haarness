@@ -406,6 +406,11 @@ fn review_reason(
             "path",
             path,
         ),
+        ReviewReason::InlineCode { program } => text(
+            "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.",
+            "program",
+            program,
+        ),
         ReviewReason::Rated => language
             .text(match review.risk {
                 Some(ReviewRisk::Critical) => "It rated this action critical risk.",
@@ -441,14 +446,94 @@ pub(crate) fn review_reason_text(
 /// them; Haarness's own notes never add them.
 fn plain(text: &str) -> String {
     text.chars()
-        .filter(|c| {
-            !c.is_control()
-                && !matches!(
+        .filter_map(|c| {
+            if c.is_whitespace() && c.is_control() {
+                // A line break or a tab still parts the words around it.
+                Some(' ')
+            } else if c.is_control()
+                || matches!(
                     c,
-                    '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
                 )
+            {
+                None
+            } else {
+                Some(c)
+            }
         })
         .collect()
+}
+
+/// A path shortened to about `room` characters for a note that must fit
+/// its rows: the home folder as `~`, then the middle left out (`…`).
+fn short_path(path: &str, room: usize) -> String {
+    let home = haarness_protocol::home_dir().map(|home| home.display().to_string());
+    let path = match home.as_deref().and_then(|home| path.strip_prefix(home)) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    };
+    let count = path.chars().count();
+    if count <= room.max(8) {
+        return path;
+    }
+    let keep = room.max(8) - 1;
+    let head: String = path.chars().take(keep / 2).collect();
+    let tail: String = path.chars().skip(count - (keep - keep / 2)).collect();
+    format!("{head}…{tail}")
+}
+
+/// [`review_note`] that fits `rows` rows of `width`: a deletion note whose
+/// path is too long gets the path shortened, so its reason still shows.
+pub fn review_note_within(
+    pending: &PendingPermissionInfo,
+    language: Language,
+    width: usize,
+    rows: usize,
+) -> Option<String> {
+    use haarness_protocol::ReviewReason;
+    let note = review_note(pending, language)?;
+    let fits = |note: &str| textwrap::wrap(note, width.max(10)).len() <= rows;
+    if fits(&note) {
+        return Some(note);
+    }
+    let review = pending.review.as_ref()?;
+    let path = match review.reason.as_ref()? {
+        ReviewReason::UnnamedDeletion { path } | ReviewReason::UnplacedDeletion { path } => path,
+        _ => return Some(note),
+    };
+    // The path gives way first, down to a readable stub; then the rule,
+    // which a deletion note does not need, and the path again.
+    for (rule, floor) in [(true, 24), (false, 8)] {
+        let mut shorter = pending.clone();
+        if let Some(review) = shorter.review.as_mut().filter(|_| !rule) {
+            review.rule = None;
+        }
+        let mut room = path.chars().count();
+        loop {
+            let short = short_path(path, room);
+            if let Some(review) = shorter.review.as_mut() {
+                review.reason = Some(match review.reason.as_ref() {
+                    Some(ReviewReason::UnplacedDeletion { .. }) => {
+                        ReviewReason::UnplacedDeletion { path: short }
+                    }
+                    _ => ReviewReason::UnnamedDeletion { path: short },
+                });
+            }
+            let note = review_note(&shorter, language)?;
+            if fits(&note) {
+                return Some(note);
+            }
+            if room <= floor {
+                break;
+            }
+            room = room.saturating_sub(4).max(floor);
+        }
+    }
+    Some(note)
 }
 
 /// The reviewer's rule as the note shows it: Haarness's own ("Destructive
@@ -588,7 +673,7 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let show_footer = spend(&mut room, footer_rows) == 1;
     // Why the reviewer asks is worth more than the subject's later rows; a
     // second row for a long one comes after them.
-    let note_rows: Vec<String> = review_note(pending, language)
+    let note_rows: Vec<String> = review_note_within(pending, language, inner.saturating_sub(2), 2)
         .map(|note| {
             textwrap::wrap(&note, inner.saturating_sub(2).max(10))
                 .into_iter()

@@ -19249,8 +19249,19 @@ fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
             status: PermissionReviewStatus::Asked,
             risk: None,
             rule: Some("Shared\u{2067}state\u{2069}".into()),
-            rationale: Some("It pushes \u{202e}to main\u{200f}.".into()),
+            rationale: Some("It pushes \u{202e}to main\u{200f}.\nNot\trequested.".into()),
             reason: None,
+        },
+        // A deep path, with an Arabic letter mark in it.
+        PermissionReview {
+            status: PermissionReviewStatus::Asked,
+            risk: None,
+            rule: Some("Destructive action".into()),
+            rationale: None,
+            reason: Some(ReviewReason::UnnamedDeletion {
+                path: "/srv/shared/projects/client-work/archive/2026/builds/nightly/ca\u{061c}che"
+                    .into(),
+            }),
         },
     ];
     for language in [
@@ -19274,8 +19285,8 @@ fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
                     );
                     assert!(
                         !line.text().contains([
-                            '\u{200e}', '\u{200f}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}',
-                            '\u{2069}'
+                            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202e}', '\u{2066}', '\u{2067}',
+                            '\u{2068}', '\u{2069}', '\n', '\t'
                         ]),
                         "{language:?} {index}: {:?}",
                         line.text()
@@ -19292,9 +19303,15 @@ fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
                     let expected = [
                         "Auto review unavailable: It could not decide (HTTP 500).",
                         "This deletes /tmp/cache, outside the project, and your messages do not name it.",
-                        "Auto review · Sharedstate: It pushes to main.",
+                        "Auto review · Sharedstate: It pushes to main. Not requested.",
+                        "outside the project, and your messages do not name it.",
                     ][index];
                     assert!(text.contains(expected), "{text}");
+                }
+                // At 60 columns a deep path gives way, so the reason still
+                // ends on the card.
+                if language == crate::locale::Language::English && index == 3 {
+                    assert!(text.contains("do not name it."), "{width}: {text}");
                 }
                 if language == crate::locale::Language::Arabic && index == 1 {
                     assert!(text.contains("/tmp/cache"), "{text}");

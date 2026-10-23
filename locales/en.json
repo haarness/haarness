@@ -2785,6 +2785,7 @@
   "It blocked {count} actions this turn, so the rest of it is yours to approve.": "It blocked {count} actions this turn, so the rest of it is yours to approve.",
   "This deletes {path}, outside the project, and your messages do not name it.": "This deletes {path}, outside the project, and your messages do not name it.",
   "This deletes {path}, a path Haarness can't place, and your messages do not name it.": "This deletes {path}, a path Haarness can't place, and your messages do not name it.",
+  "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.": "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it.",
   "Destructive action": "Destructive action",
   "Already answered": "Already answered",
   "It rated this action critical risk.": "It rated this action critical risk.",

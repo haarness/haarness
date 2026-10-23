@@ -308,9 +308,8 @@ fn read_verdict(value: &Value) -> Option<Verdict> {
     let text = |keys: &[&str]| {
         pick(keys)
             .and_then(Value::as_str)
-            .map(str::trim)
+            .map(one_line)
             .filter(|text| !text.is_empty())
-            .map(str::to_owned)
     };
     Some(Verdict {
         risk: risk.unwrap_or(ReviewRisk::High),
@@ -330,6 +329,18 @@ fn salvage(text: &str) -> Option<Verdict> {
         return None;
     }
     read_verdict(&serde_json::from_str(&text[start..=end]).ok()?)
+}
+
+/// `text` on one line, as every client shows a note: runs of whitespace
+/// (line breaks, tabs) one space, and no other control characters, so
+/// nothing in it can break a line or reach a terminal as an escape.
+fn one_line(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 /// Keeps the start and the end of a long text.
@@ -781,6 +792,9 @@ fn note(status: PermissionReviewStatus, reason: ReviewReason) -> PermissionRevie
         ReviewReason::UnplacedDeletion { path } => format!(
             "This deletes {path}, a path Haarness can't place, and your messages do not name it."
         ),
+        ReviewReason::InlineCode { program } => format!(
+            "This runs {program} code that deletes files or reaches outside the project, and your messages do not ask for it."
+        ),
         ReviewReason::Rated | ReviewReason::Unknown => explain(ReviewRisk::High),
     };
     PermissionReview {
@@ -1181,7 +1195,7 @@ impl Reviewer {
         let Some(verdict) = verdict else {
             let detail = last_error.map_or_else(
                 || "no answer".to_owned(),
-                |error| clip(&crate::refusal_reason(&error), 160),
+                |error| clip(&one_line(&crate::refusal_reason(&error)), 160),
             );
             return Outcome::Ask(note(
                 PermissionReviewStatus::Failed,
@@ -1218,7 +1232,9 @@ impl Reviewer {
         let (rationale, reason) = match (&target, verdict.rationale.as_deref()) {
             (Some(target), _) => {
                 let path = clip(&target.path, 120);
-                let reason = if target.placed {
+                let reason = if target.inline {
+                    ReviewReason::InlineCode { program: path }
+                } else if target.placed {
                     ReviewReason::UnnamedDeletion { path }
                 } else {
                     ReviewReason::UnplacedDeletion { path }
@@ -1904,6 +1920,22 @@ mod tests {
         ));
         assert!(!named("rebuild-cache now", "/tmp/build-cache"));
         assert!(!named("x marks", "/tmp/x.bin"));
+    }
+
+    #[test]
+    fn the_reviewers_words_reach_every_client_on_one_line() {
+        let verdict = read_verdict(&json!({
+            "risk": "high",
+            "outcome": "ask",
+            "rule": "Shared\tstate",
+            "rationale": "It deletes ~/.ssh.\nNot requested.\u{1b}[2J\r\n",
+        }))
+        .unwrap();
+        assert_eq!(verdict.rule.as_deref(), Some("Shared state"));
+        assert_eq!(
+            verdict.rationale.as_deref(),
+            Some("It deletes ~/.ssh. Not requested.[2J")
+        );
     }
 
     #[test]
