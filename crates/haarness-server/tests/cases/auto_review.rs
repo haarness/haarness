@@ -33,6 +33,15 @@ fn runtime_with(
     workspace: &Path,
     configure: impl FnOnce(&mut RuntimeConfig),
 ) -> (AgentRuntime, Capturing) {
+    runtime_with_tools(workspace, Vec::new(), configure)
+}
+
+/// [`runtime_with`] with `extra` tools beside the native ones.
+fn runtime_with_tools(
+    workspace: &Path,
+    extra: Vec<Arc<dyn Tool>>,
+    configure: impl FnOnce(&mut RuntimeConfig),
+) -> (AgentRuntime, Capturing) {
     let provider = Capturing::default();
     let mut config = RuntimeConfig::default();
     config.base_rules.push(PermissionRule {
@@ -45,7 +54,10 @@ fn runtime_with(
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
         ])),
-        Arc::new(NativeToolRegistry::new(workspace.to_path_buf())),
+        Arc::new(WithFixtures {
+            native: NativeToolRegistry::new(workspace.to_path_buf()),
+            extra,
+        }),
         EventBus::new(4096),
         workspace.to_path_buf(),
         String::new(),
@@ -744,4 +756,340 @@ async fn a_workflows_calls_are_reviewed_and_a_persons_own_are_approved_once() {
     assert!(!own.is_error, "{}", own.output.text);
     assert!(workspace.0.join("waited.txt").exists());
     assert_eq!(reviews(&provider), 1);
+}
+
+struct WithFixtures {
+    native: NativeToolRegistry,
+    extra: Vec<Arc<dyn Tool>>,
+}
+impl ToolRegistry for WithFixtures {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.extra
+            .iter()
+            .find(|tool| tool.definition().name == name)
+            .cloned()
+            .or_else(|| self.native.get(name))
+    }
+    fn list(&self) -> Vec<ToolDefinition> {
+        let mut tools = self.native.list();
+        tools.extend(self.extra.iter().map(|tool| tool.definition()));
+        tools
+    }
+}
+
+/// A tool only a person answers: every call asks, like a Cloud action that
+/// spends money (`forced`), or names a site in the person's Chrome
+/// (`explicit`).
+struct PersonOnly {
+    name: &'static str,
+    explicit: bool,
+}
+#[async_trait]
+impl Tool for PersonOnly {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "Fixture a person answers".into(),
+            input_schema: json!({"type":"object","properties":{}}),
+        }
+    }
+    fn side_effectful(&self) -> bool {
+        true
+    }
+    fn permission_constraint(&self, _args: &Value, _operation: &str) -> Option<D> {
+        (!self.explicit).then_some(D::Ask)
+    }
+    fn explicit_approval(&self, _args: &Value, _operation: &str) -> bool {
+        self.explicit
+    }
+    async fn execute(&self, _args: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        Ok(ToolOutput {
+            text: "done".into(),
+            metadata: json!({}),
+        })
+    }
+}
+
+async fn running(runtime: &AgentRuntime, count: usize) {
+    for _ in 0..500 {
+        if runtime.auto_reviews_running() == count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "expected {count} running reviews, saw {}",
+        runtime.auto_reviews_running()
+    );
+}
+
+#[tokio::test]
+async fn spending_and_chrome_requests_are_never_reviewed() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with_tools(
+        &workspace.0,
+        vec![
+            Arc::new(PersonOnly {
+                name: "spend_fixture",
+                explicit: false,
+            }),
+            Arc::new(PersonOnly {
+                name: "chrome_fixture",
+                explicit: true,
+            }),
+        ],
+        |_| {},
+    );
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    for tool in ["spend_fixture", "chrome_fixture"] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&format!("!tool {tool} {{}} [review:allow]")),
+            )
+            .await
+            .unwrap();
+        let asked = pending(&runtime).await;
+        assert!(asked.review.is_none(), "{tool}");
+        assert_eq!(reviews(&provider), 0, "{tool} reached the reviewer");
+        reply(&runtime, &asked.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+}
+
+#[tokio::test]
+async fn twenty_blocks_in_a_turn_pause_reviewing_even_without_three_in_a_row() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    // Deny, deny, allow: never three in a row. The verdict is the marker in
+    // each call, the last the reviewer sees.
+    let calls: Vec<Value> = (0..30)
+        .map(|index| {
+            let verdict = if index % 3 == 2 { "allow" } else { "deny" };
+            json!({"name": "bash", "arguments": {
+                "command": format!("printf '[review:{verdict}]' > t{index}.txt")
+            }})
+        })
+        .collect();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!("!multi {}", Value::Array(calls))),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    let review = asked.review.clone().unwrap();
+    assert_eq!(review.status, Status::Paused);
+    assert_eq!(
+        review.rationale.as_deref(),
+        Some("It blocked 20 actions this turn, so the rest of it is yours to approve.")
+    );
+    // Twenty blocks and nine approvals: the thirtieth request is a person's.
+    assert_eq!(reviews(&provider), 29);
+    reply(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert!(workspace.0.join("t2.txt").exists());
+    assert!(!workspace.0.join("t0.txt").exists());
+    assert!(!workspace.0.join("t29.txt").exists());
+}
+
+#[tokio::test]
+async fn a_small_model_that_fails_twice_is_skipped_for_a_while() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |config| {
+        config.auto_review.small_model = Some("echo/echo-small".into());
+    });
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let models = || {
+        provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.output_schema.is_some())
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    };
+    for (round, expected) in [
+        // The small model twice, then the chat's own model twice.
+        (0, vec!["echo-small", "echo-small", "echo-1", "echo-1"]),
+        // Benched: only the chat's model.
+        (
+            1,
+            vec![
+                "echo-small",
+                "echo-small",
+                "echo-1",
+                "echo-1",
+                "echo-1",
+                "echo-1",
+            ],
+        ),
+    ] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&bash(&format!("printf {round} > f{round}.txt"), "fail")),
+            )
+            .await
+            .unwrap();
+        let asked = pending(&runtime).await;
+        assert_eq!(asked.review.as_ref().unwrap().status, Status::Failed);
+        assert_eq!(models(), expected);
+        reply(&runtime, &asked.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+}
+
+#[tokio::test]
+async fn a_child_agents_review_shows_its_task_and_counts_toward_its_root_chat() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |config| {
+        // One child at a time, so the order of the blocks is known.
+        config.execution.subagent_concurrency = 1;
+    });
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let child = |name: &str| {
+        let calls: Vec<Value> = (1..=2)
+            .map(|index| {
+                json!({"name": "bash", "arguments": {
+                    "command": format!("printf x > {name}{index}.txt")
+                }})
+            })
+            .collect();
+        json!({"name": "task", "arguments": {
+            "agent": "general",
+            "description": format!("child {name}"),
+            "prompt": format!("!multi {} [review:deny]", Value::Array(calls)),
+        }})
+    };
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!("!multi {}", json!([child("a"), child("b")]))),
+        )
+        .await
+        .unwrap();
+    // Two blocks in one child and one in the other make three in a row for
+    // the root chat: the fourth request is a person's.
+    let asked = pending(&runtime).await;
+    assert_ne!(asked.thread_id, thread.id);
+    let review = asked.review.clone().unwrap();
+    assert_eq!(review.status, Status::Paused, "{review:?}");
+    assert_eq!(reviews(&provider), 3);
+    let prompt = provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| request.output_schema.is_some())
+        .map(|request| match &request.messages[0] {
+            ProviderMessage::Text { content, .. } => content.clone(),
+            _ => String::new(),
+        })
+        .unwrap();
+    assert!(prompt.contains("<delegated_task>"), "{prompt}");
+    assert!(prompt.contains("parent agent: \"!multi"), "{prompt}");
+    reply(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    for name in ["a1", "a2", "b1", "b2"] {
+        assert!(!workspace.0.join(format!("{name}.txt")).exists());
+    }
+}
+
+#[tokio::test]
+async fn a_quick_toggle_back_to_auto_reviews_a_waiting_request_again() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf t > toggled.txt", "stall")),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    running(&runtime, 1).await;
+    // Out of Auto and straight back: whichever of the switch and the ended
+    // review takes the gate first, one review runs again.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    reviewing(&provider, 2).await;
+    running(&runtime, 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reviews(&provider), 2);
+    assert_eq!(runtime.pending_permissions().len(), 1);
+    reply(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    running(&runtime, 0).await;
+    assert!(!workspace.0.join("toggled.txt").exists());
+}
+
+#[tokio::test]
+async fn a_review_ends_when_its_request_is_answered_or_rejected_with_a_sibling() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |config| {
+        config.base_rules.push(PermissionRule {
+            pattern: "bash:printf mine*".into(),
+            decision: D::Ask,
+        });
+    });
+    let thread = echo_thread(&runtime).await;
+    // A person answers a request while the review Auto started runs.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf raced > raced.txt", "stall")),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    running(&runtime, 1).await;
+    reply(&runtime, &asked.permission_id, Reply::Once).await;
+    running(&runtime, 0).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("raced.txt")).unwrap(),
+        "raced"
+    );
+    assert_eq!(reviews(&provider), 1);
+
+    // A person rejects a request in the same chat as one under review: both
+    // are rejected, and that review ends.
+    let task = json!({"name": "task", "arguments": {
+        "agent": "general",
+        "description": "child under review",
+        "prompt": bash("printf child > child.txt", "stall"),
+    }});
+    let mine = json!({"name": "bash", "arguments": {"command": "printf mine > mine.txt"}});
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            // The person's ask first: a task's result is taken in call order,
+            // so its child runs beside the ask.
+            turn_request(&format!("!multi {}", json!([mine, task]))),
+        )
+        .await
+        .unwrap();
+    running(&runtime, 1).await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.thread_id, thread.id, "the person's own ask");
+    reply(&runtime, &asked.permission_id, Reply::Reject).await;
+    running(&runtime, 0).await;
+    wait_done(&runtime, &turn).await;
+    assert!(!workspace.0.join("child.txt").exists());
+    assert!(!workspace.0.join("mine.txt").exists());
+    assert!(runtime.pending_permissions().is_empty());
 }
