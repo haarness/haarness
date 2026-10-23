@@ -214,8 +214,20 @@ test("a question a hook answered shows its answer and says the hook answered it"
   await page.getByRole("button", { name: /Send message|Send guidance/ }).click();
   const card = page.getByRole("region", { name: "A question for you" });
   await expect(card).toBeVisible();
+  // While it is asked, the card stands for it: no row says "Asking" too.
+  const asked = page.locator(".tool-call").filter({ hasText: "Which color?" });
+  await expect(asked).toHaveCount(0);
+  // It takes the keyboard on its first choice; a key pressed as it came is
+  // not an answer, so the answer waits for that moment to pass.
+  await expect(card.getByRole("button", { name: "Blue", exact: true })).toBeFocused();
+  await expect(card).not.toHaveAttribute("data-arming");
   await card.getByRole("button", { name: "Blue", exact: true }).press("Enter");
   await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
-  await expect(page.locator(".tool-call").filter({ hasText: "Which color?" }).locator(".tool-chip")).toHaveCount(0);
+  // Answered from the keyboard, the keyboard goes back to the message box.
+  await expect(box).toBeFocused();
+  await expect(asked.locator(".tool-chip")).toHaveCount(0);
+  // Answered, its row says what was asked and what came back.
+  await expect(asked.locator(".tool-answer")).toHaveText("Blue");
+  await expect(asked.locator(".tool-target")).toHaveCSS("font-family", /^(?!.*mono)/i);
   expect(errors).toEqual([]);
 });

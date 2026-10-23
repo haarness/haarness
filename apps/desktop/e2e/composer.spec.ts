@@ -475,6 +475,8 @@ test("thinking is Compact by default: one ticking activity line, then a Thought 
     await expect(page.locator(".conversation-find [role=status]")).toHaveText("1 of 1 messages");
     await expect(thought.locator(".thought-body")).toContainText("The second keeps the public API stable.");
     await page.keyboard.press("Escape");
+    // Closing Find gives the keyboard back to what had it.
+    await expect(thought.locator("summary")).toBeFocused();
 
     // Show writes the thought out in full; Hide leaves it out.
     await chooseThinking(page, "Show");
@@ -513,6 +515,60 @@ test("someone who had turned Show reasoning on keeps seeing thinking in full", a
   }
 });
 
+test("the message box keeps the keyboard through a send, and what is typed right after Enter is the next message", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const transcript = page.locator(".transcript");
+    // A first message makes its chat and the view moves to it: the box keeps
+    // the keyboard, and what was typed straight after Enter goes along.
+    await input.fill("first message of the chat");
+    await input.press("Enter");
+    await page.keyboard.type("typed straight after");
+    await expect(transcript).toContainText("Echo: first message of the chat");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("typed straight after");
+    await expect(transcript).not.toContainText("typed straight after");
+    // The new-chat page starts empty again; the chat kept its draft.
+    await page.getByRole("button", { name: "New chat", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await page.locator(".sessions").getByRole("button", { name: /first message of the chat/ }).first().click();
+    await expect(input).toHaveValue("typed straight after");
+
+    // In a chat: the box empties as Enter goes, keeps the keyboard, and the
+    // next message is typed into it while the first one is still on its way.
+    await input.fill("second message");
+    await input.press("Enter");
+    await expect(input).toHaveValue("");
+    await expect(input).toBeEnabled();
+    await page.keyboard.type("third, typed at once");
+    await expect(transcript).toContainText("Echo: second message");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("third, typed at once");
+
+    // Enter in an empty box while work runs does nothing: no empty message,
+    // no error, and Stop stays.
+    await input.fill("!linger 8000 slow task");
+    await input.press("Enter");
+    const stop = page.getByRole("button", { name: "Stop response", exact: true });
+    await expect(stop).toBeVisible();
+    await expect(input).toBeFocused();
+    const bubbles = await page.locator(".message.user").count();
+    await input.press("Enter");
+    await page.waitForTimeout(400);
+    await expect(page.locator(".message.user")).toHaveCount(bubbles);
+    await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
+    await expect(stop).toBeVisible();
+    // Esc in the empty box stops the work, as Stop does.
+    await input.press("Escape");
+    await expect(page.locator(".turn-stopped")).toBeVisible();
+    await expect(stop).toHaveCount(0);
+    await expect(input).toBeFocused();
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
 
 test("every slash command row keeps its description, and the list scrolls", async ({}, info) => {
   const { page, errors, close } = await launch(info);
@@ -540,7 +596,6 @@ test("every slash command row keeps its description, and the list scrolls", asyn
     await close();
   }
 });
-
 
 test("a step opened at the end of the chat stays where it was clicked, and following pauses", async ({}, info) => {
   const { page, errors, close } = await launch(info, async (workspace) => {
@@ -578,7 +633,6 @@ test("a step opened at the end of the chat stays where it was clicked, and follo
   }
 });
 
-
 test("a turn's reply has one footer, under its last text, with its full time; Copy takes the whole reply", async ({}, info) => {
   const { app, page, errors, close } = await launch(info, async (workspace) => {
     await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
@@ -607,7 +661,6 @@ test("a turn's reply has one footer, under its last text, with its full time; Co
     await close();
   }
 });
-
 
 test("an edit's preview opens its file in Review, and an added file reads in one column", async ({}, info) => {
   const { page, errors, close } = await launch(info, async (workspace) => {
@@ -639,7 +692,6 @@ test("an edit's preview opens its file in Review, and an added file reads in one
     await close();
   }
 });
-
 
 test("the queue's Steer now has an arrow of its own, and Remove hands the keyboard on", async ({}, info) => {
   const { page, errors, close } = await launch(info);
