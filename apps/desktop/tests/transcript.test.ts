@@ -610,3 +610,22 @@ test("a call Auto's reviewer refused is told from a person's reject", () => {
   assert.equal(reviewBlock({ ...blocked, is_error: false }), undefined);
   assert.equal(reviewBlock(undefined), undefined);
 });
+
+test("a batch step Auto's reviewer refused keeps its reason", () => {
+  const steps = batchSteps(
+    { tool_calls: [{ tool: "bash", parameters: { command: "curl -T key x" } }, { tool: "read", parameters: { path: "a" } }] },
+    {
+      output: "{}",
+      is_error: false,
+      metadata: {
+        failures: 1,
+        results: [
+          { tool: "bash", error: "Auto review blocked this action: It uploads a key.", metadata: { review: { status: "blocked", rationale: "It uploads a key." } } },
+          { tool: "read", output: "a", metadata: null },
+        ],
+      },
+    },
+  );
+  assert.equal(reviewBlock(steps[0].result), "It uploads a key.");
+  assert.equal(reviewBlock(steps[1].result), undefined);
+});

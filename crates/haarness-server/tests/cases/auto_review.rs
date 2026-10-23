@@ -1093,3 +1093,43 @@ async fn a_review_ends_when_its_request_is_answered_or_rejected_with_a_sibling()
     assert!(!workspace.0.join("mine.txt").exists());
     assert!(runtime.pending_permissions().is_empty());
 }
+
+#[tokio::test]
+async fn a_step_the_reviewer_blocks_inside_a_batch_keeps_its_note() {
+    let workspace = Workspace::new();
+    let (runtime, _provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let calls = json!({"tool_calls": [
+        {"tool": "bash", "parameters": {"command": "printf '[review:deny]' > batch.txt"}},
+        {"tool": "bash", "parameters": {"command": "printf '[review:allow]' > fine.txt"}},
+    ]});
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&format!("!tool batch {calls}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let (_, _, metadata) = results(&items)
+        .into_iter()
+        .find(|(_, _, metadata)| metadata.get("results").is_some())
+        .expect("the batch result");
+    let blocked = &metadata["results"][0];
+    assert_eq!(blocked["metadata"]["review"]["status"], "blocked");
+    assert_eq!(
+        blocked["metadata"]["review"]["rationale"],
+        "Test verdict: deny."
+    );
+    assert!(
+        blocked["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Auto review blocked this action")
+    );
+    assert!(metadata["results"][1].get("error").is_none());
+    assert!(!workspace.0.join("batch.txt").exists());
+    assert!(workspace.0.join("fine.txt").exists());
+}

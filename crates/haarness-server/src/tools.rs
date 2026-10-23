@@ -496,6 +496,13 @@ impl Tool for BatchTool {
 fn batch_result(name: &str, result: CoreResult<ToolOutput>) -> Value {
     match result {
         Ok(output) => json!({"tool":name,"output":output.text,"metadata":output.metadata}),
+        // A step Auto's reviewer refused keeps its note, as a call of its own
+        // does, so clients tell it from a failure or a person's reject.
+        Err(CoreError::ReviewBlocked(review)) => json!({
+            "tool": name,
+            "error": CoreError::ReviewBlocked(review.clone()).to_string(),
+            "metadata": {"review": review},
+        }),
         Err(error) => json!({"tool":name,"error":error.to_string()}),
     }
 }
