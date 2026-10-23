@@ -5988,10 +5988,6 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
     }
 }
 
-/// What a shell request's script says, for the terminal prompt: its path
-/// and first lines, indented and each cut to `PREVIEW_COLUMNS` cells, or why its
-/// text is not shown. The server has already made its text safe for a
-/// terminal.
 /// `line` with its tabs as spaces to the next stop of four.
 fn expand_tabs(line: &str) -> String {
     const TAB_WIDTH: usize = 4;
@@ -6010,6 +6006,10 @@ fn expand_tabs(line: &str) -> String {
     text
 }
 
+/// What a shell request's script says, for the terminal prompt: its path
+/// and first lines, indented and each cut to `PREVIEW_COLUMNS` cells, or why its
+/// text is not shown. The server has already replaced what could act on a
+/// terminal; tabs are expanded and anything left is escaped here too.
 fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
     use haarness_protocol::ScriptWithheld;
     const LINES: usize = 6;
