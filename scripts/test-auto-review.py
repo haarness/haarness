@@ -8,7 +8,8 @@ ask shows the card with the reviewer's note, a block leaves a quiet row with
 its reason, a slow review reads `reviewing…`, a failed one asks with a note,
 an ask a person configured never reaches the reviewer, a switch to Review or
 Stop mid-review settles the request at once, and `haarness run --auto` asks
-at a terminal with the note or stops without one, saying why.
+at a terminal with the note, or without one refuses each such request with
+its reason and goes on (exit status 3), stopping after five in a row.
 
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
@@ -238,22 +239,43 @@ try:
     check('run --auto at a terminal asks with the reviewer\'s note')
 
     # Without a terminal: each request that still needs a person is refused
-    # with its reason, one line each, and the run goes on.
-    headless = subprocess.run(
-        [str(binary), '--workspace', str(workspace), 'run', '--auto', '--title', 'Run refuses',
-         '!multi ' + json.dumps([
-             {'name': 'bash', 'arguments': {'command': 'printf asked > run-asked-2.txt'}},
-             {'name': 'bash', 'arguments': {'command': 'printf mine > run-mine.txt'}},
-         ]) + ' [review:ask]'],
-        env=env, input='', text=True, capture_output=True, timeout=120, start_new_session=True)
+    # with its reason, one line each (and one JSON record each), the agent
+    # reads why in Haarness's words, and the run goes on to exit with 3.
+    def headless_run(title, calls, verdict):
+        return subprocess.run(
+            [str(binary), '--workspace', str(workspace), 'run', '--auto', '--format', 'json', '--title', title,
+             '!multi ' + json.dumps(calls) + f' [review:{verdict}]'],
+            env=env, input='', text=True, capture_output=True, timeout=120, start_new_session=True)
+
+    headless = headless_run('Run refuses', [
+        {'name': 'bash', 'arguments': {'command': 'printf asked > run-asked-2.txt'}},
+        {'name': 'bash', 'arguments': {'command': 'printf mine > run-mine.txt'}},
+    ], 'ask')
     finished()
-    assert headless.returncode == 0, headless.stderr
-    refused = [line for line in headless.stderr.splitlines() if line.startswith('Refused: ')]
+    assert headless.returncode == 3, (headless.returncode, headless.stderr)
+    refused = sorted(line for line in headless.stderr.splitlines() if line.startswith('Refused: '))
     assert len(refused) == 2, headless.stderr
-    assert 'Auto review left it to a person (Test rule): Test verdict: ask. Nobody can approve that in this run; allow it by adding' in refused[0], refused
-    assert 'A permission rule asks a person for it. Nobody can approve that in this run' in refused[1], refused
+    assert any('A permission rule asks a person for it. Nobody can approve that in this run' in line for line in refused), refused
+    assert any('Auto review left it to a person (Test rule): Test verdict: ask. Nobody can approve that in this run; allow it by adding' in line for line in refused), refused
+    records = [json.loads(line) for line in headless.stdout.splitlines() if line.strip()]
+    assert sorted(record['request'] for record in records if record['type'] == 'refused') == [
+        'run a command (printf asked > run-asked-2.txt)', 'run a command (printf mine > run-mine.txt)'], records
+    chat = next(record['threadID'] for record in records if record['type'] == 'refused')
+    said = [item['data']['output'] for item in api('/v1/threads/' + chat + '/items')
+            if item['data']['type'] == 'tool_result' and item['data'].get('is_error')]
+    assert len(said) == 2 and all('nobody can answer in this run' in output for output in said), said
+    assert not any('The user rejected' in output for output in said), said
     assert not (workspace / 'run-asked-2.txt').exists() and not (workspace / 'run-mine.txt').exists()
-    check('run --auto without a terminal refuses each request that needs a person, with its reason, and goes on')
+    check('run --auto without a terminal refuses each request that needs a person, with its reason, goes on and exits 3')
+
+    stuck = headless_run('Run stops', [
+        {'name': 'bash', 'arguments': {'command': f'printf stuck > stuck-{index}.txt'}} for index in range(6)
+    ], 'ask')
+    finished()
+    assert stuck.returncode == 1, (stuck.returncode, stuck.stderr)
+    assert 'Stopped: 5 requests in a row needed a person, and nobody can answer in this run.' in stuck.stderr, stuck.stderr
+    assert not any((workspace / f'stuck-{index}.txt').exists() for index in range(6))
+    check('run --auto without a terminal stops after five refusals in a row')
     print(f'{len(checks)} Auto review scenarios passed.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)

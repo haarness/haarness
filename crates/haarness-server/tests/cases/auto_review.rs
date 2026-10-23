@@ -1273,3 +1273,123 @@ async fn the_server_says_auto_asks_a_reviewer_only_while_it_does() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_refusal_nobody_answered_ends_its_request_alone_in_haarnesss_words() {
+    let workspace = Workspace::new();
+    let (runtime, _provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let child = |name: &str, verdict: &str| {
+        json!({"name": "task", "arguments": {
+            "agent": "general",
+            "description": format!("child {name}"),
+            "prompt": bash(&format!("printf {name} > {name}.txt"), verdict),
+        }})
+    };
+    // Three children at once: one the reviewer leaves to a person, one it
+    // is still deciding, and one more left to a person.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "!multi {}",
+                json!([
+                    child("asked", "ask"),
+                    child("slow", "slow"),
+                    child("other", "ask")
+                ])
+            )),
+        )
+        .await
+        .unwrap();
+    let mut shown = Vec::new();
+    for _ in 0..500 {
+        shown = runtime.pending_permissions();
+        if shown.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert!(
+        shown.iter().all(
+            |pending| pending.review.as_ref().map(|review| review.status) == Some(Status::Asked)
+        )
+    );
+    let asked = shown
+        .iter()
+        .find(|pending| pending.operation.contains("asked.txt"))
+        .unwrap();
+    // A run with nobody to ask refuses one: only that one ends.
+    runtime
+        .reply_permission(
+            &asked.permission_id,
+            PermissionReply {
+                decision: Reply::Refuse,
+                feedback: Some(
+                    "Auto review left this to a person and nobody can answer in this run: Test rule: Test verdict: ask"
+                        .into(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    let left = runtime.pending_permissions();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].operation.contains("other.txt"), "{left:?}");
+    // The request still under review is the reviewer's: it allows it.
+    for _ in 0..600 {
+        if workspace.0.join("slow.txt").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("slow.txt")).unwrap(),
+        "slow"
+    );
+    runtime
+        .reply_permission(
+            &left[0].permission_id,
+            PermissionReply {
+                decision: Reply::Refuse,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(!workspace.0.join("asked.txt").exists());
+    assert!(!workspace.0.join("other.txt").exists());
+    // Each refused child reads why in Haarness's words, never as a person's
+    // answer.
+    let mut refused = Vec::new();
+    for child in shown.iter().map(|pending| pending.thread_id) {
+        let items = runtime.items(child, None).await.unwrap();
+        for (output, is_error, _) in results(&items) {
+            if is_error {
+                refused.push(output);
+            }
+        }
+    }
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert!(
+        refused
+            .iter()
+            .all(|output| !output.contains("The user rejected")),
+        "{refused:?}"
+    );
+    assert!(
+        refused.iter().any(|output| output.starts_with(
+            "Auto review left this to a person and nobody can answer in this run: Test rule: Test verdict: ask. Do not retry it"
+        )),
+        "{refused:?}"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|output| output.starts_with("Nobody can approve this action in this run.")),
+        "{refused:?}"
+    );
+}

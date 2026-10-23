@@ -2117,6 +2117,14 @@ impl std::fmt::Display for ApiRefusal {
 
 impl std::error::Error for ApiRefusal {}
 
+/// The server's error code (`not_found`, …) of a refused request.
+#[must_use]
+pub fn refusal_code(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .and_then(|refusal| refusal.code.as_deref())
+}
+
 /// The HTTP status of a refused request, whichever way it was checked.
 #[must_use]
 pub fn refusal_status(error: &anyhow::Error) -> Option<reqwest::StatusCode> {
