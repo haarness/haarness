@@ -13,16 +13,17 @@
  * back into view, or the live reply once it is saved) shows its image at
  * once, with no placeholder in between, and a reply asks for each of its
  * images once. A remembered image keeps showing while it is read again behind
- * it, and every reply showing it takes the new one when it differs. It is
- * read again the next time a reply draws it:
- * - at once after the chat being viewed ends a turn, or after a write tool or
- *   the file API wrote that very file;
- * - at most every `PROJECT_IMAGE_LIMITS.recheck` after another change of the
- *   project (any chat's turn ended, a tool of the viewed chat wrote files, the
- *   window of a project on this computer came back to the front). A draw the
- *   wait turned away leaves one read for when it ends, as long as a reply
- *   that asked still shows the image.
- * Pure apart from the DOM it is handed, so it is tested without a window.
+ * it, and every reply showing it takes the new one when it differs. While a
+ * reply shows it, it is read again for them:
+ * - at once after the chat being viewed (itself, not its subagents) ends a
+ *   turn, or after a write tool or the file API wrote that very file;
+ * - when `PROJECT_IMAGE_LIMITS.recheck` has passed since it was read, after
+ *   another change of the project (any other turn ended, a tool of the viewed
+ *   chat wrote files, the window of a project on this computer came back to
+ *   the front), or after a read that got no answer;
+ * so an image on screen is read at most once per change, and at most once
+ * per recheck time for the changes that wait. Pure apart from the DOM it is
+ * handed, so it is tested without a window.
  */
 import { linkTarget, parsedAddress } from "./link-target";
 import { madeHere, markMade } from "./remote-images";
@@ -348,22 +349,22 @@ export function shownProjectImage(scope: string, path: string): ShownImage | und
 }
 
 /**
- * The project may have changed on disk: what it showed keeps showing, and is
- * read again the next time a reply draws it, once it has shown for
- * `PROJECT_IMAGE_LIMITS.recheck`. With `now`, as when the chat being viewed
- * ends a turn, at once, and so are the reads waiting for the recheck time.
+ * The project may have changed on disk: what it showed keeps showing, and the
+ * images replies show are read again for them once
+ * `PROJECT_IMAGE_LIMITS.recheck` has passed since they were read. With
+ * `now`, as when the chat being viewed ends a turn, at once.
  */
 export function projectChanged(scope: string, now = false) {
-  if (!now) return void epochs.set(scope, epoch(scope) + 1);
-  urgents.set(scope, urgent(scope) + 1);
-  for (const [entry, trail] of trailing) if (entry.startsWith(`${scope}\n`)) trail.run();
+  if (now) urgents.set(scope, urgent(scope) + 1);
+  else epochs.set(scope, epoch(scope) + 1);
+  for (const entry of [...askers.keys()]) if (entry.startsWith(`${scope}\n`)) askAgain(entry, now);
 }
 
-/** The file was written: the next reply that draws it, or one waiting to read it again, reads it at once. */
+/** The file was written: replies showing it, and the next one to draw it, read it again at once. */
 export function projectFileWritten(scope: string, path: string) {
   const entry = key(scope, path.replace(/\\/g, "/").replace(/^\.\//, ""));
   touches.set(entry, (touches.get(entry) ?? 0) + 1);
-  trailing.get(entry)?.run();
+  askAgain(entry, true);
 }
 
 /**
@@ -380,31 +381,36 @@ export function localProject(scope: string) {
   local.add(scope);
 }
 
-/** Whether `thread`, or the tree `root` heads, is the chat `selected` or the tree it belongs to. */
+/**
+ * Whether `thread` is the chat `selected` itself ("self"), or it or the tree
+ * `root` heads is in the tree that chat belongs to, its subagents included
+ * ("tree"); undefined otherwise.
+ */
 export function inViewedTree(
   selected: string | null | undefined,
   threads: readonly { id: string; parentId?: string | null }[],
   thread?: string | null,
   root?: string | null,
-) {
-  if (!selected) return false;
+): "self" | "tree" | undefined {
+  if (!selected) return undefined;
+  if (thread === selected) return "self";
   let top = selected;
   for (let guard = 0; guard < 64; guard++) {
     const parent = threads.find((item) => item.id === top)?.parentId;
     if (!parent) break;
     top = parent;
   }
-  return [thread, root].some((id) => !!id && (id === selected || id === top));
+  return [thread, root].some((id) => !!id && (id === selected || id === top)) ? "tree" : undefined;
 }
 
 /** What a server event means for a project's images (see `projectEvent`). */
 export type ProjectChange =
   /** The file API wrote this file. */
   | { written: string }
-  /** A write or edit tool call names this image; it is written once its result says so. */
-  | { writing: string; call: string }
-  /** A tool call finished; if it was writing an image and did not fail, that file is written. */
-  | { finished: string; failed?: boolean }
+  /** A write or edit tool call of `thread` names this image; it is written once its result says so. */
+  | { writing: string; call: string; thread: string }
+  /** A tool call of `thread` finished; if it was writing an image and did not fail, that file is written. */
+  | { finished: string; thread: string; failed?: boolean }
   /** Files may have changed: read again after the recheck time, or `now`. */
   | { changed: true; now?: boolean };
 
@@ -413,16 +419,17 @@ export type ProjectChange =
  * file. A write or edit tool call names an image of the project, which is
  * written only once its result arrives (it may wait for approval, or fail).
  * The chat being viewed ended a turn: its images are read again at once.
- * Another chat ended a turn, or a tool of the viewed chat that writes
- * (as the Files panel reads them) finished: files may have changed, read again
- * after the recheck time. Another chat's tools, however busy, change nothing
+ * Another turn ended (another chat's, or a subagent's of the viewed chat), or
+ * a tool of the viewed chat or its subagents that writes (as the Files panel
+ * reads them) finished: files may have changed, read again after the recheck
+ * time. Another chat's tools, however busy, change nothing
  * on their own; its turn's end, once per turn, does. `viewed` says whether an
  * event's chat (or its tree) is the one being viewed, and `roots` are the
  * project's folders, which a tool's absolute path is read against.
  */
 export function projectEvent(
   event: { type?: string; payload?: unknown; threadId?: string | null; rootThreadId?: string | null },
-  viewed: (thread?: string | null, root?: string | null) => boolean,
+  viewed: (thread?: string | null, root?: string | null) => ReturnType<typeof inViewedTree>,
   roots: string | readonly string[] = [],
 ): ProjectChange | undefined {
   if (event.type === "files.updated") {
@@ -430,7 +437,8 @@ export function projectEvent(
     return typeof path === "string" && path ? { written: path } : undefined;
   }
   const mine = () => viewed(event.threadId, event.rootThreadId);
-  if (event.type === "turn.finished") return { changed: true, now: mine() };
+  const thread = event.threadId ?? "";
+  if (event.type === "turn.finished") return { changed: true, now: mine() === "self" };
   if (event.type !== "item.created") return undefined;
   const data = (
     event.payload as
@@ -450,17 +458,18 @@ export function projectEvent(
       (value): value is string => typeof value === "string",
     );
     const found = named === undefined ? undefined : projectImagePath(named, roots);
-    return found && "path" in found ? { writing: found.path, call: data.call_id } : undefined;
+    return found && "path" in found ? { writing: found.path, call: data.call_id, thread } : undefined;
   }
   if (data?.type !== "tool_result") return undefined;
-  if (data.is_error) return data.call_id ? { finished: data.call_id, failed: true } : undefined;
+  if (data.is_error) return data.call_id ? { finished: data.call_id, thread, failed: true } : undefined;
   const writes = /write|edit|patch|apply|bash|shell|move|delete/.test(data.name ?? "");
   if (writes && mine()) return { changed: true };
-  return data.call_id ? { finished: data.call_id } : undefined;
+  return data.call_id ? { finished: data.call_id, thread } : undefined;
 }
 
-/** Image files each project's write tool calls are writing, by call, until their results arrive. */
+/** Image files each project's write tool calls are writing, by chat and call, until their results arrive. */
 const writing = new Map<string, string>();
+const call = (scope: string, thread: string, id: string) => `${scope}\n${thread}\n${id}`;
 
 /** Applies a server event of project `scope` to what its images show (see `projectEvent`). */
 export function applyProjectEvent(
@@ -472,14 +481,15 @@ export function applyProjectEvent(
   const change = projectEvent(event, viewed, roots);
   if (!change) return;
   if ("written" in change) return projectFileWritten(scope, change.written);
-  if ("writing" in change) return void writing.set(key(scope, change.call), change.writing);
-  const call =
+  if ("writing" in change) return void writing.set(call(scope, change.thread, change.call), change.writing);
+  const id =
     "finished" in change
       ? change.finished
       : (event.payload as { data?: { call_id?: string } } | undefined)?.data?.call_id;
-  const path = call === undefined ? undefined : writing.get(key(scope, call));
-  if (call !== undefined && path !== undefined) {
-    writing.delete(key(scope, call));
+  const done = id === undefined ? undefined : call(scope, event.threadId ?? "", id);
+  const path = done === undefined ? undefined : writing.get(done);
+  if (done !== undefined && path !== undefined) {
+    writing.delete(done);
     if (!("failed" in change && change.failed)) projectFileWritten(scope, path);
   }
   if ("changed" in change) projectChanged(scope, change.now);
@@ -537,9 +547,48 @@ const refused = (error: unknown) =>
 /** A read that answered nothing: the remembered image stays, and is read again on the next occasion. */
 const UNSETTLED = Symbol("unsettled");
 
-type Trail = { timer: ReturnType<typeof setTimeout>; waiters: Set<AbortSignal>; run: () => void };
-/** One read each remembered image waits for until the recheck time ends, by the replies that asked. */
-const trailing = new Map<string, Trail>();
+type Decode = (data: string) => Promise<boolean | "large">;
+type Asker = { read: ImageReader; decode: Decode };
+/** The replies showing each image, by the signal that ends when they unmount, and how they read it. */
+const askers = new Map<string, Map<AbortSignal, Asker>>();
+/** The read each image on screen waits for until the recheck time ends. */
+const trailing = new Map<string, ReturnType<typeof setTimeout>>();
+
+function enlist(entry: string, signal: AbortSignal, asker: Asker) {
+  let shown = askers.get(entry);
+  if (!shown) askers.set(entry, (shown = new Map()));
+  if (shown.has(signal)) return;
+  shown.set(signal, asker);
+  signal.addEventListener(
+    "abort",
+    () => {
+      shown!.delete(signal);
+      if (!shown!.size && askers.get(entry) === shown) {
+        askers.delete(entry);
+        clearTimeout(trailing.get(entry));
+        trailing.delete(entry);
+      }
+    },
+    { once: true },
+  );
+}
+
+/**
+ * Asks again for the image at `entry` for one reply still showing it, whose
+ * answer reaches them all: read now, or when the recheck time ends, as `due`
+ * says. With `now`, a read waiting for the recheck time is dropped first.
+ */
+function askAgain(entry: string, now = false) {
+  if (now) {
+    clearTimeout(trailing.get(entry));
+    trailing.delete(entry);
+  }
+  for (const [signal, asker] of askers.get(entry) ?? []) {
+    if (signal.aborted) continue;
+    const at = entry.indexOf("\n");
+    return requestProjectImage(entry.slice(0, at), entry.slice(at + 1), asker.read, signal, asker.decode);
+  }
+}
 
 /**
  * When the image remembered as `current` is read again: now, never (nothing
@@ -570,25 +619,23 @@ export function requestProjectImage(
   path: string,
   read: ImageReader,
   signal: AbortSignal,
-  decode: (data: string) => Promise<boolean | "large"> = async () => true,
+  decode: Decode = async () => true,
 ) {
   if (signal.aborted) return;
   const entry = key(scope, path);
+  enlist(entry, signal, { read, decode });
   const current = remembered.get(entry);
   const when = current ? due(scope, entry, current) : "now";
   if (when === "fresh") return;
   if (when !== "now") {
-    const trail = trailing.get(entry);
-    if (trail) return void trail.waiters.add(signal);
-    const waiters = new Set([signal]);
-    const run = () => {
-      clearTimeout(timer);
-      if (trailing.get(entry)?.run !== run) return;
-      trailing.delete(entry);
-      for (const waiter of waiters) if (!waiter.aborted) requestProjectImage(scope, path, read, waiter, decode);
-    };
-    const timer = setTimeout(run, when + 5);
-    trailing.set(entry, { timer, waiters, run });
+    if (!trailing.has(entry))
+      trailing.set(
+        entry,
+        setTimeout(() => {
+          trailing.delete(entry);
+          askAgain(entry);
+        }, when + 5),
+      );
     return;
   }
   const queued = pending.get(entry);
@@ -644,6 +691,10 @@ export function requestProjectImage(
           if (pending.get(entry) === job) pending.delete(entry);
           active--;
           pump();
+          // The project changed while it was read (a draw that joined it
+          // wants the file after that change), or the read got no answer:
+          // read again for the replies showing it, now or after the wait.
+          if (remembered.has(entry)) askAgain(entry);
         });
     },
   };
@@ -660,8 +711,9 @@ export function forgetProjectImages() {
   urgents.clear();
   touches.clear();
   writing.clear();
-  for (const trail of trailing.values()) clearTimeout(trail.timer);
+  for (const timer of trailing.values()) clearTimeout(timer);
   trailing.clear();
+  askers.clear();
   local.clear();
   waiting.length = 0;
   pending.clear();
@@ -793,7 +845,7 @@ export interface ImageProject {
   roots: string[];
   /** A remote host's project, whose files the window coming to the front does not change. */
   remote: boolean;
-  viewed: (thread?: string | null, root?: string | null) => boolean;
+  viewed: (thread?: string | null, root?: string | null) => ReturnType<typeof inViewedTree>;
 }
 
 /** The project of the window's open chat, read from the app's state when an event arrives. */

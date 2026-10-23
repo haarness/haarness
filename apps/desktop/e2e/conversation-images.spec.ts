@@ -397,6 +397,18 @@ test("scrolling up through replies that finish drawing above the view moves only
   expect(errors).toEqual([]);
 });
 
+test("an earlier reply on screen takes the chart its chat remade once the turn ends, though the last reply only says done", async () => {
+  await writeFile(join(workspace, "out/remade.png"), chart(300, 180, [120, 80, 200]));
+  const first = await reply("The chart: ![Remade](out/remade.png)");
+  const image = first.locator("img.project-image-loaded");
+  await expect(image).toHaveJSProperty("naturalWidth", 300);
+  // A command remakes it (not through the file API), and the next reply only says it is done.
+  await writeFile(join(workspace, "out/remade.png"), chart(420, 180, [200, 120, 80]));
+  await reply("Done.");
+  await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(420);
+  expect(errors).toEqual([]);
+});
+
 test("a reply drawn again shows its image at once, and a file written anew shows anew", async () => {
   await reply("The chart again: ![Weekly chart](out/chart.png)");
   await client.createThread({ title: "Elsewhere", provider: "echo", model: "echo-1" });
