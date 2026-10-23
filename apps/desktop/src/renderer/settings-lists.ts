@@ -6,12 +6,16 @@ import type { PluginInfo, ToolCatalogEntry } from "@haarness/sdk";
  * rules are pinned in tests rather than found in the panes.
  */
 
-/** A home folder in the usual places, which a path then shows as `~`. The
- * renderer is not told the home folder, and a remote server has its own. */
-const home = /^(?:\/Users\/[^/]+|\/home\/[^/]+|\/root|[A-Za-z]:\\Users\\[^\\]+)(?=[/\\]|$)/;
-
-export function homePath(path: string) {
-  return path.replace(home, "~");
+/**
+ * A path as a person reads it: this computer's own home folder as `~`. Only
+ * the home Desktop runs in is known, so another user's folder, or a remote
+ * server's, keeps its whole path.
+ */
+export function homePath(path: string, home?: string) {
+  if (!home || home === "/" || home === "\\") return path;
+  const root = home.replace(/[/\\]+$/, "");
+  if (path === root) return "~";
+  return path.startsWith(root + "/") || path.startsWith(root + "\\") ? "~" + path.slice(root.length) : path;
 }
 
 /**
@@ -19,8 +23,8 @@ export function homePath(path: string) {
  * the head is the part that may shrink to an ellipsis, the tail (with the
  * separator before it, so a cut reads "…/folder") never does.
  */
-export function splitPath(path: string) {
-  const shown = homePath(path);
+export function splitPath(path: string, home?: string) {
+  const shown = homePath(path, home);
   const cut = Math.max(shown.lastIndexOf("/"), shown.lastIndexOf("\\"));
   if (cut <= 0) return { head: "", tail: shown };
   return { head: shown.slice(0, cut), tail: shown.slice(cut) };
@@ -115,8 +119,11 @@ export function definitionSource(
   const prefix = row.name.includes(":") ? row.name.slice(0, row.name.indexOf(":")) : "";
   if (prefix && plugins.some((plugin) => plugin.name === prefix)) return prefix;
   if (row.path) {
+    // Compared with one separator, so a Windows server's paths match too.
+    const plain = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "");
+    const path = plain(row.path);
     const owner = plugins
-      .filter((plugin) => plugin.path && (row.path === plugin.path || row.path!.startsWith(plugin.path.replace(/[/\\]$/, "") + "/")))
+      .filter((plugin) => plugin.path && (path === plain(plugin.path) || path.startsWith(plain(plugin.path) + "/")))
       .sort((a, b) => b.path.length - a.path.length)[0];
     if (owner) return owner.name;
   }

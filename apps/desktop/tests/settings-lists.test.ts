@@ -25,18 +25,22 @@ const tool = (id: string, source = "native", description = ""): ToolCatalogEntry
   loaded: false,
 });
 
-test("a path shows the home folder as ~ and keeps its last folder whole", () => {
-  assert.equal(homePath("/Users/alex/work/haarness"), "~/work/haarness");
-  assert.equal(homePath("/home/sam/notes"), "~/notes");
-  assert.equal(homePath("/Users/alex"), "~");
-  assert.equal(homePath("C:\\Users\\Ana\\code\\app"), "~\\code\\app");
-  // A folder outside a home folder, or one only named like it, stays as it is.
-  assert.equal(homePath("/private/var/folders/x/T/fixture"), "/private/var/folders/x/T/fixture");
-  assert.equal(homePath("/Users2/alex/x"), "/Users2/alex/x");
-  assert.deepEqual(splitPath("/Users/alex/work/haarness"), { head: "~/work", tail: "/haarness" });
+test("a path shows this computer's own home folder as ~ and keeps its last folder whole", () => {
+  const home = "/Users/alex";
+  assert.equal(homePath("/Users/alex/work/haarness", home), "~/work/haarness");
+  assert.equal(homePath("/Users/alex", home), "~");
+  assert.equal(homePath("/Users/alex/work", home + "/"), "~/work");
+  assert.equal(homePath("C:\\Users\\Ana\\code\\app", "C:\\Users\\Ana"), "~\\code\\app");
+  // Another user's home, a folder only named like it, or a path when the home
+  // is not known (a remote server's) keeps its whole path.
+  assert.equal(homePath("/Users/sam/notes", home), "/Users/sam/notes");
+  assert.equal(homePath("/Users/alexandra/x", home), "/Users/alexandra/x");
+  assert.equal(homePath("/Users/alex/work"), "/Users/alex/work");
+  assert.equal(homePath("/home/alex/work", "/"), "/home/alex/work");
+  assert.deepEqual(splitPath("/Users/alex/work/haarness", home), { head: "~/work", tail: "/haarness" });
   assert.deepEqual(splitPath("/tmp"), { head: "", tail: "/tmp" });
   assert.deepEqual(splitPath("relative"), { head: "", tail: "relative" });
-  assert.deepEqual(splitPath("C:\\Users\\Ana\\code\\app"), { head: "~\\code", tail: "\\app" });
+  assert.deepEqual(splitPath("C:\\Users\\Ana\\code\\app", "C:\\Users\\Ana"), { head: "~\\code", tail: "\\app" });
 });
 
 test("tools group by source: built-in first, then each MCP server, then each extension", () => {
@@ -87,6 +91,7 @@ test("a definition says it is built in or names its plugin, never both at once",
   const plugins = [
     { name: "kit", path: "/data/plugins/kit" },
     { name: "kit-extra", path: "/data/plugins/kit-extra" },
+    { name: "win", path: "C:\\Users\\Ana\\plugins\\win\\" },
   ];
   assert.equal(definitionSource({ name: "build", native: true }, plugins), "builtin");
   assert.equal(definitionSource({ name: "kit:reviewer" }, plugins), "kit");
@@ -95,9 +100,14 @@ test("a definition says it is built in or names its plugin, never both at once",
     definitionSource({ name: "check", path: "/data/plugins/kit-extra/skills/check/SKILL.md", pluginManaged: true }, plugins),
     "kit-extra",
   );
+  assert.equal(
+    definitionSource({ name: "lint", path: "C:\\Users\\Ana\\plugins\\win\\skills\\lint\\SKILL.md" }, plugins),
+    "win",
+  );
   // The person's own definitions say their scope instead; others are not guessed.
   assert.equal(definitionSource({ name: "mine", scope: "global" }, plugins), undefined);
   assert.equal(definitionSource({ name: "base-agent", scope: "base" }, plugins), undefined);
   assert.equal(definitionSource({ name: "other:agent" }, plugins), undefined);
   assert.equal(definitionSource({ name: "claude-agent" }, plugins), undefined);
+  assert.equal(definitionSource({ name: "near", path: "/data/plugins/kitchen/x.md" }, plugins), undefined);
 });

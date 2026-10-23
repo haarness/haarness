@@ -711,6 +711,8 @@ function installHandlers() {
     servers: data().servers,
     version: app.getVersion(),
     platform: process.platform,
+    // Settings shows this computer's own paths under it as ~.
+    home: homedir(),
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
   handle("preferences", async (_, input) => {
