@@ -18,7 +18,9 @@ import {
   contextKey,
   contextLabel,
   countLines,
+  FILE_ROWS,
   fileContext,
+  keptFiles,
   mentionAgents,
   pasteSize,
   RESOURCE_MENTIONS,
@@ -83,16 +85,6 @@ export function unreadReason(reason: string) {
 }
 /** A mentioned resource: what it is and where the server reads it from;
  * one brought back from a sent message, what was read then. */
-/** Whether every character of `query` comes in `text`, in order. */
-function inOrder(text: string, query: string) {
-  let at = 0;
-  for (const character of query) {
-    at = text.indexOf(character, at) + 1;
-    if (!at) return false;
-  }
-  return true;
-}
-
 function ResourcePreview(props: { item: ResourceContext }) {
   const read = () => {
     const part = props.item.block === undefined ? undefined : sentParts(props.item.block)[0];
@@ -246,14 +238,15 @@ export function PromptContextControls(props: {
     ];
   };
   /** The files the list shows: while a search runs, the last one's that
-   * still match what is typed, so typing never empties the list. */
+   * the server would still find, in its order, so typing never empties the
+   * list and its top row is most likely the one the search puts there. */
   const files = () => {
     const last = found();
     if (last.connection !== app.state.connection?.id) return [];
-    if (!loading()) return last.names;
-    const query = (mention()?.query ?? "").toLowerCase();
-    return last.names.filter((name) => inOrder(name.toLowerCase(), query));
+    return loading() ? keptFiles(last.names, mention()?.query ?? "") : last.names;
   };
+  /** The person moved the highlight since their last keystroke. */
+  let moved = false;
   let generation = 0;
   createEffect(() => {
     const active = open(),
@@ -261,6 +254,7 @@ export function PromptContextControls(props: {
       connection = app.state.connection?.id;
     const version = ++generation;
     setCursor(0);
+    moved = false;
     setError("");
     setLoading(false);
     if (!active || !connection) {
@@ -270,11 +264,12 @@ export function PromptContextControls(props: {
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
-        .api<string[]>(connection, "searchFiles", [{ q: query, limit: 20 }])
+        .api<string[]>(connection, "searchFiles", [{ q: query, limit: FILE_ROWS }])
         .then((names) => {
           if (version !== generation) return;
-          // The highlighted row stays highlighted where the new files put it.
-          const held = options()[cursor()];
+          // A row the person moved to stays highlighted where the new files
+          // put it; otherwise the top row is.
+          const held = moved ? options()[cursor()] : undefined;
           setFound({ connection, names });
           setLoading(false);
           const at = held
@@ -418,13 +413,14 @@ export function PromptContextControls(props: {
       }
       const values = options();
       if (!values.length) return;
-      if (event.key === "ArrowDown" || event.key === "ArrowUp")
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        moved = true;
         setCursor(
           (value) =>
             (value + (event.key === "ArrowDown" ? 1 : -1) + values.length) %
             values.length,
         );
-      else void choose(values[cursor()] ?? values[0]);
+      } else void choose(values[cursor()] ?? values[0]);
     };
     for (const event of ["input", "click", "keyup", "select"])
       input.addEventListener(event, update);
@@ -591,7 +587,10 @@ export function PromptContextControls(props: {
                   aria-disabled={busy()}
                   data-kind={option.kind}
                   classList={{ highlighted: cursor() === index() }}
-                  onPointerMove={() => setCursor(index())}
+                  onPointerMove={() => {
+                    moved = true;
+                    setCursor(index());
+                  }}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => void choose(option)}
                 >

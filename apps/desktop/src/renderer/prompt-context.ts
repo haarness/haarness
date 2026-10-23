@@ -223,6 +223,60 @@ export function activeMention(text: string, caret: number) {
     ? { from: caret - match[1].length - 1, to: caret, query: match[1] }
     : undefined;
 }
+/** The most files the composer's `@` list asks a search for. */
+export const FILE_ROWS = 20;
+/** Lowercase for ASCII letters only, as the server folds paths and queries. */
+const foldAscii = (text: string) => text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+const utf8Length = (text: string) => new TextEncoder().encode(text).length;
+/** Whether every character of `query` comes in `text`, in order. */
+function inOrder(text: string, query: string) {
+  let at = 0;
+  for (const character of query) {
+    const found = text.indexOf(character, at);
+    if (found < 0) return false;
+    at = found + character.length;
+  }
+  return true;
+}
+/**
+ * How the server's file search scores `path` for the folded `query`, as
+ * `fuzzy_score` in crates/haarness-server/src/api.rs does (lengths and
+ * positions in UTF-8 bytes, as there): an early substring hit, a file name
+ * that starts with or holds the query and a short path score higher; a path
+ * that holds the query's characters only in order scores low, and one that
+ * does not is no match (`undefined`).
+ */
+export function fileScore(path: string, query: string) {
+  path = foldAscii(path);
+  if (!query) return -utf8Length(path);
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  let score = 0;
+  const position = path.indexOf(query);
+  if (position >= 0) score += 1000 - utf8Length(path.slice(0, position));
+  else if (inOrder(path, query)) score += 100;
+  else return undefined;
+  if (name.startsWith(query)) score += 500;
+  else if (name.includes(query)) score += 250;
+  return score - utf8Length(path);
+}
+/**
+ * The files of an earlier search the `@` list keeps while the search for
+ * `query` runs: those the server would still find, in its order (best
+ * first, then by path), at most what it returns. None for a path the person
+ * spells out (`/`, `~`, `./`, `../`), which the server lists a folder for.
+ */
+export function keptFiles(names: string[], query: string) {
+  if (/^(~|\.\.?)(\/|$)|^\//.test(query)) return [];
+  const folded = foldAscii(query);
+  return names
+    .flatMap((name) => {
+      const score = fileScore(name, folded);
+      return score === undefined ? [] : [{ name, score }];
+    })
+    .sort((a, b) => b.score - a.score || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .slice(0, FILE_ROWS)
+    .map(({ name }) => name);
+}
 const escapeHtml = (text: string) =>
   text
     .replace(/&/g, "&amp;")

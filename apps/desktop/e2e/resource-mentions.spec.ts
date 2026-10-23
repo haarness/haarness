@@ -27,6 +27,9 @@ test.beforeAll(async () => {
   workspace = join(temporary, "workspace");
   await mkdir(join(workspace, ".haarness"), { recursive: true });
   await writeFile(join(workspace, "settings.md"), "A file whose name the `@set` query also finds.\n");
+  // `@s` finds setup.md first, `@st` style.css.
+  await writeFile(join(workspace, "setup.md"), "Setup notes.\n");
+  await writeFile(join(workspace, "style.css"), "body {}\n");
   reads = join(temporary, "requests.log");
   const server = { command: "python3", args: [join(fixtures, "resources.py")], env: { REQUEST_LOG: reads } };
   await writeFile(
@@ -235,6 +238,32 @@ test("resources wait below the files a slow search is still finding, so a quick 
   expect(await rows().count()).toBe(0);
   expect(await place()).toBe(before);
   await expect(rows()).toHaveCount(2);
+  await app.evaluate(() => ((globalThis as any).filesDelay = 0));
+  await page.keyboard.press("Escape");
+  await input().fill("");
+});
+
+test("typing on keeps the files in the order the search will give them, and its top row stays highlighted", async () => {
+  await app.evaluate(() => ((globalThis as any).filesDelay = 1500));
+  await input().fill("@s");
+  const files = list().locator('[role="option"][data-kind="file"]');
+  await expect(files.first()).toContainText("setup.md");
+  await input().press("t");
+  // At once, before the search answers: style.css now leads.
+  expect(await files.first().textContent()).toContain("style.css");
+  await expect(page.locator(".mention-popover")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator(".mention-popover")).toHaveAttribute("aria-busy", "false");
+  await expect(files.first()).toContainText("style.css");
+  await expect(list().locator('[role="option"]').first()).toHaveAttribute("aria-selected", "true");
+  // A row the person moves to while the search runs stays highlighted when the files come in.
+  await input().press("Backspace");
+  await expect(page.locator(".mention-popover")).toHaveAttribute("aria-busy", "true");
+  await input().press("ArrowDown");
+  const highlighted = list().locator('[role="option"][aria-selected="true"]');
+  const held = (await highlighted.textContent())!;
+  await expect(list().locator('[role="option"]').first()).toHaveAttribute("aria-selected", "false");
+  await expect(page.locator(".mention-popover")).toHaveAttribute("aria-busy", "false");
+  await expect(highlighted).toHaveText(held);
   await app.evaluate(() => ((globalThis as any).filesDelay = 0));
   await page.keyboard.press("Escape");
   await input().fill("");
