@@ -1,6 +1,7 @@
 //! Per-chat approval mode, owned by the server so every client agrees.
 use crate::ThreadId;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use utoipa::ToSchema;
 
 /// Servers advertising this answer eligible permission requests themselves
@@ -136,8 +137,33 @@ pub struct PermissionReview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
     /// Set when Haarness wrote the note itself.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_reason"
+    )]
     pub reason: Option<ReviewReason>,
+}
+
+/// A reason this client cannot read (a known code missing a field, a value
+/// of the wrong shape) is an unknown one: the note shows `rationale`.
+fn lenient_reason<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ReviewReason>, D::Error> {
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .map(|value| serde_json::from_value(value).unwrap_or(ReviewReason::Unknown)))
+}
+
+/// Decode a `review` this client cannot read as no review, never as a
+/// failure of the request or item that carries it.
+///
+/// # Errors
+/// Only when the input is not a value at all.
+pub fn lenient_review<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PermissionReview>, D::Error> {
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 #[cfg(test)]
@@ -166,5 +192,51 @@ mod tests {
             serde_json::to_value(&known.reason).unwrap(),
             serde_json::json!({"code": "timeout", "seconds": 60})
         );
+        // A known code missing its field is an unknown reason, not a failure.
+        let partial: PermissionReview = serde_json::from_value(serde_json::json!({
+            "status": "asked",
+            "reason": {"code": "unnamed_deletion"},
+            "rationale": "Shown as written."
+        }))
+        .unwrap();
+        assert_eq!(partial.reason, Some(ReviewReason::Unknown));
+        assert_eq!(partial.rationale.as_deref(), Some("Shown as written."));
+    }
+
+    #[test]
+    fn a_review_a_client_cannot_read_leaves_its_request_readable() {
+        let thread = ThreadId::new();
+        let request = |review: serde_json::Value| {
+            serde_json::json!({
+                "permissionId": "p1",
+                "operation": "bash:ls",
+                "threadId": thread,
+                "createdAt": "2026-10-23T12:00:00Z",
+                "review": review,
+            })
+        };
+        let info: crate::PendingPermissionInfo =
+            serde_json::from_value(request(serde_json::json!({"reason": {"code": "timeout"}})))
+                .unwrap();
+        assert_eq!(info.permission_id, "p1");
+        assert!(info.review.is_none());
+        let info: crate::PendingPermissionInfo =
+            serde_json::from_value(request(serde_json::json!("asked"))).unwrap();
+        assert!(info.review.is_none());
+        let info: crate::PendingPermissionInfo =
+            serde_json::from_value(request(serde_json::json!({"status": "asked"}))).unwrap();
+        assert_eq!(info.review.unwrap().status, PermissionReviewStatus::Asked);
+        let item: crate::ItemData = serde_json::from_value(serde_json::json!({
+            "type": "permission_request",
+            "permission_id": "p1",
+            "operation": "bash:ls",
+            "detail": {},
+            "review": {"status": 3},
+        }))
+        .unwrap();
+        assert!(matches!(
+            item,
+            crate::ItemData::PermissionRequest { review: None, .. }
+        ));
     }
 }
