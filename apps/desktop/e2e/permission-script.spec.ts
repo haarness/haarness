@@ -155,7 +155,8 @@ test("the card offers the script a command runs, closed until asked for, by mous
 
 test("a long script scrolls in its box and says only its start is shown", async () => {
   await send("sh scripts/big.sh");
-  await expect(toggle()).toBeVisible();
+  // The count of a cut file is of what was read.
+  await expect(toggle()).toHaveText(/^View script · first \d+ lines$/);
   await toggle().click();
   const region = card().getByRole("region", { name: "Script", exact: true });
   const size = await region.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }));

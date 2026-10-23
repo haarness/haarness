@@ -154,6 +154,8 @@ try:
 
     started = turn('sh scripts/big.sh')
     approval()
+    # The count of a cut file is of what was read.
+    until(lambda: 'Script: scripts/big.sh · first ' in capture(), 'cut script size')
     keys('C-e')
     for _ in range(60):
         keys('PageDown')

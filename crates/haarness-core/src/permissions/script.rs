@@ -159,10 +159,15 @@ fn read(file: &Path, readable: &impl Fn(&Path) -> bool) -> Option<Shown> {
         // A character the cut split in two is left out whole.
         bytes.truncate(complete_utf8(&bytes));
     }
+    let content = displayed(&String::from_utf8_lossy(&bytes));
+    // An empty file has nothing to read on the card.
+    if content.trim_end_matches('\n').is_empty() {
+        return None;
+    }
     Some(Shown {
         script: PermissionScript {
             path: shown.to_string_lossy().into_owned(),
-            content: displayed(&String::from_utf8_lossy(&bytes)),
+            content,
             truncated,
         },
         seal,
@@ -336,16 +341,20 @@ mod tests {
     }
 
     #[test]
-    fn shows_nothing_for_a_missing_file_a_folder_a_binary_or_a_secret() {
+    fn shows_nothing_for_a_missing_or_empty_file_a_folder_a_binary_or_a_secret() {
         let fixture = Fixture::new();
         std::fs::create_dir_all(fixture.0.join("folder")).unwrap();
         fixture.write("binary", [0x7f, b'E', 0, 1, 2]);
+        fixture.write("empty.sh", "");
+        fixture.write("blank.sh", "\n\n");
         fixture.write("prod.env", "TOKEN=1\n");
         fixture.write(".env", "TOKEN=1\n");
         for command in [
             "bash missing.sh",
             "bash folder",
             "./binary",
+            "sh empty.sh",
+            "sh blank.sh",
             "source prod.env",
             ". .env",
         ] {
