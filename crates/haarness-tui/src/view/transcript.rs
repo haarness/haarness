@@ -1032,10 +1032,27 @@ pub(crate) fn user_block(
             crate::prompt_context::Part::Text(typed) => {
                 typed_text(&mut paragraphs, typed, theme.text);
             }
-            crate::prompt_context::Part::Reference { label, .. } => paragraphs
-                .last_mut()
-                .expect("one paragraph")
-                .push(Span::new(label, theme.primary).with_attributes(attr::BOLD)),
+            // A pick's marker that reached a chat unread is its text, not
+            // a chip.
+            crate::prompt_context::Part::Reference { label, body }
+                if crate::resource_mentions::is_marker(body) =>
+            {
+                typed_text(&mut paragraphs, &label, theme.text);
+            }
+            crate::prompt_context::Part::Reference { label, body } => {
+                let paragraph = paragraphs.last_mut().expect("one paragraph");
+                paragraph.push(Span::new(label, theme.primary).with_attributes(attr::BOLD));
+                // An MCP resource the server could not read says why.
+                if let Some(reason) = crate::prompt_context::unread(body) {
+                    paragraph.push(Span::new(
+                        format!(
+                            ": {}",
+                            crate::resource_mentions::unread_reason(language, reason)
+                        ),
+                        theme.muted,
+                    ));
+                }
+            }
             crate::prompt_context::Part::Paste { content, .. } => {
                 let paragraph = paragraphs.last_mut().expect("one paragraph");
                 paragraph.push(Span::new(if open { "▾ " } else { "▸ " }, theme.muted));

@@ -25,7 +25,7 @@ and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
 - [Remote computers through Haarness Cloud](REMOTE-ACCESS.md): reach your own machine from Cloud web, the API and the SDKs.
 - [Haarness Router](ROUTER.md): connect a self-hosted router from Desktop, the TUI or the CLI.
 - [Side questions with `/btw`](SIDE-QUESTIONS.md): ask about a chat without adding to it.
-- [TUI message browser](TUI-MESSAGES.md): find, copy, reuse or fork at an earlier message (Alt+M, `/messages`).
+- [TUI message browser](TUI-MESSAGES.md): find, copy, reuse or fork at an earlier message (Alt+M, `/messages`), and move between messages (Alt+Up/Down).
 - [API keys across clients](UNIFIED-API-KEYS.md): one `HAARNESS_API_KEY` for the CLI, Desktop and the SDKs.
 - [Usage statistics](USAGE-STATISTICS.md): what the daily summary contains, when it is sent, and how to turn it off.
 - [Dynamic workflows](WORKFLOWS.md): writing and running JavaScript/TypeScript workflows, their APIs and trust boundary.

@@ -986,6 +986,12 @@ async fn run_git_with(
     guard: &Guard,
 ) -> Result<GitOutput> {
     let mut command = Command::new("git");
+    // Git and what it runs (a diff driver, a filter) need none of the
+    // server's credentials or OpenTelemetry settings, nor a chat id it
+    // inherited; the Git settings below are set on purpose.
+    for name in haarness_core::private_env_names() {
+        command.env_remove(name);
+    }
     command
         .args(read_only_args())
         .args(&guard.args)
@@ -1940,6 +1946,45 @@ mod tests {
             "core.hooksPath={}",
             null_device(cfg!(windows))
         ))));
+    }
+
+    /// Git and what it runs (here an alias's shell) get none of the server's
+    /// private variables (`private_env_names`), and keep the Git settings
+    /// the review sets on purpose. Run again in a process whose own
+    /// environment holds them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_and_what_it_runs_get_none_of_the_server_s_private_variables() {
+        const NAME: &str =
+            "vcs::tests::git_and_what_it_runs_get_none_of_the_server_s_private_variables";
+        if std::env::var_os("HAARNESS_GIT_PRIVATE_FIXTURE").is_none() {
+            let output = StdCommand::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("HAARNESS_GIT_PRIVATE_FIXTURE", "1")
+                .env("HAARNESS_SESSION_ID", "outer-chat")
+                .env("HAARNESS_SERVER_TOKEN", "server-secret")
+                .env("OTEL_EXPORTER_OTLP_HEADERS", "collector-key")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("git got nothing private"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let folder =
+            std::env::temp_dir().join(format!("haarness-vcs-private-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&folder).unwrap();
+        let alias = r#"alias.seen=!printf '%s|%s|%s|%s' "${HAARNESS_SESSION_ID-unset}" "${HAARNESS_SERVER_TOKEN-unset}" "${OTEL_EXPORTER_OTLP_HEADERS-unset}" "${GIT_OPTIONAL_LOCKS-unset}""#;
+        let output = run_git(&folder, &os_args(&["-c", alias, "seen"]), 4096)
+            .await
+            .unwrap();
+        let _ = fs::remove_dir_all(&folder);
+        assert!(output.status.success(), "{}", output.stderr_text());
+        assert_eq!(output.stdout_text(), "unset|unset|unset|0");
+        println!("git got nothing private");
     }
 
     #[tokio::test]

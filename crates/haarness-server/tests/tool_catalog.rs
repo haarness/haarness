@@ -285,6 +285,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
         request_id: RequestId::new(),
         text: text.into(),
         attachments: Vec::new(),
+        resources: Vec::new(),
         synthetic: false,
         auto_approve: true,
         agent: None,

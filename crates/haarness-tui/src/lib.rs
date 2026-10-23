@@ -21,6 +21,7 @@ mod preferences;
 mod prompt_context;
 mod pty_view;
 mod remote_control;
+mod resource_mentions;
 mod servers;
 mod side_chat;
 mod state;
@@ -35,8 +36,7 @@ mod width;
 mod tests;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as TerminalEvent, EventStream};
-use futures::StreamExt;
+use crossterm::event::Event as TerminalEvent;
 use haarness_opentui::{Color, ColorSupport, Renderer};
 use haarness_protocol::CreateThreadRequest;
 use std::{path::PathBuf, time::Duration};
@@ -476,6 +476,12 @@ async fn run_with_client(
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
     app.thinking = config::load_thinking();
+    if !app.keybindings_skipped.is_empty() {
+        app.notice = app.language.format(
+            "Shortcuts not applied: {names} · /keybinds",
+            &[("names", &app.keybindings_skipped.join(", "))],
+        );
+    }
     // A waiting prompt takes the keyboard unless a restored draft is being
     // written, as one arriving live does; ctrl+g reaches it either way.
     if !app.pending_permissions.is_empty() {
@@ -514,7 +520,7 @@ async fn run_with_client(
         initial_background_mode,
         color_support,
     ));
-    let mut input = EventStream::new();
+    let mut input = crate::input::meta::TerminalInput::new();
     let initial_cursor = app
         .server_info
         .as_ref()
@@ -575,6 +581,12 @@ async fn run_with_client(
     // for a list), applied when they come.
     let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
     app.catalog_tx = Some(catalog_tx.clone());
+    // MCP resources for the `@` list, read off the loop when it first opens,
+    // and messages that mention some, sent off the loop while they are read.
+    let (resources_tx, mut resources_rx) = tokio::sync::mpsc::channel(16);
+    app.resources_tx = Some(resources_tx);
+    let (sends_tx, mut sends_rx) = tokio::sync::mpsc::channel(4);
+    app.sends_tx = Some(sends_tx.clone());
     // Side chat answers being written, applied as they arrive.
     let (side_tx, mut side_rx) = tokio::sync::mpsc::unbounded_channel();
     app.side.sender = Some(side_tx.clone());
@@ -617,6 +629,10 @@ async fn run_with_client(
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
                     catalog_rx = receiver;
                     app.catalog_tx = Some(sender);
+                    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+                    resources_rx = receiver;
+                    app.resources_tx = Some(sender);
+                    app.sends_tx = Some(sends_tx.clone());
                     app.side.sender = Some(side_tx.clone());
                     force_redraw = true;
                 }
@@ -965,6 +981,8 @@ async fn run_with_client(
                 }
             },
             Some(message) = side_rx.recv() => app.side_message(message),
+            Some(update) = resources_rx.recv() => app.resources_arrived(update),
+            Some(sent) = sends_rx.recv() => app.mentions_sent(sent, Some(&client)).await,
             Some(listed) = catalog_rx.recv() => {
                 match listed {
                     Some(providers) => app.catalog_arrived(providers, &client).await,

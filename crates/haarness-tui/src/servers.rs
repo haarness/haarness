@@ -23,6 +23,9 @@ struct Server {
     #[serde(default)]
     auth: ServerAuth,
 }
+/// Each server's drafts and views, kept across restarts.
+pub(crate) const DRAFTS_FILE: &str = "tui-server-drafts.json";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StoredDraft")]
 pub(crate) struct Draft {
@@ -128,7 +131,7 @@ fn saved_view(
     info: Option<&haarness_protocol::ServerInfo>,
     threads: &[haarness_protocol::Thread],
 ) -> Result<SavedView> {
-    let mut all: SavedViews = config::load_client_json("tui-server-drafts.json")?;
+    let mut all: SavedViews = config::load_client_json(DRAFTS_FILE)?;
     let scope = draft_scope(client, info);
     let mut saved = if let Some(saved) = all.remove(&scope) {
         saved
@@ -219,7 +222,7 @@ pub(crate) fn save_current(app: &App, client: &ApiClient) -> Result<()> {
     } else {
         drafts.insert(app.thread.id, draft);
     }
-    config::update_client_json("tui-server-drafts.json", |all: &mut SavedViews| {
+    config::update_client_json(DRAFTS_FILE, |all: &mut SavedViews| {
         let saved = all.entry(scope).or_insert_with(|| SavedView {
             drafts: app.draft_baseline.borrow().clone(),
             ..SavedView::default()
@@ -228,6 +231,12 @@ pub(crate) fn save_current(app: &App, client: &ApiClient) -> Result<()> {
         saved.thread = Some(app.thread.id);
         saved.shell = false;
     })?;
+    app.keep_picks(
+        &drafts
+            .values()
+            .map(|draft| draft.text.clone())
+            .collect::<Vec<_>>(),
+    );
     *app.draft_baseline.borrow_mut() = drafts;
     Ok(())
 }

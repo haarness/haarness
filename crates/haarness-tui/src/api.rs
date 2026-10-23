@@ -1031,6 +1031,17 @@ impl ApiClient {
     pub async fn mcp(&self) -> Result<Vec<McpServerInfo>> {
         self.get("/v1/mcp").await
     }
+    /// The MCP servers, each saying whether chat `thread` can reach it
+    /// under `agent` (`turned_off`).
+    pub async fn mcp_for(
+        &self,
+        thread: haarness_protocol::ThreadId,
+        agent: &str,
+    ) -> Result<Vec<McpServerInfo>> {
+        let agent: String = url::form_urlencoded::byte_serialize(agent.as_bytes()).collect();
+        self.get(&format!("/v1/mcp?threadId={thread}&agent={agent}"))
+            .await
+    }
     pub async fn configure_mcp(
         &self,
         name: &str,

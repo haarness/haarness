@@ -8,6 +8,7 @@ mod goal;
 mod home;
 mod input;
 mod management;
+mod mention;
 mod model_names;
 mod pty;
 pub mod tokens;
@@ -24,6 +25,7 @@ pub use home::{
 };
 pub use input::*;
 pub use management::*;
+pub use mention::*;
 pub use model_names::{
     model_display_id, model_display_name, provider_display_id, provider_storage_id,
 };
@@ -585,6 +587,10 @@ pub struct StartTurnRequest {
     /// local-first clients do not have to persist large base64 blobs.
     #[serde(default, alias = "images")]
     pub attachments: Vec<String>,
+    /// MCP resources mentioned with `@`, read into the message when it
+    /// arrives (`mcp-resource-mentions.v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceMention>,
     /// Internal runtime prompt. Backward-compatible API clients omit this and
     /// receive ordinary user-message behavior.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -928,6 +934,10 @@ pub struct ExecuteCommandRequest {
     pub arguments: Option<Value>,
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// MCP resources mentioned with `@`, read and added to string arguments
+    /// when the command runs (`mcp-resource-mentions.v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceMention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1019,6 +1029,12 @@ pub struct McpServerInfo {
     /// it is connected with its apps on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_tools: Option<u32>,
+    /// `true` when the chat (or agent) the list was asked for takes every
+    /// tool of this server away by a rule or tool setting, and with them its
+    /// resources: an `@` list leaves it out. Absent otherwise, and from
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turned_off: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1086,6 +1102,14 @@ pub struct PendingPermissionInfo {
     pub operation: String,
     #[serde(default)]
     pub detail: Value,
+    /// For any request a shell command raises (`bash`, and under the
+    /// default rules `external_directory`), the script the command runs
+    /// (`bash x.sh`, `./x.sh`, `source ./env.sh`; a `source` name without a
+    /// slash is not claimed), read when it asked, for the person who
+    /// answers. Display only: it changes no pattern or rule. An Allow once
+    /// does not run the command if the file is no longer what was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<PermissionScript>,
     /// Permission category (bash, edit, external_directory, …).
     #[serde(default)]
     pub permission: String,
@@ -1111,6 +1135,44 @@ pub struct PendingPermissionInfo {
         deserialize_with = "lenient_review"
     )]
     pub review: Option<PermissionReview>,
+}
+
+/// The script file a shell command runs, as the server read it when the
+/// command asked for permission.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionScript {
+    /// The file the command names, as an absolute path (links are followed
+    /// to read it, not here), with the replacements `content` has and its
+    /// tabs and line breaks as `�` too.
+    pub path: String,
+    /// Its text: at most its first 30,000 bytes, with line breaks as `\n`
+    /// and other control characters (tabs aside), bidirectional controls
+    /// and marks, and Unicode line and paragraph separators shown as `�`.
+    pub content: String,
+    /// The file goes on past `content`.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Why the text is not shown (`content` is empty, and a card names the
+    /// file instead): what runs may not be what is on disk now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<ScriptWithheld>,
+}
+
+/// Why a script's text is not shown on its card.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptWithheld {
+    /// The command writes the file before it runs it (`curl -o x.sh … &&
+    /// bash x.sh`, `cat > x.sh <<EOF`).
+    Written,
+    /// The line is not of the trusted shape before it (or in its own
+    /// command): an earlier step may change it.
+    Changeable,
+    /// A reason a newer server gives that this client does not know: shown
+    /// like `Changeable`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One unanswered model question, listable so clients can hydrate every
@@ -1197,6 +1259,10 @@ pub struct QueueInputRequest {
     pub text: String,
     #[serde(default, alias = "images")]
     pub attachments: Vec<String>,
+    /// MCP resources mentioned with `@`, read into the message when it
+    /// arrives, before it is queued (`mcp-resource-mentions.v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceMention>,
     /// Internal runtime prompt, hidden from user-authored transcript/history
     /// surfaces but still delivered to the provider.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1268,6 +1334,8 @@ pub struct ApiError {
         McpConfigureRequest,
         LoopConfig,
         PendingPermissionInfo,
+        PermissionScript,
+        ScriptWithheld,
         PendingQuestionInfo,
         BackgroundTaskInfo,
         ThreadActivity,
@@ -1277,6 +1345,7 @@ pub struct ApiError {
         InputQueueAction,
         QueueInputRequest,
         QueueInputResponse,
+        ResourceMention,
         ApiError,
         TurnStatus,
         WorkflowArgument,

@@ -336,10 +336,34 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   max-height: 420px;
   border-radius: var(--r-md);
 }
-/* An image from another host waits for a click (remote-images.ts): framed
-   like inline code, sized to its text, and inline like the image it stands
-   for, so a badge in a sentence stays in it. */
-.markdown .remote-image {
+/* In the conversation (replies, thinking, side chats, your own messages) an
+   image is no taller than 320px and its width follows, so the ratio holds
+   and a smaller one keeps its own size. One whose markup gives it a width of
+   its own is fitted inside that box, never stretched. A Markdown file's
+   preview keeps the larger bound. */
+.markdown:not(.markdown-document) img {
+  max-height: 320px;
+  height: auto;
+  object-fit: contain;
+}
+/* In your own message an image is a thumbnail, as an attachment is, and it
+   opens full size; it never folds the message (UserMessage.tsx). */
+.bubble .markdown img {
+  max-height: 120px;
+}
+/* An image the conversation shows smaller than it is opens full size (ImageViewer.tsx). */
+:is(.markdown, .tool-image, .attachment-image) img[data-image-open] {
+  cursor: zoom-in;
+}
+:root:not([data-pointer-focus]) :is(.markdown, .tool-image, .attachment-image) img[data-image-open]:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
+}
+/* An image from another host waits for a click (remote-images.ts), and one
+   from the project while it is read (project-images.ts): framed like inline
+   code, sized to its text, and inline like the image it stands for, so a
+   badge in a sentence stays in it. */
+.markdown :is(.remote-image, .project-image) {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -356,13 +380,22 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   line-height: 1.4;
   color: var(--muted);
 }
-.markdown .remote-image-alt {
+/* No button ends a project image's frame, so its text sits as far from either edge. */
+.markdown .project-image {
+  padding-inline: var(--s3);
+}
+.markdown :is(.remote-image-alt, .project-image-alt) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
   unicode-bidi: plaintext;
+}
+/* Why no picture comes: outside the project, too large, or not available. */
+.markdown .project-image-note {
+  color: var(--muted);
+  white-space: nowrap;
 }
 /* The button names the host and is never cut short: the end of a host name
    says who gets the request. */
@@ -680,6 +713,18 @@ html[dir="rtl"] .tool-target {
 }
 .tool-body .tool-output {
   color: var(--text);
+}
+/* The image a read returned, under its result: no taller than a reply's,
+   and opens full size. */
+.tool-image {
+  padding: 0 var(--s3) var(--s3);
+}
+.tool-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border-radius: var(--r-md);
 }
 
 /* An edit shown as a change rather than as arguments. */
@@ -1937,6 +1982,94 @@ html[dir="rtl"] .tool-target {
   /* The note mixes the interface's language with the reviewer's own words
      and paths: each run keeps its own direction. */
   unicode-bidi: plaintext;
+}
+/* The script a command runs: a quiet toggle under the command, the file in
+   the change style once opened, scrolling inside its own short box so the
+   answers and the composer stay in view. */
+.approval-script {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s1);
+  min-width: 0;
+}
+/* A script the command writes before it runs it: one quiet line. */
+.approval-script-note {
+  margin: 0;
+  padding-inline: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.approval-script-note code {
+  font-family: var(--mono);
+}
+.approval-script-toggle {
+  min-height: 22px;
+  border: 0;
+  padding: 0 var(--s1);
+  background: none;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  gap: var(--s1);
+  border-radius: var(--r-sm);
+}
+.approval-script-toggle:hover:not(:disabled) {
+  background: none;
+  color: var(--text);
+}
+.approval-script-chevron {
+  flex: none;
+  color: var(--faint);
+  transition: transform var(--fast) var(--ease);
+}
+.approval-script.open .approval-script-chevron {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .approval-script:not(.open) .approval-script-chevron {
+  transform: rotate(180deg);
+}
+.approval-script-body {
+  align-self: stretch;
+}
+/* Code keeps left-to-right order in Arabic too, as in the diff view. */
+.approval-script-body .change-lines {
+  direction: ltr;
+  text-align: left;
+}
+/* A long path gives way from its start, so the file's own name stays in
+   view; the path itself still reads left to right. */
+.approval-script-body .change-path {
+  direction: rtl;
+  text-align: left;
+}
+.approval-script-body .change-path bdi {
+  direction: ltr;
+}
+.approval-script-body .change-lines {
+  max-height: 200px;
+  overflow-x: hidden;
+}
+/* A long line wraps whole rather than run past the edge: what it does at its
+   end is part of what is approved. */
+.approval-script-body .diff-line {
+  min-width: 0;
+}
+.approval-script-body .diff-line code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* The rows a line continues on hang in, so they do not read as lines of
+     their own. */
+  padding-inline-start: 2ch;
+  text-indent: -2ch;
+}
+:root:not([data-pointer-focus]) .approval-script-body .change-lines:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: -1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .approval-script-chevron {
+    transition: none;
+  }
 }
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */

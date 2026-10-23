@@ -3817,6 +3817,7 @@ async fn execute_schedule(
                     request_id: RequestId::new(),
                     text: schedule.prompt.clone(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: true,
                     agent: schedule.agent.clone(),
@@ -3971,6 +3972,7 @@ async fn arm_loop(
             request_id: RequestId::new(),
             text: config.prompt,
             attachments: vec![],
+            resources: Vec::new(),
             synthetic: false,
             auto_approve: false,
             agent: None,
@@ -4751,6 +4753,7 @@ async fn run_command(
                         request_id: RequestId::new(),
                         text: prompt,
                         attachments,
+                        resources: Vec::new(),
                         synthetic: false,
                         auto_approve: yolo,
                         agent: args.agent,
@@ -5688,6 +5691,7 @@ impl RunWatch {
                 .ask(
                     &request,
                     pending.review.as_ref().map(review_note).as_deref(),
+                    script_preview(pending.script.as_ref()).as_deref(),
                 )
                 .await?
             {
@@ -5709,14 +5713,15 @@ impl RunWatch {
         Ok(())
     }
 
-    /// `note`: why Auto's reviewer left the request to a person.
-    async fn ask(&self, request: &str, note: Option<&str>) -> Result<bool> {
+    /// `note`: why Auto's reviewer left the request to a person; `script`:
+    /// the first lines of the script the command runs.
+    async fn ask(&self, request: &str, note: Option<&str>, script: Option<&str>) -> Result<bool> {
         let _paused = self.activity.as_ref().map(RunActivity::pause);
-        eprintln!("The agent asks to {request}.");
-        if let Some(note) = note {
-            eprintln!("{note}");
-        }
-        eprint!("Allow it once? [y/N] ");
+        eprint!(
+            "The agent asks to {request}.\n{}{}Allow it once? [y/N] ",
+            note.map(|note| format!("{note}\n")).unwrap_or_default(),
+            script.unwrap_or_default()
+        );
         let _ = io::stderr().flush();
         let answer = tokio::task::spawn_blocking(|| {
             let mut line = String::new();
@@ -5981,6 +5986,58 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
         Some(subject) => format!("{kind} ({subject})"),
         None => kind,
     }
+}
+
+/// What a shell request's script says, for the terminal prompt: its path
+/// and first lines, indented and each cut to `PREVIEW_COLUMNS` cells, or why its
+/// text is not shown. The server has already made its text safe for a
+/// terminal.
+fn script_preview(script: Option<&haarness_protocol::PermissionScript>) -> Option<String> {
+    use haarness_protocol::ScriptWithheld;
+    const LINES: usize = 6;
+    /// How much of a line the prompt shows.
+    const PREVIEW_COLUMNS: usize = 200;
+    let script = script?;
+    match script.withheld {
+        Some(ScriptWithheld::Written) => {
+            return Some(format!(
+                "It writes {} before running it, so its contents can't be shown.\n",
+                terminal_safe(&script.path, false)
+            ));
+        }
+        Some(ScriptWithheld::Changeable | ScriptWithheld::Unknown) => {
+            return Some(format!(
+                "An earlier step of it can change {}, so its contents aren't shown.\n",
+                terminal_safe(&script.path, false)
+            ));
+        }
+        None => {}
+    }
+    let lines: Vec<&str> = script.content.lines().collect();
+    let mut text = format!("It runs {}:\n", terminal_safe(&script.path, false));
+    for line in lines.iter().take(LINES) {
+        text.push_str("    ");
+        // What the file holds is printed, never run by the terminal.
+        let line = terminal_safe(line, false);
+        // Cut by the cells a terminal draws, so wide characters count twice.
+        let mut used = 0;
+        let cut = line.char_indices().find_map(|(at, character)| {
+            used += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+            (used > PREVIEW_COLUMNS).then_some(at)
+        });
+        match cut {
+            Some(cut) => {
+                text.push_str(&line[..cut]);
+                text.push('…');
+            }
+            None => text.push_str(&line),
+        }
+        text.push('\n');
+    }
+    if lines.len() > LINES || script.truncated {
+        text.push_str("    …\n");
+    }
+    Some(text)
 }
 
 /// The configuration that would let a run without a person do what this
@@ -11857,6 +11914,12 @@ async fn ensure_workspace_server_at(
     let start_log = prepare_start_log(&paths.data);
     let start_id = random_token();
     let mut command = ProcessCommand::new(executable);
+    // A client that an agent's command started (`haarness run` in it, say)
+    // has Haarness's own markers; this server outlives that command and
+    // serves a person's own `!` commands and terminals too.
+    for name in haarness_core::own_agent_markers(std::env::var_os("AI_AGENT").as_deref()) {
+        command.env_remove(name);
+    }
 
     command
         .args(paths.root.as_ref().map(|_| "--data-dir"))
@@ -12140,6 +12203,56 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_terminal_prompt_shows_the_start_of_the_script_a_command_runs() {
+        use haarness_protocol::ScriptWithheld;
+        let script = |content: &str, truncated, withheld| haarness_protocol::PermissionScript {
+            path: "/work/run.sh".into(),
+            content: content.into(),
+            truncated,
+            withheld,
+        };
+        assert_eq!(super::script_preview(None), None);
+        assert_eq!(
+            super::script_preview(Some(&script("echo a\necho b\n", false, None))).as_deref(),
+            Some("It runs /work/run.sh:\n    echo a\n    echo b\n")
+        );
+        let long = (1..=8)
+            .map(|line| format!("echo {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = super::script_preview(Some(&script(&long, false, None))).unwrap();
+        assert!(preview.ends_with("    echo 6\n    …\n"), "{preview}");
+        assert_eq!(
+            super::script_preview(Some(&script("", false, Some(ScriptWithheld::Written))))
+                .as_deref(),
+            Some("It writes /work/run.sh before running it, so its contents can't be shown.\n")
+        );
+        assert_eq!(
+            super::script_preview(Some(&script("", false, Some(ScriptWithheld::Changeable))))
+                .as_deref(),
+            Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
+        );
+        // A long line is cut, not wrapped over the terminal, by the cells it
+        // takes: a wide character counts twice.
+        let wide = super::script_preview(Some(&script(&"x".repeat(500), false, None))).unwrap();
+        assert!(
+            wide.contains(&format!("    {}…\n", "x".repeat(200))),
+            "{wide}"
+        );
+        let wide = super::script_preview(Some(&script(&"字".repeat(150), false, None))).unwrap();
+        assert!(
+            wide.contains(&format!("    {}…\n", "字".repeat(100))),
+            "{wide}"
+        );
+        // A reason a newer server gives reads like the cautious one.
+        assert_eq!(
+            super::script_preview(Some(&script("", false, Some(ScriptWithheld::Unknown))))
+                .as_deref(),
+            Some("An earlier step of it can change /work/run.sh, so its contents aren't shown.\n")
+        );
+    }
+
     /// Run in a process of its own (it installs the process's panic hook):
     /// a server's stderr whose reader stopped held a panicking thread in the
     /// message the default hook writes there, and so it goes on without it;
@@ -14705,6 +14818,7 @@ request_timeout = 0
                     request_id: RequestId::new(),
                     text: "finish migration".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: Some("build".into()),
@@ -15079,6 +15193,7 @@ request_timeout = 0
                     request_id: RequestId::new(),
                     text: "x".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,
@@ -15190,6 +15305,7 @@ request_timeout = 0
                     request_id: RequestId::new(),
                     text: "write outside".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: None,
@@ -15281,6 +15397,7 @@ request_timeout = 0
                             request_id: RequestId::new(),
                             text: "write outside".into(),
                             attachments: Vec::new(),
+                            resources: Vec::new(),
                             synthetic: false,
                             auto_approve: false,
                             agent: None,
@@ -15426,6 +15543,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    resources: Vec::new(),
                 },
             )
             .await
@@ -15705,6 +15823,7 @@ request_timeout = 0
             permission_id: "p".into(),
             operation: "cloud:session_create".into(),
             detail: serde_json::Value::Null,
+            script: None,
             permission: "cloud".into(),
             patterns: Vec::new(),
             always_patterns: Vec::new(),
@@ -15737,6 +15856,7 @@ request_timeout = 0
             permission_id: "chrome".into(),
             operation: format!("browser_site:chrome-browsing:{root}:https://mail.example.test"),
             detail: serde_json::Value::Null,
+            script: None,
             permission: "browser_site".into(),
             patterns: vec![format!("chrome-browsing:{root}:https://mail.example.test")],
             always_patterns: vec![format!(
@@ -15921,6 +16041,7 @@ request_timeout = 0
             permission_id: "late".into(),
             operation: "external_directory:/outside".into(),
             detail: serde_json::Value::Null,
+            script: None,
             permission: "external_directory".into(),
             patterns: vec!["/outside".into()],
             always_patterns: vec!["/outside".into()],
@@ -16174,6 +16295,7 @@ request_timeout = 0
                     request_id: RequestId::new(),
                     text: "keep working".into(),
                     attachments: Vec::new(),
+                    resources: Vec::new(),
                     synthetic: false,
                     auto_approve: false,
                     agent: Some("build".into()),

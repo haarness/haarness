@@ -207,7 +207,10 @@ Where each hook fires:
   template expands.
 - `shell.env` runs for each `bash` tool call, after permission evaluation;
   later extensions override earlier ones and invalid variable names are
-  dropped.
+  dropped. A command the agent runs is still marked as an agent's: `AGENT`,
+  `HAARNESS` and `HAARNESS_SESSION_ID` win over an extension's values, and an
+  `AI_AGENT` it sets is kept (see
+  [Permissions and execution](PERMISSIONS-AND-EXECUTION.md#configure-execution-budgets)).
 - `tool.definition` runs once per tool when the registry is composed (startup
   and hot reload), for native, MCP and extension tools known at that time.
   Tools that appear later, such as lazily connected MCP servers, keep their

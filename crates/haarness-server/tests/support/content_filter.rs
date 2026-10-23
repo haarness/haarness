@@ -77,6 +77,7 @@ async fn filtered_turn_preserves_partial_output_and_usage_without_tools_or_queue
                 request_id: RequestId::new(),
                 text: "queued input".into(),
                 attachments: vec![],
+                resources: Vec::new(),
                 synthetic: false,
             },
         )

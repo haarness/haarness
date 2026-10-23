@@ -10,6 +10,7 @@
 
 pub mod arity;
 pub mod bash;
+pub mod script;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
