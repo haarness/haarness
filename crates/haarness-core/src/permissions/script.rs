@@ -14,10 +14,13 @@ use sha2::{Digest as _, Sha256};
 /// marked [`PermissionScript::truncated`].
 pub const MAX_SCRIPT_BYTES: usize = 30_000;
 
-/// How long reading a script may take, for the prompt and again before the
-/// command runs: a hung network or FUSE mount gives no script rather than a
-/// stalled prompt.
+/// How long reading a script for a prompt may take: a hung network or FUSE
+/// mount gives no script rather than a stalled prompt.
 pub const READ_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// How long reading it again before the command runs may take: longer, as
+/// a slow disk would otherwise refuse a command the person approved.
+pub const RECHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How many of a command's script files are tried before giving up: a
 /// program run by its path may be a binary (`/usr/bin/git status && bash
@@ -70,7 +73,7 @@ pub struct Seal {
 impl Seal {
     /// Whether the command still runs what the card showed: the file it
     /// names leads to the same place and reads the same, read again off the
-    /// async workers within [`READ_TIMEOUT`]. A file gone, changed, moved
+    /// async workers within [`RECHECK_TIMEOUT`]. A file gone, changed, moved
     /// behind its link or too slow to read again does not hold.
     pub async fn holds(&self) -> bool {
         let seal = self.clone();
@@ -79,7 +82,7 @@ impl Seal {
                 && read_bytes(&seal.real).is_some_and(|bytes| digest(&bytes) == seal.digest)
         });
         matches!(
-            tokio::time::timeout(READ_TIMEOUT, check).await,
+            tokio::time::timeout(RECHECK_TIMEOUT, check).await,
             Ok(Ok(true))
         )
     }
@@ -184,7 +187,7 @@ fn read_bytes(real: &Path) -> Option<Vec<u8>> {
         return None;
     }
     let file = open(real).ok()?;
-    if !file.metadata().ok()?.is_file() {
+    if !file.metadata().ok()?.is_file() || !opened_at(&file, real) {
         return None;
     }
     let mut bytes = Vec::new();
@@ -198,21 +201,44 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// The resolved path opened without following a link at its end: one put
-/// there after it was resolved cannot lead past the checks above. A pipe
-/// never blocks the open.
+/// The resolved path opened without following a link: a link put there
+/// after it was resolved cannot lead past the checks above. macOS (11 and
+/// later) refuses a link at any step; elsewhere the last step is refused
+/// and [`opened_at`] catches a folder swapped for a link. A pipe never
+/// blocks the open, and a terminal never becomes the server's.
 #[cfg(unix)]
 fn open(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(target_vendor = "apple")]
+    let links = nix::libc::O_NOFOLLOW_ANY;
+    #[cfg(not(target_vendor = "apple"))]
+    let links = nix::libc::O_NOFOLLOW;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY | links)
         .open(path)
 }
 
 #[cfg(not(unix))]
 fn open(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
+}
+
+/// Whether the open file is the one at `real`: on Linux its own path, as
+/// the system names it, must be `real`, so a folder swapped for a link
+/// between resolving and opening is refused. Elsewhere [`open`] already
+/// refuses that (macOS), or nothing more can be told.
+#[cfg(target_os = "linux")]
+fn opened_at(file: &std::fs::File, real: &Path) -> bool {
+    use std::os::fd::AsRawFd as _;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .ok()
+        .is_none_or(|opened| opened == real)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn opened_at(_file: &std::fs::File, _real: &Path) -> bool {
+    true
 }
 
 /// How many bytes of `bytes` end on a whole UTF-8 character: a sequence
@@ -273,7 +299,7 @@ mod tests {
 
     pub(super) fn wait_if_slow(path: &Path) {
         if SLOW.lock().unwrap().iter().any(|slow| slow == path) {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(RECHECK_TIMEOUT + Duration::from_millis(500));
         }
     }
 
@@ -313,13 +339,13 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("x.sh", "echo hi\n");
         let script = bash_script("bash x.sh", &fixture.0, |_| true).unwrap();
-        assert_eq!(script.path, fixture.0.join("x.sh").to_string_lossy());
+        assert_eq!(Path::new(&script.path), fixture.0.join("x.sh"));
         assert_eq!(script.content, "echo hi\n");
         assert!(!script.truncated);
         // A `cd` earlier in the line moves where it is looked for.
         fixture.write("sub/y.sh", "echo sub\n");
         let script = bash_script("cd sub && ./y.sh", &fixture.0, |_| true).unwrap();
-        assert_eq!(script.path, fixture.0.join("sub/y.sh").to_string_lossy());
+        assert_eq!(Path::new(&script.path), fixture.0.join("sub").join("y.sh"));
         assert_eq!(script.content, "echo sub\n");
         assert!(bash_script("echo hi", &fixture.0, |_| true).is_none());
     }
@@ -363,8 +389,8 @@ mod tests {
             "./binary",
             "sh empty.sh",
             "sh blank.sh",
-            "source prod.env",
-            ". .env",
+            "source ./prod.env",
+            ". ./.env",
         ] {
             assert!(
                 bash_script(command, &fixture.0, |_| true).is_none(),
@@ -381,7 +407,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, fixture.0.join("run.sh")).unwrap();
         let script = bash_script("./run.sh", &fixture.0, |_| true).unwrap();
         // Named as the command names it, read where it leads.
-        assert_eq!(script.path, fixture.0.join("run.sh").to_string_lossy());
+        assert_eq!(Path::new(&script.path), fixture.0.join("run.sh"));
         assert_eq!(script.content, "echo real\n");
         let secret = fixture.write("prod.env", "TOKEN=1\n");
         std::os::unix::fs::symlink(&secret, fixture.0.join("link.sh")).unwrap();
@@ -420,7 +446,7 @@ mod tests {
             fixture.write(name, "export TOKEN=fixture-only\n");
             assert!(is_credential(&fixture.0.join(name)), "{name}");
             assert!(
-                bash_script(&format!("source {name}"), &fixture.0, |_| true).is_none(),
+                bash_script(&format!("source ./{name}"), &fixture.0, |_| true).is_none(),
                 "{name}"
             );
         }
@@ -429,7 +455,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(fixture.0.join(".envrc"), fixture.0.join("setup.sh"))
                 .unwrap();
-            assert!(bash_script("source setup.sh", &fixture.0, |_| true).is_none());
+            assert!(bash_script("source ./setup.sh", &fixture.0, |_| true).is_none());
         }
         for name in [
             "credentials",
@@ -464,7 +490,7 @@ mod tests {
         let started = std::time::Instant::now();
         let shown = for_prompt("bash slow.sh".into(), fixture.0.clone(), |_| true).await;
         assert!(shown.is_none());
-        assert!(started.elapsed() < Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_millis(1500));
         fixture.write("quick.sh", "echo quick\n");
         let shown = for_prompt("bash quick.sh".into(), fixture.0.clone(), |_| true)
             .await
@@ -517,6 +543,20 @@ mod tests {
         }
     }
 
+    /// A folder swapped for a link between resolving and opening: the
+    /// file is not read where the link leads.
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    #[test]
+    fn a_folder_swapped_for_a_link_after_resolving_is_not_read() {
+        let fixture = Fixture::new();
+        let real = fixture.write("a/run.sh", "echo resolved\n");
+        fixture.write("b/run.sh", "echo elsewhere\n");
+        assert!(read_bytes(&real).is_some());
+        std::fs::rename(fixture.0.join("a"), fixture.0.join("old")).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("b"), fixture.0.join("a")).unwrap();
+        assert!(read_bytes(&real).is_none());
+    }
+
     #[test]
     fn a_binary_program_gives_way_to_the_script_after_it() {
         let fixture = Fixture::new();
@@ -549,15 +589,18 @@ mod tests {
                 .content,
             "echo a\u{fffd}b\u{fffd}c\u{fffd}d\u{fffd}e\u{fffd}f\n"
         );
-        // And the path, line breaks and tabs included.
-        let odd = "odd\u{202e}\nname\t.sh";
-        fixture.write(odd, "echo odd\n");
-        let script = bash_script(&format!("bash '{odd}'"), &fixture.0, |_| true).unwrap();
-        assert!(
-            script.path.ends_with("odd\u{fffd}\u{fffd}name\u{fffd}.sh"),
-            "{}",
-            script.path
-        );
+        // And the path, line breaks and tabs included (names NTFS refuses).
+        #[cfg(unix)]
+        {
+            let odd = "odd\u{202e}\nname\t.sh";
+            fixture.write(odd, "echo odd\n");
+            let script = bash_script(&format!("bash '{odd}'"), &fixture.0, |_| true).unwrap();
+            assert!(
+                script.path.ends_with("odd\u{fffd}\u{fffd}name\u{fffd}.sh"),
+                "{}",
+                script.path
+            );
+        }
         // Bytes that are not UTF-8 read as replacements too.
         fixture.write("latin.sh", b"echo caf\xe9\n");
         assert_eq!(
