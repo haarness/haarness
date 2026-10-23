@@ -1478,6 +1478,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     let undone_after = app.thread.revert.as_ref().map(|revert| revert.sequence);
     let mut folded = false;
     let ordered = presentation_order(&app.items);
+    // The turn is waiting for a person: to answer a request, or a question.
+    let person_wait = app.phase.as_ref().filter(|phase| {
+        matches!(
+            phase.state.as_str(),
+            "waiting_permission" | "waiting_question"
+        )
+    });
+    let asks_approval = person_wait.is_some_and(|phase| phase.state == "waiting_permission");
     // Off screen, the sidebar leaves one row in its place: the plan's
     // progress where it last changed, which opens the sidebar.
     let plan_at = (app.plan_inline.get() && open_plan(app))
@@ -1720,20 +1728,37 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // A batch whose children are running is live work, never a
                 // call waiting its turn behind another tool; nor is one
                 // whose own step (`<call id>:N`) is the running tool.
-                let queued = name != "task"
-                    && !batch_active
-                    && status.is_none()
-                    && app.phase.as_ref().is_some_and(|phase| {
-                        matches!(phase.state.as_str(), "tool" | "reviewing")
-                            && phase.call_id.as_deref().is_some_and(|active| {
-                                active != call_id
-                                    && crate::state::batch_parent_call(active) != Some(call_id)
-                            })
+                let unfinished = name != "task" && !batch_active && status.is_none();
+                let this_call = |active: &str| {
+                    active == call_id || crate::state::batch_parent_call(active) == Some(call_id)
+                };
+                // While a request waits for a person nothing runs: the call
+                // that asked waits still, and the calls after it queue.
+                let awaiting = unfinished
+                    && person_wait.is_some_and(|phase| match phase.call_id.as_deref() {
+                        Some(active) => this_call(active),
+                        // A question the server asked without naming its
+                        // call (no tool status came first) is this call's.
+                        None => phase.state == "waiting_question" && same_tool(name, "question"),
                     });
+                let queued = unfinished
+                    && !awaiting
+                    && app
+                        .phase
+                        .as_ref()
+                        .is_some_and(|phase| match phase.state.as_str() {
+                            "tool" | "reviewing" => phase
+                                .call_id
+                                .as_deref()
+                                .is_some_and(|active| !this_call(active)),
+                            "waiting_permission" | "waiting_question" => true,
+                            _ => false,
+                        });
                 let color = child_state.map_or_else(
                     || match status {
                         Some("failed") => theme.danger,
                         Some(_) => theme.muted,
+                        None if awaiting => theme.accent,
                         None if queued => theme.muted,
                         None => theme.accent,
                     },
@@ -1742,6 +1767,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // Running tools breathe: the dot becomes a spinner frame.
                 let marker = child_state.map_or_else(
                     || match status {
+                        None if awaiting && asks_approval => "  ⚠ ".into(),
+                        None if awaiting => "  ? ".into(),
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
@@ -1778,6 +1805,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         } else {
                             format!("  {lead}: {}", single_line(&reason, 160))
                         }
+                    }
+                    None if awaiting && asks_approval => {
+                        format!("  {}", app.language.text("waiting for approval"))
                     }
                     None if queued => "  queued".to_owned(),
                     _ => String::new(),
@@ -1960,12 +1990,18 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } else {
                         listed.len()
                     };
-                    // The step running now: the turn's status names it as
-                    // `<call id>:N`, the batch's Nth step.
+                    // The step running now, or waiting for approval: the
+                    // turn's status names it as `<call id>:N`, the batch's
+                    // Nth step.
                     let running = app
                         .phase
                         .as_ref()
-                        .filter(|phase| matches!(phase.state.as_str(), "tool" | "reviewing"))
+                        .filter(|phase| {
+                            matches!(
+                                phase.state.as_str(),
+                                "tool" | "reviewing" | "waiting_permission" | "waiting_question"
+                            )
+                        })
                         .and_then(|phase| phase.call_id.as_deref())
                         .and_then(|active| active.strip_prefix(call_id.as_str()))
                         .and_then(|rest| rest.strip_prefix(':'))
@@ -1982,6 +2018,10 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 ("●".to_owned(), theme.muted)
                             }
                             (None, Some(_)) => ("⊘".to_owned(), theme.muted),
+                            (None, None) if running == Some(step.index) && awaiting => (
+                                if asks_approval { "⚠" } else { "?" }.to_owned(),
+                                theme.accent,
+                            ),
                             (None, None) if running == Some(step.index) => {
                                 (spinner(app.tick).to_string(), theme.accent)
                             }
