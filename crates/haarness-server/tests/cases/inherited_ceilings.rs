@@ -36,7 +36,10 @@ async fn children_of_a_plan_chat_and_a_build_chat_send_one_tool_list() {
         EventBus::new(256),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let mut children = Vec::new();
     for (agent, prompt) in [("plan", PLAN_CHILD), ("build", BUILD_CHILD)] {
@@ -112,7 +115,10 @@ async fn the_plan_agent_started_from_a_build_chat_still_cannot_write() {
         EventBus::new(256),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let chat = echo_thread(&runtime).await;
     let write = json!({"path": "notes.txt", "content": "planned"});
