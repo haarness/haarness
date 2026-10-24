@@ -290,6 +290,20 @@ test("open lists and menus in Settings, in both themes, in a large and a small w
       }
     await page.keyboard.press("Escape");
     await expect(form).toBeHidden();
+    // Two more forms over Settings: a schedule's model picker, and the list a
+    // new MCP server is made available in.
+    await section("Schedules");
+    await settings().getByRole("button", { name: "Create schedule", exact: true }).first().click();
+    const schedule = page.getByRole("dialog", { name: "Create schedule", exact: true });
+    await formShots(`settings-schedule-model-${size}`, schedule, schedule.getByRole("combobox", { name: "Model", exact: true }), info);
+    await page.keyboard.press("Escape");
+    await expect(schedule).toBeHidden();
+    await section("MCP servers");
+    await settings().getByRole("button", { name: "Add MCP server", exact: true }).first().click();
+    const mcp = page.getByRole("dialog", { name: "Add MCP server", exact: true });
+    await formShots(`settings-mcp-available-${size}`, mcp, mcp.getByRole("combobox", { name: "Available in", exact: true }), info);
+    await page.keyboard.press("Escape");
+    await expect(mcp).toBeHidden();
     await page.keyboard.press("Escape");
     await expect(settings()).toBeHidden();
   }
@@ -297,3 +311,21 @@ test("open lists and menus in Settings, in both themes, in a large and a small w
   await page.setViewportSize({ width: 1600, height: 1000 });
   expect(errors).toEqual([]);
 });
+
+/** A screenshot of `form` with `control`'s list open, in both themes; the list stays inside the form. */
+async function formShots(name: string, form: Locator, control: Locator, info: { outputPath: (name: string) => string }) {
+  await expect(form).toBeVisible();
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await control.click();
+    const layer = page.locator(".select-popover").last();
+    await expect(layer).toBeVisible();
+    await page.waitForTimeout(250);
+    inside(await box(layer), await box(form), name);
+    await page.screenshot({ path: join(shots ?? info.outputPath(""), `${name}-${theme}.png`) });
+    await page.keyboard.press("Escape");
+    await expect(layer).toBeHidden();
+    await expect(form).toBeVisible();
+  }
+}
