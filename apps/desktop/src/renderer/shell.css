@@ -137,7 +137,7 @@
   justify-content: flex-start;
   border: 0;
   background: transparent;
-  min-height: 36px;
+  min-height: 32px;
   padding: 0 var(--s2);
   gap: var(--s2);
   font-size: var(--ui-lg);
@@ -1585,7 +1585,7 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  min-height: 36px;
+  min-height: 32px;
   padding-inline: var(--s2);
   text-align: start;
 }
