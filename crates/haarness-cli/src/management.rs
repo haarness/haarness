@@ -2657,11 +2657,17 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
 }
 
 fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> {
+    // The arguments were shown for the command as it was.
+    let shown_for = entry.command.clone();
     if let Some(command) = optional_string(input, "command") {
         entry.command = Some(command.into());
     }
     if input.get("args").is_some() {
-        entry.args = edited_secret_args(&entry.args, string_array(input, "args")?)?;
+        entry.args = edited_secret_args(
+            shown_for.as_deref(),
+            &entry.args,
+            string_array(input, "args")?,
+        )?;
     }
     let environment = if input.get("environment").is_some() {
         "environment"
@@ -2733,7 +2739,11 @@ fn edited_secret_map(
 /// `--api-key <redacted>`), and only when exactly one argument fits; a
 /// value that cannot be matched must be given in full, so a reordered or
 /// shortened list never puts one secret in another's place.
-fn edited_secret_args(existing: &[String], next: Vec<String>) -> Result<Vec<String>> {
+fn edited_secret_args(
+    command: Option<&str>,
+    existing: &[String],
+    next: Vec<String>,
+) -> Result<Vec<String>> {
     use haarness_core::redact::REDACTED;
     fn key(args: &[String], index: usize) -> (Option<&str>, &str) {
         let previous = (args[index] == REDACTED)
@@ -2741,7 +2751,7 @@ fn edited_secret_args(existing: &[String], next: Vec<String>) -> Result<Vec<Stri
             .flatten();
         (previous, args[index].as_str())
     }
-    let shown = haarness_core::redact::args(existing);
+    let shown = haarness_core::redact::command_args(command, existing);
     if next == shown {
         return Ok(existing.to_vec());
     }
@@ -3523,17 +3533,18 @@ mod tests {
         // Sent back as displayed: unchanged.
         let shown = haarness_core::redact::args(&existing);
         assert_eq!(
-            edited_secret_args(&existing, shown.clone()).unwrap(),
+            edited_secret_args(None, &existing, shown.clone()).unwrap(),
             existing
         );
         // A shortened list keeps each value with its own flag.
         assert_eq!(
-            edited_secret_args(&existing, args(&["--token", hidden])).unwrap(),
+            edited_secret_args(None, &existing, args(&["--token", hidden])).unwrap(),
             args(&["--token", "BBB"])
         );
         // Swapped pairs keep their values.
         assert_eq!(
             edited_secret_args(
+                None,
                 &existing,
                 args(&[
                     "--token",
@@ -3553,19 +3564,21 @@ mod tests {
             args(&["--token", hidden, "--token", hidden]),
             args(&["--api-key=<redacted>"]),
         ] {
-            let error = edited_secret_args(&existing, next).unwrap_err().to_string();
+            let error = edited_secret_args(None, &existing, next)
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("in full"), "{error}");
         }
         // Two values behind the same flag cannot be told apart once moved,
         // but come back unchanged.
         let headers: Vec<String> = args(&["-H", "A: 1", "-H", "B: 2", "--x"]);
         let shown = haarness_core::redact::args(&headers);
-        assert_eq!(edited_secret_args(&headers, shown).unwrap(), headers);
-        assert!(edited_secret_args(&headers, args(&["-H", hidden])).is_err());
+        assert_eq!(edited_secret_args(None, &headers, shown).unwrap(), headers);
+        assert!(edited_secret_args(None, &headers, args(&["-H", hidden])).is_err());
         // Addresses and ssh targets are shown whole, so a list holding them
         // can be edited freely; a proxy's password moves with its own text.
         let existing: Vec<String> = args(&[
-            "--member=user:alex@example.com",
+            "--member=group:devs@example.com",
             "scp",
             "alex@build.fixture.test:icon@2x.png",
             "${USER:-root}@10.0.0.5:/tmp/",
@@ -3581,7 +3594,16 @@ mod tests {
         let mut expected = existing.clone();
         expected.reverse();
         expected.push("-v".into());
-        assert_eq!(edited_secret_args(&existing, next).unwrap(), expected);
+        assert_eq!(edited_secret_args(None, &existing, next).unwrap(), expected);
+        // A server run through sshpass has its password in its first
+        // arguments; saved back as shown, it keeps it.
+        let existing: Vec<String> = args(&["-p", "PRIVATE", "ssh", "-p", "22", "host"]);
+        let shown = haarness_core::redact::command_args(Some("/usr/bin/sshpass"), &existing);
+        assert_eq!(shown, args(&["-p", hidden, "ssh", "-p", "22", "host"]));
+        assert_eq!(
+            edited_secret_args(Some("/usr/bin/sshpass"), &existing, shown).unwrap(),
+            existing
+        );
     }
 
     #[tokio::test]
