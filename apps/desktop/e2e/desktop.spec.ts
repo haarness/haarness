@@ -7502,6 +7502,14 @@ test("one project groups worktree conversations while drafts, permissions, files
     .click();
   const current = page.getByRole("menuitemradio", { name: "Project folder", exact: true });
   await expect(current).toHaveAttribute("aria-checked", "true");
+  if (process.env.HAARNESS_SCREENSHOTS)
+    for (const theme of ["dark", "light"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page
+        .getByRole("menu", { name: "Choose working location", exact: true })
+        .screenshot({ path: join(process.env.HAARNESS_SCREENSHOTS, `location-menu-${theme}.png`) });
+    }
   await current.click();
   await expect(page.getByRole("menu", { name: "Choose working location", exact: true })).toHaveCount(0);
   await page.waitForTimeout(500);
