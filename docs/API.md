@@ -506,11 +506,11 @@ provider receives: once they pass the provider's limit, the oldest are
 replaced by a one-line note naming each one ("[Image shot.png omitted: the
 oldest images are left out to keep the request within the provider's
 limits]") until the rest fit in three fifths of it, so the newest images
-always reach the model. The limit is 25 MiB of images for most providers
-(Anthropic and Haarness Cloud take 32 MB in a request, OpenAI and Vertex AI
-more), 15 MiB for Bedrock and the Gemini API, which take 20 MB, and for
-Anthropic models, directly or through Haarness Cloud, also 100 images in a
-request to a model with a 200K-token context window and 600 to a larger one.
+always reach the model. The limit is 25 MiB of images (Anthropic and Haarness
+Cloud take 32 MB in a request; OpenAI, the Gemini API and Gemini on Vertex AI
+take more), 15 MiB on Bedrock, which takes 20 MB, and for Claude models,
+directly, on Bedrock or through Haarness Cloud, also 100 images in a request
+to a model with a 200K-token context window and 600 to a larger one.
 The cut moves only when the images kept pass the limit again, not with each new
 image, so the requests between two cuts carry the same history and the
 provider's prompt cache holds. The images of the turn's own messages are never

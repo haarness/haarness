@@ -1050,8 +1050,8 @@ fn oldest_half<'a>(sent: &'a [SentImage], current: &HashSet<String>) -> Vec<&'a 
     older
 }
 
-/// How providers say a request has too many bytes.
-const OVERSIZED_REQUEST: [&str; 7] = [
+/// How providers say a request has too many bytes (Gemini with a 400).
+const OVERSIZED_REQUEST: [&str; 8] = [
     "http 413",
     "status 413",
     "request entity too large",
@@ -1059,6 +1059,7 @@ const OVERSIZED_REQUEST: [&str; 7] = [
     "request_too_large",
     "payload too large",
     "maximum allowed number of bytes",
+    "payload size exceeds the limit",
 ];
 
 /// An image refusal of the request for how many images it carries or how
@@ -16309,6 +16310,7 @@ mod tests {
             "HTTP 400 Bad Request: Provided image is not valid.",
             "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
             r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}"#,
+            r#"HTTP 400 Bad Request: {"error":{"code":400,"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#,
         ] {
             assert!(refused(message), "{message}");
         }

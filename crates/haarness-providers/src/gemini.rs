@@ -193,15 +193,6 @@ impl GeminiProvider {
 
 #[async_trait]
 impl ModelProvider for GeminiProvider {
-    /// The Gemini API takes 20 MB in a request that carries its images
-    /// inline, text included; the images get 15 MiB of it. Vertex AI takes
-    /// more and keeps the default.
-    fn image_limits(&self, _model: &str) -> haarness_core::ImageLimits {
-        haarness_core::ImageLimits {
-            bytes: 15 * 1024 * 1024,
-            ..haarness_core::ImageLimits::default()
-        }
-    }
     async fn refresh_models(&self, force: bool) {
         self.live_models
             .refresh(force, || self.fetch_models())
@@ -693,6 +684,17 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct FixtureState(Arc<Mutex<Vec<Value>>>);
+
+    #[test]
+    fn the_gemini_api_takes_the_default_image_budget() {
+        // Google raised the inline request size past 20 MB; a stricter cut
+        // would leave out screenshots a request could carry.
+        let provider = GeminiProvider::for_test("http://127.0.0.1:9".into());
+        assert_eq!(
+            provider.image_limits("gemini-2.5-flash"),
+            haarness_core::ImageLimits::default()
+        );
+    }
 
     async fn structured_content(
         State(state): State<FixtureState>,
