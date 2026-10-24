@@ -22876,15 +22876,41 @@ fn the_external_editor_gets_its_file_as_one_word() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// While the terminal is handed to `$EDITOR`, it counts as the TUI's: a
-/// server notice then goes to the log, not over the editor.
+/// While the editor has the terminal, it counts as the TUI's: a server
+/// notice then goes to the log, not over the editor. The draft comes back.
+#[cfg(unix)]
 #[test]
-fn the_terminal_lent_to_the_editor_is_still_the_tuis() {
+fn the_editor_has_the_terminal_while_it_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.composer.set_text("draft".into());
+    let mut renderer = haarness_opentui::Renderer::new(80, 24, true).unwrap();
     assert!(!crate::owns_terminal(), "no TUI is drawing in a unit test");
-    let lent = crate::terminal::LentTerminal::new();
-    assert!(crate::owns_terminal());
-    drop(lent);
-    assert!(!crate::owns_terminal());
+    let (running, seen) = (
+        std::sync::Arc::new(AtomicBool::new(true)),
+        std::sync::Arc::new(AtomicBool::new(false)),
+    );
+    let watcher = {
+        let (running, seen) = (running.clone(), seen.clone());
+        std::thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                if crate::owns_terminal() {
+                    seen.store(true, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+    };
+    crate::edit_draft(&mut app, &mut renderer, "sleep 0.3; printf edited >");
+    running.store(false, Ordering::Relaxed);
+    watcher.join().unwrap();
+    assert!(
+        seen.load(Ordering::Relaxed),
+        "the editor's terminal was not the TUI's"
+    );
+    assert!(!crate::owns_terminal(), "taken back");
+    assert_eq!(app.composer.text(), "edited");
 }
 
 /// The `$EDITOR` draft is a new file in a new folder named so no one can

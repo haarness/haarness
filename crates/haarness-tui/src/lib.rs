@@ -190,6 +190,11 @@ fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".into());
+    edit_draft(app, renderer, &editor);
+}
+
+/// The composer's text through `editor`, with the terminal handed to it.
+fn edit_draft(app: &mut App, renderer: &mut Renderer, editor: &str) {
     let folder = match DraftFolder::new() {
         Ok(folder) => folder,
         Err(error) => {
@@ -206,7 +211,7 @@ fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
     };
     let lent = crate::terminal::LentTerminal::new();
     crate::terminal::restore_terminal();
-    let status = editor_command(&editor, &file).status();
+    let status = editor_command(editor, &file).status();
     // Re-enter raw mode + alternate screen; the original guard still owns
     // final cleanup, so resuming must not create and leak a second guard.
     let _ = crate::terminal::resume_terminal();
