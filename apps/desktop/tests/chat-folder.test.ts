@@ -59,3 +59,34 @@ test("the folder a chat reports is shown from the chat home, and only when it is
   assert.equal(folderName(home + "/2026-10-24/hello-there"), "hello-there");
   assert.equal(folderName("C:\\a\\b\\notes\\"), "notes");
 });
+
+test("a chat's folder name is always one the server accepts: no leading dash or dot, no control characters or edge spaces, short", () => {
+  const inputs = [
+    "-rf everything",
+    "--help me",
+    ".git config",
+    "...and then",
+    " leading and trailing spaces ",
+    "tab\there\nnew line\u0000nul\u0007bell",
+    "-",
+    ".",
+    "—— em dashes ——",
+    "../../etc/passwd",
+    "C:\\Windows\\System32",
+    "a/b/c",
+    "x".repeat(300),
+    "émoji 🎉 party 🎉",
+    "\u202eright-to-left override",
+    "",
+  ];
+  for (const text of inputs) {
+    const slug = chatSlug(text);
+    assert.match(slug, /^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$/, JSON.stringify(text));
+    const name = newChatFolder(text, new Date(2026, 9, 24), () => "beef").split("/");
+    assert.equal(name.length, 2, JSON.stringify(text));
+    assert.equal(name[0], "2026-10-24");
+    assert.doesNotMatch(name[1], /^[-.]|[\u0000-\u001f\u007f]|^\s|\s$/, JSON.stringify(text));
+    assert.ok(new TextEncoder().encode(name[1]).length <= 255, JSON.stringify(text));
+    assert.ok(name[1].length > 0, JSON.stringify(text));
+  }
+});
