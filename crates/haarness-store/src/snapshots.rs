@@ -656,25 +656,60 @@ impl SqliteSnapshotStore {
     /// file adds another copy of it forever. Three things are always kept —
     /// anything newer than `retention`, the most recent `keep_per_thread`
     /// checkpoints of each thread (so undo still has somewhere to go), and
-    /// whatever a pending undo is holding as its backup or base. The rows
-    /// of a capture that never completed go too, once it is abandoned;
-    /// those of one still being written, and their blobs, stay.
+    /// whatever a pending undo is holding as its backup or base. What
+    /// unfinished captures left goes too (see [`Self::sweep`]).
     pub fn prune(
         &self,
         retention: chrono::Duration,
         keep_per_thread: usize,
     ) -> CoreResult<PruneReport> {
-        prune(&self.connection, retention, keep_per_thread)
+        prune(&self.connection, Some((retention, keep_per_thread)))
+    }
+
+    /// The retention pass that keeps every checkpoint: it removes only the
+    /// rows of abandoned captures (see [`ABANDONED_AFTER_MS`]) and the blobs
+    /// no manifest row names any more. A capture still being written keeps
+    /// its rows and their blobs.
+    pub fn sweep(&self) -> CoreResult<PruneReport> {
+        prune(&self.connection, None)
     }
 }
 
+/// The databases in which a capture of this process failed and left blobs
+/// no manifest row names: the next retention pass there removes them,
+/// though it has nothing else to remove.
+static ORPHANED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+fn database_key(connection: &Connection) -> Option<String> {
+    connection
+        .path()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+/// `expiry` is the retention and the checkpoints kept per thread; without
+/// it every checkpoint is kept.
 fn prune(
     connection: &Mutex<Connection>,
+    expiry: Option<(chrono::Duration, usize)>,
+) -> CoreResult<PruneReport> {
+    let connection = connection.lock();
+    let doomed = match expiry {
+        Some((retention, keep_per_thread)) => {
+            expired_snapshots(&connection, retention, keep_per_thread)?
+        }
+        None => Vec::new(),
+    };
+    let abandoned = abandoned_captures(&connection)?;
+    reclaim(&connection, &doomed, &abandoned)
+}
+
+fn expired_snapshots(
+    connection: &Connection,
     retention: chrono::Duration,
     keep_per_thread: usize,
-) -> CoreResult<PruneReport> {
+) -> CoreResult<Vec<String>> {
     let cutoff = Utc::now() - retention;
-    let connection = connection.lock();
     let mut protected: BTreeSet<String> = BTreeSet::new();
     // A pending undo is live state, never garbage, whatever its age.
     let mut pending = connection
@@ -734,14 +769,40 @@ fn prune(
         }
         doomed.push(id);
     }
-    drop(all);
-    let abandoned = abandoned_captures(&connection)?;
-    if doomed.is_empty() && abandoned.is_empty() {
+    Ok(doomed)
+}
+
+/// Remove the `doomed` snapshots and the rows of the `abandoned` captures,
+/// then every blob that no manifest row names any more.
+fn reclaim(
+    connection: &Connection,
+    doomed: &[String],
+    abandoned: &[String],
+) -> CoreResult<PruneReport> {
+    let database = database_key(connection);
+    let orphaned = database
+        .as_ref()
+        .is_some_and(|database| ORPHANED.lock().remove(database));
+    if doomed.is_empty() && abandoned.is_empty() && !orphaned {
         return Ok(PruneReport::default());
     }
+    let reclaimed = reclaim_rows(connection, doomed, abandoned);
+    if reclaimed.is_err()
+        && orphaned
+        && let Some(database) = database
+    {
+        ORPHANED.lock().insert(database);
+    }
+    reclaimed
+}
 
+fn reclaim_rows(
+    connection: &Connection,
+    doomed: &[String],
+    abandoned: &[String],
+) -> CoreResult<PruneReport> {
     let transaction = connection.unchecked_transaction().map_err(storage)?;
-    for id in &doomed {
+    for id in doomed {
         transaction
             .execute("DELETE FROM snapshot_files WHERE snapshot_id=?1", [id])
             .map_err(storage)?;
@@ -750,7 +811,7 @@ fn prune(
             .map_err(storage)?;
     }
     let mut swept = 0;
-    for id in &abandoned {
+    for id in abandoned {
         // A capture that wrote its `snapshots` row since it was listed is
         // a snapshot now, and keeps its rows.
         let removed = transaction
@@ -920,7 +981,18 @@ impl SqliteSnapshotFolders {
     ) -> CoreResult<PruneReport> {
         let connection = self.inner.connection.lock().clone();
         match connection {
-            Some(connection) => prune(&connection, retention, keep_per_thread),
+            Some(connection) => prune(&connection, Some((retention, keep_per_thread))),
+            None => Ok(PruneReport::default()),
+        }
+    }
+
+    /// The pass that keeps every checkpoint (see
+    /// [`SqliteSnapshotStore::sweep`]). Nothing to do while no folder has
+    /// been opened.
+    pub fn sweep(&self) -> CoreResult<PruneReport> {
+        let connection = self.inner.connection.lock().clone();
+        match connection {
+            Some(connection) => prune(&connection, None),
             None => Ok(PruneReport::default()),
         }
     }
@@ -1148,17 +1220,32 @@ impl SqliteSnapshotStore {
         tx.commit().map_err(storage)
     }
 
-    /// Remove the manifest rows of a capture that failed. The blobs only it
-    /// stored go with the next retention pass that removes anything, and
-    /// rows this cannot remove go once the capture counts as abandoned.
+    /// Remove the manifest rows of a capture that failed, a batch per
+    /// transaction. The blobs only it stored go with the next retention
+    /// pass, and rows this cannot remove once the capture is abandoned.
     fn discard(&self, id: &str) {
-        let removed = self.connection.lock().execute(
-            "DELETE FROM snapshot_files WHERE snapshot_id=?1 \
-             AND NOT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)",
-            [id],
-        );
-        if let Err(error) = removed {
-            tracing::debug!(snapshot = id, %error, "could not remove a failed capture's entries");
+        let mut removed_any = false;
+        loop {
+            let connection = self.connection.lock();
+            let removed = connection.execute(
+                "DELETE FROM snapshot_files WHERE rowid IN \
+                 (SELECT rowid FROM snapshot_files WHERE snapshot_id=?1 LIMIT ?2) \
+                 AND NOT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)",
+                params![id, i64::try_from(BATCH.entries).unwrap_or(i64::MAX)],
+            );
+            match removed {
+                Ok(0) => {
+                    if removed_any && let Some(database) = database_key(&connection) {
+                        ORPHANED.lock().insert(database);
+                    }
+                    return;
+                }
+                Ok(_) => removed_any = true,
+                Err(error) => {
+                    tracing::debug!(snapshot = id, %error, "could not remove a failed capture's entries");
+                    return;
+                }
+            }
         }
     }
 }
@@ -2875,6 +2962,77 @@ mod tests {
             i64::MAX
         ));
         assert!(!started_before("not an id", i64::MAX));
+    }
+
+    #[test]
+    fn retention_keeps_a_capture_that_completes_while_the_pass_runs() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "a\n").unwrap();
+        let id = started_hours_ago(25);
+        let written = store.write_manifest(&id, BATCH, |_| Ok(())).unwrap();
+        let abandoned = abandoned_captures(&store.connection.lock()).unwrap();
+        assert_eq!(abandoned, vec![id.clone()]);
+        // Another process completes it before the pass removes anything.
+        let elsewhere =
+            SqliteSnapshotStore::open(guard.0.join("test.db"), workspace.clone()).unwrap();
+        elsewhere.publish(&id, ThreadId::new(), written).unwrap();
+        let report = reclaim(&store.connection.lock(), &[], &abandoned).unwrap();
+        assert_eq!(report.abandoned, 0);
+        assert_eq!(report.blobs, 0);
+        let manifest = store.load_manifest(&id).unwrap();
+        assert_eq!(store.load_blob(&manifest["a"]).unwrap(), b"a\n");
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_removes_its_rows_and_the_next_pass_its_blobs() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("kept"), "kept\n").unwrap();
+        let kept = store.capture(ThreadId::new()).await.unwrap();
+        age(&store, &kept.id, 30);
+        // More rows than one removal takes.
+        for index in 0..1_100 {
+            fs::write(workspace.join(format!("f{index:04}")), format!("{index}\n")).unwrap();
+        }
+        store
+            .connection
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'no room'); END;",
+            )
+            .unwrap();
+        let error = store.capture(ThreadId::new()).await.unwrap_err();
+        assert!(error.to_string().contains("no room"), "{error}");
+        assert_eq!(
+            count(&store, "snapshot_files"),
+            1,
+            "only the kept checkpoint's"
+        );
+        assert_eq!(count(&store, "snapshot_blobs"), 1_101);
+
+        // Keeping every checkpoint, however old, the pass removes the blobs
+        // only the failed capture stored.
+        assert_eq!(
+            store.sweep().unwrap(),
+            PruneReport {
+                snapshots: 0,
+                blobs: 1_100,
+                abandoned: 0
+            }
+        );
+        assert_eq!(store.sweep().unwrap(), PruneReport::default());
+        assert_eq!(store.load_manifest(&kept.id).unwrap().len(), 1);
+        store
+            .connection
+            .lock()
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        assert_eq!(
+            store.capture(ThreadId::new()).await.unwrap().file_count,
+            1_101
+        );
     }
 
     /// A diff reads the whole tree: the executor that awaits it keeps
