@@ -345,7 +345,7 @@ impl ModelProvider for GeminiProvider {
                             let mut provider_metadata = json!({});
                             if let Some(signature) = part.get("thoughtSignature") { provider_metadata["thoughtSignature"] = signature.clone(); }
                             if let Some(id) = call.get("id") { provider_metadata["functionCallId"] = id.clone(); }
-                            if provider_metadata.as_object().is_some_and(|value| value.is_empty()) { provider_metadata = Value::Null; }
+                            if provider_metadata.as_object().is_some_and(serde_json::Map::is_empty) { provider_metadata = Value::Null; }
                             let name = call.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
                             let arguments = call.get("args").cloned().unwrap_or(Value::Null);
                             if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {

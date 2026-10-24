@@ -1412,7 +1412,7 @@ mod tests {
                 vec!["create", "update", "pause", "resume", "run", "delete"],
             ),
         ] {
-            engine.approve_always(&format!("{tool}:*"));
+            engine.approve_always(format!("{tool}:*"));
             for action in reads {
                 assert_eq!(
                     engine.evaluate(&format!("{tool}:{action}:id")),

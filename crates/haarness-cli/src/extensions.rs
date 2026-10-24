@@ -565,6 +565,7 @@ pub(crate) fn remove_marketplace_package(paths: &Paths, receipt: &serde_json::Va
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn marketplace_install(
     paths: &Paths,
     workspace: &Path,
@@ -725,7 +726,7 @@ pub async fn marketplace_install(
     result
 }
 
-pub async fn manage(
+pub fn manage(
     paths: &Paths,
     workspace: &Path,
     trust: bool,

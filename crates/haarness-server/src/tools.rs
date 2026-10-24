@@ -234,6 +234,7 @@ impl NativeToolRegistry {
         self
     }
 
+    #[must_use]
     pub fn with_browser(mut self, broker: Arc<crate::browser::BrowserBroker>) -> Self {
         for tool in crate::browser::tools(broker) {
             self.tools.insert(tool.definition().name.clone(), tool);
@@ -2981,24 +2982,23 @@ impl Tool for BuiltinTool {
                     ));
                 }
                 let mut matches = Vec::new();
-                let mut files = 0;
                 let mut skipped = Skipped::default();
                 let mut partial = false;
                 // Match ripgrep semantics: respect .gitignore,
                 // .ignore, repository excludes, hidden files, and parent
                 // ignore files instead of scanning dependency/build trees.
                 // Links are not followed, so every file is where it is named.
-                for entry in ignore::WalkBuilder::new(&root)
+                for (files, entry) in ignore::WalkBuilder::new(&root)
                     .standard_filters(true)
                     .build()
                     .filter_map(Result::ok)
                     .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                    .enumerate()
                 {
                     if files == 20_000 {
                         partial = true;
                         break;
                     }
-                    files += 1;
                     if let Some(hidden) = secrets.names_hidden(entry.path()) {
                         skipped.count(hidden);
                         continue;
@@ -4492,7 +4492,7 @@ mod tests {
 
     fn tool_context(workspace: &Path) -> ToolContext {
         ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.to_path_buf(),
@@ -5060,7 +5060,7 @@ mod tests {
             "external scheduler state must not create workspace snapshots"
         );
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -5409,7 +5409,7 @@ export default workflow({
             .unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -5702,7 +5702,7 @@ export default workflow({
             skill.definition().description
         );
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -5744,7 +5744,7 @@ export default workflow({
             infos,
         );
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -5941,7 +5941,7 @@ export default workflow({
             .unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -6016,7 +6016,7 @@ export default workflow({
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -6204,7 +6204,7 @@ export default workflow({
             .unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let mut context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -6235,7 +6235,7 @@ export default workflow({
 
         let target = external.join("created.txt");
         let write_context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -6287,7 +6287,7 @@ export default workflow({
             .unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let context = ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.clone(),
@@ -6347,7 +6347,7 @@ export default workflow({
         let run = |tool: &'static str, args: Value| {
             let registry = &registry;
             let context = ToolContext {
-                execution: Default::default(),
+                execution: haarness_core::ExecutionSettings::default(),
                 thread_id: ThreadId::new(),
                 turn_id: TurnId::new(),
                 workspace: workspace.clone(),
@@ -6601,7 +6601,7 @@ export default workflow({
             .execute(
                 json!({"pattern":"*"}),
                 ToolContext {
-                    execution: Default::default(),
+                    execution: haarness_core::ExecutionSettings::default(),
                     thread_id: ThreadId::new(),
                     turn_id: TurnId::new(),
                     workspace: workspace.clone(),
@@ -6781,7 +6781,7 @@ mod webfetch_tests {
 
     fn composite_context(workspace: &Path) -> ToolContext {
         ToolContext {
-            execution: Default::default(),
+            execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),
             turn_id: TurnId::new(),
             workspace: workspace.to_path_buf(),
@@ -6865,7 +6865,7 @@ mod webfetch_tests {
             .execute(
                 json!({"url": format!("http://{address}/start")}),
                 ToolContext {
-                    execution: Default::default(),
+                    execution: haarness_core::ExecutionSettings::default(),
                     thread_id: ThreadId::new(),
                     turn_id: TurnId::new(),
                     workspace,

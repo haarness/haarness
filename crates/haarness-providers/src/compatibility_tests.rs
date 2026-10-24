@@ -61,10 +61,11 @@ async fn fixture() -> (String, Captures, tokio::task::JoinHandle<()>) {
         };
         (
             [(CONTENT_TYPE, "text/event-stream")],
-            events
-                .iter()
-                .map(|event| format!("data: {event}\n\n"))
-                .collect(),
+            events.iter().fold(String::new(), |mut body, event| {
+                use std::fmt::Write as _;
+                let _ = write!(body, "data: {event}\n\n");
+                body
+            }),
         )
     }
     let captures = Captures::default();

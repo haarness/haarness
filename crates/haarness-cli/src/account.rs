@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 use haarness_account::{Client, Config};
 use reqwest::Method;
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 
 #[derive(Args, Clone)]
@@ -18,6 +19,7 @@ pub struct LoginArgs {
     pub json: bool,
 }
 #[derive(Args)]
+#[allow(clippy::struct_excessive_bools)] // independent CLI switches validated by clap
 pub struct AccountArgs {
     /// Print JSON.
     #[arg(long)]
@@ -571,7 +573,7 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
                     client.config.selected_account().unwrap_or_default()
                 );
                 if let Some(agent) = agent {
-                    path.push_str(&format!("&cloudAgentId={}", id(&json!({"id":agent}))?));
+                    write!(path, "&cloudAgentId={}", id(&json!({"id":agent}))?)?;
                 }
                 // Omitting accountId selects the signed-in personal account.
                 if client.config.selected_account().is_none() {

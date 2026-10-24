@@ -118,7 +118,7 @@ pub(crate) async fn run(
                 value = child.wait(), if status.is_none() => { status = Some(value.map_err(error)?); continue; }
             };
             total += bytes.len();
-            lines += bytes.iter().filter(|&&b| b == b'\n').count();
+            lines += newlines(bytes);
             file.write_all(bytes).await.map_err(error)?;
             tail.extend_from_slice(bytes);
             if tail.len() > 50 * 1024 {
@@ -193,6 +193,12 @@ pub(crate) async fn run(
 /// `AI_AGENT` already set, there or in the server's environment, names an
 /// outer agent and is kept, unless it is Haarness's own. A person's own
 /// command is not marked.
+/// The newlines in `bytes`; a plain count, not worth a dependency.
+#[allow(clippy::naive_bytecount)]
+fn newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&byte| byte == b'\n').count()
+}
+
 fn mark_agent(command: &mut std::process::Command, thread: ThreadId, env: &[(&String, &String)]) {
     // What the command would get otherwise: `env`'s value, else the server's.
     let given = |name: &str| {

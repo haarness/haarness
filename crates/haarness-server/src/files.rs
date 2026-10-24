@@ -809,7 +809,7 @@ mod tests {
         input.content = "not-base64".into();
         assert!(decode_write(&input).is_err());
         input.encoding = Some("utf8".into());
-        input.content = "x".repeat(LIMIT as usize + 1);
+        input.content = "x".repeat(usize::try_from(LIMIT).unwrap() + 1);
         assert_eq!(
             decode_write(&input).unwrap_err().0,
             StatusCode::PAYLOAD_TOO_LARGE
