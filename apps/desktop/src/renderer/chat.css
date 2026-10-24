@@ -1604,8 +1604,25 @@ html[dir="rtl"] .tool-target {
 }
 .composer .location-picker {
   max-width: 150px;
+}
+.composer .location-picker .picker-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* In a narrow chat (a small window, the side panel open) the chips and the
+   approvals keep their icons; their names stay in their labels and tips. */
+@container (max-width: 520px) {
+  .composer .composer-folder .picker-label,
+  .composer .composer-folder .picker-caret,
+  .composer .location-picker .picker-label,
+  .composer .approval-mode .pill-label {
+    display: none;
+  }
+  .composer .composer-folder,
+  .composer .location-picker {
+    min-width: 0;
+  }
 }
 .composer .composer-folder > svg,
 .composer .location-picker > svg {
@@ -1724,6 +1741,10 @@ html[dir="rtl"] .tool-target {
    the trailing controls onto a line of their own. */
 .composer-leading {
   flex: 1 1 0;
+  /* Never wider than the room it has: past the narrowest chips, what does
+     not fit is cut (a focus ring keeps its few pixels). */
+  overflow: clip;
+  overflow-clip-margin: var(--s0);
 }
 .composer-leading > * {
   flex: none;
