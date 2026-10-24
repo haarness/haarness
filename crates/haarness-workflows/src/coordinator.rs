@@ -42,6 +42,11 @@ pub trait WorkflowRuntimeHost: Send + Sync + 'static {
         title: &str,
     ) -> Result<ThreadId, HostError>;
 
+    /// The chat's own folder, when `thread` works in one.
+    async fn chat_folder(&self, _thread: ThreadId) -> Option<PathBuf> {
+        None
+    }
+
     /// Execute one non-nested host request for a durable workflow thread.
     async fn request(
         &self,
@@ -248,6 +253,19 @@ impl WorkflowCoordinator {
     }
 
     #[must_use]
+    /// The catalog `thread` starts workflows from: with its own folder's
+    /// workflows when it works in a folder of its own.
+    pub async fn catalog_for(&self, thread: Option<ThreadId>) -> Arc<WorkflowCatalog> {
+        let catalog = self.catalog();
+        match thread {
+            Some(thread) => match self.runtime_host.chat_folder(thread).await {
+                Some(folder) => Arc::new(catalog.for_chat_folder(&folder)),
+                None => catalog,
+            },
+            None => catalog,
+        }
+    }
+
     pub fn catalog(&self) -> Arc<WorkflowCatalog> {
         self.catalog
             .read()
@@ -298,8 +316,9 @@ impl WorkflowCoordinator {
                 "workflow timeout must be a positive integer".into(),
             ));
         }
-        let (definition, source, source_path) = self.resolve_start(&request)?;
-        self.ensure_trusted(&definition, source_path.as_ref())?;
+        let catalog = self.catalog_for(request.thread_id).await;
+        let (definition, source, source_path) = Self::resolve_start(&catalog, &request)?;
+        self.ensure_trusted(&catalog, &definition, source_path.as_ref())?;
         let args_provided = definition.dialect == ProtocolDialect::Native || request.args.is_some();
         let args = workflow_args(&definition, request.args.clone())?;
         let thread_id = self
@@ -647,6 +666,7 @@ impl WorkflowCoordinator {
             )));
         }
         self.ensure_source_trusted(
+            &self.catalog(),
             run.definition.dialect,
             &run.definition.invocation,
             run.source_path.as_deref().map(Path::new),
@@ -715,10 +735,9 @@ impl WorkflowCoordinator {
     }
 
     fn resolve_start(
-        &self,
+        catalog: &WorkflowCatalog,
         request: &WorkflowStartRequest,
     ) -> CoreResult<(WorkflowDefinition, String, Option<PathBuf>)> {
-        let catalog = self.catalog();
         let response = if let Some(name) = request.name.as_deref() {
             catalog.read_source(name)
         } else if let Some(source) = request.source.as_deref() {
@@ -738,10 +757,12 @@ impl WorkflowCoordinator {
 
     fn ensure_trusted(
         &self,
+        catalog: &WorkflowCatalog,
         definition: &WorkflowDefinition,
         source_path: Option<&PathBuf>,
     ) -> CoreResult<()> {
         self.ensure_source_trusted(
+            catalog,
             definition.dialect,
             &definition.invocation,
             source_path.map(PathBuf::as_path),
@@ -750,11 +771,12 @@ impl WorkflowCoordinator {
 
     fn ensure_source_trusted(
         &self,
+        catalog: &WorkflowCatalog,
         dialect: ProtocolDialect,
         invocation: &str,
         source_path: Option<&Path>,
     ) -> CoreResult<()> {
-        let project_source = source_path.is_some_and(|path| self.catalog().is_project_path(path));
+        let project_source = source_path.is_some_and(|path| catalog.is_project_path(path));
         if project_source && dialect == ProtocolDialect::Native && !self.project_trusted {
             return Err(CoreError::PermissionDenied(format!(
                 "native project workflow {invocation} is disabled because project configuration is disabled"
@@ -1128,11 +1150,12 @@ impl WorkflowCoordinator {
         args: Option<Value>,
         cancellation: CancellationToken,
     ) -> Result<Option<Value>, HostError> {
-        let response = self
-            .catalog()
+        let catalog = self.catalog_for(Some(thread_id)).await;
+        let response = catalog
             .read_source(name)
             .map_err(|error| HostError::new(catalog_error(error).to_string()))?;
         self.ensure_trusted(
+            &catalog,
             &response.definition,
             Some(&PathBuf::from(&response.definition.path)),
         )

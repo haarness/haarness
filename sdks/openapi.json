@@ -1267,7 +1267,7 @@
             ]
           },
           "directory": {
-            "description": "A working folder of the chat's own, relative to the server's project\nfolder (`/`-separated, no `..`): the server creates it and the chat's\ntools run there, with it as their project boundary. When another chat\nalready works in that folder the server picks `<path>-2`, `-3`, \u2026;\nthe folder chosen is the thread's `directory`. Omitted, the chat works\nin the project folder, or in its parent chat's folder. Servers that\nknow it list `thread-directory.v1`; older ones ignore it.",
+            "description": "A working folder of the chat's own, `<date>/<name>` relative to the\nserver's project folder (`2026-10-24/fix-the-tests`): the server\ncreates it and the chat's tools run there, with it as their project\nboundary. When another chat already works in that folder the server\npicks `<name>-2`, `-3`, \u2026; the folder chosen is the thread's\n`directory`. The absolute folder another chat reports shares that\nfolder. Omitted, the chat works in the project folder (in the chat\nhome, in a new folder of its own), or in its parent chat's folder.\nServers that know it list `thread-directory.v1`; older ones ignore it.",
             "type": [
               "string",
               "null"
@@ -4726,7 +4726,7 @@
             ]
           },
           "directory": {
-            "description": "Open the terminal for a chat's folder (a thread's `directory`): given\nrelative to the project folder, as a chat's folder is created, or as\nthe absolute folder the thread reports. It must exist inside the\nproject; the shell starts there, and `ifNone` then hands back only a\nterminal opened for the same folder (without it, only one opened\nwithout a folder). Not together with `cwd`.",
+            "description": "Open the terminal for a chat's folder (a thread's `directory`): given\nas `<date>/<name>` relative to the project folder, as a chat's folder\nis created, or as the absolute folder the thread reports. It must be\nthat chat folder, existing and no link; the shell starts there, and `ifNone` then hands back only a\nterminal opened for the same folder (without it, only one opened\nwithout a folder). Not together with `cwd`.",
             "type": [
               "string",
               "null"

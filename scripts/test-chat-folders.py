@@ -5,8 +5,11 @@ The chat home is the folder Desktop keeps the folders of chats without a project
 it the way Desktop does (`haarness --workspace "<folder>" --chat-home desktop`, `connect`), creates
 two chats with folders, and shows that each chat's shell runs in its folder, writes land there, a
 write into the other chat's folder asks, Undo takes a write back in that folder alone, a terminal
-opens there, and the chat home appears in no project list (`desktop projects`, `worktree list`)
-and never takes the pre-workspace database. Echo provider, isolated HAARNESS_HOME and
+opens there, a chat that names no folder (`haarness run`) gets one of its own, a workflow made in
+a chat's folder starts from it, a folder replaced by a link refuses the chat's work, a review
+never makes a deleted folder again, and the chat home appears in no project list (`desktop
+projects`, `worktree list`), survives an older build rewriting the registry, never takes the
+pre-workspace database, and is refused for a project. Echo provider, isolated HAARNESS_HOME and
 HAARNESS_DATA_DIR; stdlib only.
 """
 import json, os, pathlib, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
@@ -56,6 +59,14 @@ def api(method, path, body=None, expect=None):
     elif status >= 400:
         raise AssertionError((method, path, status, raw))
     return json.loads(raw) if raw else None
+
+
+def reply(call):
+    """`call`'s answer, or the error it got: only what it did on disk matters."""
+    try:
+        return call()
+    except AssertionError as error:
+        return error
 
 
 def until(fn, label, timeout=30):
@@ -189,6 +200,50 @@ try:
         api('DELETE', f'/ptys/{opened["id"]}')
     passed('a chat\'s terminal opens in its folder and is that chat\'s alone')
 
+    # Any client that names no folder (here `haarness run`) gets a new one: nothing runs in the chat home.
+    known = {thread['id'] for thread in api('GET', '/threads')}
+    cli('run', '!tool bash ' + json.dumps({'command': 'pwd -P'}), ws=home)
+    ran = [thread for thread in api('GET', '/threads') if thread['id'] not in known]
+    assert len(ran) == 1 and ran[0].get('directory'), ran
+    today = time.strftime('%Y-%m-%d')
+    expected = canonical_home / today / ('chat-' + ran[0]['id'].replace('-', '')[-4:])
+    assert ran[0]['directory'] == str(expected), (ran[0], expected)
+    output = last_result(ran[0], 'bash')['output']
+    assert output == f'exit: 0\n{expected}\n', output
+    plain = api('POST', '/threads', {'title': 'No folder named'})
+    assert plain['directory'].startswith(str(canonical_home / today / 'chat-')), plain
+    passed('a chat that names no folder (haarness run, a plain create) gets one of its own; nothing runs in the chat home')
+
+    # A workflow the chat makes in its folder can be started from it.
+    flow = api('POST', '/threads', {'title': 'Workflow', 'directory': '2026-10-24/flow'})
+    source = "export const meta = { name: 'hello', phases: ['one'] };\nphase('one');\nreturn 1;\n"
+    tool(flow, 'workflow', {'action': 'create', 'name': 'hello', 'source': source})
+    assert (pathlib.Path(flow['directory']) / '.haarness/workflows/hello.ts').is_file()
+    tool(flow, 'workflow', {'action': 'start', 'name': 'hello'})
+    started = last_result(flow, 'workflow')['output']
+    assert 'Started workflow' in started, started
+    passed('a workflow created in a chat\'s folder starts by name from that chat')
+
+    # A folder replaced by a link (to the other chat's) refuses the chat's work, plainly.
+    linked = api('POST', '/threads', {'title': 'Linked', 'directory': '2026-10-24/linked'})
+    os.rmdir(linked['directory'])
+    os.symlink(second['directory'], linked['directory'])
+    refusal = api('POST', f'/threads/{linked["id"]}/turns',
+                  {'requestId': str(uuid.uuid4()), 'text': '!tool bash ' + json.dumps({'command': 'cat hello.txt'})},
+                  expect=400)
+    assert refusal['code'] == 'invalid_request' and 'link' in refusal['message'], refusal
+    os.unlink(linked['directory'])
+    passed('a chat whose folder became a link is refused its turns')
+
+    # Reading never makes a deleted folder again; a turn does.
+    gone = api('POST', '/threads', {'title': 'Gone', 'directory': '2026-10-24/gone'})
+    os.rmdir(gone['directory'])
+    reply(lambda: api('GET', f'/threads/{gone["id"]}/diff'))
+    assert not pathlib.Path(gone['directory']).exists(), 'a review made the folder again'
+    tool(gone, 'bash', {'command': 'pwd -P'})
+    assert pathlib.Path(gone['directory']).is_dir()
+    passed('a review never makes a deleted folder again; the next turn does')
+
     # A project beside it: the catalogs list the project, never the chat home.
     for args in (['init', '-q', '-b', 'main'],):
         subprocess.run(['git', '-C', str(project), *args], check=True, capture_output=True)
@@ -209,9 +264,34 @@ try:
     registry = json.loads((data / 'data' / 'workspaces.json').read_text())
     entry = [workspace for workspace in registry['workspaces'] if workspace['path'] == str(canonical_home)]
     assert len(entry) == 1 and entry[0].get('chatHome') is True, registry
+    marks = json.loads((data / 'data' / 'chat-home.json').read_text())
+    assert str(canonical_home) in marks['paths'], marks
     # The first project took the pre-workspace database instead.
     assert not legacy.exists(), 'the first project did not take the legacy database'
     passed('the chat home stays marked, and the first project takes the legacy database')
+
+    # An older build rewrites the registry without the mark: the chat home is still no project.
+    subprocess.run([binary, '--workspace', str(home), 'serve', '--stop'], env=env, capture_output=True, timeout=35)
+    started_home = False
+    registry = json.loads((data / 'data' / 'workspaces.json').read_text())
+    for workspace in registry['workspaces']:
+        workspace.pop('chatHome', None)
+    (data / 'data' / 'workspaces.json').write_text(json.dumps(registry))
+    paths, roots, listing = catalog_paths(cli('desktop', ws=project, input=json.dumps({'action': 'projects'})))
+    assert str(canonical_home) not in paths and str(canonical_home) not in roots, listing
+    connection = json.loads(cli('desktop', ws=home, input='{"action":"connect"}'))
+    started_home = True
+    assert api('GET', '/info')['projectTrusted'] is False
+    again = api('POST', '/threads', {'title': 'After'})
+    assert again['directory'].startswith(str(canonical_home / today)), again
+    passed('the chat home survives an older build rewriting the registry, and runs as the chat home without the flag')
+
+    # A project, or a Git repository's own folder, is never made the chat home.
+    for folder in (project,):
+        refused = subprocess.run([binary, '--workspace', str(folder), '--chat-home', 'desktop'],
+                                 input='{"action":"connect"}', env=env, text=True, capture_output=True, timeout=60)
+        assert refused.returncode != 0 and 'chat home must be a folder of its own' in refused.stderr, refused
+    passed('--chat-home refuses a project or a Git repository')
 finally:
     if started_home:
         subprocess.run([binary, '--workspace', str(home), 'serve', '--stop'], env=env,
