@@ -19,8 +19,9 @@ pub const REDACTED: &str = "<redacted>";
 /// a credential: API, access and private keys, secrets, passwords,
 /// passphrases and passcodes, credentials, tokens, authorization, cookies
 /// and signatures. `pat`, `pass`, `pw`, `cred`, `keys` and `tokens` count
-/// only as a word of their own (`GITHUB_PAT`, `dbPass`), never inside
-/// `pattern` or `passage`, and a bare `pwd` is a working directory.
+/// only as a word of their own (`GITHUB_PAT`, `dbPass`), or a `pass` glued
+/// to an account (`storepass`, `keypass`), never inside `pattern` or
+/// `passage`, and a bare `pwd` is a working directory.
 #[must_use]
 pub fn secret_name(name: &str) -> bool {
     let words = words(name);
@@ -60,6 +61,7 @@ pub fn secret_name(name: &str) -> bool {
         ]
         .contains(&last.as_str()))
         || (last == "pwd" && words.len() > 1)
+        || account_pass(last)
 }
 
 /// Whether the words of a name end in a passcode or a passphrase, written as
@@ -77,9 +79,9 @@ fn passcode(words: &[String]) -> bool {
 
 /// The accounts a glued `pass` or `pw` opens (`dbpass`, `rootpw`); any
 /// other glued `pass` is a word (`bypass`, `compass`, `trespass`).
-const ACCOUNTS: [&str; 14] = [
+const ACCOUNTS: [&str; 16] = [
     "user", "db", "admin", "root", "login", "proxy", "ftp", "smtp", "mail", "ldap", "ssh", "mysql",
-    "pg", "redis",
+    "pg", "redis", "store", "key",
 ];
 
 /// Whether `word` is a `pass` or `pw` glued to one of [`ACCOUNTS`].
@@ -411,13 +413,33 @@ fn urls_in_text(text: &str) -> Cow<'_, str> {
 }
 
 /// The arguments of a command with credentials hidden: the value after a
-/// credential flag (`--api-key VALUE`), a header flag (`-H VALUE`) or a
-/// `user:password` flag (`-u VALUE`), the value of `--token=VALUE` and
+/// credential flag (`--api-key VALUE`, `-storepass VALUE`), a header flag
+/// (`-H VALUE`), a `user:password` flag (`-u VALUE`), OpenSSL's
+/// `-passin pass:VALUE` and `sshpass -p VALUE`, the value of `--token=VALUE` and
 /// `API_KEY=VALUE`, and any argument that is itself a bearer token, a JWT,
 /// a private key, a URL carrying credentials or a `user:password@host`
 /// written without a scheme.
 #[must_use]
 pub fn args(args: &[String]) -> Vec<String> {
+    // `sshpass -p PASSWORD`: among sshpass's own options (before the
+    // command it runs), `-p` takes the password, not a port.
+    let mut sshpass = None;
+    if let Some(at) = args
+        .iter()
+        .position(|arg| arg.rsplit(['/', '\\']).next() == Some("sshpass"))
+    {
+        let mut index = at + 1;
+        while let Some(option) = args.get(index).filter(|arg| arg.starts_with('-')) {
+            match option.as_str() {
+                "-p" => {
+                    sshpass = Some(index + 1);
+                    break;
+                }
+                "-f" | "-d" | "-P" => index += 2,
+                _ => index += 1,
+            }
+        }
+    }
     args.iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -425,7 +447,8 @@ pub fn args(args: &[String]) -> Vec<String> {
                 .checked_sub(1)
                 .and_then(|previous| args.get(previous))
                 .and_then(|previous| flag_name(previous));
-            if previous.is_some_and(|flag| takes_credential(flag, arg)) {
+            let password = sshpass == Some(index);
+            if password || previous.is_some_and(|flag| takes_credential(flag, arg)) {
                 REDACTED.to_owned()
             } else {
                 arg_value(arg).into_owned()
@@ -454,6 +477,9 @@ fn takes_credential(name: &str, value: &str) -> bool {
     match name {
         "H" | "header" => true,
         "u" | "user" => value.contains(':'),
+        // OpenSSL's `-passin pass:PASSWORD`; `env:`, `file:` and `fd:` name
+        // where it is.
+        "pass" | "passin" | "passout" => value.starts_with("pass:"),
         _ => !name.starts_with("no-") && secret_name(name),
     }
 }
@@ -528,6 +554,13 @@ pub fn text(text: &str) -> String {
             (r#"(?i)\b(bearer|basic)[ \t]+[^\s"',;]+"#.to_owned(), "${1} [redacted]"),
             (
                 format!(r#"(?i)(^|[^\w-])(--(?:proxy-)?user(?:=|[ \t]+))({VALUE}|[^\s"',;&]+)"#),
+                "${1}${2}[redacted]",
+            ),
+            // OpenSSL's `-passin pass:PASSWORD` (`env:`, `file:` and `fd:`
+            // name where it is), and `sshpass -p PASSWORD`, whose `-p` is no port.
+            (r#"(^|[^\w-])(-pass(?:in|out)?[ \t]+["']?pass:)([^\s"',;&]+)"#.to_owned(), "${1}${2}[redacted]"),
+            (
+                r#"(?i:\b(sshpass))((?:[ \t]+-[a-oq-zA-Z]\S*)*[ \t]+-p[ \t]*)("[^"\r\n]*"?|'[^'\r\n]*'?|[^\s"',;&]+)"#.to_owned(),
                 "${1}${2}[redacted]",
             ),
             // `-u user:password`, but not `sort -u file`.
@@ -808,6 +841,8 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     let mut at = 0;
     // Whether `at` may start a user name.
     let mut start = true;
+    // The end and last `@` of the word a cut password was last looked for in.
+    let mut word = None;
     while at < bytes.len() {
         if !start {
             start = head(bytes[at]);
@@ -846,13 +881,22 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
                 _ => end += 1,
             }
         }
-        let word = &text[user..end];
-        if let Some(last) = word.rfind('@')
+        if end > password
+            && matches!(bytes.get(end), Some(b'/' | b'#' | b'?' | b'\\'))
+            && !text[password..end].contains('@')
+        {
+            // `user:p/ss@proxy:3128`: a password holding a raw `/`, `#`, `?`
+            // or `\` ends the run early. It runs on to the last `@` of the
+            // word when a host and port follow it there.
+            end = bare_password_end(bytes, end, &mut word).unwrap_or(end);
+        }
+        let found = &text[user..end];
+        if let Some(last) = found.rfind('@')
             && (user == 0 || bytes[user - 1] != b'@')
-            && let Some(hidden) = hidden_userinfo(&word[..last], &word[last + 1..])
+            && let Some(hidden) = hidden_userinfo(&found[..last], &found[last + 1..])
         {
             shown.push_str(&text[copied..user]);
-            shown.push_str(&word[..hidden]);
+            shown.push_str(&found[..hidden]);
             shown.push_str(mark);
             copied = user + last;
         }
@@ -864,6 +908,55 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     }
     shown.push_str(&text[copied..]);
     Cow::Owned(shown)
+}
+
+/// Where the `user:p/ss@host:port` that a raw `/`, `#`, `?` or `\` cut at
+/// `cut` ends: past the host and port after the last `@` of the word; `None`
+/// unless a host and a port follow that `@`. `word` keeps the end and last
+/// `@` of the word last read, which every cut inside it shares, so a long
+/// word is read once.
+fn bare_password_end(
+    bytes: &[u8],
+    cut: usize,
+    word: &mut Option<(usize, Option<usize>)>,
+) -> Option<usize> {
+    let (end, last) = match *word {
+        Some((end, last)) if cut < end => (end, last),
+        _ => {
+            let mut end = cut;
+            let mut last = None;
+            while let Some(&byte) = bytes.get(end) {
+                match byte {
+                    b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+                    _ if byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`') => break,
+                    b'@' => {
+                        last = Some(end);
+                        end += 1;
+                    }
+                    _ => end += 1,
+                }
+            }
+            let end = end.min(bytes.len());
+            *word = Some((end, last));
+            (end, last)
+        }
+    };
+    let at = last.filter(|&at| at > cut)?;
+    let host = at
+        + 1
+        + bytes[at + 1..end]
+            .iter()
+            .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))?;
+    if host == at + 1 || bytes[host] != b':' {
+        return None;
+    }
+    let port = host
+        + 1
+        + bytes[host + 1..end]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .unwrap_or(end - host - 1);
+    (port > host + 1 && (port == end || bytes[port] == b'/')).then_some(port)
 }
 
 /// For `info@after`, a bare `user:password@host` that [`bare_userinfo`]
@@ -1553,6 +1646,102 @@ mod tests {
     }
 
     #[test]
+    fn free_text_hides_openssl_keytool_and_sshpass_passwords_and_a_bare_one_holding_a_slash() {
+        for (input, output) in [
+            (
+                "openssl pkcs12 -export -in c.pem -out c.p12 -passout pass:PRIVATE",
+                "openssl pkcs12 -export -in c.pem -out c.p12 -passout pass:[redacted]",
+            ),
+            (
+                "openssl rsa -in k.pem -passin pass:PRIVATE -out plain.pem",
+                "openssl rsa -in k.pem -passin pass:[redacted] -out plain.pem",
+            ),
+            (
+                "openssl enc -aes256 -pass pass:PRIVATE -in f",
+                "openssl enc -aes256 -pass pass:[redacted] -in f",
+            ),
+            (
+                "keytool -genkeypair -keystore ks.jks -storepass PRIVATE -keypass PRIVATE",
+                "keytool -genkeypair -keystore ks.jks -storepass [redacted] -keypass [redacted]",
+            ),
+            (
+                "jarsigner -keystore ks.jks -storepass PRIVATE app.apk alias",
+                "jarsigner -keystore ks.jks -storepass [redacted] app.apk alias",
+            ),
+            (
+                "sshpass -p PRIVATE ssh alex@host",
+                "sshpass -p [redacted] ssh alex@host",
+            ),
+            (
+                "sshpass -v -p 'PRIVATE PART' ssh alex@host",
+                "sshpass -v -p [redacted] ssh alex@host",
+            ),
+            (
+                "proxy user:p/PRIVATE@proxy.fixture.test:3128",
+                "proxy [redacted]@proxy.fixture.test:3128",
+            ),
+            (
+                "proxy user:p#PRIVATE@proxy.fixture.test:3128/x",
+                "proxy [redacted]@proxy.fixture.test:3128/x",
+            ),
+            (
+                r"proxy user:pa\PRIVATE@proxy.fixture.test:3128",
+                "proxy [redacted]@proxy.fixture.test:3128",
+            ),
+            (
+                "proxy user:p?PRIVATE@10.0.0.1:8080 refused",
+                "proxy [redacted]@10.0.0.1:8080 refused",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "openssl rsa -in k.pem -passin env:KEY_PASS -passout file:pw.txt",
+            "ssh -p 2222 alex@host && scp -P 2222 f alex@host:/tmp",
+            "node:internal/process/task_queues:95:5",
+            "image=registry.fixture.test:5000/app:1.0@sha256:abc123",
+            r"C:\proj\x@y.fixture.test:80",
+            "see a:b/c@d and x:y#z@w",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+        assert_eq!(
+            args(
+                &[
+                    "-passin",
+                    "pass:PRIVATE",
+                    "-passout",
+                    "env:KEY_PASS",
+                    "-storepass",
+                    "PRIVATE",
+                    "--proxy",
+                    "user:p/PRIVATE@proxy.fixture.test:3128",
+                ]
+                .map(str::to_owned)
+            ),
+            [
+                "-passin",
+                REDACTED,
+                "-passout",
+                "env:KEY_PASS",
+                "-storepass",
+                REDACTED,
+                "--proxy",
+                "<redacted>@proxy.fixture.test:3128",
+            ]
+        );
+        assert_eq!(
+            args(&["sshpass", "-p", "PRIVATE", "ssh", "-p", "22", "h"].map(str::to_owned)),
+            ["sshpass", "-p", REDACTED, "ssh", "-p", "22", "h"]
+        );
+        assert_eq!(
+            args(&["ssh", "-p", "22", "h"].map(str::to_owned)),
+            ["ssh", "-p", "22", "h"]
+        );
+    }
+
+    #[test]
     fn free_text_reads_long_runs_of_bare_user_names_and_passwords_quickly() {
         let started = std::time::Instant::now();
         for run in [
@@ -1563,6 +1752,8 @@ mod tests {
             ":".repeat(200_000),
             "a:b:".repeat(100_000),
             "x(".repeat(100_000),
+            "a:b/".repeat(100_000),
+            format!("a:b/{}@h:1", "c/".repeat(100_000)),
         ] {
             let _ = bare_userinfo(&run, "[redacted]");
             let _ = text(&run);
