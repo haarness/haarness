@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // The /btw side chat in real Electron against a project daemon on the echo
 // provider, which answers a side question with "Echo: <question>" and names
@@ -65,7 +66,7 @@ test.beforeAll(async () => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
     BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
   const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
     env, input: JSON.stringify({ action: "connect" }), encoding: "utf8", timeout: 60000,
@@ -94,6 +95,7 @@ test.afterAll(async () => {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
   try { execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 10 }).catch(() => {});
 });
 

@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stopChatHome } from "./fixtures/chat-home";
 
 test("Marketplace and plugin settings install, disable and remove a scoped resource", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-desktop-marketplace-")));
@@ -32,7 +33,7 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
     app = await electron.launch({ args: ["."], env, timeout: 120000 });
     const page = await app.firstWindow();
     await app.evaluate(({ dialog }, directory) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] }); }, workspace);
-    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
@@ -56,6 +57,7 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
     client?.close();
     if (app) await app.close().catch(() => {});
     try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
+    stopChatHome(binary, env);
     catalog.close();
     await rm(root, { recursive: true, force: true });
   }
