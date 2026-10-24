@@ -22299,6 +22299,34 @@ fn the_external_editor_gets_its_file_as_one_word() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The `$EDITOR` draft is a new file in a new folder named so no one can
+/// guess it, both this user's only (`/tmp` is shared on Linux); an existing
+/// file is never written through, and the folder goes with the draft.
+#[cfg(unix)]
+#[test]
+fn the_editor_draft_is_private_and_new() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let folder = crate::DraftFolder::new().unwrap();
+    let other = crate::DraftFolder::new().unwrap();
+    assert_ne!(folder.0, other.0, "each draft gets a folder of its own");
+    assert!(folder.0.starts_with(std::env::temp_dir()));
+    let name = folder.0.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(!name.contains(&std::process::id().to_string()), "{name}");
+    assert_eq!(mode(&folder.0), 0o700);
+    let file = folder.write("draft text").unwrap();
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "draft text");
+    assert!(
+        folder.write("again").is_err(),
+        "a file already there is not written through"
+    );
+    let path = folder.0.clone();
+    drop(folder);
+    assert!(!path.exists());
+}
+
 /// After the task following the server's events ended by itself and started
 /// again, its first answer clears the red indicator; when it keeps ending,
 /// the status line says nothing retries, never "reconnecting".
