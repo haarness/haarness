@@ -3280,6 +3280,10 @@
                 "description": "The provider's reason, bounded.",
                 "type": "string"
               },
+              "too_large": {
+                "description": "With `oldest`: the request was too large, rather than carrying\ntoo many images.",
+                "type": "boolean"
+              },
               "type": {
                 "enum": [
                   "media_omitted"

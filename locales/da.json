@@ -2541,6 +2541,8 @@
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Udbyderen afviste et billede uden at sige hvilket, så de nyeste, {names}, udelades fremover i denne chat.",
   "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "Anmodningen havde for mange billeder til udbyderen, så det ældste, {name}, udelades fremover i denne chat.",
   "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "Anmodningen havde for mange billeder til udbyderen, så de ældste billeder ({count}) udelades fremover i denne chat.",
+  "The request was too large for the provider, so the oldest one, {name}, is left out of this chat from now on.": "Anmodningen var for stor til udbyderen, så det ældste, {name}, udelades fremover i denne chat.",
+  "The request was too large for the provider, so the oldest {count} are left out of this chat from now on.": "Anmodningen var for stor til udbyderen, så de ældste billeder ({count}) udelades fremover i denne chat.",
   "{name} is not an image Haarness can read.": "{name} er ikke et billede, som Haarness kan læse.",
   "This link could not be opened.": "Linket kunne ikke åbnes.",
   "Open a project to open links to its files.": "Åbn et projekt for at åbne links til dets filer.",

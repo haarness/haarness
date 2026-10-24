@@ -2541,6 +2541,8 @@
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "O provedor recusou uma imagem sem dizer qual, então as mais recentes, {names}, ficam de fora deste chat a partir de agora.",
   "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "A solicitação tinha imagens demais para o provedor, então a mais antiga, {name}, fica de fora deste chat a partir de agora.",
   "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "A solicitação tinha imagens demais para o provedor, então as {count} mais antigas ficam de fora deste chat a partir de agora.",
+  "The request was too large for the provider, so the oldest one, {name}, is left out of this chat from now on.": "A solicitação era grande demais para o provedor, então a mais antiga, {name}, fica de fora deste chat a partir de agora.",
+  "The request was too large for the provider, so the oldest {count} are left out of this chat from now on.": "A solicitação era grande demais para o provedor, então as {count} mais antigas ficam de fora deste chat a partir de agora.",
   "{name} is not an image Haarness can read.": "{name} não é uma imagem que o Haarness consiga ler.",
   "This link could not be opened.": "Não foi possível abrir este link.",
   "Open a project to open links to its files.": "Abra um projeto para abrir links para os arquivos dele.",

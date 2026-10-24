@@ -191,7 +191,8 @@ test("a pasted image the provider refuses is left out with a notice and the chat
 test("a provider that takes fewer images gets the newest, and the notice names the oldest left out", async ({}, info) => {
   test.setTimeout(150000);
   const requests: string[][] = [];
-  // Anthropic's Messages API, refusing a request with more than one image without naming any.
+  // Anthropic's Messages API, refusing a request with more than one image without naming any; in a chat
+  // that says TOO_LARGE, refusing one with more than two as too large.
   const server = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
@@ -205,11 +206,13 @@ test("a provider that takes fewer images gets the newest, and the notice names t
       ? message.content.flatMap(block => block.type === "image" ? [block.source!.data] : [])
       : []);
     requests.push(images);
-    if (images.length > 1) {
-      response.statusCode = 400;
+    if (body.includes("TOO_LARGE") ? images.length > 2 : images.length > 1) {
+      const tooLarge = body.includes("TOO_LARGE");
+      response.statusCode = tooLarge ? 413 : 400;
       response.setHeader("Content-Type", "application/json");
-      response.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error",
-        message: `Too many images in the request: ${images.length} > 1` } }));
+      response.end(JSON.stringify({ type: "error", error: tooLarge
+        ? { type: "request_too_large", message: "Request exceeds the maximum size" }
+        : { type: "invalid_request_error", message: `Too many images in the request: ${images.length} > 1` } }));
       return;
     }
     response.setHeader("Content-Type", "text/event-stream");
@@ -260,6 +263,7 @@ test("a provider that takes fewer images gets the newest, and the notice names t
     // Two 1x1 PNGs: the provider takes the first alone, then refuses both.
     const first = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
     const second = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC";
+    const third = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQqDgBAAI0AWkYRiUPAAAAAElFTkSuQmCC";
     for (const [name, data] of [["first.png", first], ["second.png", second]]) {
       await client.startTurn(thread.id, { requestId: randomUUID(), text: `Look at ${name}`, attachments: [`data:image/png;name=${name};base64,${data}`] });
       await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
@@ -285,6 +289,32 @@ test("a provider that takes fewer images gets the newest, and the notice names t
       await page.locator(".transcript").screenshot({ path: info.outputPath("oldest-image-notice-dark-rtl.png") });
       await theme("light");
       await page.locator(".transcript").screenshot({ path: info.outputPath("oldest-image-notice-light-rtl.png") });
+    } finally {
+      await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    }
+
+    // A request too large for its images says so: two images fit, the third's request is refused, and the
+    // two oldest go.
+    requests.length = 0;
+    const large = await client.createThread({ title: "Too large proof", provider: "anthropic", model: "claude-sonnet-4-6" });
+    await page.locator(".sessions").getByRole("button", { name: large.title, exact: true }).click();
+    for (const [name, data] of [["first.png", first], ["second.png", second], ["third.png", third]]) {
+      await client.startTurn(large.id, { requestId: randomUUID(), text: `TOO_LARGE: look at ${name}`, attachments: [`data:image/png;name=${name};base64,${data}`] });
+      await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
+    }
+    const tooLarge = page.locator(".notice-inline.media-omitted");
+    await expect(tooLarge).toContainText("The request was too large for the provider, so the oldest 2 are left out of this chat from now on.", { timeout: 30000 });
+    expect(requests.map(images => images.length)).toEqual([1, 2, 3, 1]);
+    expect(requests[3][0]).toBe(requests[2][2]);
+    await tooLarge.scrollIntoViewIfNeeded();
+    for (const value of ["light", "dark"] as const) {
+      await theme(value);
+      await page.locator(".transcript").screenshot({ path: info.outputPath(`too-large-notice-${value}.png`) });
+    }
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+    try {
+      await expect(tooLarge).toContainText("كان الطلب أكبر مما يقبله الموفر");
+      await page.locator(".transcript").screenshot({ path: info.outputPath("too-large-notice-dark-rtl.png") });
     } finally {
       await page.evaluate(() => window.haarness.preferences({ language: "en" }));
     }

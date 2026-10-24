@@ -2541,6 +2541,8 @@
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovije, {names}, izostavljaju iz ovog chata.",
   "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "Zahtjev je imao previše slika za provajdera, pa se od sada najstarija, {name}, izostavlja iz ovog chata.",
   "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "Zahtjev je imao previše slika za provajdera, pa se od sada najstarije slike ({count}) izostavljaju iz ovog chata.",
+  "The request was too large for the provider, so the oldest one, {name}, is left out of this chat from now on.": "Zahtjev je bio prevelik za provajdera, pa se od sada najstarija, {name}, izostavlja iz ovog chata.",
+  "The request was too large for the provider, so the oldest {count} are left out of this chat from now on.": "Zahtjev je bio prevelik za provajdera, pa se od sada najstarije slike ({count}) izostavljaju iz ovog chata.",
   "{name} is not an image Haarness can read.": "{name} nije slika koju Haarness može pročitati.",
   "This link could not be opened.": "Ovaj link nije moguće otvoriti.",
   "Open a project to open links to its files.": "Otvorite projekat da biste otvarali linkove na njegove datoteke.",

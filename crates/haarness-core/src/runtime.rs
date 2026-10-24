@@ -8183,6 +8183,7 @@ impl RunnerTask {
         let (refused, choice) = refused_images(message, sent, current, limits);
         let guessed = choice == RefusedImages::Newest;
         let oldest = matches!(choice, RefusedImages::Oldest(_));
+        let too_large = choice == RefusedImages::Oldest(ImageVolume::Bytes);
         let mut fingerprints = Vec::new();
         let mut names = Vec::new();
         for image in refused {
@@ -8208,6 +8209,7 @@ impl RunnerTask {
             reason,
             guessed,
             oldest,
+            too_large,
         })
         .await?;
         Ok(true)
@@ -16360,6 +16362,7 @@ mod tests {
                 reason: "image exceeds 5 MB maximum".into(),
                 guessed: false,
                 oldest: false,
+                too_large: false,
             },
         ));
         let after = provider_messages(items.clone());
