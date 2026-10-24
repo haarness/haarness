@@ -125,6 +125,38 @@ pub struct Report {
     pub detached_items_skipped: u64,
 }
 
+/// The workspace registry, with the chat homes `chat-home.json` names
+/// marked too (an older build may have rewritten the registry without the
+/// mark).
+fn read_registry(data: &Path) -> Result<Registry> {
+    #[derive(Default, Deserialize)]
+    struct Marks {
+        #[serde(default)]
+        paths: Vec<PathBuf>,
+    }
+    let registry_path = data.join("workspaces.json");
+    let mut registry: Registry = if registry_path.exists() {
+        serde_json::from_slice(&std::fs::read(&registry_path)?)
+            .context("read workspace registry")?
+    } else {
+        Registry::default()
+    };
+    let marks = std::fs::read(data.join("chat-home.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Marks>(&bytes).ok())
+        .unwrap_or_default();
+    for workspace in &mut registry.workspaces {
+        if marks
+            .paths
+            .iter()
+            .any(|path| path == Path::new(&workspace.path))
+        {
+            workspace.chat_home = true;
+        }
+    }
+    Ok(registry)
+}
+
 /// How reports name the chat home's chats.
 const CHATS_WITHOUT_A_PROJECT: &str = "Chats without a project";
 
@@ -189,13 +221,7 @@ pub fn collect_at(
     now: DateTime<Utc>,
 ) -> Result<Report> {
     options.validate()?;
-    let registry_path = data.join("workspaces.json");
-    let registry: Registry = if registry_path.exists() {
-        serde_json::from_slice(&std::fs::read(&registry_path)?)
-            .context("read workspace registry")?
-    } else {
-        Registry::default()
-    };
+    let registry = read_registry(data)?;
     let project_filter = if options.current_project {
         let path = workspace
             .canonicalize()
@@ -341,13 +367,7 @@ pub struct ModelUsage {
 /// Days without turns are left out.
 pub fn daily_usage(data: &Path, days: u32, now: DateTime<Utc>) -> Result<Vec<DailyUsage>> {
     anyhow::ensure!((1..=366).contains(&days), "days must be between 1 and 366");
-    let registry_path = data.join("workspaces.json");
-    let registry: Registry = if registry_path.exists() {
-        serde_json::from_slice(&std::fs::read(&registry_path)?)
-            .context("read workspace registry")?
-    } else {
-        Registry::default()
-    };
+    let registry = read_registry(data)?;
     let start = (now - chrono::Duration::days(i64::from(days) - 1))
         .date_naive()
         .and_hms_opt(0, 0, 0)
