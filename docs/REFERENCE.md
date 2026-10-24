@@ -541,7 +541,9 @@ refresh_ms = 2000
 timeout_ms = 5000
 
 [permissions]
-# Decisions are allow|ask|deny; later rules override earlier ones.
+# Decisions are allow|ask|deny (any letter case); later rules override earlier ones, in the
+# order written (tool-wide entries first, then the [permissions.<tool>] tables), except that
+# a "*" key reads first in each.
 # The defaults allow tools, while external directories, secret
 # `.env` reads, agent switches, generated media, repeated identical
 # calls (doom_loop) and websites in your Chrome (browser_site) ask. `edit` governs write, edit, and

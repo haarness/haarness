@@ -96,7 +96,8 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
-toml = "1.0"
+# Tables keep the order they are written in: `[permissions]` rules apply in it.
+toml = { version = "1.0", features = ["preserve_order"] }
 tower = "0.5"
 htmd = "0.5"
 jsonc-parser = { version = "0.33", features = ["serde", "cst"] }

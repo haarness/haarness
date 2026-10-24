@@ -14711,6 +14711,9 @@ fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<S
 }
 
 #[cfg(test)]
+mod permission_corpus;
+
+#[cfg(test)]
 mod switch_permission_tests {
     use super::*;
     #[test]
