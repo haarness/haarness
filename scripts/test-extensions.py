@@ -13,6 +13,7 @@ import tarfile
 import threading
 import time
 import urllib.request
+from e2e_env import ISOLATED
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).resolve()
@@ -119,7 +120,7 @@ def main():
             path.mkdir()
         env = {key: value for key, value in os.environ.items() if key in ("PATH", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "TERM", "COLORTERM")}
         env["TERM"] = "xterm-256color"
-        env.update(HOME=str(home), HAARNESS_TEST_PROVIDER="1", HAARNESS_TELEMETRY="0", RUST_LOG="warn")
+        env.update(HOME=str(home), HAARNESS_TEST_PROVIDER="1", RUST_LOG="warn", **ISOLATED)
         if os.environ.get("HAARNESS_BUN"):
             env["HAARNESS_BUN"] = os.environ["HAARNESS_BUN"]
         subprocess.run(["git", "init", "-q", str(workspace)], check=True, env=env)

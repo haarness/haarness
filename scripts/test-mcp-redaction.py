@@ -14,6 +14,7 @@ Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 import e2e_scratch
+from e2e_env import clean_env
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-redaction-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
@@ -96,7 +97,7 @@ refs_entry = {'type': 'local', 'command': ['python3', str(root/'refs_server.py')
                           'oauthClientId': 'fixture-client', 'enabled': False},
             'helper': {'type': 'remote', 'url': f'http://127.0.0.1:{port}/helper/mcp', 'oauth': False,
                        'headersHelper': 'printf \'{"X-Fixture":"%s","X-Quoted":"${FIXTURE_HELPER_VALUE}"}\' "${FIXTURE_HELPER_VALUE}"'}}}))
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
            # The variable's value names another; it must reach the server as written.

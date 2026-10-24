@@ -11,6 +11,7 @@ none of which has Git installed.
 """
 import hashlib, http.server, json, os, re, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
+from e2e_env import clean_env
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOOR = tuple(int(part) for part in os.environ.get('HAARNESS_GLIBC_FLOOR', '2.17').split('.'))
@@ -54,7 +55,7 @@ def install(payload, version, product, home):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        env = {key: value for key, value in os.environ.items() if not key.startswith(('HAARNESS_', 'XDG_'))}
+        env = clean_env('XDG_')
         env.update(HOME=str(home), HAARNESS_RELEASE_URL=f'http://127.0.0.1:{server.server_port}',
                    HAARNESS_CHANNEL='preview', HAARNESS_VERSION=version, HAARNESS_PRODUCT=product)
         result = subprocess.run(['sh', str(ROOT / 'install.sh')], env=env, capture_output=True, text=True, timeout=600)

@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from e2e_env import ISOLATED
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("HAARNESS_BIN", ROOT / "target/debug/haarness")).resolve()
@@ -39,7 +40,7 @@ def main():
         workspace, home, data = (root / n for n in ("workspace", "home", "data"))
         for p in (workspace, home, data): p.mkdir()
         env = {k:v for k,v in os.environ.items() if k in ("PATH", "TMPDIR", "LANG", "TERM", "HAARNESS_BUN")}
-        env.update(HOME=str(home), HAARNESS_TEST_PROVIDER="1", HAARNESS_TELEMETRY="0", RUST_LOG="warn")
+        env.update(HOME=str(home), HAARNESS_TEST_PROVIDER="1", RUST_LOG="warn", **ISOLATED)
         resources, manifests, artifacts = {}, {}, {}
         files = {
             "skill": {"SKILL.md": "---\nname: proof-skill\ndescription: marketplace skill proof\n---\nRead references/proof.txt.\n", "references/proof.txt": "MARKETPLACE_SUPPORT_FILE"},

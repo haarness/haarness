@@ -9,6 +9,7 @@ each check also keeps a colored capture (`.ansi`) beside its text, for screensho
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.request, uuid
 import e2e_scratch
 from e2e_tmux import pane_command
+from e2e_env import clean_env
 
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-script-tmux-')).resolve()
 workspace = root / 'project'
@@ -50,7 +51,7 @@ outside.mkdir()
 (outside / 'run.sh').chmod(0o755)
 variant = os.environ.get('HAARNESS_TUI_VARIANT')
 binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve())
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(
     HAARNESS_HOME=str(root / 'home'),
     HAARNESS_DATA_DIR=str(root / 'data'),

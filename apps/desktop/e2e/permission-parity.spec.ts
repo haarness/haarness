@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stopChatHome } from "./fixtures/chat-home";
+import { isolatedEnv } from "./fixtures/isolated-env";
 let app: ElectronApplication, page: Page, root: string, main: string, linked: string, current: string;
 let env: Record<string,string>; const binary=resolve(process.env.HAARNESS_BIN??"../../target/debug/haarness");
 const errors:string[]=[];
@@ -30,7 +31,7 @@ test.beforeAll(async()=>{
   await symlink(".env",join(main,"notes.txt"));
   const git=(args:string[])=>execFileSync("git",args,{cwd:main,stdio:"ignore"});
   git(["init","-b","main"]);git(["add","."]);git(["-c","user.name=Fixture","-c","user.email=fixture@example.test","commit","-m","fixture"]);git(["worktree","add","-b","linked",linked]);
-  env=Object.fromEntries(Object.entries(process.env).filter(([key,value])=>value!==undefined&&!key.startsWith("HAARNESS_"))) as Record<string,string>;
+  env=isolatedEnv();
   Object.assign(env,{HAARNESS_BIN:binary,HAARNESS_HOME:join(root,"home"),HAARNESS_DATA_DIR:join(root,"data"),HAARNESS_DESKTOP_DATA:join(root,"desktop"),HAARNESS_TEST_PROVIDER:"1",HAARNESS_DESKTOP_TEST:"1"});
   delete env.ELECTRON_RUN_AS_NODE;delete env.ELECTRON_RENDERER_URL;
   app=await electron.launch({args:["."],env,timeout:60000});page=await app.firstWindow();page.setDefaultTimeout(15000);

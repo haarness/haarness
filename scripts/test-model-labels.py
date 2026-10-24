@@ -7,12 +7,13 @@ Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import json, os, pathlib, subprocess, tempfile, urllib.request
 import e2e_scratch
+from e2e_env import clean_env
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-model-labels-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
 workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
-env = {k: v for k, v in os.environ.items() if not k.startswith(('HAARNESS_', 'AWS_'))}
+env = clean_env('AWS_')
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_NO_CONNECT_PROMPT='1')
 EXPECTED = {

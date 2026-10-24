@@ -17,11 +17,12 @@ Every daemon runs on isolated data under one temporary root and is stopped at th
 """
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.error, urllib.request, uuid
 import e2e_scratch
+from e2e_env import clean_env
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-resolved-targets-')).resolve()
 binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve())
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_HOME=str(root / 'home'), HAARNESS_DATA_DIR=str(root / 'data'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_SERVER_TOKEN='', HAARNESS_SERVER_PASSWORD='')
 CANARY = 'SECRET_CANARY_' + uuid.uuid4().hex[:8]
