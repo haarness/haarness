@@ -2539,6 +2539,8 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Der Anbieter hat {name} abgelehnt, daher bleibt es in diesem Chat ab jetzt außen vor.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Der Anbieter hat ein Bild abgelehnt, ohne zu sagen, welches. Daher bleibt das neueste, {name}, in diesem Chat ab jetzt außen vor.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Der Anbieter hat ein Bild abgelehnt, ohne zu sagen, welches. Daher bleiben die neuesten, {names}, in diesem Chat ab jetzt außen vor.",
+  "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleibt das älteste, {name}, in diesem Chat ab jetzt außen vor.",
+  "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleiben die ältesten {count} in diesem Chat ab jetzt außen vor.",
   "{name} is not an image Haarness can read.": "{name} ist kein Bild, das Haarness lesen kann.",
   "This link could not be opened.": "Dieser Link konnte nicht geöffnet werden.",
   "Open a project to open links to its files.": "Öffne ein Projekt, um Links zu seinen Dateien zu öffnen.",

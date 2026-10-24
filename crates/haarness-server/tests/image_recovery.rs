@@ -400,3 +400,49 @@ async fn past_the_providers_image_count_the_oldest_are_noted_and_the_newest_sent
     let items = runtime.items(thread, None).await.unwrap();
     assert!(omissions(&items).is_empty(), "nothing is left out for good");
 }
+
+#[tokio::test]
+async fn a_request_refused_for_its_number_of_images_leaves_out_the_oldest() {
+    let fixture = Fixture::new("HTTP 400 Bad Request: too many images in the request: 5 > 4");
+    *fixture.provider.most.lock().unwrap() = Some(4);
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+    for name in ["a", "b", "c", "d"] {
+        let done = turn(&runtime, thread, name, vec![image(&format!("{name}.png"))]).await;
+        assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    }
+    fixture.requests();
+
+    let done = turn(&runtime, thread, "e", vec![image("e.png")]).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 2, "refused once, then retried once");
+    // The oldest half went; the newest image reached the model.
+    assert_eq!(sent(&requests[1]), ["d.png", "e.png"]);
+    let items = runtime.items(thread, None).await.unwrap();
+    let omitted = items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::MediaOmitted {
+                names,
+                guessed,
+                oldest,
+                ..
+            } => Some((names.clone(), *guessed, *oldest)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        omitted,
+        vec![(
+            vec!["a.png".to_owned(), "b.png".to_owned(), "c.png".to_owned()],
+            false,
+            true
+        )]
+    );
+
+    // The next screenshot is sent too.
+    let done = turn(&runtime, thread, "f", vec![image("f.png")]).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    assert_eq!(sent(&fixture.requests()[0]), ["d.png", "e.png", "f.png"]);
+}

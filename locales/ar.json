@@ -2539,6 +2539,8 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "رفض الموفر {name}، لذا سيُستبعد من هذه المحادثة من الآن فصاعدًا.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "رفض الموفر صورة دون أن يحدد أيها، لذا ستُستبعد أحدث صورة، {name}، من هذه المحادثة من الآن فصاعدًا.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "رفض الموفر صورة دون أن يحدد أيها، لذا ستُستبعد أحدث الصور، {names}، من هذه المحادثة من الآن فصاعدًا.",
+  "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "كان في الطلب صور أكثر مما يقبله الموفر، لذا ستُستبعد أقدم صورة، {name}، من هذه المحادثة من الآن فصاعدًا.",
+  "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "كان في الطلب صور أكثر مما يقبله الموفر، لذا ستُستبعد أقدم الصور ({count}) من هذه المحادثة من الآن فصاعدًا.",
   "{name} is not an image Haarness can read.": "{name} ليست صورة يستطيع Haarness قراءتها.",
   "This link could not be opened.": "تعذّر فتح هذا الرابط.",
   "Open a project to open links to its files.": "افتح مشروعًا لفتح الروابط إلى ملفاته.",

@@ -2539,6 +2539,8 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "ผู้ให้บริการปฏิเสธ {name} จึงจะไม่ส่งรูปนี้ในแชตนี้อีกต่อไป",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "ผู้ให้บริการปฏิเสธรูปภาพโดยไม่ระบุว่ารูปใด จึงจะไม่ส่งรูปล่าสุด {name} ในแชตนี้อีกต่อไป",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "ผู้ให้บริการปฏิเสธรูปภาพโดยไม่ระบุว่ารูปใด จึงจะไม่ส่งรูปล่าสุด ({names}) ในแชตนี้อีกต่อไป",
+  "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "คำขอมีรูปภาพมากเกินกว่าที่ผู้ให้บริการรับได้ จึงจะไม่ส่งรูปที่เก่าที่สุด {name} ในแชตนี้อีกต่อไป",
+  "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "คำขอมีรูปภาพมากเกินกว่าที่ผู้ให้บริการรับได้ จึงจะไม่ส่งรูปที่เก่าที่สุด {count} รูปในแชตนี้อีกต่อไป",
   "{name} is not an image Haarness can read.": "{name} ไม่ใช่รูปภาพที่ Haarness อ่านได้",
   "This link could not be opened.": "ไม่สามารถเปิดลิงก์นี้ได้",
   "Open a project to open links to its files.": "เปิดโปรเจกต์ก่อนเพื่อเปิดลิงก์ไปยังไฟล์ในโปรเจกต์",

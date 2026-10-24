@@ -2539,6 +2539,8 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "The provider refused {name}, so it is left out of this chat from now on.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
+  "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.",
+  "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.",
   "{name} is not an image Haarness can read.": "{name} is not an image Haarness can read.",
   "This link could not be opened.": "This link could not be opened.",
   "Open a project to open links to its files.": "Open a project to open links to its files.",

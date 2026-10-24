@@ -944,17 +944,9 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
                 .any(|marker| message.contains(marker)));
     // Too many bytes, unless the provider says it is the context that is
     // too long: compaction answers that one.
-    let oversized = [
-        "http 413",
-        "status 413",
-        "request entity too large",
-        "request too large",
-        "request_too_large",
-        "payload too large",
-        "maximum allowed number of bytes",
-    ]
-    .iter()
-    .any(|marker| message.contains(marker))
+    let oversized = OVERSIZED_REQUEST
+        .iter()
+        .any(|marker| message.contains(marker))
         && ![
             "context",
             "token",
@@ -975,6 +967,8 @@ struct SentImage {
     block: usize,
     nested: Option<usize>,
     source: String,
+    /// The base64 bytes the provider received for it.
+    bytes: usize,
 }
 
 fn sent_images(messages: &[ProviderMessage]) -> Vec<SentImage> {
@@ -1007,6 +1001,7 @@ fn sent_images(messages: &[ProviderMessage]) -> Vec<SentImage> {
                     block,
                     nested,
                     source: source.clone(),
+                    bytes: crate::attachments::sent_bytes(source),
                 });
             }
         }
@@ -1032,6 +1027,49 @@ fn refused_image<'a>(message: &str, sent: &'a [SentImage]) -> Option<&'a SentIma
             && image.block == block
             && (image.nested.is_none() || image.nested == nested)
     })
+}
+
+/// The oldest images of a request, by count and by bytes at least half of
+/// them, leaving out none of `current` (the turn's own) attached to a
+/// message. Empty when only those are left.
+fn oldest_half<'a>(sent: &'a [SentImage], current: &HashSet<String>) -> Vec<&'a SentImage> {
+    let total = sent.iter().map(|image| image.bytes).sum::<usize>();
+    let (mut kept, mut count) = (total, sent.len());
+    let mut older = Vec::new();
+    for image in sent {
+        if count <= sent.len() / 2 && kept <= total / 2 {
+            break;
+        }
+        if image.nested.is_none() && current.contains(&image.source) {
+            continue;
+        }
+        older.push(image);
+        kept -= image.bytes;
+        count -= 1;
+    }
+    older
+}
+
+/// How providers say a request has too many bytes.
+const OVERSIZED_REQUEST: [&str; 7] = [
+    "http 413",
+    "status 413",
+    "request entity too large",
+    "request too large",
+    "request_too_large",
+    "payload too large",
+    "maximum allowed number of bytes",
+];
+
+/// An image refusal of the request for how many images it carries or how
+/// large they make it, rather than for one of them: leaving out any images
+/// answers it, and the oldest matter least.
+fn refuses_image_volume(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    ["too many images", "maximum number of images"]
+        .iter()
+        .chain(&OVERSIZED_REQUEST)
+        .any(|marker| message.contains(marker))
 }
 
 /// Keep transport envelopes in logs while giving the transcript a concise,
@@ -8027,27 +8065,40 @@ impl RunnerTask {
     /// Leaves the images a provider refused out of this and every later
     /// request of the thread. The record is an item, so a restarted server,
     /// a fork and a replay all leave out the same images and the prompt stays
-    /// the same from one request to the next. A refusal that names no image
-    /// leaves out the newest ones: what the last request added is the
-    /// likeliest cause. False for any other error.
-    async fn omit_refused_images(&self, error: &CoreError, sent: &[SentImage]) -> CoreResult<bool> {
+    /// the same from one request to the next. A refusal of the request for
+    /// the number or size of its images leaves out the oldest half of them,
+    /// keeping the turn's own (`current`) while there are others, so the
+    /// newest reach the model. Any other refusal that names no image leaves
+    /// out the newest ones: what the last request added is the likeliest
+    /// cause. False for any other error.
+    async fn omit_refused_images(
+        &self,
+        error: &CoreError,
+        sent: &[SentImage],
+        current: &HashSet<String>,
+    ) -> CoreResult<bool> {
         let CoreError::Provider(message) = error else {
             return Ok(false);
         };
         if !is_provider_image_rejection(error, !sent.is_empty()) {
             return Ok(false);
         }
-        let (refused, guessed) = match refused_image(message, sent) {
-            Some(image) => (vec![image], false),
-            None => {
-                let newest = sent.iter().map(|image| image.message).max();
-                (
-                    sent.iter()
-                        .filter(|image| Some(image.message) == newest)
-                        .collect(),
-                    true,
-                )
-            }
+        let (refused, guessed, oldest) = if let Some(image) = refused_image(message, sent) {
+            (vec![image], false, false)
+        } else if let Some(older) = refuses_image_volume(message)
+            .then(|| oldest_half(sent, current))
+            .filter(|older| !older.is_empty())
+        {
+            (older, false, true)
+        } else {
+            let newest = sent.iter().map(|image| image.message).max();
+            (
+                sent.iter()
+                    .filter(|image| Some(image.message) == newest)
+                    .collect(),
+                true,
+                false,
+            )
         };
         let mut fingerprints = Vec::new();
         let mut names = Vec::new();
@@ -8063,6 +8114,7 @@ impl RunnerTask {
             turn = %self.turn.id,
             images = fingerprints.len(),
             guessed,
+            oldest,
             %error,
             "provider refused an image; leaving it out"
         );
@@ -8072,6 +8124,7 @@ impl RunnerTask {
             names,
             reason,
             guessed,
+            oldest,
         })
         .await?;
         Ok(true)
@@ -8878,7 +8931,10 @@ impl RunnerTask {
                     Ok(stream) => stream,
                     Err(error_value) => {
                         record_span_error(&provider_span, &error_value);
-                        if self.omit_refused_images(&error_value, &sent_images).await? {
+                        if self
+                            .omit_refused_images(&error_value, &sent_images, &current_attachments)
+                            .await?
+                        {
                             if !std::mem::replace(&mut image_retried, true) {
                                 continue 'provider_round;
                             }
@@ -8933,7 +8989,13 @@ impl RunnerTask {
                             // Providers check images before they answer, so a
                             // refusal arrives before anything was streamed.
                             if !saw_provider_event
-                                && self.omit_refused_images(&error_value, &sent_images).await?
+                                && self
+                                    .omit_refused_images(
+                                        &error_value,
+                                        &sent_images,
+                                        &current_attachments,
+                                    )
+                                    .await?
                             {
                                 if !std::mem::replace(&mut image_retried, true) {
                                     continue 'provider_round;
@@ -16209,6 +16271,7 @@ mod tests {
                 names: vec!["shot.png".into()],
                 reason: "image exceeds 5 MB maximum".into(),
                 guessed: false,
+                oldest: false,
             },
         ));
         let after = provider_messages(items.clone());
