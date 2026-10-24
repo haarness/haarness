@@ -29,9 +29,14 @@ export interface MenuAction {
   run?: () => void;
 }
 
-/** A menu holding a live choice gives every row its tick column, as native
- * menus do, so the rows' icons and labels line up. */
+/** A menu holding a live choice gives every row its tick column, and its
+ * icon column when any row has an icon, as native menus do, so the rows'
+ * icons and labels line up. */
 const ticked = (items: MenuAction[]) => items.some((item) => item.checked !== undefined);
+const columns = (items: MenuAction[]) => ({
+  tick: ticked(items),
+  icon: ticked(items) && items.some((item) => item.icon),
+});
 
 /** The hairline between two groups of choices; keyboard navigation skips it. */
 const Divider = (props: { when?: boolean }) => (
@@ -243,7 +248,7 @@ export function MenuButton(props: {
                       <Heading text={item.heading} />
                       <MenuItem
                         item={item}
-                        tick={ticked(props.items)}
+                        columns={columns(props.items)}
                         /* Moving to a sibling folds an open branch, as native
                            menus do. */
                         onPointerEnter={() => setBranch("")}
@@ -337,7 +342,7 @@ export function MenuButton(props: {
                               <Divider when={child.divider} />
                               <MenuItem
                                 item={child}
-                                tick={ticked(item.submenu!)}
+                                columns={columns(item.submenu!)}
                                 onRun={() => {
                                   close(true);
                                   child.run?.();
@@ -362,8 +367,8 @@ export function MenuButton(props: {
 /** A leaf choice. `checked` turns it into a radio within its group. */
 function MenuItem(props: {
   item: MenuAction;
-  /** Its menu holds a live choice, so a plain row keeps the tick column too. */
-  tick?: boolean;
+  /** The columns its menu keeps on every row (see `columns`). */
+  columns?: { tick: boolean; icon: boolean };
   onRun: () => void;
   onPointerEnter?: () => void;
 }) {
@@ -382,14 +387,21 @@ function MenuItem(props: {
         props.onRun();
       }}
     >
-      <Show when={props.item.checked !== undefined || props.tick}>
+      <Show when={props.item.checked !== undefined || props.columns?.tick}>
         <span class="menu-check" aria-hidden="true">
           <Show when={props.item.checked}>
             <Icon name="check" size="sm" />
           </Show>
         </span>
       </Show>
-      <Show when={props.item.icon}>
+      <Show
+        when={props.item.icon}
+        fallback={
+          <Show when={props.columns?.icon}>
+            <span class="menu-icon-slot" aria-hidden="true" />
+          </Show>
+        }
+      >
         <Icon name={props.item.icon!} size="sm" />
       </Show>
       <Show when={props.item.detail} fallback={props.item.label}>

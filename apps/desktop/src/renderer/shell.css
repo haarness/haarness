@@ -1370,8 +1370,10 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   font-weight: 500;
   color: var(--muted);
 }
-/* Reserve the tick column so a checked and an unchecked row align. */
-.menu-check {
+/* Reserve the tick column so a checked and an unchecked row align, and the
+   icon column (a small icon's box) beside an icon on another row. */
+.menu-check,
+.menu-icon-slot {
   display: inline-flex;
   width: 14px;
   flex: none;
