@@ -6,7 +6,7 @@ mod archive;
 mod input;
 mod snapshots;
 mod workflows;
-pub use snapshots::{SqliteSnapshotFolders, SqliteSnapshotStore};
+pub use snapshots::{PruneReport, SqliteSnapshotFolders, SqliteSnapshotStore};
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
