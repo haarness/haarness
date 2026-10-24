@@ -63,18 +63,19 @@ pub async fn handle_mouse(
         MouseEventKind::Drag(MouseButton::Left) => {
             app.hovered_cell = None;
             if let Some(anchor) = app.mouse_down {
-                // Within a cell of the press it is still a click (see the
-                // release), so nothing is painted as selected yet.
-                app.selection_range =
-                    (!within_a_cell(anchor, event)).then_some((anchor, (event.column, event.row)));
+                // A slip that stays on what was pressed is still a click
+                // (see the release), so nothing is painted as selected.
+                app.selection_range = (!slip_on_target(app, anchor, event))
+                    .then_some((anchor, (event.column, event.row)));
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
             let anchor = app.mouse_down.take();
-            // A press that moved a cell at most, on its row, is a click: a
-            // hand that shifts while it clicks must not copy a letter or two
-            // instead of pressing what it is on.
-            if anchor.is_some_and(|anchor| within_a_cell(anchor, event)) {
+            // A press that slipped a cell at most and is still on the same
+            // control is a click: a hand that shifts while it clicks a chip
+            // must not copy a letter of it. A press that slipped onto a
+            // control, or across text, is a selection.
+            if anchor.is_some_and(|anchor| slip_on_target(app, anchor, event)) {
                 app.selection_range = None;
                 return click(app, event.row as usize, event.column as usize, client).await;
             }
@@ -86,6 +87,8 @@ pub async fn handle_mouse(
                     app.notice = "Copied selection".into();
                 }
                 app.selection_range = None;
+            } else if anchor.is_some_and(|anchor| within_a_cell(anchor, event)) {
+                return click(app, event.row as usize, event.column as usize, client).await;
             }
         }
         _ => {}
@@ -96,6 +99,19 @@ pub async fn handle_mouse(
 /// Whether the pointer is on the press's row, a cell from it at most.
 fn within_a_cell((column, row): (u16, u16), event: MouseEvent) -> bool {
     event.row == row && event.column.abs_diff(column) <= 1
+}
+
+/// Whether the pointer slipped a cell at most from the press and both are on
+/// the same control. A dialog's own surface is not one: its text is there to
+/// be read and copied.
+fn slip_on_target(app: &App, (column, row): (u16, u16), event: MouseEvent) -> bool {
+    let target = |row: u16, column: u16| {
+        app.hit_at(usize::from(row), usize::from(column))
+            .filter(|target| !matches!(target, HitTarget::DialogSurface | HitTarget::DialogItem(_)))
+    };
+    within_a_cell((column, row), event)
+        && target(row, column)
+            .is_some_and(|pressed| target(event.row, event.column) == Some(pressed))
 }
 
 async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> Result<AppAction> {

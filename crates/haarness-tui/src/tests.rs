@@ -9318,6 +9318,108 @@ async fn clicking_a_chip_answers_the_approval() {
     assert_eq!(server.await.unwrap().len(), 1);
 }
 
+/// Press, drag through and release, as a terminal reports a mouse drag on
+/// one row.
+async fn mouse_drag(
+    app: &mut App,
+    client: &crate::api::ApiClient,
+    row: u16,
+    press: u16,
+    release: u16,
+) {
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), press),
+        (MouseEventKind::Drag(MouseButton::Left), release),
+        (MouseEventKind::Up(MouseButton::Left), release),
+    ] {
+        crate::input::mouse::handle_mouse(
+            app,
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            client,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// A press beside an approval chip that slips onto it is a selection, not
+/// an answer; a press on the chip that slips within it still answers.
+#[tokio::test]
+async fn a_press_that_slips_onto_a_chip_does_not_answer() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-slip"));
+    let _ = app.lines((100, 40));
+    let chip = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| hit.target == crate::view::frame::HitTarget::PermissionOption(0))
+        .cloned()
+        .expect("Allow once chip is clickable");
+    let (row, start) = (
+        u16::try_from(chip.row).unwrap(),
+        u16::try_from(chip.start).unwrap(),
+    );
+    assert_ne!(
+        app.hit_at(chip.row, chip.start - 1),
+        Some(crate::view::frame::HitTarget::PermissionOption(0)),
+        "the press misses the chip"
+    );
+    let (watching, seen) = sign_in_server(Vec::new()).await;
+    mouse_drag(&mut app, &watching, row, start - 1, start).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the card was answered: {:?}",
+        seen.lock().unwrap()
+    );
+    crate::terminal::take_copied();
+
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    let _ = app.lines((100, 40));
+    mouse_drag(&mut app, &client, row, start, start + 1).await;
+    assert!(
+        app.pending_permissions.is_empty(),
+        "a slip within the chip answers"
+    );
+    assert_eq!(server.await.unwrap().len(), 1);
+    assert_eq!(crate::terminal::take_copied(), Vec::<String>::new());
+}
+
+/// Over text, a drag of one cell copies: both cells of a wide glyph, or a
+/// two-letter word.
+#[tokio::test]
+async fn a_one_cell_drag_over_text_copies_it() {
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "A界Z then ok now".into(),
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let client = offline_client();
+    let lines = app.lines((80, 20));
+    let (wide, row) = screen_cell(&lines, "界");
+    crate::terminal::take_copied();
+    mouse_drag(&mut app, &client, row, wide, wide + 1).await;
+    assert_eq!(crate::terminal::take_copied(), vec!["界".to_owned()]);
+    let _ = app.lines((80, 20));
+    let (ok, row) = screen_cell(&lines, "ok now");
+    mouse_drag(&mut app, &client, row, ok, ok + 1).await;
+    assert_eq!(crate::terminal::take_copied(), vec!["ok".to_owned()]);
+}
+
 fn outside_write_event(thread: &Thread, id: &str) -> haarness_protocol::EventEnvelope {
     fixture_event(
         "permission.requested",

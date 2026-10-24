@@ -61,7 +61,10 @@ with tempfile.TemporaryDirectory(prefix="haarness-copy-", dir=os.environ.get("TU
     root = Path(directory)
     project = root / "project"
     (project / ".haarness").mkdir(parents=True)
-    (project / ".haarness/config.toml").write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+    # Every command asks, so the approval card shows without --yolo.
+    (project / ".haarness/config.toml").write_text(
+        '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n'
+    )
     run("git", "init", "-q", "-b", "main", cwd=project)
     helpers = root / "bin"
     helpers.mkdir()
@@ -135,10 +138,11 @@ with tempfile.TemporaryDirectory(prefix="haarness-copy-", dir=os.environ.get("TU
             column, row = find(needle, start, prefix)
             return column + cells(needle) - 1, row
 
-        def launch(width):
+        def launch(width, yolo=True):
             subprocess.run(["tmux", "-L", SOCKET, "kill-server"], capture_output=True)
+            approvals = ["--yolo"] if yolo else []
             tmux("new-session", "-d", "-x", str(width), "-y", "40", "-s", session,
-                 pane_command(env, [BINARY, "--workspace", project, "--trust-project", "--yolo"]))
+                 pane_command(env, [BINARY, "--workspace", project, "--trust-project", *approvals]))
             # The stand-in clipboard is the only one: tmux keeps OSC 52 to itself.
             tmux("set-option", "-g", "set-clipboard", "off")
             until(lambda: "/ commands" in pane(), "the TUI did not open")
@@ -205,7 +209,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-copy-", dir=os.environ.get("TU
             if width == 120:
                 text("/agents")
                 keys("Enter")
-                until(lambda: "explore" in pane(), "/agents did not open")
+                until(lambda: "Select agent" in pane() and "Explore" in pane(), "/agents did not open")
                 time.sleep(0.5)
                 screen("agents-dialog")
                 # Three rows of the card, from an agent's name to the middle of the card two rows
@@ -221,6 +225,28 @@ with tempfile.TemporaryDirectory(prefix="haarness-copy-", dir=os.environ.get("TU
                     assert word not in copied, copied
                 keys("Escape")
                 checks.append("A drag inside the /agents dialog copies its rows only, not the chat beside the card")
+        # A press beside an approval chip that slips onto it is not an answer; a
+        # press on the chip that slips within it is.
+        launch(120, yolo=False)
+        approved = project / "approved.txt"
+        paste('!tool bash ' + json.dumps({"command": f"touch {approved}"}))
+        keys("Enter")
+        until(lambda: "Allow once" in pane(), "no approval card")
+        time.sleep(0.5)
+        label, row = find("Allow once")
+        mouse(0, label - 2, row)
+        mouse(32, label - 1, row)
+        mouse(0, label - 1, row, release=True)
+        time.sleep(1.5)
+        assert not approved.exists(), "a press beside the chip answered the card"
+        assert "Allow once" in pane(), pane()
+        screen("chip-near-miss")
+        mouse(0, label, row)
+        mouse(32, label + 1, row)
+        mouse(0, label + 1, row, release=True)
+        until(lambda: approved.exists(), f"a slip within the chip did not answer:\n{pane()}", timeout=15)
+        checks.append("A press beside Allow once that slips onto it leaves the card waiting; one that slips within it answers")
+
         for check in checks:
             print("ok -", check)
         print(f"evidence: {EVIDENCE}")
