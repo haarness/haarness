@@ -29,6 +29,10 @@ export interface MenuAction {
   run?: () => void;
 }
 
+/** A menu holding a live choice gives every row its tick column, as native
+ * menus do, so the rows' icons and labels line up. */
+const ticked = (items: MenuAction[]) => items.some((item) => item.checked !== undefined);
+
 /** The hairline between two groups of choices; keyboard navigation skips it. */
 const Divider = (props: { when?: boolean }) => (
   <Show when={props.when}>
@@ -235,6 +239,7 @@ export function MenuButton(props: {
                       <Heading text={item.heading} />
                       <MenuItem
                         item={item}
+                        tick={ticked(props.items)}
                         /* Moving to a sibling folds an open branch, as native
                            menus do. */
                         onPointerEnter={() => setBranch("")}
@@ -328,6 +333,7 @@ export function MenuButton(props: {
                               <Divider when={child.divider} />
                               <MenuItem
                                 item={child}
+                                tick={ticked(item.submenu!)}
                                 onRun={() => {
                                   close(true);
                                   child.run?.();
@@ -352,6 +358,8 @@ export function MenuButton(props: {
 /** A leaf choice. `checked` turns it into a radio within its group. */
 function MenuItem(props: {
   item: MenuAction;
+  /** Its menu holds a live choice, so a plain row keeps the tick column too. */
+  tick?: boolean;
   onRun: () => void;
   onPointerEnter?: () => void;
 }) {
@@ -370,7 +378,7 @@ function MenuItem(props: {
         props.onRun();
       }}
     >
-      <Show when={props.item.checked !== undefined}>
+      <Show when={props.item.checked !== undefined || props.tick}>
         <span class="menu-check" aria-hidden="true">
           <Show when={props.item.checked}>
             <Icon name="check" size="sm" />
