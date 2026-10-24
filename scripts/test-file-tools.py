@@ -154,6 +154,10 @@ def case_read_text():
     assert 'is not UTF-8 text, so edit cannot change it' in output, output
     assert (files / 'latin1.txt').read_bytes() == b'caf\xe9 au lait\n'
     passed('a Latin-1 file reads with U+FFFD and a note, and edit refuses it plainly')
+    (files / 'wide.txt').write_text('日' * 3000 + '\nend\n')
+    output = tool(files, 'read', {'path': 'wide.txt'})
+    assert '日' * 2000 + CUT in output and 'not UTF-8' not in output and '\ufffd' not in output, output[-300:]
+    passed('a long line of CJK text reads as UTF-8, its cut leaving no U+FFFD')
 
 
 def case_read_pipe():
