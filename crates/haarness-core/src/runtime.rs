@@ -1055,14 +1055,13 @@ fn refused_images<'a>(
     message: &str,
     sent: &'a [SentImage],
     current: &HashSet<String>,
-    limits: crate::ImageLimits,
 ) -> (Vec<&'a SentImage>, RefusedImages) {
     if let Some(image) = refused_image(message, sent) {
         return (vec![image], RefusedImages::Named);
     }
     let volume = image_volume_refusal(message);
     if let Some(volume) = volume {
-        let older = oldest_half(sent, current, volume, limits);
+        let older = oldest_half(sent, current, volume);
         if !older.is_empty() {
             return (older, RefusedImages::Oldest(volume));
         }
@@ -1080,15 +1079,13 @@ fn refused_images<'a>(
 /// (`volume`). The turn's own images (`current`) and those of the last
 /// message that carries any stay, and so does every copy of a source sent
 /// again among them, since the record leaves a source out everywhere. Empty
-/// when the turn's own images hold more than half the request, or they and
-/// the last message's together pass the provider's `limits`: leaving out the
-/// others would not answer the refusal, so the newest go instead and the
-/// older ones are kept.
+/// when those that stay hold more than half the refused request by that
+/// measure: leaving out the others would not answer the refusal, so the
+/// newest go instead and the older ones are kept.
 fn oldest_half<'a>(
     sent: &'a [SentImage],
     current: &HashSet<String>,
     volume: ImageVolume,
-    limits: crate::ImageLimits,
 ) -> Vec<&'a SentImage> {
     let measure = |image: &SentImage| match volume {
         ImageVolume::Count => 1,
@@ -1098,24 +1095,8 @@ fn oldest_half<'a>(
     let last = sent.iter().map(|image| image.message).max();
     let stays = |image: &&SentImage| own(image) || Some(image.message) == last;
     let total = sent.iter().map(measure).sum::<usize>();
-    let tally = |keep: &dyn Fn(&&SentImage) -> bool| {
-        sent.iter()
-            .filter(keep)
-            .fold((0_usize, 0_usize), |(count, bytes), image| {
-                (count + 1, bytes.saturating_add(image.bytes))
-            })
-    };
-    let (own_count, own_bytes) = tally(&own);
-    let own_share = match volume {
-        ImageVolume::Count => own_count,
-        ImageVolume::Bytes => own_bytes,
-    };
-    // What stays must fit for leaving out the rest to answer the refusal.
-    let (staying_count, staying_bytes) = tally(&stays);
-    if own_share.saturating_mul(2) > total
-        || staying_bytes > limits.bytes
-        || limits.count.is_some_and(|most| staying_count > most)
-    {
+    let share = sent.iter().filter(stays).map(measure).sum::<usize>();
+    if share.saturating_mul(2) > total {
         return Vec::new();
     }
     let staying = sent
@@ -8183,7 +8164,6 @@ impl RunnerTask {
         error: &CoreError,
         sent: &[SentImage],
         current: &HashSet<String>,
-        limits: crate::ImageLimits,
     ) -> CoreResult<bool> {
         let CoreError::Provider(message) = error else {
             return Ok(false);
@@ -8191,7 +8171,7 @@ impl RunnerTask {
         if !is_provider_image_rejection(error, !sent.is_empty()) {
             return Ok(false);
         }
-        let (refused, choice) = refused_images(message, sent, current, limits);
+        let (refused, choice) = refused_images(message, sent, current);
         let guessed = matches!(choice, RefusedImages::Newest(_));
         let oldest = matches!(choice, RefusedImages::Oldest(_));
         let too_large = matches!(
@@ -9030,12 +9010,7 @@ impl RunnerTask {
                     Err(error_value) => {
                         record_span_error(&provider_span, &error_value);
                         if self
-                            .omit_refused_images(
-                                &error_value,
-                                &sent_images,
-                                &current_attachments,
-                                image_limits,
-                            )
+                            .omit_refused_images(&error_value, &sent_images, &current_attachments)
                             .await?
                         {
                             if !std::mem::replace(&mut image_retried, true) {
@@ -9097,7 +9072,6 @@ impl RunnerTask {
                                         &error_value,
                                         &sent_images,
                                         &current_attachments,
-                                        image_limits,
                                     )
                                     .await?
                             {
@@ -16498,11 +16472,10 @@ mod tests {
         error: &str,
         messages: &[ProviderMessage],
         current: &[&str],
-        limits: crate::ImageLimits,
     ) -> (Vec<String>, super::RefusedImages) {
         let sent = super::sent_images(messages);
         let current = current.iter().map(|source| (*source).to_owned()).collect();
-        let (images, choice) = super::refused_images(error, &sent, &current, limits);
+        let (images, choice) = super::refused_images(error, &sent, &current);
         let names = images
             .iter()
             .map(|image| crate::attachments::display_name(&image.source))
@@ -16690,7 +16663,6 @@ mod tests {
             "HTTP 400 Bad Request: too many images in the request: 21 > 20",
             &messages,
             &[],
-            crate::ImageLimits::default(),
         );
         assert_eq!(
             choice,
@@ -16711,7 +16683,6 @@ mod tests {
             "HTTP 413 Payload Too Large: request_too_large",
             &messages,
             &[],
-            crate::ImageLimits::default(),
         );
         assert_eq!(
             choice,
@@ -16735,8 +16706,7 @@ mod tests {
         // The person's photo is 4 of the 7 MiB: leaving out the older ones
         // would not answer the refusal, so they are kept.
         let refusal = "HTTP 413 Payload Too Large: request_too_large";
-        let (names, choice) =
-            left_out(refusal, &messages, &[&photo], crate::ImageLimits::default());
+        let (names, choice) = left_out(refusal, &messages, &[&photo]);
         assert_eq!(
             (names, choice),
             (
@@ -16745,25 +16715,12 @@ mod tests {
             )
         );
 
-        // So does a photo larger than the provider takes at all.
+        // Beside twelve older ones it is less than half, and the older go.
         let mut many = (1..=12)
             .map(|index| shot_result(sized_image(&format!("old-{index}.png"), MIB)))
             .collect::<Vec<_>>();
         many.push(messages.pop().unwrap());
-        let small = crate::ImageLimits {
-            bytes: 3 * MIB,
-            count: None,
-        };
-        let (names, choice) = left_out(refusal, &many, &[&photo], small);
-        assert_eq!(
-            (names, choice),
-            (
-                vec!["photo.png".to_owned()],
-                super::RefusedImages::Newest(Some(super::ImageVolume::Bytes))
-            )
-        );
-        // Within the limits, the older ones go.
-        let (names, choice) = left_out(refusal, &many, &[&photo], crate::ImageLimits::default());
+        let (names, choice) = left_out(refusal, &many, &[&photo]);
         assert_eq!(
             choice,
             super::RefusedImages::Oldest(super::ImageVolume::Bytes)
@@ -16783,18 +16740,14 @@ mod tests {
         messages.extend(
             (1..=6).map(|index| shot_result(sized_image(&format!("old-{index}.png"), MIB))),
         );
-        messages.push(shot_result(sized_image("last.png", 4 * MIB)));
-        // The photo and the last screenshot alone (5 MiB) pass a 3 MiB limit:
-        // leaving out the six older ones would not answer the refusal.
-        let limits = crate::ImageLimits {
-            bytes: 3 * MIB,
-            count: None,
-        };
+        messages.push(shot_result(sized_image("last.png", 12 * MIB)));
+        // A provider that takes less than the 19 MiB sent refused it. The
+        // photo and the last screenshot are 13 MiB of it: leaving out the six
+        // older ones would leave a request still too large, so the last goes.
         let (names, choice) = left_out(
             "HTTP 413 Payload Too Large: request_too_large",
             &messages,
             &[&photo],
-            limits,
         );
         assert_eq!(
             (names, choice),
@@ -16820,7 +16773,6 @@ mod tests {
             "HTTP 400 Bad Request: too many images in the request: 5 > 4",
             &messages,
             &[],
-            crate::ImageLimits::default(),
         );
         assert_eq!(
             choice,
