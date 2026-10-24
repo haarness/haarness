@@ -150,7 +150,8 @@ try:
     for secret in ("SECRETDB", "SECRETPROXY", "SECRETCODE"):
         assert secret not in text, (secret, text[:800])
     assert "@proxy.fixture.test:3128 GET /cb?code=[redacted]&state=s" in text, text[:800]
-    assert copied.read_text() == str(zips[0]), copied.read_text()
+    # The clipboard tool runs on its own worker, a moment after the status line says so.
+    until(lambda: copied.exists() and copied.read_text() == str(zips[0]), "the path was not copied")
     # Said where, in few enough words to fit the status line.
     assert f"Logs saved to ~/Downloads/{zips[0].name} · path copied" in pane(), pane()
 
