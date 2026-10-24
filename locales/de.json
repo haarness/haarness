@@ -2870,5 +2870,6 @@
   "less than a day left at this pace": "bei diesem Tempo weniger als ein Tag übrig",
   "about 1 day left at this pace": "bei diesem Tempo noch etwa 1 Tag",
   "about {count} days left at this pace": "bei diesem Tempo noch etwa {count} Tage",
-  "Can't reach the server · still waiting": "Server nicht erreichbar · wartet weiter"
+  "Can't reach the server · still waiting": "Server nicht erreichbar · wartet weiter",
+  "Theme {file} not loaded: {reason}": "Theme {file} nicht geladen: {reason}"
 }

@@ -44,6 +44,14 @@ use std::{path::PathBuf, time::Duration};
 /// How long the first frame waits for the provider catalog.
 const PROVIDERS_FIRST_FRAME: Duration = Duration::from_secs(1);
 
+/// Whether a TUI of this process is drawing on the terminal now. Anything
+/// else written to the terminal meanwhile stays over its frame, so a notice
+/// for the person goes to the log instead.
+#[must_use]
+pub fn owns_terminal() -> bool {
+    terminal::on_screen()
+}
+
 use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
 use crate::input::{AppAction, handle_key_at};
 /// The model a new chat starts on when none is configured; `haarness run`
@@ -475,10 +483,17 @@ async fn run_with_client(
             app.notice = error.to_string();
         }
     }
-    app.themes = config::load_theme_entries();
+    let (themes, unread_themes) = config::load_theme_entries();
+    app.themes = themes;
     app.language = config::load_language();
     app.thinking = config::load_thinking();
     app.sidebar_open = config::load_sidebar();
+    if let Some(unread) = unread_themes.first() {
+        app.notice = app.language.format(
+            "Theme {file} not loaded: {reason}",
+            &[("file", &unread.file), ("reason", &unread.reason)],
+        );
+    }
     if !app.keybindings_skipped.is_empty() {
         app.notice = app.language.format(
             "Shortcuts not applied: {names} · /keybinds",

@@ -333,28 +333,38 @@ pub(crate) fn base_config_dir() -> Option<PathBuf> {
     }
 }
 
+/// A theme file that could not be read as one: its file name and the first
+/// line of why (the whole reason goes to the log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadTheme {
+    pub file: String,
+    pub reason: String,
+}
+
 /// Themes discovered from `<config>/themes/*.toml`, then from the base
 /// configuration folder's `themes` (`HAARNESS_BASE_CONFIG_DIR`), appended
 /// after the built-ins; the first theme of a name wins, so a global theme
-/// replaces the base folder's. Unparseable files are skipped with a stderr
-/// note.
-pub fn load_theme_entries() -> Vec<crate::theme::ThemeEntry> {
+/// replaces the base folder's. Unparseable files are skipped and returned,
+/// never printed: the TUI may be drawing on the terminal.
+pub fn load_theme_entries() -> (Vec<crate::theme::ThemeEntry>, Vec<UnreadTheme>) {
     let mut entries = crate::theme::builtin_entries();
     let mut names: std::collections::HashSet<String> =
         entries.iter().map(|entry| entry.name.clone()).collect();
+    let mut unread = Vec::new();
     let directories = config_dir()
         .into_iter()
         .chain(base_config_dir())
         .map(|directory| directory.join("themes"));
     for directory in directories {
-        add_theme_entries(&mut entries, &mut names, &directory);
+        add_theme_entries(&mut entries, &mut names, &mut unread, &directory);
     }
-    entries
+    (entries, unread)
 }
 
 fn add_theme_entries(
     entries: &mut Vec<crate::theme::ThemeEntry>,
     names: &mut std::collections::HashSet<String>,
+    unread: &mut Vec<UnreadTheme>,
     directory: &std::path::Path,
 ) {
     let Ok(files) = std::fs::read_dir(directory) else {
@@ -381,7 +391,13 @@ fn add_theme_entries(
                     entries.push(entry);
                 }
             }
-            Err(error) => eprintln!("Theme {}: {error}", path.display()),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "theme not loaded: {error}");
+                unread.push(UnreadTheme {
+                    file: file.file_name().to_string_lossy().into_owned(),
+                    reason: error.lines().next().unwrap_or_default().trim().to_owned(),
+                });
+            }
         }
     }
 }
@@ -787,10 +803,42 @@ fn overlay(base: toml::Value, over: toml::Value) -> toml::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundMode, adopt_legacy_files, merge_tui_settings, parse_background_mode,
-        resolve_config_dir, write_whole,
+        BackgroundMode, UnreadTheme, add_theme_entries, adopt_legacy_files, merge_tui_settings,
+        parse_background_mode, resolve_config_dir, write_whole,
     };
     use std::path::PathBuf;
+
+    /// A theme file that is not one is returned with the first line of why,
+    /// for a notice, and the other themes still load. Nothing is printed: the
+    /// TUI may be drawing on the terminal (a server switch reloads them).
+    #[test]
+    fn theme_files_that_cannot_be_read_are_returned_not_printed() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-themes-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("broken.toml"), "primary = [\n").unwrap();
+        std::fs::write(
+            directory.join("fine.toml"),
+            "name = \"fine\"\nprimary = \"#336699\"\n",
+        )
+        .unwrap();
+        let (mut entries, mut names, mut unread) =
+            (Vec::new(), std::collections::HashSet::default(), Vec::new());
+        add_theme_entries(&mut entries, &mut names, &mut unread, &directory);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["fine"]
+        );
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        let UnreadTheme { file, reason } = &unread[0];
+        assert_eq!(file, "broken.toml");
+        assert!(reason.starts_with("TOML parse error"), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     /// A state file kept elsewhere through a link is written where the link
     /// leads, the link stays a link, and no half-written copy is left behind.
