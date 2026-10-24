@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 r"""Real-binary proof of the October 24 permission-reading fixes, with the echo provider.
 
-1. toml_order: `[permissions]` rules in `config.toml` apply in the order written, kept as TOML and
-   once migrated to `haarness.json`: a deny written after a broader allow refuses.
+1. toml_order: `[permissions]` rules in `config.toml` apply in the order written, a `"*"` catch-all
+   first, kept as TOML and once migrated to `haarness.json`: a deny written after a broader allow
+   refuses, and a catch-all written last never overrides a deny before it.
 2. cd_link: a `cd` through a link that the shell takes out of the project by name
    (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
@@ -84,8 +85,9 @@ def passed(label):
 
 
 def case_toml_order():
-    """A deny after a broader allow in `config.toml` refuses, kept as TOML or migrated."""
-    rules = '[permissions.bash]\n"echo hello*" = "allow"\n"echo hello --force*" = "deny"\n'
+    """`config.toml` rules apply as written, a `"*"` catch-all first; kept as TOML or migrated."""
+    rules = ('[permissions]\nbash = { "echo hello*" = "allow", "echo hello --force*" = "deny", "*" = "allow",'
+             ' "echo secret*" = "deny" }\n"*" = "allow"\nedit = "ask"\n')
     for name, extra in [('toml-kept', '[compaction]\nthreshold = 0.9\n'), ('toml-migrated', '')]:
         config, env = environment(name)
         (config / 'config.toml').write_text(rules + extra)
@@ -93,14 +95,18 @@ def case_toml_order():
         try:
             output = bash(env, folder, 'echo hello --force')
             assert "is denied by permission rule 'bash:echo hello --force*'" in output, output
+            # The catch-all written after it never overrides the deny before it.
+            output = bash(env, folder, 'echo secret x')
+            assert "is denied by permission rule 'bash:echo secret*'" in output, output
             output = bash(env, folder, 'echo hello world')
             assert 'hello world' in output and 'denied' not in output, output
         finally:
             stop(env, folder)
         if not extra:
-            migrated = json.loads((config / 'haarness.json').read_text())
-            assert list(migrated['permission']['bash']) == ['echo hello*', 'echo hello --force*'], migrated
-        passed(f'{name}: a deny written after a broader allow refuses')
+            migrated = json.loads((config / 'haarness.json').read_text())['permission']
+            assert list(migrated) == ['*', 'edit', 'bash'], migrated
+            assert list(migrated['bash']) == ['*', 'echo hello*', 'echo hello --force*', 'echo secret*'], migrated
+        passed(f'{name}: a deny written after a broader allow refuses, and a catch-all written last reads first')
 
 
 def case_cd_link():

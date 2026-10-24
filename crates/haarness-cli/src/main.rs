@@ -10475,9 +10475,31 @@ fn apply_json_goal_config(config: &mut FileConfig, layers: &jsonconfig::JsonLaye
     }
 }
 
-/// Compile `[permissions]` TOML into ordered engine rules, in the order the
-/// file writes them. Tool-level string entries compile first (`edit = "ask"`
-/// → `edit:*`), then per-tool pattern tables (`[permissions.bash] "git
+/// `[permissions]` in the order its rules apply: tool-level string entries
+/// first, then each tool's pattern table (`[permissions.bash]` or an inline
+/// table), each group in the order the file writes it, except that a `"*"`
+/// catch-all reads before its neighbours, as reading the table sorted by name
+/// always put it: `"*" = "allow"` written after `"git push*" = "deny"` never
+/// overrides that deny. [`compile_permissions`] and the migration to
+/// `haarness.json` both read it so.
+fn ordered_permissions(map: &toml::Table) -> Vec<(&String, &toml::Value)> {
+    let strings = catch_all_first(map.iter().filter(|(_, value)| !value.is_table()));
+    let tables = catch_all_first(map.iter().filter(|(_, value)| value.is_table()));
+    strings.into_iter().chain(tables).collect()
+}
+
+/// `entries` in the order written, with the `"*"` one first.
+fn catch_all_first<'a>(
+    entries: impl Iterator<Item = (&'a String, &'a toml::Value)>,
+) -> Vec<(&'a String, &'a toml::Value)> {
+    let (mut first, rest): (Vec<_>, Vec<_>) = entries.partition(|(key, _)| key.as_str() == "*");
+    first.extend(rest);
+    first
+}
+
+/// Compile `[permissions]` TOML into ordered engine rules, in the order of
+/// [`ordered_permissions`]: tool-level string entries (`edit = "ask"` →
+/// `edit:*`) before per-tool pattern tables (`[permissions.bash] "git
 /// push*" = "ask"` → `bash:git push*`), so specific patterns override
 /// tool-level decisions under last-match-wins.
 fn compile_permissions(map: &toml::Table) -> Result<Vec<haarness_core::PermissionRule>> {
@@ -10492,30 +10514,31 @@ fn compile_permissions(map: &toml::Table) -> Result<Vec<haarness_core::Permissio
         }
     }
     let mut rules = Vec::new();
-    for (tool, value) in map {
-        if let toml::Value::String(text) = value {
-            let pattern = if tool == "*" {
-                "*".to_owned()
-            } else {
-                format!("{tool}:*")
-            };
-            rules.push(PermissionRule {
-                pattern,
-                decision: decision(text)?,
-            });
-        }
-    }
-    for (tool, value) in map {
-        if let toml::Value::Table(patterns) = value {
-            for (pattern, entry) in patterns {
-                let text = entry.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("[permissions.{tool}] entries must be strings")
-                })?;
+    for (tool, value) in ordered_permissions(map) {
+        match value {
+            toml::Value::String(text) => {
+                let pattern = if tool == "*" {
+                    "*".to_owned()
+                } else {
+                    format!("{tool}:*")
+                };
                 rules.push(PermissionRule {
-                    pattern: format!("{tool}:{pattern}"),
+                    pattern,
                     decision: decision(text)?,
                 });
             }
+            toml::Value::Table(patterns) => {
+                for (pattern, entry) in catch_all_first(patterns.iter()) {
+                    let text = entry.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("[permissions.{tool}] entries must be strings")
+                    })?;
+                    rules.push(PermissionRule {
+                        pattern: format!("{tool}:{pattern}"),
+                        decision: decision(text)?,
+                    });
+                }
+            }
+            _ => {}
         }
     }
     Ok(rules)
@@ -16831,8 +16854,8 @@ request_timeout = 0
         use haarness_core::PermissionDecision;
         let map: toml::Table = toml::from_str(
             r#"
-            "*" = "ask"
             edit = "allow"
+            "*" = "ask"
             [bash]
             "git status*" = "allow"
             "git push*" = "deny"
@@ -16842,7 +16865,8 @@ request_timeout = 0
         let rules = super::compile_permissions(&map).unwrap();
         let patterns: Vec<_> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
         // String entries compile first, pattern tables after — so specific
-        // patterns win under last-match-wins.
+        // patterns win under last-match-wins. The `"*"` catch-all reads
+        // first, and the rest in the order written.
         assert_eq!(
             patterns,
             vec!["*", "edit:*", "bash:git status*", "bash:git push*"]
@@ -16862,36 +16886,63 @@ request_timeout = 0
     #[test]
     fn toml_permission_rules_apply_in_the_order_they_are_written() {
         use haarness_core::{PermissionDecision, PermissionEngine};
+        let engine = |text: &str| {
+            let config: FileConfig = toml::from_str(text).unwrap();
+            PermissionEngine::new(
+                super::compile_permissions(config.permissions.as_ref().unwrap()).unwrap(),
+            )
+        };
         // Sorted, `git push --force*` would come first (a space sorts
         // before `*`) and the broader allow after it would win.
-        let config: FileConfig = toml::from_str(
+        let written = engine(
             r#"
-            [permissions]
-            edit = "allow"
-            "*" = "ask"
             [permissions.bash]
             "git push*" = "allow"
             "git push --force*" = "deny"
         "#,
-        )
-        .unwrap();
-        let rules = super::compile_permissions(config.permissions.as_ref().unwrap()).unwrap();
-        let patterns: Vec<_> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
-        assert_eq!(
-            patterns,
-            vec!["edit:*", "*", "bash:git push*", "bash:git push --force*"]
         );
-        let engine = PermissionEngine::new(rules);
         assert_eq!(
-            engine.evaluate("bash:git push --force origin main"),
+            written.evaluate("bash:git push --force origin main"),
             PermissionDecision::Deny
         );
         assert_eq!(
-            engine.evaluate("bash:git push origin main"),
+            written.evaluate("bash:git push origin main"),
             PermissionDecision::Allow
         );
-        // A later catch-all overrides an earlier tool-wide string, as written.
-        assert_eq!(engine.evaluate("edit:src/main.rs"), PermissionDecision::Ask);
+        // A `"*"` catch-all reads first wherever it is written, as sorting
+        // put it: it never overrides the rules written before it.
+        let last = engine(
+            r#"
+            [permissions.bash]
+            "echo secret*" = "deny"
+            "*" = "allow"
+        "#,
+        );
+        assert_eq!(
+            last.evaluate("bash:echo secret x"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(last.evaluate("bash:echo plain"), PermissionDecision::Allow);
+        let tool_wide = engine(
+            r#"
+            [permissions]
+            bash = "ask"
+            "*" = "allow"
+        "#,
+        );
+        assert_eq!(tool_wide.evaluate("bash:echo hi"), PermissionDecision::Ask);
+        assert_eq!(tool_wide.evaluate("edit:x"), PermissionDecision::Allow);
+        let asks = engine(
+            r#"
+            [permissions.bash]
+            "echo hi*" = "allow"
+            "*" = "ask"
+        "#,
+        );
+        assert_eq!(
+            asks.evaluate("bash:echo hi there"),
+            PermissionDecision::Allow
+        );
     }
 
     #[test]
