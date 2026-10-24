@@ -3045,7 +3045,7 @@ impl Tool for BuiltinTool {
                 let path = resolve_existing(requested_path, &context)?;
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
-                let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let text = text::read_utf8(&path, "edit").await?;
                 let (before, after) = text::crlf_edit(&text, before, after);
                 let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
@@ -3079,7 +3079,7 @@ impl Tool for BuiltinTool {
                     .ok_or_else(|| {
                         CoreError::Invalid("edits must contain 1 to 100 entries".into())
                     })?;
-                let original = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let original = text::read_utf8(&path, "multiedit").await?;
                 let mut updated = original.clone();
                 for (index, edit) in edits.iter().enumerate() {
                     let before = string(edit, "old")?;
@@ -6919,7 +6919,25 @@ export default workflow({
         let result = read_text_of(&root, json!({"path":"latin1.txt"}))
             .await
             .unwrap();
-        assert_eq!(result.text, "caf\u{fffd}\nna\u{fffd}ve");
+        assert_eq!(
+            result.text,
+            "caf\u{fffd}\nna\u{fffd}ve\n\n(this file is not UTF-8: bytes that do not decode show as \u{fffd}; edit cannot change it, and write would replace those bytes)"
+        );
+        let refused = NativeToolRegistry::new(root.clone())
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"latin1.txt","old":"na","new":"no"}),
+                tool_context(&root),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("latin1.txt is not UTF-8 text, so edit cannot change it"),
+            "{refused}"
+        );
         // A NUL near the start marks binary data: only UTF-8 shows, as before.
         std::fs::write(root.join("blob.bin"), b"\x00\x01\xff\xfe").unwrap();
         let refused = read_text_of(&root, json!({"path":"blob.bin"}))

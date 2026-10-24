@@ -165,6 +165,8 @@ pub(super) fn read_text(
     let mut bytes = 0_usize;
     let mut index = 0_usize;
     let mut stop = None;
+    // Whether a line shown had bytes that are not UTF-8.
+    let mut replaced = false;
     while shown_lines.len() < limit {
         let Some(line) = lines.next_line(cancel)? else {
             break;
@@ -176,6 +178,7 @@ pub(super) fn read_text(
         let text = line.text(!binary).ok_or_else(|| {
             CoreError::Tool(format!("{} holds binary data, not text", path.display()))
         })?;
+        replaced |= matches!(text, Cow::Owned(_));
         let text = shown(&text, line.long).into_owned();
         let size = text.len() + usize::from(!shown_lines.is_empty());
         if shown_lines.len() == READ_MAX_LINES {
@@ -189,17 +192,37 @@ pub(super) fn read_text(
         bytes += size;
         shown_lines.push(text);
     }
-    let mut text = shown_lines.join("\n");
+    let mut notes = Vec::new();
+    // Said so the model does not write the file back from what it was shown.
+    if replaced {
+        notes.push(
+            "(this file is not UTF-8: bytes that do not decode show as \u{fffd}; edit cannot change it, and write would replace those bytes)"
+                .to_owned(),
+        );
+    }
     if let Some(stop) = stop {
         let next = offset + shown_lines.len();
-        let note = format!("(stopped at {stop}; read on with offset={next})");
-        text = if text.is_empty() {
-            note
-        } else {
-            format!("{text}\n\n{note}")
-        };
+        notes.push(format!("(stopped at {stop}; read on with offset={next})"));
     }
-    Ok(text)
+    let text = shown_lines.join("\n");
+    Ok(match (text.is_empty(), notes.is_empty()) {
+        (_, true) => text,
+        (true, false) => notes.join("\n"),
+        (false, false) => format!("{text}\n\n{}", notes.join("\n")),
+    })
+}
+
+/// A file's text for `edit` and `multiedit`, which change only UTF-8 text:
+/// a file that is not says so plainly.
+pub(super) async fn read_utf8(path: &Path, tool: &str) -> CoreResult<String> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Err(CoreError::Tool(format!(
+            "{} is not UTF-8 text, so {tool} cannot change it without replacing the bytes that do not decode",
+            path.display()
+        ))),
+        Err(error) => Err(CoreError::Tool(error.to_string())),
+    }
 }
 
 /// Bytes of a line `grep` searches: a match further into a longer line is

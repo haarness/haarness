@@ -450,7 +450,9 @@ that never ends (a minified bundle, a JSON dump), holds only what is shown: a
 line longer than 2000 characters shows its first 2000 and ends in
 `… (line truncated to 2000 characters)`, and a read stops at 2000 lines or 50 KB
 with `(stopped at 50 KB; read on with offset=N)`. Text that is not UTF-8 (a
-Latin-1 file) shows `�` for what does not decode; a file with a NUL byte in its
+Latin-1 file) shows `�` for what does not decode, with a note that `edit`
+cannot change it and `write` would replace those bytes (`edit` and `multiedit`
+refuse it as not UTF-8 text); a file with a NUL byte in its
 first 8 KiB is binary data and is shown only when it is UTF-8 throughout the
 part read. A folder, pipe or device is refused instead of waited on. Since
 `read` shows lines without their `\r`, `edit` and `multiedit` give `old` and
