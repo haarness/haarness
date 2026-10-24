@@ -316,6 +316,99 @@ test("a wake follows a notification stream again that still looks open but died 
   }
 });
 
+test("a read that reaches a connection already closed shows no dialog, nor does a server stopped under live streams, while any other error still shows Electron's", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("closed");
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const thread = await chat(client, "Closed connection chat");
+    await launch();
+    let stderr = "";
+    app.process().stderr?.on("data", (chunk) => (stderr += chunk));
+    // Electron's own listener opens its dialog through dialog.showErrorBox;
+    // the monitor sees every uncaught exception, handled or not.
+    await app.evaluate(({ dialog }) => {
+      const shown: string[] = [];
+      const uncaught: string[] = [];
+      Object.assign(globalThis, { shownErrors: shown, uncaughtErrors: uncaught });
+      dialog.showErrorBox = (title, content) => void shown.push(title + "\n" + content);
+      process.on("uncaughtExceptionMonitor", (error) => void uncaught.push(error.stack ?? String(error)));
+    });
+    const seen = () =>
+      app.evaluate(() => globalThis as unknown as { shownErrors: string[]; uncaughtErrors: string[] }).then(
+        ({ shownErrors, uncaughtErrors }) => ({ shown: shownErrors, uncaught: uncaughtErrors }),
+      );
+    await addServer("Closed server", remote.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: thread.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Closed connection chat start");
+
+    // Twice, a socket as code that ends it inside one of its own reads leaves
+    // it (an inspector's evaluate runs between any two calls): marked
+    // destroyed, its handle still reading. 216 bytes arrive, and Node throws
+    // from the read itself.
+    for (let time = 0; time < 2; time++)
+      await app.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            const net = process.getBuiltinModule("node:net");
+            let socket: import("node:net").Socket;
+            const server = net.createServer((peer) => {
+              setTimeout(() => peer.write(Buffer.alloc(216, 120)), 50);
+              setTimeout(() => {
+                (socket as unknown as { _handle?: { close(): void } })._handle?.close();
+                peer.destroy();
+                server.close();
+                resolve();
+              }, 500);
+            });
+            server.listen(0, "127.0.0.1", () => {
+              const { port } = server.address() as import("node:net").AddressInfo;
+              socket = net.connect(port, "127.0.0.1", () => {
+                (socket as { destroyed: boolean }).destroyed = true;
+              });
+              socket.on("data", () => {});
+            });
+          }),
+      );
+    let state = await seen();
+    expect(state.uncaught).toHaveLength(2);
+    for (const stack of state.uncaught)
+      expect(stack).toMatch(/^RangeError \[ERR_OUT_OF_RANGE\][^\n]*Received 216\n.*getSystemErrorName.*\n.*ErrnoException.*\n.*TCP\.onStreamRead/);
+    expect(state.shown).toEqual([]);
+    // Noted once.
+    await expect.poll(() => stderr.split("a read that reached a connection already closed").length - 1).toBe(1);
+
+    // The server stops while a reply streams to the window and to the
+    // notification watch: nothing interrupts, and the app keeps answering.
+    const started = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "::long 20000" });
+    await expect(page.locator(".transcript")).toContainText("marker-", { timeout: 30000 });
+    execFileSync(binary, ["--workspace", workspaces.at(-1)!, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+    await client.waitTurn(started.id).catch(() => {});
+    await page.waitForTimeout(3000);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
+    state = await seen();
+    expect(state.shown).toEqual([]);
+
+    // Any other uncaught exception still opens Electron's dialog, as before.
+    await app.evaluate(() => {
+      setTimeout(() => {
+        throw new Error("Another failure in main");
+      });
+    });
+    await expect.poll(async () => (await seen()).shown).toEqual([
+      expect.stringMatching(
+        /^A JavaScript error occurred in the main process\nUncaught Exception:\nError: Another failure in main\n {4}at /,
+      ),
+    ]);
+    expect(stderr.split("a read that reached a connection already closed").length - 1).toBe(1);
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+  }
+});
+
 /** An Anthropic-format endpoint that lists its models in four pages of
  * 2.2 s each (inside the server's 3 s for a page and 10 s for the list), and
  * answers a message with "late hello". */

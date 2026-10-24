@@ -95,7 +95,16 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
+import { quietClosedSocketReads } from "./closed-socket-read";
 
+// A connection that went away never interrupts with Electron's error dialog
+// (see closed-socket-read.ts); any other uncaught error still shows it.
+quietClosedSocketReads(process, (error) =>
+  console.warn(
+    "Haarness ignored a read that reached a connection already closed; nothing was lost, and later ones are not logged.\n" +
+      error.stack,
+  ),
+);
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
 app.setName("Haarness");
