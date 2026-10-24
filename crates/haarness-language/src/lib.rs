@@ -225,7 +225,9 @@ impl Operation {
 
 struct ServerSlot {
     config: LspServerConfig,
-    client: Mutex<Option<Arc<Client>>>,
+    /// One running server per folder it was started for: the project
+    /// folder, or a chat's own folder, whose files it then sees alone.
+    clients: Mutex<BTreeMap<PathBuf, Arc<Client>>>,
     error: RwLock<Option<String>>,
     retry_after: Mutex<Option<Instant>>,
 }
@@ -282,7 +284,7 @@ impl LanguageService {
                     id,
                     Arc::new(ServerSlot {
                         config,
-                        client: Mutex::new(None),
+                        clients: Mutex::new(BTreeMap::new()),
                         error: RwLock::new(None),
                         retry_after: Mutex::new(None),
                     }),
@@ -343,26 +345,38 @@ impl LanguageService {
         !state.servers.is_empty() || !state.formatters.is_empty()
     }
 
+    /// Format and diagnose `files` of a call that works in `root` (the
+    /// project folder, or a chat's own folder inside it).
     pub async fn process_files(
         self: &Arc<Self>,
         files: Vec<PathBuf>,
+        root: &Path,
         cancel: CancellationToken,
     ) -> Vec<FileReport> {
         let futures = files.into_iter().map(|file| {
             let service = Arc::clone(self);
             let cancel = cancel.clone();
-            async move { service.process_file(file, cancel).await }
+            let root = root.to_path_buf();
+            async move { service.process_file(file, &root, cancel).await }
         });
         join_all(futures).await
     }
 
-    pub async fn process_file(&self, file: PathBuf, cancel: CancellationToken) -> FileReport {
+    pub async fn process_file(
+        &self,
+        file: PathBuf,
+        root: &Path,
+        cancel: CancellationToken,
+    ) -> FileReport {
         let state = self.state();
         let mut report = FileReport {
             file: file.clone(),
             ..FileReport::default()
         };
-        if !file.is_file() || !self.inside_workspace(&file) {
+        let Some(root) = self.root(root) else {
+            return report;
+        };
+        if !file.is_file() || !inside(&root, &file) {
             return report;
         }
         for (id, formatter) in &state.formatters {
@@ -373,7 +387,7 @@ impl LanguageService {
             ) {
                 continue;
             }
-            match self.run_formatter(formatter, &file, &cancel).await {
+            match self.run_formatter(formatter, &file, &root, &cancel).await {
                 Ok(true) => report.formatted_by.push(id.clone()),
                 Ok(false) => {}
                 Err(error) => report.warnings.push(format!("formatter {id}: {error}")),
@@ -383,7 +397,7 @@ impl LanguageService {
             return report;
         }
         for (id, slot) in Self::matching_servers(&state, &file) {
-            match self.client(&state, &id, &slot, &cancel).await {
+            match self.client(&state, &id, &slot, &root, &cancel).await {
                 Ok(client) => match client
                     .touch(
                         &file,
@@ -406,28 +420,41 @@ impl LanguageService {
         report
     }
 
-    pub async fn touch(&self, file: &Path, cancel: &CancellationToken) {
+    pub async fn touch(&self, file: &Path, root: &Path, cancel: &CancellationToken) {
         let state = self.state();
-        if !state.lsp.enabled || !file.is_file() || !self.inside_workspace(file) {
+        let Some(root) = self.root(root) else {
+            return;
+        };
+        if !state.lsp.enabled || !file.is_file() || !inside(&root, file) {
             return;
         }
         for (id, slot) in Self::matching_servers(&state, file) {
-            if let Ok(client) = self.client(&state, &id, &slot, cancel).await {
+            if let Ok(client) = self.client(&state, &id, &slot, &root, cancel).await {
                 let _ = client.touch(file, 0, cancel).await;
             }
         }
     }
 
+    /// Ask the language servers of `root` (where the call works) about
+    /// `file`. A server started for a chat's own folder answers only with
+    /// places inside it.
+    #[allow(clippy::too_many_arguments)] // one query's position, text and scope
     pub async fn query(
         &self,
         operation: Operation,
         file: &Path,
+        root: &Path,
         line: u32,
         character: u32,
         query: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Value, String> {
         let state = self.state();
+        let root = self
+            .root(root)
+            .ok_or_else(|| "the folder is not inside the project".to_owned())?;
+        let project = self.canonical_workspace();
+        let chat_folder = project != root;
         let matches = Self::matching_servers(&state, file);
         if matches.is_empty() {
             return Err("no configured language server handles this file".into());
@@ -435,7 +462,7 @@ impl LanguageService {
         let mut results = Vec::new();
         let mut errors = Vec::new();
         for (id, slot) in matches {
-            let client = match self.client(&state, &id, &slot, cancel).await {
+            let client = match self.client(&state, &id, &slot, &root, cancel).await {
                 Ok(client) => client,
                 Err(error) => {
                     errors.push(format!("{id}: {error}"));
@@ -500,7 +527,12 @@ impl LanguageService {
                 )
                 .await
             {
-                Ok(value) => results.push(json!({"server": id, "result": value})),
+                Ok(mut value) => {
+                    if chat_folder {
+                        keep_places_of(&mut value, &root, &project);
+                    }
+                    results.push(json!({"server": id, "result": value}));
+                }
                 Err(error) => errors.push(format!("{id}: {error}")),
             }
         }
@@ -518,7 +550,7 @@ impl LanguageService {
         let state = self.state();
         let mut result = Vec::new();
         for (id, slot) in &state.servers {
-            let client = slot.client.lock().await.clone();
+            let client = slot.clients.lock().await.values().next().cloned();
             // A server that is not installed is missing, whatever launching
             // it anyway reported.
             let missing = client.is_none()
@@ -592,6 +624,7 @@ impl LanguageService {
         state: &Arc<LanguageState>,
         id: &str,
         slot: &Arc<ServerSlot>,
+        root: &Path,
         cancel: &CancellationToken,
     ) -> Result<Lease, String> {
         let _lifecycle = tokio::select! {
@@ -619,8 +652,8 @@ impl LanguageService {
                 }
             });
         }
-        let mut current = slot.client.lock().await;
-        if let Some(client) = current.as_ref()
+        let mut current = slot.clients.lock().await;
+        if let Some(client) = current.get(root)
             && client.status.read().await.as_str() == "running"
         {
             return Ok(Lease::new(Arc::clone(client)).await);
@@ -643,18 +676,16 @@ impl LanguageService {
         reap(state, true).await;
         let mut count = 0;
         for slot in state.servers.values() {
-            if slot.client.lock().await.is_some() {
-                count += 1;
-            }
+            count += slot.clients.lock().await.len();
         }
         if count >= state.lsp.max_clients.max(1) {
             return Err("language server capacity is busy".into());
         }
-        current = slot.client.lock().await;
+        current = slot.clients.lock().await;
         match Client::spawn(
             id.to_owned(),
             slot.config.clone(),
-            self.workspace.clone(),
+            root.to_path_buf(),
             slot.config
                 .initialize_timeout_ms
                 .or(slot.config.request_timeout_ms)
@@ -666,7 +697,7 @@ impl LanguageService {
             Ok(client) => {
                 *slot.error.write().await = None;
                 *slot.retry_after.lock().await = None;
-                *current = Some(Arc::clone(&client));
+                current.insert(root.to_path_buf(), Arc::clone(&client));
                 Ok(Lease::new(client).await)
             }
             Err(error) => {
@@ -681,6 +712,7 @@ impl LanguageService {
         &self,
         formatter: &FormatterDefinition,
         file: &Path,
+        root: &Path,
         cancel: &CancellationToken,
     ) -> Result<bool, String> {
         let Some(program) = formatter.command.first() else {
@@ -704,7 +736,7 @@ impl LanguageService {
             command.env_remove(name);
         }
         command
-            .current_dir(dunce::simplified(&self.workspace))
+            .current_dir(dunce::simplified(root))
             .envs(&formatter.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -755,22 +787,80 @@ impl LanguageService {
         })
     }
 
-    fn inside_workspace(&self, path: &Path) -> bool {
-        let workspace = self
-            .workspace
+    fn canonical_workspace(&self) -> PathBuf {
+        self.workspace
             .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
-        path.canonicalize()
-            .is_ok_and(|path| path.starts_with(workspace))
+            .unwrap_or_else(|_| self.workspace.clone())
     }
+
+    /// `root` canonical, when it is the project folder or a folder inside it.
+    fn root(&self, root: &Path) -> Option<PathBuf> {
+        let root = root.canonicalize().ok()?;
+        root.starts_with(self.canonical_workspace()).then_some(root)
+    }
+}
+
+fn inside(root: &Path, path: &Path) -> bool {
+    path.canonicalize().is_ok_and(|path| path.starts_with(root))
+}
+
+/// Leave out of the answer a language server started for the chat folder
+/// `root` gives every place (a location, a link's target, a symbol, a
+/// call-hierarchy item) in another part of `project`: another chat's
+/// files. Places outside the project (the standard library, a dependency
+/// cache) stay.
+fn keep_places_of(value: &mut Value, root: &Path, project: &Path) {
+    match value {
+        Value::Array(items) => {
+            items.retain(|item| {
+                !item
+                    .as_object()
+                    .is_some_and(|place| elsewhere(place, root, project))
+            });
+            for item in items {
+                keep_places_of(item, root, project);
+            }
+        }
+        Value::Object(place) if elsewhere(place, root, project) => *value = Value::Null,
+        Value::Object(place) => {
+            for item in place.values_mut() {
+                keep_places_of(item, root, project);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `place` names a file of `project` outside `root`.
+fn elsewhere(place: &serde_json::Map<String, Value>, root: &Path, project: &Path) -> bool {
+    let nested = |key: &str| place.get(key).and_then(|value| value.get("uri"));
+    place
+        .get("uri")
+        .or_else(|| place.get("targetUri"))
+        .or_else(|| nested("location"))
+        .or_else(|| nested("from"))
+        .or_else(|| nested("to"))
+        .and_then(Value::as_str)
+        .and_then(|uri| url::Url::parse(uri).ok())
+        .and_then(|url| url.to_file_path().ok())
+        .is_some_and(|path| {
+            let path = path.canonicalize().unwrap_or(path);
+            path.starts_with(project) && !path.starts_with(root)
+        })
 }
 
 async fn shutdown_language_state(state: &LanguageState) {
     let _lifecycle = state.lifecycle.lock().await;
     state.closed.store(true, Ordering::SeqCst);
     for slot in state.servers.values() {
-        let client = slot.client.lock().await.clone();
-        if let Some(client) = client {
+        let clients = slot
+            .clients
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for client in clients {
             client.shutdown().await;
         }
     }
@@ -811,24 +901,24 @@ async fn reap(state: &LanguageState, capacity: bool) {
     let mut count = 0;
     let mut idle = Vec::new();
     for slot in state.servers.values() {
-        let current = slot.client.lock().await;
-        if let Some(client) = current.as_ref() {
+        let current = slot.clients.lock().await;
+        for (root, client) in current.iter() {
             count += 1;
             if let Ok(guard) = client.activity.clone().try_write_owned() {
                 let used = *client
                     .used
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                idle.push((used, slot.clone(), client.clone(), guard));
+                idle.push((used, slot.clone(), root.clone(), client.clone(), guard));
             }
         }
     }
     idle.sort_by_key(|entry| entry.0);
-    for (used, slot, client, _guard) in idle {
+    for (used, slot, root, client, _guard) in idle {
         if used.elapsed() >= Duration::from_millis(state.lsp.idle_timeout_ms.max(1))
             || (capacity && count >= state.lsp.max_clients.max(1))
         {
-            slot.client.lock().await.take();
+            slot.clients.lock().await.remove(&root);
             client.shutdown().await;
             count -= 1;
         }
@@ -1435,6 +1525,7 @@ mod tests {
             service.query(
                 Operation::Hover,
                 Path::new("cancelled.rs"),
+                &std::env::temp_dir(),
                 0,
                 0,
                 None,
@@ -1466,6 +1557,7 @@ mod tests {
             .query(
                 Operation::Hover,
                 &workspace.join("a.ghost"),
+                &workspace,
                 0,
                 0,
                 None,
@@ -1481,6 +1573,45 @@ mod tests {
         let ghost = status.iter().find(|server| server.id == "ghost").unwrap();
         assert_eq!(ghost.status, "missing");
         assert_eq!(ghost.error, None);
+    }
+
+    #[test]
+    fn a_chat_folder_s_answers_leave_out_other_chats_places_only() {
+        let base = std::env::temp_dir().join(format!("haarness-places-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(base.join("home/2026-10-24/a")).unwrap();
+        std::fs::create_dir_all(base.join("home/2026-10-24/b")).unwrap();
+        let project = base.join("home").canonicalize().unwrap();
+        let root = project.join("2026-10-24/a");
+        let uri = |path: PathBuf| url::Url::from_file_path(path).unwrap().to_string();
+        let mine = uri(root.join("a.rs"));
+        let sibling = uri(project.join("2026-10-24/b/b.rs"));
+        let home_file = uri(project.join("notes.rs"));
+        let library = "file:///usr/lib/rustlib/src/core/lib.rs";
+        let mut value = json!([
+            {"uri": mine, "range": {}},
+            {"uri": sibling, "range": {}},
+            {"uri": home_file, "range": {}},
+            {"uri": library, "range": {}},
+            {"targetUri": sibling},
+            {"name": "symbol", "location": {"uri": sibling}},
+            {"from": {"uri": sibling}, "fromRanges": []},
+            {"to": {"uri": library}, "fromRanges": []},
+            {"name": "local", "kind": 12},
+        ]);
+        keep_places_of(&mut value, &root, &project);
+        assert_eq!(
+            value,
+            json!([
+                {"uri": mine, "range": {}},
+                {"uri": library, "range": {}},
+                {"to": {"uri": library}, "fromRanges": []},
+                {"name": "local", "kind": 12},
+            ])
+        );
+        let mut single = json!({"uri": sibling, "range": {}});
+        keep_places_of(&mut single, &root, &project);
+        assert!(single.is_null());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
