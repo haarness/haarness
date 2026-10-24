@@ -113,6 +113,7 @@ import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
+import { ChatLoading } from "./ChatLoading";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
 import {
   awaitsApproval,
@@ -2527,6 +2528,12 @@ export function Session() {
             onJump={jumpToPrompt}
             onWheel={outlineWheel}
           />
+        </Show>
+        {/* Another chat of this project reading its history keeps the box and
+            the frame on screen; the mark waits, then fades in over the
+            transcript alone. */}
+        <Show when={!!state.loadingChat && !rows().length && !stream()?.text && !stream()?.reasoning}>
+          <ChatLoading label={t("Loading chat…")} />
         </Show>
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
