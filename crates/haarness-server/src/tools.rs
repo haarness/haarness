@@ -1920,18 +1920,16 @@ impl Tool for WorkflowTool {
             .ok_or_else(|| CoreError::Invalid("workflow action is required".into()))?;
         match action {
             "read" => {
+                // The chat's own folder's workflows are this chat's too.
+                let catalog = self.coordinator.catalog_for(Some(context.thread_id)).await;
                 if let Some(name) = input.get("name").and_then(Value::as_str) {
-                    let result = self
-                        .coordinator
-                        .catalog()
-                        .read_source(name)
-                        .map_err(workflow_catalog_error)?;
+                    let result = catalog.read_source(name).map_err(workflow_catalog_error)?;
                     Ok(ToolOutput {
                         text: result.source,
                         metadata: json!({"title": format!("Workflow {name}"), "name": name}),
                     })
                 } else {
-                    workflow_json_output("Workflows", &self.coordinator.catalog().list(), json!({}))
+                    workflow_json_output("Workflows", &catalog.list(), json!({}))
                 }
             }
             "create" => {
