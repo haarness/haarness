@@ -37,8 +37,10 @@ struct ResolvedCommand {
 /// POST endpoint. Hidden collision losers remain available through their
 /// explicit owner (for example `/workflow run <name>` for a workflow shadowed
 /// by a configured prompt command).
-pub(crate) fn registry(state: &ServerState) -> Vec<CommandInfo> {
-    resolved_commands(state)
+/// `folder`: the chat's own folder when the list is for such a chat, whose
+/// workflows are then listed too.
+pub(crate) fn registry(state: &ServerState, folder: Option<&std::path::Path>) -> Vec<CommandInfo> {
+    resolved_commands(state, folder)
         .into_iter()
         .map(|resolved| resolved.info)
         .collect()
@@ -51,10 +53,10 @@ pub(crate) async fn execute(
 ) -> CoreResult<CommandExecutionResponse> {
     // Establish both existence and workspace ownership before dispatch. A
     // server instance owns exactly one workspace and its thread repository.
-    state.runtime.get_thread(thread_id).await?;
+    let folder = chat_folder_of(state, thread_id).await?;
 
     let name = normalize_requested_name(&request.name)?;
-    let commands = resolved_commands(state);
+    let commands = resolved_commands(state, folder.as_deref());
     let resolved = commands
         .iter()
         .find(|candidate| candidate.info.name.eq_ignore_ascii_case(name))
@@ -73,7 +75,38 @@ pub(crate) async fn execute(
     }
 }
 
-fn resolved_commands(state: &ServerState) -> Vec<ResolvedCommand> {
+/// The folder chat `thread_id` works in, when it is one of its own.
+pub(crate) async fn chat_folder_of(
+    state: &ServerState,
+    thread_id: ThreadId,
+) -> CoreResult<Option<std::path::PathBuf>> {
+    Ok(state
+        .runtime
+        .get_thread(thread_id)
+        .await?
+        .directory
+        .map(std::path::PathBuf::from))
+}
+
+/// The workflows a chat working in `folder` (or the project's chats) can run.
+pub(crate) fn workflow_list(
+    state: &ServerState,
+    folder: Option<&std::path::Path>,
+) -> haarness_protocol::WorkflowListResponse {
+    let catalog = state.workflows.as_ref().map_or_else(
+        || std::sync::Arc::new(WorkflowCatalog::for_workspace(&state.workspace)),
+        |coordinator| coordinator.catalog(),
+    );
+    match folder {
+        Some(folder) => catalog.for_chat_folder(folder).list(),
+        None => catalog.list(),
+    }
+}
+
+fn resolved_commands(
+    state: &ServerState,
+    folder: Option<&std::path::Path>,
+) -> Vec<ResolvedCommand> {
     let mut seen = HashSet::new();
     let mut commands = Vec::new();
     push_unique(
@@ -133,10 +166,7 @@ fn resolved_commands(state: &ServerState) -> Vec<ResolvedCommand> {
         );
     }
 
-    let catalog = state.workflows.as_ref().map_or_else(
-        || WorkflowCatalog::for_workspace(&state.workspace).list(),
-        |coordinator| coordinator.catalog().list(),
-    );
+    let catalog = workflow_list(state, folder);
     let mut workflows = catalog.workflows;
     workflows.sort_by(|left, right| {
         left.invocation
@@ -418,7 +448,8 @@ async fn execute_named_workflow(
     argument_tail: &str,
     mut request: ExecuteCommandRequest,
 ) -> CoreResult<CommandExecutionResponse> {
-    let definition = workflow_definition(state, name)?;
+    let folder = chat_folder_of(state, thread_id).await?;
+    let definition = workflow_definition(state, name, folder.as_deref())?;
     request.arguments = parse_argument_tail(argument_tail)?;
     execute_workflow_definition(state, thread_id, definition, request).await
 }
@@ -427,10 +458,7 @@ async fn workflow_summary(
     state: &ServerState,
     thread_id: ThreadId,
 ) -> CoreResult<CommandExecutionResponse> {
-    let catalog = state.workflows.as_ref().map_or_else(
-        || WorkflowCatalog::for_workspace(&state.workspace).list(),
-        |coordinator| coordinator.catalog().list(),
-    );
+    let catalog = workflow_list(state, chat_folder_of(state, thread_id).await?.as_deref());
     let mut lines = vec![format!("Workflows ({})", catalog.workflows.len())];
     for definition in catalog.workflows.iter().take(20) {
         let description = definition
@@ -464,11 +492,12 @@ async fn workflow_summary(
     })
 }
 
-fn workflow_definition(state: &ServerState, name: &str) -> CoreResult<WorkflowDefinition> {
-    let catalog = state.workflows.as_ref().map_or_else(
-        || WorkflowCatalog::for_workspace(&state.workspace).list(),
-        |coordinator| coordinator.catalog().list(),
-    );
+fn workflow_definition(
+    state: &ServerState,
+    name: &str,
+    folder: Option<&std::path::Path>,
+) -> CoreResult<WorkflowDefinition> {
+    let catalog = workflow_list(state, folder);
     catalog
         .workflows
         .iter()

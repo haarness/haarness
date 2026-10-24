@@ -26,6 +26,7 @@ BtwEvent: TypeAlias = Union['BtwEvent0', 'BtwEvent1', 'BtwEvent2', 'BtwEvent3']
 BtwRequest = TypedDict('BtwRequest', {'history': NotRequired[List['BtwTurn']], 'question': Required[str], 'requestId': NotRequired['RequestId']})
 BtwResponse = TypedDict('BtwResponse', {'answer': Required[str], 'inputTokens': Required[int], 'outputTokens': Required[int]})
 BtwTurn = TypedDict('BtwTurn', {'answer': Required[str], 'question': Required[str]})
+ChatListQuery = TypedDict('ChatListQuery', {'threadId': NotRequired[str]})
 ChatOptions = TypedDict('ChatOptions', {'agent': NotRequired[Union[str, None]], 'attachments': NotRequired[List[str]], 'autoApprove': NotRequired[bool], 'command': NotRequired[Union[str, None]], 'model': NotRequired[Union[str, None]], 'provider': NotRequired[Union[str, None]], 'reasoningEffort': NotRequired[Union[str, None]], 'requestId': NotRequired['RequestId'], 'resources': NotRequired[List['ResourceMention']], 'synthetic': NotRequired[bool], 'tools': NotRequired[Union[Dict[str, bool], None]]})
 ChromeBlock: TypeAlias = Literal['browser-control', 'project']
 ChromeHostSettings = TypedDict('ChromeHostSettings', {'blockedBy': NotRequired[Union[None, 'ChromeBlock']], 'defaultBrowser': Required['DefaultBrowser'], 'enabled': Required[bool], 'everConnected': Required[bool], 'globalEnabled': Required[bool]})

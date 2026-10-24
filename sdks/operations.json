@@ -128,6 +128,9 @@
       "items": {
         "$ref": "#/components/schemas/CommandInfo"
       }
+    },
+    "query": {
+      "$ref": "#/components/schemas/ChatListQuery"
     }
   },
   {
@@ -392,6 +395,9 @@
     "pathParams": [],
     "response": {
       "$ref": "#/components/schemas/WorkflowListResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ChatListQuery"
     }
   },
   {

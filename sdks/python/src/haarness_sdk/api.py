@@ -47,9 +47,9 @@ class Api(Transport):
         """GET /v1/agents."""
         return cast("list[T.AgentProfile]", self.request('GET', f'/v1/agents', binary_body=False, binary_response=False, options=options))
 
-    def commands(self, *, options: RequestOptions | None = None) -> list[T.CommandInfo]:
+    def commands(self, query: T.ChatListQuery | None = None, *, options: RequestOptions | None = None) -> list[T.CommandInfo]:
         """GET /v1/commands."""
-        return cast("list[T.CommandInfo]", self.request('GET', f'/v1/commands', binary_body=False, binary_response=False, options=options))
+        return cast("list[T.CommandInfo]", self.request('GET', f'/v1/commands', query=query, binary_body=False, binary_response=False, options=options))
 
     def lsp_status(self, *, options: RequestOptions | None = None) -> list[T.LanguageStatus]:
         """GET /v1/lsp."""
@@ -131,9 +131,9 @@ class Api(Transport):
         """DELETE /v1/ptys/{id}."""
         return cast("None", self.request('DELETE', f'/v1/ptys/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
-    def workflows(self, *, options: RequestOptions | None = None) -> T.WorkflowListResponse:
+    def workflows(self, query: T.ChatListQuery | None = None, *, options: RequestOptions | None = None) -> T.WorkflowListResponse:
         """GET /v1/workflows."""
-        return cast("T.WorkflowListResponse", self.request('GET', f'/v1/workflows', binary_body=False, binary_response=False, options=options))
+        return cast("T.WorkflowListResponse", self.request('GET', f'/v1/workflows', query=query, binary_body=False, binary_response=False, options=options))
 
     def workflow_source(self, invocation: str, *, options: RequestOptions | None = None) -> T.WorkflowSourceResponse:
         """GET /v1/workflows/{invocation}/source."""
@@ -552,9 +552,9 @@ class AsyncApi(AsyncTransport):
         """GET /v1/agents."""
         return cast("list[T.AgentProfile]", await self.request('GET', f'/v1/agents', binary_body=False, binary_response=False, options=options))
 
-    async def commands(self, *, options: RequestOptions | None = None) -> list[T.CommandInfo]:
+    async def commands(self, query: T.ChatListQuery | None = None, *, options: RequestOptions | None = None) -> list[T.CommandInfo]:
         """GET /v1/commands."""
-        return cast("list[T.CommandInfo]", await self.request('GET', f'/v1/commands', binary_body=False, binary_response=False, options=options))
+        return cast("list[T.CommandInfo]", await self.request('GET', f'/v1/commands', query=query, binary_body=False, binary_response=False, options=options))
 
     async def lsp_status(self, *, options: RequestOptions | None = None) -> list[T.LanguageStatus]:
         """GET /v1/lsp."""
@@ -636,9 +636,9 @@ class AsyncApi(AsyncTransport):
         """DELETE /v1/ptys/{id}."""
         return cast("None", await self.request('DELETE', f'/v1/ptys/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
-    async def workflows(self, *, options: RequestOptions | None = None) -> T.WorkflowListResponse:
+    async def workflows(self, query: T.ChatListQuery | None = None, *, options: RequestOptions | None = None) -> T.WorkflowListResponse:
         """GET /v1/workflows."""
-        return cast("T.WorkflowListResponse", await self.request('GET', f'/v1/workflows', binary_body=False, binary_response=False, options=options))
+        return cast("T.WorkflowListResponse", await self.request('GET', f'/v1/workflows', query=query, binary_body=False, binary_response=False, options=options))
 
     async def workflow_source(self, invocation: str, *, options: RequestOptions | None = None) -> T.WorkflowSourceResponse:
         """GET /v1/workflows/{invocation}/source."""
