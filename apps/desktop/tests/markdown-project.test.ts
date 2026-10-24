@@ -25,6 +25,7 @@ const examples = [
   "- [x] checked\n- [ ] open\n\nhttps://example.test\n",
   "Replace <path> with the file, then <text>x</text> stays.\n\n[<dev@example.com>](https://example.test) and [[a](/x)](/y)\n",
   "1. <path>\n2. <file>\n\n<title> is required\n\n<file>\nline two\n\n<svg>\n<path d=\"M0\"/>\n</svg>\n\n<math><mi>x</mi></math>\n",
+  "<plan>\n\n1. Do X\n2. Do Y\n\n</plan>\n\n<example>\nfoo\n\nbar\n</example>\n\nText\n\n</path>\n\nMore\n",
 ];
 
 for (const [index, source] of examples.entries()) {
@@ -98,6 +99,16 @@ test("a block that starts with a bare tag is a paragraph of the reply; block HTM
   assert.equal(html("<table>\n<tr><td>x</td></tr>\n</table>"), "<table>\n<tr><td>x</td></tr>\n</table>");
   assert.equal(html("<!-- note -->\ntext"), "<!-- note -->\n<p>text</p>\n");
   assert.equal(html('<img src="a.png" alt="a">'), '<img src="a.png" alt="a">');
+  // A closing tag starting its own block is a word too, so a section a reply
+  // wraps in made-up tags shows both, and no empty paragraph is left.
+  assert.equal(
+    html("<plan>\n\n1. Do X\n2. Do Y\n\n</plan>"),
+    "<p>&lt;plan&gt;</p>\n<ol>\n<li>Do X</li>\n<li>Do Y</li>\n</ol>\n<p>&lt;/plan&gt;</p>\n",
+  );
+  assert.equal(html("<example>\nfoo\n\n</example>"), "<p>&lt;example&gt;<br>foo</p>\n<p>&lt;/example&gt;</p>\n");
+  assert.equal(html("Text\n\n</path>\n\nMore"), "<p>Text</p>\n<p>&lt;/path&gt;</p>\n<p>More</p>\n");
+  // A drawing's closing tag in a block of its own stays markup.
+  assert.equal(html('<svg width="8">\n<path d="M0"/>\n\n</svg>'), '<svg width="8">\n<path d="M0"/>\n\n</svg>');
 });
 
 // Written without attributes around elements of their own, an svg or a
