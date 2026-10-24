@@ -137,7 +137,10 @@ export function Markdown(props: {
   function follow(href: string) {
     const connection = app.state.connection;
     const thread = app.state.selected;
-    const target = linkTarget(href, { root: connection?.workspace ?? "", base: props.base });
+    // In a chat without a project, links start from the chat's own folder
+    // and stay in it.
+    const within = conversation ? app.chatDirectory() : undefined;
+    const target = linkTarget(href, { root: connection?.workspace ?? "", base: props.base, within });
     if (target.kind === "web") {
       void window.haarness
         .openLink(connection?.id, thread, target.url)
@@ -268,6 +271,7 @@ export function Markdown(props: {
       project: conversation
         ? {
             root: () => (app.state.connection ? projectRoots(app.state.connection) : []),
+            within: () => app.chatDirectory(),
             shown: (path) => {
               const connection = app.state.connection?.id;
               const now = connection ? shownProjectImage(connection, path) : undefined;

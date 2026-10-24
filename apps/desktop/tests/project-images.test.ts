@@ -83,6 +83,19 @@ test("a path in the project names its file there; anything else is outside or no
   // Without a project nothing is read.
   assert.deepEqual(projectImagePath("chart.png", ""), { refused: "outside" });
 
+  // A chat without a project shows its own folder's images: relative paths
+  // start there, and a path outside it (another chat's, the chat home) is not read.
+  const home = "/data/Chat folders";
+  const within = "2026-10-24/charts";
+  for (const [src, path] of [
+    ["chart.png", "2026-10-24/charts/chart.png"],
+    ["./out/chart.png", "2026-10-24/charts/out/chart.png"],
+    ["/data/Chat folders/2026-10-24/charts/chart.png", "2026-10-24/charts/chart.png"],
+  ] as const)
+    assert.deepEqual(projectImagePath(src, home, within), { path }, src);
+  for (const src of ["../other/chart.png", "/data/Chat folders/2026-10-24/other/chart.png", "/data/Chat folders/x.png"])
+    assert.deepEqual(projectImagePath(src, home, within), { refused: "outside" }, src);
+
   // Not a raster image, or spelled with a control character: never read.
   for (const src of ["diagram.svg", "notes.txt", "chart", "chart.png.txt", "out/", "/Users/me/work/app", "a%00.png", "a%0A.png"])
     assert.deepEqual(projectImagePath(src, root), { refused: "failed" }, src);

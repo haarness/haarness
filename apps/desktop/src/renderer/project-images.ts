@@ -94,6 +94,9 @@ export function projectRoots(connection: { workspace: string; info?: { workspace
 export function projectImagePath(
   src: string | null | undefined,
   roots: string | readonly string[],
+  /** A chat's own folder (relative to the project), which relative paths
+   * start from and no path may leave. */
+  within?: string,
 ): ProjectImagePath | undefined {
   const raw = windowsPath(parsedAddress(src ?? ""));
   if (!raw || raw.startsWith("#") || /^[\\/]{2}/.test(raw)) return undefined;
@@ -102,7 +105,7 @@ export function projectImagePath(
   if (scheme && !drive && scheme !== "file") return undefined;
   const target = (typeof roots === "string" ? [roots] : roots)
     .filter(Boolean)
-    .map((root) => linkTarget(raw, { root: windowsPath(root) }))
+    .map((root) => linkTarget(raw, { root: windowsPath(root), within }))
     .find((found) => found.kind === "file");
   if (target?.kind !== "file") return { refused: "outside" };
   if (/[\x00-\x1f\x7f]/.test(target.path)) return { refused: "failed" };
@@ -780,10 +783,11 @@ export function holdProjectImages(
   source: (image: Element) => string | null,
   shown: (path: string) => ShownImage | undefined,
   labels: ProjectImageLabels,
+  within?: string,
 ) {
   for (const image of Array.from(root.querySelectorAll("img"))) {
     const written = source(image);
-    const found = projectImagePath(written, project);
+    const found = projectImagePath(written, project, within);
     if (!found) continue;
     const alt = image.getAttribute("alt") ?? "";
     const document = image.ownerDocument;

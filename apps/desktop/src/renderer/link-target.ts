@@ -21,6 +21,10 @@ export interface LinkPlace {
   root: string;
   /** The folder relative links start from: relative to `root` or absolute. Defaults to `root`. */
   base?: string;
+  /** A folder inside `root` (relative to it) that links may not leave: a
+   * chat's own folder in the chat home. Relative links start there unless
+   * `base` says otherwise. */
+  within?: string;
 }
 
 /** Schemes that name a file share on another computer. */
@@ -120,6 +124,15 @@ function decode(text: string) {
 const absolute = (path: string) => /^(?:\/|[a-z]:\/)/i.test(path);
 
 function filePath(input: string, fragment: string, place: LinkPlace): LinkTarget {
+  const found = projectPath(input, fragment, place);
+  const within = place.within?.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (found.kind !== "file" || !within) return found;
+  return found.path === within || found.path.startsWith(within + "/")
+    ? found
+    : refused("outside");
+}
+
+function projectPath(input: string, fragment: string, place: LinkPlace): LinkTarget {
   if (networkPath(input)) return refused("network");
   // `#L12` (GitHub, VS Code) or a `path:12`, `path:12:4`, `path:12-20` suffix.
   let line = Number(/^#L(\d+)/i.exec(fragment)?.[1]) || undefined;
@@ -132,7 +145,9 @@ function filePath(input: string, fragment: string, place: LinkPlace): LinkTarget
   path = path.replace(/\\/g, "/");
   if (!path || path.startsWith("~")) return refused(path ? "outside" : "unsupported");
   const root = place.root.replace(/\\/g, "/").replace(/\/+$/, "");
-  const start = absolute(path) ? path : join(relative(place.base ?? "", root), path);
+  const start = absolute(path)
+    ? path
+    : join(relative(place.base ?? place.within ?? "", root), path);
   if (start === undefined) return refused("outside");
   const inside = absolute(start) ? relative(start, root) : start;
   const parts = inside === undefined ? undefined : normalize(inside);
