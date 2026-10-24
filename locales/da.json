@@ -2869,5 +2869,16 @@
   "Choose a folder": "Vælg en mappe",
   "Search folders": "Søg i mapper",
   "Opening This computer…": "Åbner Denne computer…",
-  "Couldn’t open This computer": "Denne computer kunne ikke åbnes"
+  "Couldn’t open This computer": "Denne computer kunne ikke åbnes",
+  "no tools yet": "ingen værktøjer endnu",
+  "starting": "starter",
+  "running in background": "kører i baggrunden",
+  "1 tool call": "1 værktøjskald",
+  "{count} tool calls": "{count} værktøjskald",
+  "less than a day left at this pace": "under en dag tilbage i dette tempo",
+  "about 1 day left at this pace": "omkring 1 dag tilbage i dette tempo",
+  "about {count} days left at this pace": "omkring {count} dage tilbage i dette tempo",
+  "Can't reach the server · still waiting": "Kan ikke nå serveren · venter stadig",
+  "Theme {file} not loaded: {reason}": "Temaet {file} blev ikke indlæst: {reason}",
+  "The server did not answer in time": "Serveren svarede ikke i tide"
 }

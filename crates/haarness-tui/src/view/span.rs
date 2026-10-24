@@ -294,11 +294,30 @@ fn style_cells(
     line.spans = rebuilt;
 }
 
+/// Make the `prefix` a row was drawn with decoration: a selection copies the
+/// text after it, never the margin or the bar. The row's first span must
+/// start with it, as [`wrap_spans`] draws it.
+pub fn decorate_prefix(line: &mut Line, prefix: &str) {
+    let Some(first) = line.spans.first_mut() else {
+        return;
+    };
+    if prefix.is_empty() || !first.text.starts_with(prefix) {
+        return;
+    }
+    let rest = first.text.split_off(prefix.len());
+    let tail = styled_run(first, rest);
+    first.selectable = false;
+    if !tail.text.is_empty() {
+        line.spans.insert(1, tail);
+    }
+}
+
 fn push_run(spans: &mut Vec<Span>, span: Span) {
     if let Some(previous) = spans.last_mut()
         && previous.fg == span.fg
         && previous.bg == span.bg
         && previous.attributes == span.attributes
+        && previous.selectable == span.selectable
     {
         previous.text.push_str(&span.text);
     } else {
@@ -312,6 +331,7 @@ fn styled_run(template: &Span, text: String) -> Span {
         fg: template.fg,
         bg: template.bg,
         attributes: template.attributes,
+        selectable: template.selectable,
     }
 }
 

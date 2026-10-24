@@ -2869,5 +2869,16 @@
   "Choose a folder": "Choisir un dossier",
   "Search folders": "Rechercher des dossiers",
   "Opening This computer…": "Ouverture de Cet ordinateur…",
-  "Couldn’t open This computer": "Impossible d’ouvrir Cet ordinateur"
+  "Couldn’t open This computer": "Impossible d’ouvrir Cet ordinateur",
+  "no tools yet": "pas encore d’outil",
+  "starting": "démarrage",
+  "running in background": "en arrière-plan",
+  "1 tool call": "1 appel d’outil",
+  "{count} tool calls": "{count} appels d’outils",
+  "less than a day left at this pace": "moins d’un jour restant à ce rythme",
+  "about 1 day left at this pace": "environ 1 jour restant à ce rythme",
+  "about {count} days left at this pace": "environ {count} jours restants à ce rythme",
+  "Can't reach the server · still waiting": "Serveur injoignable · toujours en attente",
+  "Theme {file} not loaded: {reason}": "Thème {file} non chargé : {reason}",
+  "The server did not answer in time": "Le serveur n’a pas répondu à temps"
 }

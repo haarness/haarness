@@ -2869,5 +2869,16 @@
   "Choose a folder": "フォルダーを選択",
   "Search folders": "フォルダーを検索",
   "Opening This computer…": "このコンピューターを開いています…",
-  "Couldn’t open This computer": "このコンピューターを開けませんでした"
+  "Couldn’t open This computer": "このコンピューターを開けませんでした",
+  "no tools yet": "ツールはまだ未使用",
+  "starting": "起動中",
+  "running in background": "バックグラウンドで実行中",
+  "1 tool call": "ツール呼び出し 1 回",
+  "{count} tool calls": "ツール呼び出し {count} 回",
+  "less than a day left at this pace": "このペースでは残り 1 日未満",
+  "about 1 day left at this pace": "このペースでは残り約 1 日",
+  "about {count} days left at this pace": "このペースでは残り約 {count} 日",
+  "Can't reach the server · still waiting": "サーバーに接続できません · 引き続き待機中",
+  "Theme {file} not loaded: {reason}": "テーマ {file} を読み込めませんでした: {reason}",
+  "The server did not answer in time": "サーバーが時間内に応答しませんでした"
 }
