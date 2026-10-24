@@ -12107,15 +12107,29 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             "completed",
             task.reply
                 .clone()
-                .unwrap_or_else(|| "Subagent completed without a text response".into()),
+                .unwrap_or_else(|| ended_without_reply(None)),
         ),
-        "failed" => (
-            "error",
-            format!(
-                "{}\nHaarness restarted before this background task's result was delivered.",
-                task.error.as_deref().unwrap_or("The subagent failed.")
-            ),
-        ),
+        "failed" => {
+            // A child the provider's safety check stopped stored the wording
+            // written for a person; its parent is told as a live one is.
+            let error = match task
+                .error
+                .as_deref()
+                .and_then(CoreError::provider_blocked_reason)
+            {
+                Some(reason) => subagent_blocked(reason, task.reply.as_deref()),
+                None => task
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The subagent failed.".into()),
+            };
+            (
+                "error",
+                format!(
+                    "{error}\nHaarness restarted before this background task's result was delivered."
+                ),
+            )
+        }
         _ => (
             "error",
             format!(
@@ -15127,6 +15141,82 @@ mod tests {
         assert_eq!(
             super::subagent_reply(&[], turn, None),
             "The subagent ended without writing a reply."
+        );
+    }
+
+    /// After a restart, a background subagent's result reads as a live one
+    /// would: a safety-check stop says not to retry it as is, with its
+    /// partial reply, and a run without a reply says so.
+    #[test]
+    fn a_stranded_subagent_reads_as_a_live_one_would() {
+        let task = |state: &str, reply: Option<&str>, error: Option<String>| crate::StrandedTask {
+            parent_thread_id: ThreadId::new(),
+            parent_turn_id: Some(TurnId::new()),
+            call_id: "call".into(),
+            child_thread_id: ThreadId::new(),
+            child_turn_id: TurnId::new(),
+            state: state.into(),
+            description: "Audit".into(),
+            reply: reply.map(str::to_owned),
+            error,
+        };
+        let envelope = |task: &crate::StrandedTask| match &super::stranded_report(task)[0] {
+            ItemData::UserMessage { text, .. } => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        let blocked = envelope(&task(
+            "failed",
+            Some("partial words"),
+            Some(CoreError::ProviderBlocked("refusal".into()).to_string()),
+        ));
+        assert!(
+            blocked.contains("The provider's safety check stopped this subagent (refusal).")
+                && blocked.contains("do not retry it as is")
+                && blocked.contains("Partial reply before the stop:\npartial words")
+                && blocked.contains(
+                    "Haarness restarted before this background task's result was delivered."
+                ),
+            "{blocked}"
+        );
+        assert!(!blocked.contains("Send a follow-up message"), "{blocked}");
+        let failed = envelope(&task(
+            "failed",
+            None,
+            Some("provider error: HTTP 500".into()),
+        ));
+        assert!(
+            failed.contains("provider error: HTTP 500\nHaarness restarted"),
+            "{failed}"
+        );
+        let silent = envelope(&task("done", None, None));
+        assert!(
+            silent.contains(
+                "<task_result>\nThe subagent ended without writing a reply.\n</task_result>"
+            ),
+            "{silent}"
+        );
+        let answered = envelope(&task("done", Some("the answer"), None));
+        assert!(
+            answered.contains("<task_result>\nthe answer\n</task_result>"),
+            "{answered}"
+        );
+    }
+
+    /// What the safety check's error says is read back to its reason, and
+    /// nothing else is.
+    #[test]
+    fn a_stored_safety_check_error_gives_back_its_reason() {
+        for reason in ["refusal", "content_filter", "SAFETY"] {
+            let stored = CoreError::ProviderBlocked(reason.into()).to_string();
+            assert_eq!(CoreError::provider_blocked_reason(&stored), Some(reason));
+        }
+        assert_eq!(
+            CoreError::provider_blocked_reason("The provider's safety check stopped this response"),
+            None
+        );
+        assert_eq!(
+            CoreError::provider_blocked_reason("provider error: refusal"),
+            None
         );
     }
 
