@@ -416,6 +416,7 @@ async fn message_keys_leave_the_draft_word_motion_and_a_waiting_card_alone() {
             thread_id: app.thread.id,
             root_thread_id: Some(app.thread.id),
             turn_id: None,
+            call_id: None,
             created_at: chrono::Utc::now(),
         });
     app.question_selection = 1;

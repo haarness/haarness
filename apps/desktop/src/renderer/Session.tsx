@@ -115,6 +115,7 @@ import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
 import {
+  awaitsApproval,
   describeTool,
   errorRecovery,
   permissionCommand,
@@ -3258,12 +3259,11 @@ function Message(props: {
                   result={result()}
                   id={props.item.id}
                   expanded={!app.state.preferences.compactTools}
-                  waiting={app.state.permissions.some(
-                    (permission) =>
-                      permission.threadId === props.item.threadId &&
-                      !!props.item.turnId &&
-                      permission.turnId === props.item.turnId,
-                  )}
+                  waiting={awaitsApproval(app.state.permissions, {
+                    threadId: props.item.threadId,
+                    turnId: props.item.turnId,
+                    callId: tool().call_id,
+                  })}
                 />
               );
             })()}

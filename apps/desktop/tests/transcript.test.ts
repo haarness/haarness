@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Item } from "@haarness/sdk";
 import {
   answeredByHook,
+  awaitsApproval,
   reviewBlock,
   toolFailed,
   describeTool,
@@ -719,4 +720,23 @@ test("a batch step Auto's reviewer refused keeps its reason", () => {
   );
   assert.equal(reviewBlock(steps[0].result), "It uploads a key.");
   assert.equal(reviewBlock(steps[1].result), undefined);
+});
+
+test("the call a request names waits for approval, not a read running beside it", () => {
+  const call = (callId: string) => ({ threadId: "thread", turnId: "turn", callId });
+  const named = [{ threadId: "thread", turnId: "turn", callId: "c2" }];
+  assert.equal(awaitsApproval(named, call("c2")), true);
+  assert.equal(awaitsApproval(named, call("c1")), false);
+  // Another chat's request is not this call's.
+  assert.equal(awaitsApproval([{ ...named[0], threadId: "other" }], call("c2")), false);
+  // A batch's step: its batch's row waits.
+  const step = [{ threadId: "thread", turnId: "turn", callId: "batch:2" }];
+  assert.equal(awaitsApproval(step, call("batch")), true);
+  assert.equal(awaitsApproval(step, call("bat")), false);
+  assert.equal(awaitsApproval([{ ...step[0], callId: "batch:x" }], call("batch")), false);
+  // An older server names no call: every call of the asking turn waits.
+  const older = [{ threadId: "thread", turnId: "turn" }];
+  assert.equal(awaitsApproval(older, call("c1")), true);
+  assert.equal(awaitsApproval(older, { ...call("c1"), turnId: "earlier" }), false);
+  assert.equal(awaitsApproval(older, { ...call("c1"), turnId: null }), false);
 });

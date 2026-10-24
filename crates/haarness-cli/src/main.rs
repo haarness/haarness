@@ -15861,6 +15861,7 @@ request_timeout = 0
             root_thread_id: None,
             turn_id: None,
             agent: None,
+            call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
         };
@@ -15896,6 +15897,7 @@ request_timeout = 0
             root_thread_id: Some(root),
             turn_id: None,
             agent: None,
+            call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
         };
@@ -16079,6 +16081,7 @@ request_timeout = 0
             root_thread_id: Some(root),
             turn_id: None,
             agent: Some("w1".into()),
+            call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
         };

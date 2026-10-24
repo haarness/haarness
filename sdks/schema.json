@@ -3705,6 +3705,13 @@
             },
             "type": "array"
           },
+          "callId": {
+            "description": "The tool call that asks, by the id of its `tool_call` item (a\nbatch's step: `<batch call id>:N`), so a client marks that call, and\nno other of a parallel batch, as the one waiting. Older servers send\nnone.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -3794,6 +3801,13 @@
       "PendingQuestionInfo": {
         "description": "One unanswered model question, listable so clients can hydrate every\nprompt in a root conversation after reconnecting or switching threads.\nQuestions raised by parallel child agents remain distinct queue entries.",
         "properties": {
+          "callId": {
+            "description": "The tool call that asks (`question`, or a goal's criteria), by the\nid of its `tool_call` item. Older servers send none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "choices": {
             "items": {
               "type": "string"

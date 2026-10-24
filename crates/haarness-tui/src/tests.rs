@@ -2420,6 +2420,7 @@ fn new_item_kinds_render_in_the_transcript() {
             thread_id: thread.id,
             root_thread_id: Some(thread.id),
             turn_id: None,
+            call_id: None,
             created_at: chrono::Utc::now(),
         });
     app.pending_permissions
@@ -2438,6 +2439,7 @@ fn new_item_kinds_render_in_the_transcript() {
             root_thread_id: Some(thread.id),
             turn_id: None,
             agent: None,
+            call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
         });
@@ -8750,6 +8752,7 @@ fn question_hydration_filters_the_current_root_and_preserves_oldest_first() {
             thread_id: child,
             root_thread_id: Some(thread.id),
             turn_id: None,
+            call_id: None,
             created_at: now,
         },
         haarness_protocol::PendingQuestionInfo {
@@ -8761,6 +8764,7 @@ fn question_hydration_filters_the_current_root_and_preserves_oldest_first() {
             thread_id: ThreadId::new(),
             root_thread_id: Some(foreign_root),
             turn_id: None,
+            call_id: None,
             created_at: now - chrono::Duration::seconds(2),
         },
         haarness_protocol::PendingQuestionInfo {
@@ -8772,6 +8776,7 @@ fn question_hydration_filters_the_current_root_and_preserves_oldest_first() {
             thread_id: child,
             root_thread_id: Some(thread.id),
             turn_id: None,
+            call_id: None,
             created_at: now - chrono::Duration::seconds(1),
         },
     ]);
@@ -8834,6 +8839,7 @@ fn pending_permission_fixture(
         root_thread_id: Some(thread.id),
         turn_id: None,
         agent: None,
+        call_id: None,
         created_at: Utc::now(),
         review: None,
     }
@@ -9047,6 +9053,7 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
             root_thread_id: Some(thread.id),
             turn_id: None,
             agent: None,
+            call_id: None,
             created_at: Utc::now(),
             review: None,
         });
@@ -10304,6 +10311,7 @@ async fn a_compact_terminal_shows_the_waiting_request_and_its_answers() {
             root_thread_id: Some(thread.id),
             turn_id: None,
             agent: None,
+            call_id: None,
             created_at: Utc::now(),
             review: None,
         }],
@@ -10992,9 +11000,9 @@ async fn background_root_completion_notifies_after_activity_snapshot_race() {
 
 /// While a request waits for a person nothing runs: the call that asked
 /// shows a still ⚠ (? under a question) and the calls after it a quiet ○,
-/// never a spinner. No status names the asking call, so it is the earliest
-/// call of the asking turn with no result; with that turn unknown, no call is
-/// marked either way.
+/// never a spinner. From a server that names no asking call, it is the
+/// earliest call of the asking turn with no result; with that turn unknown,
+/// no call is marked either way.
 #[tokio::test]
 async fn calls_waiting_on_an_approval_do_not_spin() {
     let thread = fixture_thread();
@@ -11089,6 +11097,7 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
         thread_id: thread.id,
         root_thread_id: Some(thread.id),
         turn_id: Some(turn),
+        call_id: None,
         created_at: Utc::now(),
     }];
     app.reduce(status("waiting_question", None), &client)
@@ -11109,6 +11118,189 @@ async fn calls_waiting_on_an_approval_do_not_spin() {
     let text = frame_text(&app, (100, 30));
     assert!(!text.contains("queued"), "{text}");
     assert!(!text.contains("waiting for approval  "), "{text}");
+}
+
+/// In a parallel group the call a request names waits (⚠), not the earlier
+/// read still running beside it, which keeps its spinner; the call after
+/// them queues. Two siblings may ask at once, and one answered runs again
+/// while the other still waits.
+#[tokio::test]
+async fn a_parallel_group_marks_the_call_the_request_names() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let call = |sequence, id: &str, name: &str, arguments| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let items = vec![
+        call(1, "c1", "read", serde_json::json!({"path": "slow.txt"})),
+        call(2, "c2", "read", serde_json::json!({"path": "one.txt"})),
+        call(3, "c3", "read", serde_json::json!({"path": "two.txt"})),
+        call(
+            4,
+            "c4",
+            "bash",
+            serde_json::json!({"command": "echo after"}),
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let client = offline_client();
+    let event = |kind: &str, payload: serde_json::Value| {
+        let mut event = fixture_event(kind, thread.id, thread.id, payload);
+        event.turn_id = Some(turn);
+        event
+    };
+    let status = |state: &str, call: &str| {
+        event(
+            "turn.status",
+            serde_json::json!({
+                "state": state,
+                "tool": "read",
+                "callId": call,
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    let requested = |id: &str, call: &str| {
+        event(
+            "permission.requested",
+            serde_json::json!({
+                "permissionId": id,
+                "operation": "external_directory:/outside/*",
+                "permission": "external_directory",
+                "patterns": ["/outside/*"],
+                "detail": {"path": "/outside/one.txt"},
+                "threadId": thread.id,
+                "turnId": turn,
+                "callId": call,
+            }),
+        )
+    };
+    let row = |text: &str, target: &str| {
+        text.lines()
+            .find(|line| line.contains(target))
+            .unwrap_or_else(|| panic!("no row for {target}: {text}"))
+            .to_owned()
+    };
+    let spins = |row: &str| {
+        ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇']
+            .iter()
+            .any(|frame| row.contains(*frame))
+    };
+    for started in ["c1", "c2", "c3"] {
+        app.reduce(status("tool", started), &client).await.unwrap();
+    }
+    // c2 asks while c1, earlier in the group, still reads.
+    app.reduce(requested("perm-one", "c2"), &client)
+        .await
+        .unwrap();
+    app.reduce(status("waiting_permission", "c2"), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.pending_permissions[0].call_id.as_deref(), Some("c2"));
+    let text = frame_text(&app, (100, 30));
+    let slow = row(&text, "slow.txt");
+    assert!(
+        spins(&slow) && !slow.contains('⚠') && !slow.contains("queued"),
+        "{text}"
+    );
+    assert!(
+        row(&text, "one.txt").contains("⚠ read one.txt  waiting for approval"),
+        "{text}"
+    );
+    assert!(
+        row(&text, "echo after").contains("○ bash echo after  queued"),
+        "{text}"
+    );
+    // c3 asks too: both wait, the earlier read still runs.
+    app.reduce(requested("perm-two", "c3"), &client)
+        .await
+        .unwrap();
+    app.reduce(status("waiting_permission", "c3"), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(row(&text, "one.txt").contains('⚠'), "{text}");
+    assert!(row(&text, "two.txt").contains('⚠'), "{text}");
+    assert!(spins(&row(&text, "slow.txt")), "{text}");
+    // c2 answered runs again; c3, not answered yet, still waits.
+    app.reduce(
+        event(
+            "permission.resolved",
+            serde_json::json!({"permissionId": "perm-one", "allowed": true}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.reduce(status("tool", "c2"), &client).await.unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(spins(&row(&text, "one.txt")), "{text}");
+    assert!(
+        row(&text, "two.txt").contains("⚠ read two.txt  waiting for approval"),
+        "{text}"
+    );
+    assert!(spins(&row(&text, "slow.txt")), "{text}");
+    assert!(row(&text, "echo after").contains("queued"), "{text}");
+}
+
+/// A batch's step a request names (`<batch call id>:N`) is the one marked
+/// waiting, whichever step the last tool status named.
+#[tokio::test]
+async fn a_batch_marks_the_step_the_request_names() {
+    let thread = fixture_thread();
+    let steps = [
+        ("read", serde_json::json!({"path":"slow.txt"})),
+        ("read", serde_json::json!({"path":"asks.txt"})),
+        ("bash", serde_json::json!({"command":"echo third"})),
+    ];
+    let turn = TurnId::new();
+    let mut items = batch_items(&thread, &steps, None);
+    items[0].turn_id = Some(turn);
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let client = offline_client();
+    let status = |state: &str, call: &str| {
+        fixture_event(
+            "turn.status",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "state": state,
+                "tool": "read",
+                "callId": call,
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    app.reduce(status("tool", "call-batch:2"), &client)
+        .await
+        .unwrap();
+    app.reduce(status("tool", "call-batch:1"), &client)
+        .await
+        .unwrap();
+    let mut pending = pending_permission_fixture(&thread, "perm-step");
+    pending.turn_id = Some(turn);
+    pending.call_id = Some("call-batch:2".into());
+    app.pending_permissions = vec![pending];
+    app.reduce(status("waiting_permission", "call-batch:2"), &client)
+        .await
+        .unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("⚠ batch"), "{text}");
+    assert!(text.contains("⚠ read asks.txt"), "{text}");
+    assert!(!text.contains("⚠ read slow.txt"), "{text}");
+    assert!(text.contains("○ bash echo third"), "{text}");
 }
 
 /// Ctrl+R with no fold on screen leaves the waiting card's summary in the
@@ -11591,6 +11783,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             thread_id: thread.id,
             root_thread_id: Some(thread.id),
             turn_id: None,
+            call_id: None,
             created_at: Utc::now(),
         });
     app.pending_permissions
@@ -11609,6 +11802,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             root_thread_id: Some(thread.id),
             turn_id: None,
             agent: None,
+            call_id: None,
             created_at: Utc::now(),
             review: None,
         });
@@ -14995,6 +15189,7 @@ async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_cha
             thread_id: fork.id,
             root_thread_id: Some(recent.id),
             turn_id: None,
+            call_id: None,
             created_at: now,
         },
         haarness_protocol::PendingQuestionInfo {
@@ -15006,6 +15201,7 @@ async fn session_list_leads_with_chats_that_wait_and_keeps_the_cursor_on_its_cha
             thread_id: current.id,
             root_thread_id: Some(current.id),
             turn_id: None,
+            call_id: None,
             created_at: now,
         },
     ]);
@@ -17421,6 +17617,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         root_thread_id: Some(root),
         turn_id: None,
         agent: None,
+        call_id: None,
         created_at: chrono::Utc::now(),
         review: None,
     };

@@ -4523,6 +4523,7 @@ impl AgentRuntime {
                     thread_id,
                     root_thread_id: root,
                     turn_id: None,
+                    call_id: Some(call_id.clone()),
                     agent: Some(thread.agent.clone()),
                     created_at: Utc::now(),
                     sender,
@@ -4638,6 +4639,7 @@ impl AgentRuntime {
                     "alwaysPatterns": always_rules,
                     "threadId": thread_id,
                     "rootThreadId": root,
+                    "callId": call_id,
                     "agent": thread.agent,
                 });
                 if let Some(review) = &review {
@@ -6559,6 +6561,8 @@ struct PendingPermission {
     thread_id: ThreadId,
     root_thread_id: ThreadId,
     turn_id: Option<TurnId>,
+    /// The tool call that asks, as its `tool_call` item names it.
+    call_id: Option<String>,
     agent: Option<String>,
     created_at: DateTime<Utc>,
     sender: oneshot::Sender<PermissionResolution>,
@@ -6694,6 +6698,8 @@ struct PendingQuestion {
     thread_id: ThreadId,
     root_thread_id: ThreadId,
     turn_id: TurnId,
+    /// The tool call that asks, as its `tool_call` item names it.
+    call_id: String,
     created_at: DateTime<Utc>,
     sender: oneshot::Sender<String>,
 }
@@ -6709,6 +6715,7 @@ impl PendingQuestion {
             thread_id: self.thread_id,
             root_thread_id: Some(self.root_thread_id),
             turn_id: Some(self.turn_id),
+            call_id: Some(self.call_id.clone()),
             created_at: self.created_at,
         }
     }
@@ -6742,6 +6749,7 @@ impl PendingQuestion {
                 "custom": self.custom,
                 "threadId": self.thread_id,
                 "rootThreadId": self.root_thread_id,
+                "callId": self.call_id,
             }),
         );
     }
@@ -7041,7 +7049,8 @@ fn publish_requested(events: &EventBus, id: &str, pending: &PendingPermission) {
 }
 
 /// The status of the turn a shown request waits in, while Auto's reviewer
-/// takes it up (`reviewing`) and once it leaves it to the person again.
+/// takes it up (`reviewing`) and once it leaves it to the person again:
+/// either way it names the call that asks.
 fn publish_review_status(events: &EventBus, pending: &PendingPermission, reviewing: bool) {
     let Some(turn) = pending.turn_id else {
         return;
@@ -7049,8 +7058,7 @@ fn publish_review_status(events: &EventBus, pending: &PendingPermission, reviewi
     let tool = pending
         .reviewer
         .as_ref()
-        .and_then(|reviewer| reviewer.request.tool.clone())
-        .filter(|_| reviewing);
+        .and_then(|reviewer| reviewer.request.tool.clone());
     events.publish_scoped(
         "turn.status",
         Some(pending.thread_id),
@@ -7060,7 +7068,10 @@ fn publish_review_status(events: &EventBus, pending: &PendingPermission, reviewi
         json!({
             "state": if reviewing { "reviewing" } else { "waiting_permission" },
             "tool": tool.as_ref().map(|(name, _)| name),
-            "callId": tool.as_ref().map(|(_, call_id)| call_id),
+            "callId": pending
+                .call_id
+                .as_deref()
+                .or(tool.as_ref().map(|(_, call_id)| call_id.as_str())),
             "startedAt": Utc::now(),
         }),
     );
@@ -7233,6 +7244,7 @@ impl PendingPermission {
             thread_id: self.thread_id,
             root_thread_id: Some(self.root_thread_id),
             turn_id: self.turn_id,
+            call_id: self.call_id.clone(),
             agent: self.agent.clone(),
             created_at: self.created_at,
             review: self.review.clone(),
@@ -9708,6 +9720,7 @@ impl RunnerTask {
 
     async fn propose_goal_criteria_tool(
         &self,
+        call_id: &str,
         arguments: &serde_json::Value,
     ) -> CoreResult<String> {
         let proposed = arguments
@@ -9750,12 +9763,15 @@ impl RunnerTask {
                 .join("\n")
         );
         let answer = self
-            .ask_question(&json!({
-                "prompt": rendered,
-                "choices": proposed,
-                "multiple": true,
-                "custom": true
-            }))
+            .ask_question(
+                &json!({
+                    "prompt": rendered,
+                    "choices": proposed,
+                    "multiple": true,
+                    "custom": true
+                }),
+                ("propose_goal_criteria", call_id),
+            )
             .await?;
         let approved = parse_goal_criteria_selection(&proposed, &answer)?;
         // The approval prompt may stay open indefinitely. The user can pause,
@@ -9985,7 +10001,7 @@ impl RunnerTask {
                 )));
             }
             return self
-                .propose_goal_criteria_tool(&arguments)
+                .propose_goal_criteria_tool(call_id, &arguments)
                 .await
                 .map(plain_tool_output);
         }
@@ -10538,6 +10554,7 @@ impl RunnerTask {
                     thread_id: self.thread.id,
                     root_thread_id: self.root_thread_id,
                     turn_id: Some(self.turn.id),
+                    call_id: Some(tool.1.to_owned()),
                     agent: Some(self.thread.agent.clone()),
                     created_at: Utc::now(),
                     sender,
@@ -10641,6 +10658,7 @@ impl RunnerTask {
                     "threadId": self.thread.id,
                     "rootThreadId": self.root_thread_id,
                     "turnId": self.turn.id,
+                    "callId": tool.1,
                     "agent": self.thread.agent,
             });
             if let Some(review) = &review {
@@ -10654,7 +10672,7 @@ impl RunnerTask {
                 None,
                 requested,
             );
-            self.set_status("waiting_permission", None);
+            self.set_status("waiting_permission", Some(tool));
             if let Some(hooks) = &self.hooks {
                 let hooks = Arc::clone(hooks);
                 let thread_id = self.thread.id;
@@ -10937,7 +10955,7 @@ impl RunnerTask {
                     "a PreToolUse hook's answers do not fit the question; asking instead"
                 );
             }
-            plain_tool_output(self.ask_question(&arguments).await?)
+            plain_tool_output(self.ask_question(&arguments, ("question", call_id)).await?)
         };
         if let Some(context) = hook_context {
             let _ = write!(
@@ -10961,7 +10979,12 @@ impl RunnerTask {
         Ok(output)
     }
 
-    async fn ask_question(&self, arguments: &serde_json::Value) -> CoreResult<String> {
+    /// `call`: the tool and call that ask.
+    async fn ask_question(
+        &self,
+        arguments: &serde_json::Value,
+        call: (&str, &str),
+    ) -> CoreResult<String> {
         let QuestionRequest {
             prompt,
             choices,
@@ -10994,6 +11017,7 @@ impl RunnerTask {
                     thread_id: self.thread.id,
                     root_thread_id: self.root_thread_id,
                     turn_id: self.turn.id,
+                    call_id: call.1.to_owned(),
                     created_at: Utc::now(),
                     sender,
                 },
@@ -11003,7 +11027,7 @@ impl RunnerTask {
                 .expect("newly inserted question")
                 .publish_requested(&self.events, &id);
         }
-        self.set_status("waiting_question", None);
+        self.set_status("waiting_question", Some(call));
         tokio::select! {
             biased;
             result = receiver => {
@@ -14638,6 +14662,7 @@ mod tests {
                 thread_id,
                 root_thread_id: thread_id,
                 turn_id,
+                call_id: "call-question".into(),
                 created_at: Utc::now(),
                 sender,
             },
@@ -16799,6 +16824,7 @@ mod tests {
             thread_id: first_child,
             root_thread_id: root,
             turn_id: first_turn,
+            call_id: "call-question".into(),
             created_at: Utc::now(),
             sender: first_sender,
         };
@@ -16810,6 +16836,7 @@ mod tests {
             thread_id: second_child,
             root_thread_id: root,
             turn_id: second_turn,
+            call_id: "call-question".into(),
             created_at: Utc::now(),
             sender: second_sender,
         };

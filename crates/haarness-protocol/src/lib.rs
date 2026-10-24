@@ -1124,6 +1124,12 @@ pub struct PendingPermissionInfo {
     pub root_thread_id: Option<ThreadId>,
     #[serde(default)]
     pub turn_id: Option<TurnId>,
+    /// The tool call that asks, by the id of its `tool_call` item (a
+    /// batch's step: `<batch call id>:N`), so a client marks that call, and
+    /// no other of a parallel batch, as the one waiting. Older servers send
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -1194,6 +1200,10 @@ pub struct PendingQuestionInfo {
     pub root_thread_id: Option<ThreadId>,
     #[serde(default)]
     pub turn_id: Option<TurnId>,
+    /// The tool call that asks (`question`, or a goal's criteria), by the
+    /// id of its `tool_call` item. Older servers send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1505,6 +1515,52 @@ mod tests {
         let tools = request.tools.unwrap();
         assert_eq!(tools.get("bash"), Some(&false));
         assert_eq!(tools.get("read"), Some(&true));
+    }
+
+    /// A waiting request names its call as `callId`; one from an older
+    /// server names none, and none is sent when there is none.
+    #[test]
+    fn pending_requests_name_the_asking_call_when_they_know_it() {
+        let thread = super::ThreadId::new();
+        let permission = json!({
+            "permissionId": "p1",
+            "operation": "read:/etc/hosts",
+            "threadId": thread,
+            "createdAt": "2026-10-24T00:00:00Z",
+        });
+        let older: super::PendingPermissionInfo =
+            serde_json::from_value(permission.clone()).unwrap();
+        assert!(older.call_id.is_none());
+        assert!(
+            serde_json::to_value(&older)
+                .unwrap()
+                .get("callId")
+                .is_none()
+        );
+        let mut named = permission;
+        named["callId"] = json!("call-batch:2");
+        let named: super::PendingPermissionInfo = serde_json::from_value(named).unwrap();
+        assert_eq!(named.call_id.as_deref(), Some("call-batch:2"));
+        assert_eq!(
+            serde_json::to_value(&named).unwrap()["callId"],
+            "call-batch:2"
+        );
+
+        let question = json!({
+            "questionId": "q1",
+            "prompt": "Which one?",
+            "threadId": thread,
+            "createdAt": "2026-10-24T00:00:00Z",
+        });
+        let older: super::PendingQuestionInfo = serde_json::from_value(question.clone()).unwrap();
+        assert!(older.call_id.is_none());
+        let mut named = question;
+        named["callId"] = json!("call-question");
+        let named: super::PendingQuestionInfo = serde_json::from_value(named).unwrap();
+        assert_eq!(
+            serde_json::to_value(&named).unwrap()["callId"],
+            "call-question"
+        );
     }
 
     #[test]
