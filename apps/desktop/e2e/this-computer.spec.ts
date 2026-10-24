@@ -312,12 +312,15 @@ test("chats without a project: a ready first launch, a folder of their own on on
   }, project);
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  // Typed first, then a folder chosen: the text goes along.
+  await composer().fill("Take this along");
   await newChatFolder().click();
   const picker = page.getByRole("dialog", { name: "Choose a folder", exact: true });
   await expect(picker.getByRole("option", { name: "No folder" })).toHaveAttribute("aria-selected", "true");
   await picker.getByRole("button", { name: "Open folder…", exact: true }).click();
   await ready();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: pocket-project");
+  await expect(composer()).toHaveValue("Take this along");
   await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on in pocket-project?");
   await send("Project message please");
   await expect(page.locator(".transcript")).toContainText("Echo: Project message please", { timeout: 60000 });
@@ -333,6 +336,8 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await picker.getByRole("option", { name: "No folder" }).click();
   await ready();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  // What was taken along is not left behind as well.
+  await expect(composer()).toHaveValue("");
   // Going back to This computer shows its message box at once too.
   expect(await loadingMarkSeen()).toBe(false);
 

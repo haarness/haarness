@@ -175,7 +175,8 @@ function NewChatFolder() {
   const choose = (action: () => Promise<unknown>) => {
     close(true);
     void app.run(async () => {
-      const result = await action();
+      // Typed first, then a folder chosen: the text goes along.
+      const result = await app.moveNewChat(action);
       if (result !== false && !state.selected && state.panel === "chat")
         document
           .querySelector<HTMLTextAreaElement>("[data-composer-input]")
