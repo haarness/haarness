@@ -1,14 +1,22 @@
 # Connect Haarness Router
 
-> **User guide:** [Haarness Router](https://haarness.ai/docs/providers/router). This page has the engineering detail.
+How Desktop, the TUI and the CLI connect a self-hosted Haarness Router as a model
+provider: where the connection and its key are saved, the provider ids it gets, and
+how the connection is tested. For developers and operators running their own router.
 
-Haarness Router connects your model providers through one endpoint. The
-self-hosted integration is available in Desktop, TUI, and CLI.
+> **User guides:** [Haarness Router](https://haarness.ai/docs/providers/router), [Run the router yourself](https://haarness.ai/docs/cloud/self-hosted-router).
+
+Haarness Router connects your model providers through one endpoint. A router that
+Haarness Cloud runs for your account is chosen with `/router` or
+`haarness account --router` instead (see [Sign in to Haarness](HAARNESS-ACCOUNT.md#cloud-routers)).
 
 ## Desktop and TUI
 
-In Desktop, open **Settings → Providers → Connect Haarness Router**.
-In the terminal, use **/providers → Connect Haarness Router**.
+In Desktop, open **Settings → Providers → Connect Haarness Router**, or
+**Connect a provider → Haarness Router** under **Something else**. Both appear only
+while Desktop uses a server on this computer.
+In the terminal, use **/providers → Connect Haarness Router**, or
+**/connect → Haarness Router…**.
 
 Enter your router address and choose **Connect**. New self-hosted routers need
 no key by default. If yours requires authentication, Haarness asks for its
@@ -16,10 +24,13 @@ router access key. Wrong keys and unreachable endpoints leave your
 configuration unchanged.
 
 Use **Advanced** to give the connection a name or limit it to the current
-project. You can add multiple named routers. The model picker loads
-current models automatically, including the router's aliases.
+project (**Available in**: global or project; a project connection is refused
+while project configuration is disabled). You can add multiple named routers. The model picker loads
+current models automatically, including the router's aliases. The address is
+normalized to its `/v1` API root (`localhost:8080` becomes
+`http://localhost:8080/v1`), keeping any proxy path before it.
 
-When attached to a remote server, the connection is checked and saved on that
+When the TUI is attached to a remote server, the connection is checked and saved on that
 server; `localhost` means the server's machine. Provider keys remain on the
 router. A router access key, if required, is saved in the Haarness server's
 credential store. The router connection becomes available automatically when
@@ -32,8 +43,11 @@ Run on the machine hosting the Haarness server:
 ```sh
 haarness provider connect-router http://localhost:8080
 haarness provider connect-router https://router.example --name "Team router"
-haarness provider connect-router http://localhost:8080 --project
+haarness provider connect-router http://localhost:8080 --project   # alias: --local
 ```
+
+`--name` defaults to "Haarness Router". `--project` saves the connection in this
+project's configuration instead of the global one.
 
 For a protected router, supply the key through stdin with `--key-stdin`; obtain
 it from your secret manager or router owner. It is never accepted as a command
@@ -53,7 +67,7 @@ that identity. Use `haarness provider list` to inspect your connections.
 
 ## Router authentication
 
-The sibling router's prepared launcher defaults to no router-key requirement:
+The sibling `haarness-router` repository's prepared launcher defaults to no router-key requirement:
 
 ```sh
 ./scripts/run-stackforward

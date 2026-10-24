@@ -1,6 +1,11 @@
 # Dynamic workflows
 
-> **User guide:** [Run and write workflows](https://haarness.ai/docs/cli/workflows). This page has the engineering detail.
+How workflows are discovered, run and stored, the native and portable APIs a workflow
+script uses, its lifecycle and events, and its trust boundary. For workflow authors and
+for contributors changing the workflow runtime (`crates/haarness-workflows`,
+`crates/haarness-workflow-catalog`).
+
+> **User guide:** [Run and write workflows](https://haarness.ai/docs/cli/workflows).
 
 Haarness discovers reusable JavaScript and TypeScript workflows, executes each
 run in a dedicated child session, and stores the source snapshot, arguments,
@@ -11,31 +16,42 @@ original source snapshot.
 
 ## Discover and run
 
-Project definitions are discovered in this order:
+Definitions are discovered in this order (`WorkflowCatalog::for_workspace`):
 
-1. `.haarness/workflows`
-2. supported legacy project workflow directories
-3. the platform Haarness data directory's `config/workflows`
-4. supported legacy global workflow directories and configuration overrides
-5. enabled plugin workflow roots
+1. `.haarness/workflows`, then the legacy `.opencode/workflows`, in the
+   selected folder and then each parent up to the Git worktree root (the
+   nearest folder first)
+2. the global workflow folder: `$HAARNESS_DATA_DIR/config/workflows` or
+   `$HAARNESS_HOME/config/workflows` when set, otherwise the platform
+   configuration folder of the `directories` crate (`~/.config/haarness/workflows`
+   on Linux, `~/Library/Application Support/dev.haarness.haarness/workflows` on
+   macOS, `%APPDATA%\haarness\haarness\config\workflows` on Windows)
+3. the legacy global `~/.opencode/workflows` and `~/.config/opencode/workflows`
+4. enabled plugin workflow roots
 
 The first project/global definition with an invocation name wins. Plugin
 definitions are namespaced as `plugin-name:workflow-name`. A plugin may use
 `workflows` in `.claude-plugin/plugin.json` to name one relative file or an
-array of relative files/directories; every path must start with `./` and stay
-inside the plugin root.
+array of relative files/directories (default `./workflows/`); every path must
+start with `./` and stay inside the plugin root.
 
-In the TUI, `/workflow` opens the searchable definitions-and-runs dashboard.
-Every discovered definition is also registered as its own searchable slash
-command. For example, invocation `audit` runs as `/audit`; a plugin invocation
-such as `shipping:audit` runs as `/shipping:audit`. Native plain text becomes
+On macOS the global workflow folder is not the `~/.config/haarness/` folder the
+rest of the global configuration uses; a workflow saved in
+`~/.config/haarness/workflows` there is not discovered.
+
+In the TUI, `/workflow` (aliases `/workflows`, `/wf`) opens the searchable
+definitions-and-runs dashboard. In the TUI and Desktop, every discovered
+definition is also registered as its own searchable slash command. For
+example, invocation `audit` runs as `/audit`; a plugin invocation such as
+`shipping:audit` runs as `/shipping:audit`. Native plain text becomes
 `{ "input": "..." }`. Portable input preserves valid JSON values and wraps
-non-JSON text in the same `input` object. Management commands remain available:
+non-JSON text in the same `input` object.
 
 The server owns command resolution, case-insensitively. Reserved `/workflow`
 wins first, configured prompt commands win over a colliding direct workflow
 name, and discovered workflows fill the remaining names. Use
 `/workflow run <name>` to explicitly run a workflow hidden by such a collision.
+The management commands:
 
 ```text
 /audit check the server
@@ -63,8 +79,9 @@ haarness workflow source audit
 haarness workflow run audit --args '{"scope":"server"}'
 haarness workflow run audit --agent review --model openai/gpt-5.6 --variant high
 haarness workflow run audit --detach
+haarness workflow run audit --timeout-ms 600000 --json
 printf 'check the server' | haarness run --workflow audit --workflow-arg reviewers=3
-haarness workflow runs
+haarness workflow runs --limit 20
 haarness workflow inspect 019...
 haarness workflow pause 019...
 haarness workflow resume 019...
@@ -72,9 +89,17 @@ haarness workflow cancel 019...
 haarness workflow delete 019...
 ```
 
+`workflow run` waits for the run to finish unless `--detach` is given;
+`--timeout-ms` stops waiting while the run goes on on the server, and `--json`
+prints the whole run record. `--agent`, `--model` and `--variant` set
+workflow-wide defaults for the run's child agents. `workflow runs` lists 50
+recent runs by default (`--limit` 1–500).
+
 The model-facing `workflow` tool can read, start, wait for, inspect, create,
-cancel, pause, resume, and delete runs. Creation never overwrites an existing
-file and follows the normal workflow and edit permission decisions. Haarness
+cancel, pause, resume, and delete runs. Creation writes
+`.haarness/workflows/<name>.ts` in the project (the name a lowercase slug of
+letters, digits, `-` and `_`), never overwrites an existing file, and follows the
+normal workflow and edit permission decisions. Haarness
 advertises this tool to a primary model turn only when the request contains a
 standalone `workflow`/`workflows` word, the turn explicitly sets
 `tools.workflow=true`, or Ultracode is active. Ordinary child agents do not
@@ -177,7 +202,9 @@ return { reports, manifest }
 Portable bodies expose `args`, `phase`/`setPhase`, `status`/`setStatus`, `log`,
 `agent`, `tool`, `shell`, `workflow`, `parallel`, and `pipeline`. Agent replies
 support `followup` and `close`. Parallel execution preserves input order, caps
-fan-out, and returns `null` for a failed branch after logging the failure.
+fan-out, and returns `null` for a failed branch after logging the failure. A
+portable run has at most 16 agents running at once (the rest queue) and 1,000
+agents in all.
 Filesystem, process, network, module-import, dynamic-code, and nondeterministic
 globals are unavailable to the portable body. Host operations still go through
 Haarness and therefore retain tool permissions, hooks, snapshots, transcript
@@ -255,6 +282,15 @@ open dashboards without polling. Completion notifications are scoped to the
 conversation that launched the run, while the dedicated workflow child session
 keeps its tools and subagents inspectable.
 
+A chat that launched a background run is owed its result: it is listed as
+working, and is not reported done (to the apps, notifications or phones) until
+the run ends, even before its first turn or after a stop. A paused run owes its
+chat nothing until it is resumed; a run cancelled with its chat is owed to
+nobody from that moment. A run's own threads and agents never show as chats.
+Chats started inside a workflow do not fire `SessionStart` hooks, so a
+workflow's agents send their first prompt without waiting for them. A run that
+fails on a refusal reports the refusal's own words, as a subagent does.
+
 ## Security boundary
 
 Native TypeScript/JavaScript is arbitrary code. Haarness clears the child
@@ -272,3 +308,13 @@ original installed path is only a diagnostic filename, so changing or deleting
 that entry cannot silently change a durable run. Native workflows retain strict
 installed-entry equality because their ordinary relative imports resolve from
 that trusted module path.
+
+A workflow's direct `tool` and `shell` calls (`ctx.tool`, `ctx.shell`) meet the
+same rules as the agent's and run `PreToolUse` hooks, but no
+`PermissionRequest` hooks. In a chat in Auto, the reviewer answers them as it
+answers the agent's. A workflow started by a turn that approves its own
+requests (a schedule's own run, `haarness run --yolo`, ACP, a `--yolo` terminal
+UI) approves its direct calls once too, also after that turn ends, and in a
+scheduled run a request that always asks is refused at once instead of
+waiting. A workflow a person's later turn starts in a scheduled chat or its
+fork is asked as usual. See [Automatic approvals](AUTO-APPROVALS.md#the-server-keeps-the-mode).

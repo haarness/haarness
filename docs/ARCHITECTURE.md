@@ -1,10 +1,43 @@
 # Architecture
 
+How the Haarness code is put together: the crates and apps in this repository, the dependency rules the build enforces, the runtime invariants every change has to keep, and the native and extension boundaries. It is for contributors; building, running and testing are in [CONTRIBUTING.md](../CONTRIBUTING.md) and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
+
+## Repository map
+
+| Path | What it holds |
+| --- | --- |
+| `crates/haarness-protocol` | Stable wire types shared by every client |
+| `crates/haarness-core` | The agent runtime (turns, tools, permissions, agents, compaction) behind provider, storage and transport ports |
+| `crates/haarness-store` | SQLite persistence, the durable source of truth |
+| `crates/haarness-providers` | Native model provider adapters; provider wire payloads stay inside this crate |
+| `crates/haarness-mcp` | MCP configuration, transports, capability discovery and tool calls |
+| `crates/haarness-server` | The REST, SSE and WebSocket API: authentication, files, previews, hooks, the browser broker, remote access |
+| `crates/haarness-cli` | The `haarness` executable and the only composition root: commands, the daemon, ACP, account, the Chrome bridge |
+| `crates/haarness-tui` | The terminal UI, a client of the server API |
+| `crates/haarness-opentui` | The OpenTUI FFI, the only place `unsafe` is allowed (see [Native boundary](#native-boundary)) |
+| `crates/haarness-account` | Haarness account sign-in shared by the terminal, Desktop and the Cloud CLI |
+| `crates/haarness-extensions` | TypeScript/JavaScript extensions in Bun subprocesses |
+| `crates/haarness-workflows`, `crates/haarness-workflow-catalog` | Workflow execution, and static workflow discovery that runs nothing |
+| `crates/haarness-scheduler` | Schedules registered with launchd, systemd user timers or Windows Task Scheduler |
+| `crates/haarness-workspaces` | The project and workspace registry and the Git worktree lifecycle |
+| `crates/haarness-insights` | Read-only cross-project analytics |
+| `crates/haarness-profiles` | Portable configuration archives |
+| `crates/haarness-language` | Formatter and LSP processes |
+| `crates/haarness-pty` | Server-owned terminal sessions |
+| `crates/haarness-ripgrep` | The embedded, checksummed ripgrep |
+| `apps/desktop` | Haarness Desktop (Electron and SolidJS), see [DESKTOP.md](DESKTOP.md) |
+| `apps/browser-extension` | Haarness for Chrome, see [CHROME-EXTENSION.md](CHROME-EXTENSION.md) |
+| `packages/browser-driver` | The page driver Desktop's browser and the Chrome extension share |
+| `sdks/` | The generated TypeScript and Python SDKs, see [sdks/README.md](../sdks/README.md) |
+| `locales/` | Interface strings for the TUI, Desktop and the Chrome extension, see [locales/README.md](../locales/README.md) |
+| `vendor/` | The pinned OpenTUI native source and its built archives, and the checksummed ripgrep binaries |
+| `xtask` | The architecture check below |
+
 ## Dependency rule
 
 `haarness-protocol` contains stable wire types. `haarness-core` contains domain behavior and ports. Store, provider, MCP, language-process, server, scheduler, native-terminal, and CLI crates are adapters. Composition happens only in `haarness-cli`. `haarness-language` owns shell-free formatter subprocesses and the stdio JSON-RPC LSP client; the server adapter attaches it to native file tools, while core remains unaware of either protocol.
 
-The core must never depend on `axum`, `rusqlite`, `reqwest`, `rmcp`, `clap`, `crossterm`, or `haarness-opentui`. The TUI must never depend on `haarness-core`, a provider, or a store. The automated architecture check rejects those edges.
+The core must never depend on `axum`, `rusqlite`, `reqwest`, `rmcp`, `clap`, `crossterm`, or `haarness-opentui`. `haarness-protocol` must not depend on the same libraries (apart from `haarness-opentui`) or on `haarness-core`. The TUI must never depend on `haarness-core`, `haarness-store`, `haarness-providers`, `haarness-mcp` or `haarness-server`. `cargo run -p xtask -- architecture` (run by CI and `scripts/test-all.sh`) rejects those edges and any `unsafe` outside `haarness-opentui`.
 
 `haarness-insights` is a query-only history adapter shared by CLI analytics and
 authenticated server endpoints. It reads registry metadata and per-workspace

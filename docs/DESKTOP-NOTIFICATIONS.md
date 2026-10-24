@@ -1,12 +1,16 @@
 # Notifications that open the conversation
 
-> **User guide:** [Get notified](https://haarness.ai/docs/desktop/settings#get-notified). This page has the engineering detail.
+How Haarness Desktop's system notifications are raised, held, suppressed and routed back to the chat they are about, and how that is tested. For contributors working on `src/main/notifications.ts` and the notification settings.
 
-Enable **Notifications** in Desktop settings. While Haarness is in the background, a notification identifies the conversation and project when a task finishes, fails, needs approval, or asks a question. Click it to bring Haarness forward and open that conversation, including switching to its saved server and exact remote project or worktree. The chat's unsent draft stays with it.
+> **User guide:** [Get notified](https://haarness.ai/docs/desktop/settings#get-notified).
+
+Turn on **Task notifications** in **Settings → General** (on by default). While Haarness is in the background, a notification identifies the conversation and project when a task finishes (**Task finished**), fails (**Task failed**), needs approval (**Approval needed**), or asks a question (**Answer needed**). Click it to bring Haarness forward and open that conversation, including switching to its saved server and exact remote project or worktree. The chat's unsent draft stays with it.
 
 Notifications keep working for projects opened during the current app run even when their sidebar group is collapsed. They survive renderer reloads; on macOS, where closing the last window leaves Haarness running, clicking a notification creates a window again. Quitting the application stops notification monitoring. OS notification permissions and Focus settings still control whether banners appear.
 
-By default, Haarness suppresses system notifications while any of its windows has focus. Turn completion notifications can also be set to Always or Never in Settings → General. Interrupted turns do not produce a success alert. Delegated agent completions stay quiet; their approval requests and questions open the parent conversation containing the controls. Failed tasks have a distinct **Task failed** title.
+By default, Haarness suppresses system notifications while any of its windows has focus. Turn completion notifications can also be set to Always or Never in Settings → General. Interrupted turns do not produce a success alert. Delegated agent completions stay quiet; their approval requests and questions open the parent conversation containing the controls.
+
+An approval request is announced once. In a chat in Auto, a request the reviewer is still deciding raises nothing; it raises **Approval needed** only when the reviewer leaves it to a person, and a request announced again (Auto turned on while its card was shown) does not raise a second one.
 
 A **Task finished** banner waits half a second (`COMPLETION_GRACE_MS` in `src/main/notifications.ts`, the value Upstream measured) before it goes out. The daemon starts the next queued prompt, or the reply to steering a stop left unread, as a new root turn moments after the previous one finishes, so a banner sent at once would call work finished while it is still going. If the same conversation starts another turn, stops or fails inside the grace, the held banner is dropped; a newer completion replaces an older one. A queue of prompts therefore produces one **Task finished**, after its last turn. Failures, approvals and questions are never held, and a stop never produces a banner. A root turn that completes or fails while work it started in the background (a child agent, a workflow run) still owes the conversation a result (`background` > 0 in its `turn.finished`) produces neither **Task finished** nor **Task failed** and drops a held banner: that work delivers its result as a new turn, and the turn that receives the last result is announced.
 
