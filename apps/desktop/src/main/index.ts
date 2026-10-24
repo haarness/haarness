@@ -957,6 +957,16 @@ function installHandlers() {
     // Chats without a project live in the chat home. Whichever way it is
     // asked for, it opens as itself: with project configuration off, and
     // never as a project.
+    // A folder inside it, such as a chat's own folder, opens This computer
+    // on that chat rather than making a project inside the chat home.
+    let askedFolder: string | undefined;
+    if (!url && !(await isChatHome(workspace!))) {
+      const root = await chatHomePath();
+      if (workspace!.startsWith(root + sep)) {
+        askedFolder = workspace;
+        workspace = await chatHomeFolder();
+      }
+    }
     const home = !url && (await isChatHome(workspace!));
     // A haarness:// link can name any folder. One already in the sidebar
     // opens as it was saved; any other is confirmed first and opens with its
@@ -1062,6 +1072,7 @@ function installHandlers() {
                 true),
           );
       if (home) view.chatHome = true;
+      if (askedFolder) view.askedFolder = askedFolder;
       const saved: Recent = {
         id: view.id,
         label: view.label,

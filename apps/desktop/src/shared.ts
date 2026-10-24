@@ -39,6 +39,9 @@ export interface Connection extends ProjectLocation {
   remote: boolean;
   trust: boolean;
   info: Types.ServerInfo;
+  /** The chat home opened for a folder inside it (a chat's own folder,
+   * chosen as a folder): its chat opens. */
+  askedFolder?: string;
   /** Existing work uses a compatible earlier runtime until an idle reconnect. */
   upgradePending?: boolean;
 }

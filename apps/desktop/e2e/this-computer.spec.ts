@@ -267,6 +267,16 @@ test("chats without a project: a ready first launch, a folder of their own on on
     await rename(second + ".moved", second);
   }
 
+  // A chat's own folder chosen as a folder opens that chat, never a project
+  // inside the chat home.
+  await app!.evaluate(({ dialog }, directory) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+  }, first);
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  await ready();
+  await expect(chatFolder()).toHaveAccessibleName("Chat folder: tool-bash-command-pwd");
+  await expect(page.locator(".project-list .project-heading")).toHaveCount(0);
+  expect((await page.evaluate(() => window.haarness.boot())).recent).toHaveLength(1);
   // Choosing a project in the chip sends there instead, and makes no folder.
   await app!.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
