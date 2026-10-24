@@ -1479,6 +1479,13 @@
           "content": {
             "type": "string"
           },
+          "directory": {
+            "description": "The chat folder (canonical and absolute) `path` is relative to, when\nthe request named a chat with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "encoding": {
             "type": "string"
           },
@@ -1598,6 +1605,13 @@
       },
       "FileListing": {
         "properties": {
+          "directory": {
+            "description": "The chat folder (canonical and absolute) the entries' paths are\nrelative to, when the listing was asked for a chat with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "entries": {
             "items": {
               "$ref": "#/components/schemas/FileEntry"
@@ -6799,6 +6813,24 @@
     "/v1/files/action": {
       "post": {
         "operationId": "mutate_file",
+        "parameters": [
+          {
+            "description": "The chat whose folder the request is about: for a chat with a\nfolder of its own, paths are relative to that folder and confined to\nit (a link out of it, to another chat's folder too, is refused).\nOmitted, or for a chat of the project folder, the server's project\nfolder.",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6841,6 +6873,22 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "description": "See [`FileScope::thread_id`].",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
+            }
           }
         ],
         "responses": {
@@ -6862,6 +6910,24 @@
       },
       "put": {
         "operationId": "write_file",
+        "parameters": [
+          {
+            "description": "The chat whose folder the request is about: for a chat with a\nfolder of its own, paths are relative to that folder and confined to\nit (a link out of it, to another chat's folder too, is refused).\nOmitted, or for a chat of the project folder, the server's project\nfolder.",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6905,6 +6971,22 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "description": "See [`FileScope::thread_id`].",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
             }
           }
         ],
@@ -6983,6 +7065,22 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "description": "See [`FileScope::thread_id`].",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
             }
           }
         ],
