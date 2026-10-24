@@ -8403,7 +8403,7 @@ test("themed pickers search, stay within the window, support keyboard selection 
   }
 });
 
-test("the folder chip chooses a project or no folder and preserves drafts across selection and reload", async () => {
+test("the folder chip chooses a project or no folder, takes typed text along to an empty new chat, and keeps drafts across selection and reload", async () => {
   await page
     .locator(".project-list .project-heading")
     .filter({ hasText: /^workspace$/ })
@@ -8422,7 +8422,7 @@ test("the folder chip chooses a project or no folder and preserves drafts across
     exact: true,
   });
   const search = popup.getByRole("combobox", {
-    name: "Search projects",
+    name: "Search folders",
     exact: true,
   });
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
@@ -8479,27 +8479,38 @@ test("the folder chip chooses a project or no folder and preserves drafts across
     "true",
   );
   await expect(composer).toBeFocused();
-  await expect(composer).toHaveValue("");
-  await composer.fill("keep the other draft");
-  await trigger.click();
-  await search.fill("workspace");
-  await popup.getByRole("option", { name: "workspace", exact: true }).click();
+  // Typed first, then a folder chosen: the text goes along to its new chat,
+  // which had none, and leaves the one it was typed in.
   await expect(composer).toHaveValue("keep this project draft");
+  await composer.fill("keep the other draft");
+  // Back in workspace by the sidebar, not the chip: nothing goes along.
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  await newSession();
+  await expect(composer).toHaveValue("");
+  await composer.fill("workspace's own draft");
+  // A new chat with a draft of its own keeps it, and the text stays where
+  // it was typed.
   await trigger.click();
   await search.fill("picker-project");
   await search.press("Enter");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   await expect(composer).toHaveValue("keep the other draft");
+  await trigger.click();
+  await search.fill("workspace");
+  await popup.getByRole("option", { name: "workspace", exact: true }).click();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  await expect(composer).toHaveValue("workspace's own draft");
 
   // On this computer the list leads with No folder, a chat of its own
-  // without a project, whose new-chat draft is its own too.
+  // without a project; its new chat had nothing, so the text goes along.
   await trigger.click();
   await expect(popup.getByRole("option").first()).toHaveText("No folder");
   await popup.getByRole("option", { name: "No folder", exact: true }).click();
   await expect(heading).toHaveText("What should we work on?");
   await expect(trigger).toHaveAccessibleName("Folder for new chat: No folder");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
-  await expect(composer).toHaveValue("");
+  await expect(composer).toHaveValue("workspace's own draft");
   await trigger.click();
   await popup.getByRole("option", { name: "picker-project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
@@ -8525,7 +8536,8 @@ test("the folder chip chooses a project or no folder and preserves drafts across
   await trigger.click();
   await search.fill("workspace");
   await popup.getByRole("option", { name: "workspace", exact: true }).click();
-  await expect(composer).toHaveValue("keep this project draft");
+  // Its text went along to No folder earlier.
+  await expect(composer).toHaveValue("");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   await trigger.click();
   await expect(
