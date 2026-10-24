@@ -1868,7 +1868,23 @@ function createApp(saved?: Preferences) {
       // Keep the record to what is open now: without the chats archived or
       // gone meanwhile, and with any chat chosen while the project loaded.
       if (!sameTabs(remembered, keptTabs(state.tabs, state.preview))) rememberTabs(view.id);
-      if (newChat || newChatAttempt === attempt)
+      // A chat's own folder chosen as a folder opens that chat.
+      const asked = view.askedFolder
+        ? state.threads.find(
+            (thread) =>
+              !!thread.directory &&
+              (view.askedFolder === thread.directory ||
+                (view.askedFolder!.startsWith(thread.directory) &&
+                  /[\\/]/.test(view.askedFolder![thread.directory.length]))),
+          )
+        : undefined;
+      if (asked) {
+        await choose(asked.id, "chat", { tab: "preview" });
+        if (!valid()) return false;
+        set("ready", true);
+        return true;
+      }
+      if (newChat || newChatAttempt === attempt || view.askedFolder)
         await window.haarness.storage("session:" + view.id, "");
       const saved = await window.haarness.storage("session:" + view.id);
       if (!valid()) return false;
