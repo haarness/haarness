@@ -201,6 +201,17 @@ struct Line {
     ending: &'static str,
 }
 
+/// The first line from `from` that an `@@` locator names: one that is the
+/// locator once trimmed, else one that contains it.
+fn locate(lines: &[Line], from: usize, header: &str) -> Option<usize> {
+    let lines = lines.get(from..)?;
+    lines
+        .iter()
+        .position(|line| line.text.trim() == header)
+        .or_else(|| lines.iter().position(|line| line.text.contains(header)))
+        .map(|offset| from + offset)
+}
+
 /// Apply parsed hunks to file content. Pure so it is testable without a
 /// filesystem: returns the new content.
 ///
@@ -234,7 +245,7 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
     {
         last.ending = newline;
     }
-    // Lines only added without a locator go at the end, after every hunk.
+    // Lines a hunk only adds go at the end, after every other hunk.
     let mut appended = Vec::new();
     let mut cursor = 0usize;
     for hunk in hunks {
@@ -246,67 +257,58 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
                 HunkLine::Add(_) => None,
             })
             .collect();
+        let header = hunk.context_header.as_deref().map(str::trim);
         if old.is_empty() {
-            let added = hunk.lines.iter().filter_map(|line| match line {
+            // As in Codex, whatever its locator says. A locator still moves
+            // where the next hunk looks, so `@@ class` then `@@ fn` narrows
+            // the hunk after them.
+            if let Some(found) = header.and_then(|header| locate(&lines, cursor, header)) {
+                cursor = found + 1;
+            }
+            appended.extend(hunk.lines.iter().filter_map(|line| match line {
                 HunkLine::Add(text) => Some(Line {
                     text: text.clone(),
                     ending: newline,
                 }),
                 HunkLine::Context(_) | HunkLine::Remove(_) => None,
-            });
-            match &hunk.context_header {
-                // After the one line the locator names.
-                Some(header) if !hunk.end_of_file => {
-                    let header = header.trim();
-                    let found: Vec<usize> = (cursor..lines.len())
-                        .filter(|&index| lines[index].text.contains(header))
-                        .collect();
-                    match found.as_slice() {
-                        [] => return Err(format!("hunk context not found: {header:?}")),
-                        [index] => {
-                            let at = index + 1;
-                            let before = lines.len();
-                            lines.splice(at..at, added);
-                            cursor = at + (lines.len() - before);
-                        }
-                        _ => {
-                            return Err(format!(
-                                "hunk context is ambiguous ({} matches): {header:?}; retry with a unique @@ locator and more unchanged context lines",
-                                found.len()
-                            ));
-                        }
-                    }
-                }
-                _ => appended.extend(added),
-            }
+            }));
             continue;
         }
-        let search_from = match &hunk.context_header {
-            Some(header) => {
-                let header = header.trim();
-                lines[cursor..]
-                    .iter()
-                    .position(|line| line.text.contains(header))
-                    .map_or(cursor, |offset| cursor + offset)
-            }
-            None => cursor,
-        };
+        // Where the hunk is looked for: from the line its locator names, then
+        // (as before) from the first line that contains the locator, else
+        // from the cursor.
+        let mut froms = Vec::new();
+        if let Some(header) = header {
+            let within = (cursor..lines.len()).find(|&index| lines[index].text.contains(header));
+            froms.extend(locate(&lines, cursor, header));
+            froms.extend(within.filter(|index| !froms.contains(index)));
+        }
+        if froms.is_empty() {
+            froms.push(cursor);
+        }
         let last = lines.len().saturating_sub(old.len());
-        // An end-of-file hunk is tried only where its old lines end the file.
-        let first = if hunk.end_of_file {
-            last.max(search_from)
-        } else {
-            search_from
-        };
-        let matches: Vec<usize> = (first..=last)
-            .filter(|&start| {
-                old.iter().enumerate().all(|(offset, expected)| {
-                    lines
-                        .get(start + offset)
-                        .is_some_and(|actual| actual.text.trim_end() == expected.trim_end())
-                })
+        let matches = froms
+            .into_iter()
+            .map(|search_from| {
+                // An end-of-file hunk is tried only where its old lines end
+                // the file.
+                let first = if hunk.end_of_file {
+                    last.max(search_from)
+                } else {
+                    search_from
+                };
+                (first..=last)
+                    .filter(|&start| {
+                        old.iter().enumerate().all(|(offset, expected)| {
+                            lines
+                                .get(start + offset)
+                                .is_some_and(|actual| actual.text.trim_end() == expected.trim_end())
+                        })
+                    })
+                    .collect::<Vec<usize>>()
             })
-            .collect();
+            .find(|matches| !matches.is_empty())
+            .unwrap_or_default();
         match matches.as_slice() {
             [] if hunk.end_of_file => {
                 return Err(format!(
@@ -574,7 +576,7 @@ five\n\
     }
 
     #[test]
-    fn pure_additions_append_or_follow_their_locator() {
+    fn pure_additions_append_at_the_end_whatever_their_locator() {
         assert_eq!(patched("a\nb\n", "@@\n+c\n+d\n").unwrap(), "a\nb\nc\nd\n");
         assert_eq!(
             patched("a\nb\n", "@@\n+c\n*** End of File\n").unwrap(),
@@ -588,16 +590,30 @@ five\n\
             patched("one\ntwo\nthree\n", "@@\n+after\n@@\n one\n-two\n+TWO\n").unwrap(),
             "one\nTWO\nthree\nafter\n"
         );
-        // With a locator, right after the one line it names.
+        // A locator, found once, twice or not at all, changes nothing about
+        // where (as in Codex), so it never lands inside a function.
+        let file = "def a():\n    return 1\n";
+        let added = "\ndef b():\n    return 2\n";
+        for locator in ["def a():", "return", "missing"] {
+            assert_eq!(
+                patched(
+                    file,
+                    &format!("@@ {locator}\n+\n+def b():\n+    return 2\n")
+                )
+                .unwrap(),
+                format!("{file}{added}"),
+                "{locator}"
+            );
+        }
+        assert_eq!(patched("", "@@ top\n+x = 1\n").unwrap(), "x = 1\n");
+        // An edit and then an addition under the same locator.
         assert_eq!(
-            patched("fn a() {\n}\nfn b() {\n}\n", "@@ fn b() {\n+    body();\n").unwrap(),
-            "fn a() {\n}\nfn b() {\n    body();\n}\n"
-        );
-        let error = patched("fn a() {\n}\nfn a() {\n}\n", "@@ fn a\n+x\n").unwrap_err();
-        assert!(error.contains("ambiguous (2 matches)"), "{error}");
-        assert_eq!(
-            patched("a\n", "@@ missing\n+x\n").unwrap_err(),
-            "hunk context not found: \"missing\""
+            patched(
+                file,
+                "@@ def a():\n-    return 1\n+    return 10\n@@ def a():\n+\n+def b():\n+    return 2\n"
+            )
+            .unwrap(),
+            "def a():\n    return 10\n\ndef b():\n    return 2\n"
         );
         // A locator alone narrows the hunk after it (`@@ class` then `@@ fn`).
         assert_eq!(
@@ -607,6 +623,35 @@ five\n\
             )
             .unwrap(),
             "impl B {\n    fn run() {\n        old();\n    }\n}\nimpl A {\n    fn run() {\n        new();\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_locator_names_the_line_it_is_before_one_that_mentions_it() {
+        // `// see fn run()` mentions the locator, and a hunk looked for after
+        // it would be ambiguous; the hunk is under the line that is it.
+        assert_eq!(
+            patched(
+                "// see fn run()\n    step();\nfn run()\n    step();\n",
+                "@@ fn run()\n-    step();\n+    STEP();\n"
+            )
+            .unwrap(),
+            "// see fn run()\n    step();\nfn run()\n    STEP();\n"
+        );
+        let file = "// see fn run()\nfn run()\n    step();\n";
+        // As before, a hunk found only after a line that contains the
+        // locator still applies there.
+        assert_eq!(
+            patched(file, "@@ fn run()\n-// see fn run()\n+// see run()\n").unwrap(),
+            "// see run()\nfn run()\n    step();\n"
+        );
+        assert_eq!(
+            patched(
+                "// call fn run\nx = 1\nfn run\n",
+                "@@ fn run\n-x = 1\n+x = 2\n"
+            )
+            .unwrap(),
+            "// call fn run\nx = 2\nfn run\n"
         );
     }
 }
