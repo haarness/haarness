@@ -5027,9 +5027,10 @@ impl EarlierMode {
         Some(Self { setting, revision })
     }
 
-    /// Put the setting back, unless someone changed the mode since.
+    /// Put the setting back, unless someone changed the mode since; say so
+    /// when the chat stays in Auto for another reason.
     async fn put_back(&self, client: &haarness_tui::api::ApiClient, thread: ThreadId) {
-        let _ = client
+        let put = client
             .set_approval_mode(
                 thread,
                 &haarness_protocol::SetApprovalModeRequest {
@@ -5038,6 +5039,19 @@ impl EarlierMode {
                 },
             )
             .await;
+        let Err(error) = put else { return };
+        let status = haarness_tui::api::refusal_status(&error);
+        if status == Some(reqwest::StatusCode::CONFLICT) {
+            return;
+        }
+        // The status only: a connection error names the server's address.
+        let answered = status
+            .map(|status| format!(" (the server answered {status})"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            io::stderr(),
+            "The chat was left in Auto: its earlier mode could not be put back{answered}."
+        );
     }
 }
 
