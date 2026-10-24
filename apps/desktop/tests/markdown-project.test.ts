@@ -24,6 +24,7 @@ const examples = [
   "one  \nline break\n\n---\n\nDone 😊 日本語 العربية\n",
   "- [x] checked\n- [ ] open\n\nhttps://example.test\n",
   "Replace <path> with the file, then <text>x</text> stays.\n\n[<dev@example.com>](https://example.test) and [[a](/x)](/y)\n",
+  "1. <path>\n2. <file>\n\n<title> is required\n\n<file>\nline two\n",
 ];
 
 for (const [index, source] of examples.entries()) {
@@ -78,6 +79,25 @@ test("a bare tag in a reply's prose is a word of it; markup and drawings stay ma
   );
   assert.equal(html("<details>\n<summary>More</summary>\n\nbody\n</details>"), "<details>\n<summary>More</summary>\n\n<p>body</p>\n</details>");
   assert.equal(html("`<path>` and\n\n```\n<path>\n```"), "<p><code>&lt;path&gt;</code> and</p>\n<pre><code>&lt;path&gt;\n</code></pre>\n");
+});
+
+// A bare tag alone on a line, or starting one with a block element's name,
+// begins a block of HTML; the sanitizer dropped it as it did inline.
+test("a block that starts with a bare tag is a paragraph of the reply; block HTML stays markup", () => {
+  const html = (text: string, breaks = true) => projectMarkdown(undefined, text, false, breaks).blocks.map((block) => block.html).join("");
+  assert.equal(html("1. <path>\n2. <file>"), "<ol>\n<li>&lt;path&gt;</li>\n<li>&lt;file&gt;</li>\n</ol>\n");
+  assert.equal(html("Options:\n\n<path>\n\n<file>\n"), "<p>Options:</p>\n<p>&lt;path&gt;</p>\n<p>&lt;file&gt;</p>\n");
+  assert.equal(html("<file>\nline two"), "<p>&lt;file&gt;<br>line two</p>\n");
+  assert.equal(html("<file>\nline two", false), "<p>&lt;file&gt;\nline two</p>\n");
+  assert.equal(html("<title> is required, in <head>"), "<p>&lt;title&gt; is required, in &lt;head&gt;</p>\n");
+  for (const name of ["head", "body", "form", "option", "iframe", "dialog", "menu"])
+    assert.equal(html(`<${name}> holds it`), `<p>&lt;${name}&gt; holds it</p>\n`, name);
+  // Real block HTML: an element showing its text, attributes, a comment.
+  assert.equal(html("<details>\n<summary>More</summary>\n\nbody\n</details>"), "<details>\n<summary>More</summary>\n\n<p>body</p>\n</details>");
+  assert.equal(html('<div class="note">\n<path>\n</div>'), '<div class="note">\n<path>\n</div>');
+  assert.equal(html("<table>\n<tr><td>x</td></tr>\n</table>"), "<table>\n<tr><td>x</td></tr>\n</table>");
+  assert.equal(html("<!-- note -->\ntext"), "<!-- note -->\n<p>text</p>\n");
+  assert.equal(html('<img src="a.png" alt="a">'), '<img src="a.png" alt="a">');
 });
 
 // An anchor inside an anchor is split by the HTML parser: the label went to

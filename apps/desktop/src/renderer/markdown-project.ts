@@ -1,4 +1,4 @@
-import { marked, type Token, type TokensList } from "marked";
+import { marked, type Token, type Tokens, type TokensList } from "marked";
 
 export type MarkdownBlock = { raw: string; html: string };
 export type MarkdownProjection = {
@@ -18,11 +18,12 @@ const SHOWN = new Set([
   "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "big", "blockquote", "br", "caption",
   "center", "cite", "code", "col", "colgroup", "data", "dd", "del", "details", "dfn", "div", "dl", "dt",
   "em", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
-  "i", "img", "ins", "kbd", "li", "main", "mark", "nav", "ol", "p", "pre", "q", "rp", "rt", "ruby", "s",
-  "samp", "section", "small", "span", "strike", "strong", "sub", "summary", "sup", "table", "tbody", "td",
-  "tfoot", "th", "thead", "time", "tr", "tt", "u", "ul", "var", "wbr",
+  "i", "img", "ins", "kbd", "li", "main", "mark", "nav", "ol", "p", "picture", "pre", "q", "rp", "rt",
+  "ruby", "s", "samp", "section", "small", "span", "strike", "strong", "sub", "summary", "sup", "table",
+  "tbody", "td", "tfoot", "th", "thead", "time", "tr", "tt", "u", "ul", "var", "wbr",
 ]);
 const BARE_TAG = /^<(\/?)([A-Za-z][\w:-]*)\s*(\/?)>$/;
+const BLOCK_TAG = /^ {0,3}<(\/?)([A-Za-z][\w:-]*)\s*(\/?)>/;
 
 /**
  * Inside a paragraph, a bare tag that is not such an element is a word of the
@@ -35,18 +36,37 @@ const BARE_TAG = /^<(\/?)([A-Za-z][\w:-]*)\s*(\/?)>$/;
  */
 function literalTags(tokens: Token[]) {
   const open: string[] = [];
-  tokens.forEach((token, index) => {
-    if (token.type !== "html" || token.block) return;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.type !== "html" || token.block) continue;
     const tag = BARE_TAG.exec(token.text);
     const name = tag?.[2].toLowerCase();
-    if (!tag || !name || SHOWN.has(name)) return;
+    if (!tag || !name || SHOWN.has(name)) continue;
     if (tag[1]) {
       const at = open.lastIndexOf(name);
-      if (at < 0) return;
+      if (at < 0) continue;
       open.splice(at, 1);
     } else if (!tag[3]) open.push(name);
     tokens[index] = { type: "text", raw: token.raw, text: token.text, escaped: false };
-  });
+  }
+}
+
+/**
+ * A block of HTML that starts with such a bare tag (`<path>` alone on a line,
+ * `1. <file>`, a line starting `<title>` or `<form>`) is text of the reply
+ * too: it is read as a paragraph, with its tags shown as words. Block HTML
+ * that starts with an element showing its text (`<details>`, `<div>`,
+ * `<table>`), a tag with attributes or a comment stays markup.
+ */
+function literalBlock(token: Tokens.HTML, breaks: boolean, type: "paragraph" | "text" = "paragraph") {
+  const tag = BLOCK_TAG.exec(token.text);
+  const name = tag?.[2].toLowerCase();
+  if (!tag || !name || SHOWN.has(name)) return;
+  const text = token.text.replace(/\n+$/, "");
+  const tokens = marked.Lexer.lexInline(text, { gfm: true, breaks });
+  literalTags(tokens);
+  // A paragraph of its own, or in a tight list item the item's text.
+  Object.assign(token, { type, text, tokens });
 }
 
 /** A label's tokens with every link in them, at any depth, replaced by its own tokens. */
@@ -65,25 +85,35 @@ const linkless = (tokens: Token[]): Token[] =>
  * text: an anchor inside an anchor is split by the HTML parser into an empty
  * link to the label's address and a visible one to the inner address.
  */
-function replyToken(token: Token) {
+const replyToken = (breaks: boolean) => (token: Token) => {
+  if (token.type === "html" && token.block) return literalBlock(token as Tokens.HTML, breaks);
+  // Seen before what it holds: a tight item's text is not a paragraph.
+  if (token.type === "list_item" && !token.loose)
+    for (const child of token.tokens ?? [])
+      if (child.type === "html" && child.block) literalBlock(child as Tokens.HTML, breaks, "text");
   if (token.type === "link" && token.tokens) token.tokens = linkless(token.tokens);
   if (token.type === "table") {
     for (const cell of [...token.header, ...token.rows.flat()]) literalTags(cell.tokens);
     return;
   }
   if ("tokens" in token && token.tokens) literalTags(token.tokens);
-}
+};
+const replyTokens = { reply: replyToken(true), file: replyToken(false) };
 
 /**
  * Replies keep the model's single line breaks, as the TUI does: agent output
  * often relies on its line structure. A Markdown file keeps standard
  * paragraphs, where a lone newline is a space.
  */
-export const markdownOptions = (breaks: boolean) => ({ gfm: true, breaks, walkTokens: replyToken });
+export const markdownOptions = (breaks: boolean) => ({
+  gfm: true,
+  breaks,
+  walkTokens: breaks ? replyTokens.reply : replyTokens.file,
+});
 
 /** What `marked.parse` does with `walkTokens` between lexing and drawing. */
-function prepare<T extends Token[]>(tokens: T) {
-  marked.walkTokens(tokens, replyToken);
+function prepare<T extends Token[]>(tokens: T, breaks: boolean) {
+  marked.walkTokens(tokens, markdownOptions(breaks).walkTokens);
   return tokens;
 }
 
@@ -101,7 +131,7 @@ function render(raw: string, tokens: TokensList, references: boolean, breaks: bo
     cache.set(key, html);
     return html;
   }
-  const html = marked.parser(prepare(tokens), markdownOptions(breaks));
+  const html = marked.parser(prepare(tokens, breaks), markdownOptions(breaks));
   const size = (key.length + html.length) * 2;
   if (!references && size <= limit) {
     cache.set(key, html);
