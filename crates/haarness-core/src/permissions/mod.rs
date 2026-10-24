@@ -656,6 +656,10 @@ impl PermissionEngine {
         let Some((permission, target)) = operation.split_once(':') else {
             return Vec::new();
         };
+        // `~/notes.txt` is the file in the home folder, as the tools read it.
+        let expanded = expand_home(target);
+        let from_home = matches!(expanded, std::borrow::Cow::Owned(_));
+        let target = expanded.as_ref();
         if !PATH_PERMISSIONS.contains(&permission)
             || target.is_empty()
             || target == "*"
@@ -671,6 +675,9 @@ impl PermissionEngine {
         let mut spellings = Vec::new();
         if given.is_absolute() {
             let named = normalize_absolute(given);
+            if from_home {
+                spellings.push((format!("{permission}:{}", named.to_string_lossy()), true));
+            }
             let relative = named
                 .strip_prefix(&configured)
                 .or_else(|_| named.strip_prefix(&root))
@@ -930,9 +937,9 @@ fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
 
 fn normalize_rule_aliases(mut rule: PermissionRule) -> PermissionRule {
     if let Some((permission, target)) = rule.pattern.split_once(':')
-        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && let Some(home) = home_folder()
     {
-        let home = PathBuf::from(home).to_string_lossy().into_owned();
+        let home = home.to_string_lossy().into_owned();
         let expanded = if let Some(suffix) = target.strip_prefix("~/") {
             Some(format!("{home}/{suffix}"))
         } else if target == "~" {
@@ -994,6 +1001,34 @@ fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
     }
 }
 
+/// The folder a leading `~` names, for tool paths and rules alike, as shell
+/// readings take it: `HOME`, else `USERPROFILE`.
+fn home_folder() -> Option<PathBuf> {
+    haarness_protocol::home_dir()
+}
+
+/// A tool path with a leading `~` read as a shell reads it: `~` alone and
+/// `~/…` (and `~\…` on Windows) are in the home folder. `~name/…` and a `~`
+/// anywhere else stay as written, so a project folder named `~` is written
+/// `./~`. Without a home folder the path stays as written.
+#[must_use]
+pub fn expand_home(value: &str) -> std::borrow::Cow<'_, str> {
+    let rest = if value == "~" {
+        Some("")
+    } else {
+        value
+            .strip_prefix("~/")
+            .or_else(|| value.strip_prefix("~\\").filter(|_| cfg!(windows)))
+    };
+    match (rest, home_folder().filter(|home| home.is_absolute())) {
+        (Some(""), Some(home)) => std::borrow::Cow::Owned(home.to_string_lossy().into_owned()),
+        (Some(rest), Some(home)) => {
+            std::borrow::Cow::Owned(home.join(rest).to_string_lossy().into_owned())
+        }
+        _ => std::borrow::Cow::Borrowed(value),
+    }
+}
+
 /// Resolve a model-supplied tool path the same way for permission checks and
 /// tool execution. Existing paths (including symlinks) are canonicalized;
 /// for a new path the nearest existing ancestor is canonicalized and the
@@ -1018,12 +1053,14 @@ pub fn resolve_permission_entry(workspace: &Path, value: &str) -> PathBuf {
     }
 }
 
-/// `value` on the canonical workspace, with `.` and `..` folded.
+/// `value` on the canonical workspace, with `.` and `..` folded and a
+/// leading `~` read as the home folder ([`expand_home`]).
 fn joined_path(workspace: &Path, value: &str) -> PathBuf {
     let workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| normalize_absolute(workspace));
-    let requested = Path::new(value);
+    let value = expand_home(value);
+    let requested = Path::new(value.as_ref());
     normalize_absolute(&if requested.is_absolute() {
         requested.to_path_buf()
     } else {
@@ -1065,7 +1102,8 @@ pub(crate) fn names_inside(workspace: &Path, value: &str) -> bool {
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| configured.clone());
-    let given = Path::new(value);
+    let value = expand_home(value);
+    let given = Path::new(value.as_ref());
     if given.is_absolute() {
         let named = normalize_absolute(given);
         named.starts_with(&root) || named.starts_with(&configured)
@@ -1790,6 +1828,63 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(engine.evaluate("bash:cargo run"), PermissionDecision::Ask);
+    }
+
+    #[test]
+    fn a_leading_tilde_in_a_tool_path_is_the_home_folder() {
+        let home = home_folder().expect("tests run with a home folder");
+        assert_eq!(expand_home("~"), home.to_string_lossy());
+        assert_eq!(
+            expand_home("~/notes.txt"),
+            home.join("notes.txt").to_string_lossy()
+        );
+        for kept in ["~user/x", "a/~/b", "./~/x", "~x", "notes~", ""] {
+            assert_eq!(expand_home(kept), kept);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(expand_home("~\\x"), "~\\x");
+
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("~")).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+        // Never a folder named `~` inside the project.
+        assert_eq!(
+            resolve_permission_path(&workspace, "~/haarness-no-such-file"),
+            real_home.join("haarness-no-such-file")
+        );
+        assert_eq!(resolve_permission_path(&workspace, "~"), real_home);
+        assert_eq!(
+            resolve_permission_entry(&workspace, "~/link"),
+            real_home.join("link")
+        );
+        assert_eq!(
+            resolve_permission_path(&workspace, "./~/x"),
+            workspace.join("~/x")
+        );
+        assert!(!names_inside(&workspace, "~/x"));
+        assert!(names_inside(&workspace, "./~/x"));
+
+        // A rule for a home folder meets a tool path written with `~`, and
+        // a project file written through it meets the project's rules.
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:~/.ssh/*", PermissionDecision::Deny));
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.set_workspace(&workspace);
+        assert_eq!(
+            engine.evaluate("read:~/.ssh/id_rsa"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            engine.evaluate("read:./~/.ssh/id_rsa"),
+            PermissionDecision::Allow
+        );
+        if let Ok(inside) = workspace.strip_prefix(&real_home) {
+            let spelled = format!("read:~/{}/secrets/key", inside.display());
+            assert_eq!(engine.evaluate(&spelled), PermissionDecision::Deny);
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]

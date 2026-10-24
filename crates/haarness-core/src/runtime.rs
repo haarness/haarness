@@ -16846,6 +16846,46 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_path_in_the_home_folder_asks_for_that_folder() {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        let home = home.canonicalize().unwrap_or(home);
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        for (tool, arguments) in [
+            ("read", json!({"path":"~/notes.txt"})),
+            ("write", json!({"path":"~/Desktop/notes.md","content":"x"})),
+            ("list", json!({"path":"~"})),
+        ] {
+            let plans = super::ask_plans(tool, &arguments, &workspace);
+            assert_eq!(plans[0].permission, "external_directory", "{tool}");
+            let folder = if tool == "write" {
+                home.join("Desktop")
+            } else {
+                home.clone()
+            };
+            assert_eq!(
+                plans[0].patterns,
+                vec![format!("{}/*", folder.display())],
+                "{tool}"
+            );
+            // The file is the one in the home folder, never `<project>/~/…`.
+            assert!(
+                plans[0]
+                    .external_paths
+                    .iter()
+                    .all(|path| path.starts_with(&home)),
+                "{tool}: {:?}",
+                plans[0].external_paths
+            );
+            assert!(plans[0].resolved.is_empty(), "{tool}");
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn lsp_uses_file_path_for_tool_and_external_directory_permissions() {
         let plans = super::ask_plans(
             "lsp",
