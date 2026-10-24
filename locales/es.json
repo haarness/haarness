@@ -2871,5 +2871,6 @@
   "about 1 day left at this pace": "queda alrededor de 1 día a este ritmo",
   "about {count} days left at this pace": "quedan alrededor de {count} días a este ritmo",
   "Can't reach the server · still waiting": "No se puede contactar con el servidor · sigue esperando",
-  "Theme {file} not loaded: {reason}": "Tema {file} no cargado: {reason}"
+  "Theme {file} not loaded: {reason}": "Tema {file} no cargado: {reason}",
+  "The server did not answer in time": "El servidor no respondió a tiempo"
 }

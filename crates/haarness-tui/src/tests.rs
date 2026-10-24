@@ -6523,6 +6523,20 @@ async fn child_rows_count_one_call_and_end_without_calls() {
     assert!(tasks(&mut app).contains("· 3 Tool-Aufrufe ·"));
     app.language = crate::locale::Language::English;
 
+    // In Russian and Polish a count reads as a label, so its noun never
+    // takes the wrong form for the number.
+    app.reduce(update("running", 3), &client).await.unwrap();
+    app.language = crate::locale::Language::Russian;
+    assert!(
+        sidebar(&app).contains("Инструменты: 3"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(tasks(&mut app).contains("Вызовы инструментов: 3"));
+    app.language = crate::locale::Language::Polish;
+    assert!(sidebar(&app).contains("Narzędzia: 3"), "{}", sidebar(&app));
+    app.language = crate::locale::Language::English;
+
     for (state, row) in [
         ("done", "└ completed"),
         ("failed", "└ failed"),
@@ -6535,6 +6549,17 @@ async fn child_rows_count_one_call_and_end_without_calls() {
             !text.contains("no tools yet") && !text.contains("tools ·"),
             "{state}: {text}"
         );
+        // Nor does the sidebar count calls it never made.
+        let side = sidebar(&app);
+        assert!(
+            side.contains(&format!("last grep · {state}")) || state == "done",
+            "{side}"
+        );
+        assert!(
+            state != "done" || side.contains("last grep · completed"),
+            "{side}"
+        );
+        assert!(!side.contains("0 tools"), "{state}: {side}");
     }
     app.reduce(update("failed", 1), &client).await.unwrap();
     assert!(frame_text(&app, (100, 30)).contains("└ failed · 1 tool"));
@@ -19587,6 +19612,18 @@ async fn a_sign_in_that_gives_up_tells_the_server_and_leaves_without_waiting() {
         "retry told the server: {:?}",
         seen.lock().unwrap()
     );
+
+    // Haarness's own reason for giving up reads in the person's language.
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().state =
+        crate::connect::LoginState::Failed("The server did not answer in time".into());
+    app.language = crate::locale::Language::German;
+    let rendered: String = app.lines((100, 30)).iter().map(line_text).collect();
+    assert!(
+        rendered.contains("Der Server hat nicht rechtzeitig geantwortet"),
+        "{rendered}"
+    );
+    app.language = crate::locale::Language::English;
 
     // Escape from a failed sign-in is back at the providers at once, also
     // when the server answers nothing.

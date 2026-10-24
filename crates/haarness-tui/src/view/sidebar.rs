@@ -138,10 +138,14 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
                         format!("last {tool}")
                     });
                 }
-                activity.push(
-                    app.language
-                        .count(task.tool_calls, "1 tool", "{count} tools"),
-                );
+                // A child that made no calls says only what state it is in,
+                // as the row under its delegation does.
+                if task.tool_calls > 0 {
+                    activity.push(
+                        app.language
+                            .count(task.tool_calls, "1 tool", "{count} tools"),
+                    );
+                }
                 match task.state.as_str() {
                     "waiting_permission" => {
                         activity.push(app.language.text("approval needed").into())

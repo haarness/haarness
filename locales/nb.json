@@ -2871,5 +2871,6 @@
   "about 1 day left at this pace": "omtrent 1 dag igjen i dette tempoet",
   "about {count} days left at this pace": "omtrent {count} dager igjen i dette tempoet",
   "Can't reach the server · still waiting": "Får ikke kontakt med serveren · venter fortsatt",
-  "Theme {file} not loaded: {reason}": "Temaet {file} ble ikke lastet: {reason}"
+  "Theme {file} not loaded: {reason}": "Temaet {file} ble ikke lastet: {reason}",
+  "The server did not answer in time": "Serveren svarte ikke i tide"
 }

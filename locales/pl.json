@@ -593,7 +593,7 @@
   "Search tools": "Szukaj narzędzi",
   "Find a tool…": "Znajdź narzędzie…",
   "1 tool": "1 narzędzie",
-  "{count} tools": "{count} narzędzi",
+  "{count} tools": "Narzędzia: {count}",
   "1 turned off": "wyłączone: 1",
   "{count} turned off": "wyłączone: {count}",
   "No tool matches that search.": "Żadne narzędzie nie pasuje do wyszukiwania.",
@@ -2869,7 +2869,8 @@
   "{count} tool calls": "Wywołania narzędzi: {count}",
   "less than a day left at this pace": "przy tym tempie zostało mniej niż dzień",
   "about 1 day left at this pace": "przy tym tempie został około 1 dzień",
-  "about {count} days left at this pace": "Pozostałe dni przy tym tempie: około {count}",
+  "about {count} days left at this pace": "Przy tym tempie pozostało dni: około {count}",
   "Can't reach the server · still waiting": "Brak połączenia z serwerem · nadal czekam",
-  "Theme {file} not loaded: {reason}": "Nie wczytano motywu {file}: {reason}"
+  "Theme {file} not loaded: {reason}": "Nie wczytano motywu {file}: {reason}",
+  "The server did not answer in time": "Serwer nie odpowiedział na czas"
 }
