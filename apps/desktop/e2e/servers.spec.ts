@@ -1965,9 +1965,11 @@ test("remote tools use standard permissions without an operating system sandbox"
   test.setTimeout(90000);
   await mkdir(join(env.HAARNESS_DATA_DIR, "config"), { recursive: true });
   await mkdir(join(env.HAARNESS_DATA_DIR, "data"), { recursive: true });
+  // Chats start in Auto, where the reviewer answers a folder outside the
+  // project: the approval this test reads is a person's, so it asks for Review.
   await writeFile(
     join(env.HAARNESS_DATA_DIR, "config/config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash = { "printf blocked*" = "deny" }\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash = { "printf blocked*" = "deny" }\n',
   );
   const legacy = join(env.HAARNESS_DATA_DIR, "data/sandbox.json");
   await writeFile(
