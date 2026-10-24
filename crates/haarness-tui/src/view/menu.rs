@@ -1388,7 +1388,7 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             let waited = login.started.elapsed().as_secs();
             // A server that stops answering the checks for a while leaves
             // the sign-in waiting; the same row says so, quietly.
-            let waiting = if login.unreachable_since.is_some() {
+            let waiting = if login.unreachable() {
                 "Can't reach the server · still waiting"
             } else {
                 "Waiting for you to finish in the browser…"

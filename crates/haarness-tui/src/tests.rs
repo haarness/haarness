@@ -19524,9 +19524,93 @@ fn waiting_sign_in(app: &mut App) {
         last_poll: None,
         check: None,
         unreachable_since: None,
+        misses: 0,
         opened: false,
     });
     app.open_overlay(crate::state::Overlay::ProviderLogin);
+}
+
+/// A sign-in that gives up on a silent server tells it to stop waiting (it
+/// may hold the port a new attempt needs), as Retry does for the old one,
+/// and Escape back to the providers does not wait on the server.
+#[tokio::test]
+async fn a_sign_in_that_gives_up_tells_the_server_and_leaves_without_waiting() {
+    let told = |seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("login_cancel") && request.contains("login-1"))
+    };
+    let mut app = connect_fixture();
+    let (client, seen) = sign_in_server(vec![SignInReply::Drop]).await;
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().unreachable_since =
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(21));
+    sign_in_check(&mut app, &client).await;
+    let state = app.connect.login.as_ref().unwrap().state.clone();
+    let crate::connect::LoginState::Failed(reason) = state else {
+        panic!("{state:?}");
+    };
+    assert!(!reason.is_empty());
+    for _ in 0..500 {
+        if told(&seen) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        told(&seen),
+        "giving up told the server: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // Retry tells the server about the sign-in it replaces.
+    let (client, seen) = sign_in_server(Vec::new()).await;
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().state =
+        crate::connect::LoginState::Failed("timed out".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    for _ in 0..500 {
+        if told(&seen) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        told(&seen),
+        "retry told the server: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // Escape from a failed sign-in is back at the providers at once, also
+    // when the server answers nothing.
+    let (client, _) = sign_in_server(vec![SignInReply::Hold, SignInReply::Hold]).await;
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().state =
+        crate::connect::LoginState::Failed("timed out".into());
+    let pressed = std::time::Instant::now();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(pressed.elapsed() < std::time::Duration::from_secs(1));
+    assert!(matches!(
+        app.overlay,
+        crate::state::Overlay::Options {
+            kind: crate::state::OptionsKind::ConnectProvider,
+            ..
+        }
+    ));
+    assert!(app.connect.login.is_none());
 }
 
 /// A check whose connection drops leaves the sign-in waiting, and the next
@@ -19618,6 +19702,7 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
         last_poll: None,
         check: None,
         unreachable_since: None,
+        misses: 0,
         opened: false,
     });
     app.open_overlay(crate::state::Overlay::ProviderLogin);
@@ -19637,17 +19722,24 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
     assert!(rendered.contains("c copy code"), "{rendered}");
     assert!(!rendered.contains("Details"), "{rendered}");
 
-    // A server that stops answering leaves the sign-in waiting, and the
-    // waiting row says so, quietly.
+    // A server that stops answering leaves the sign-in waiting. One quick
+    // miss (a dropped request) changes nothing on screen; the second says
+    // so, quietly, on the waiting row.
+    let screen = |app: &App| {
+        app.lines((100, 30))
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     sign_in_check(&mut app, &client).await;
     let login = app.connect.login.as_ref().unwrap();
     assert_eq!(login.state, crate::connect::LoginState::Pending);
-    let rendered = app
-        .lines((100, 30))
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let rendered = screen(&app);
+    assert!(rendered.contains("Waiting for you to finish"), "{rendered}");
+    assert!(!rendered.contains("Can't reach the server"), "{rendered}");
+    sign_in_check(&mut app, &client).await;
+    let rendered = screen(&app);
     assert!(
         rendered.contains("Can't reach the server · still waiting"),
         "{rendered}"
