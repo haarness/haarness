@@ -1,6 +1,8 @@
 # Automatic approvals
 
-> **User guide:** [Permissions and approvals](https://haarness.ai/docs/security/permissions). This page has the engineering detail.
+How a chat's Auto or Review mode works: Auto's reviewer model and its checks, the mode the server keeps per chat, unattended runs, the API, and what Desktop and the TUI show. For developers working on approvals and for operators configuring `auto_review`.
+
+> **User guide:** [Permissions and approvals](https://haarness.ai/docs/security/permissions).
 
 Each chat is in **Auto** or **Review**, independently from `--yolo`.
 In Auto, a reviewer model answers the eligible permission requests a person would see in Review: it approves a request **once**, blocks it with a reason the agent reads, or leaves it to a person with a short note (see [Auto's reviewer](#autos-reviewer)). Auto never adds an Always rule or changes the server's permission configuration. Explicit denies, agent permission ceilings and `PermissionRequest` hooks still win; a hook's Always answer counts once in a chat in Auto. Questions remain manual.
@@ -72,7 +74,7 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 - **Ctrl+Y** toggles Auto/Review for the open chat. `/permissions-mode auto`, `/permissions-mode review`, and `/permission-mode` work through the command menu too.
 - In Review, a pending permission offers **Once + Auto** (`u`); a chat already in Auto, whose reviewer left a request to you, offers no such choice, and `u` types into the prompt. Because it changes how the whole chat is answered, the first press only stages it, like the Always choices; Enter or `u` again confirms. It enables Auto only after a successful one-time reply.
 - `haarness --auto` opens the chat in Auto (see above).
-- The status band shows the open chat's mode as `approvals: review` or `approvals: auto` when space permits, and follows a change made from another client. When a chat's mode cannot be read (the server did not answer after a switch), it reads as Review until the server says otherwise, never as the previous chat's mode. A TUI started with `--yolo` shows `approvals: --yolo` instead.
+- The status band shows the open chat's mode as `approvals: review` or `approvals: auto`, and follows a change made from another client. In Auto (and under `--yolo`) the band keeps the mode beside a passing notice, shortened to `auto` (or `--yolo`) when it must, so it never hides that requests are being answered; in Review a notice takes the room first and the mode shows when space permits. When a chat's mode cannot be read (the server did not answer after a switch), it reads as Review until the server says otherwise, never as the previous chat's mode. A TUI started with `--yolo` shows `approvals: --yolo` instead.
 - `/new` starts the new chat in the open chat's mode.
 - The approval card shows the reviewer's note under the request (`Auto review · <rule>: <reason>`, or that it was unavailable or paused), on a second row when it is long and the card has room; Haarness's own notes (a timeout, blocks in a row, a deletion nobody named, …) read in the interface's language. A card Auto finds waiting reads `Auto review is deciding…` until the reviewer settles it. A blocked call's row, or a blocked step of a batch, reads `⊘ … Blocked by Auto review: <reason>`, as quietly as a reject, and the activity text reads `reviewing…` once a review has taken 800 ms by the TUI's own clock (a quicker one shows only the tool), with its seconds from the first whole one. On a server whose reviewer is on, Ctrl+Y's notice says a reviewer model answers requests. A reply to a card that was settled meanwhile (the server answers `not_found`) drops it with "Already answered"; Once + Auto still switches the chat. When Auto turns on with Once + Auto focused, the focus moves to Allow once, never to a neighbour, so Enter never rejects.
 - With an older server, the mode is local to the TUI launch and covers new requests from every chat on that server, as before.
@@ -85,10 +87,11 @@ cargo test -p haarness-tui --lib
 cargo test -p haarness-server --test api -- approval auto_approves turning_auto_on delegated_agents auto_review::
 cargo build -p haarness-cli
 HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-auto-mode.py
+HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-auto-review.py
 HAARNESS_BIN="$PWD/target/debug/haarness" npm --prefix apps/desktop run test:e2e -- --grep "Auto approvals allow|Auto's reviewer|Auto from a child|workspace Auto stays|SSE chat fabric|dictation inserts|universal search opens settings"
 ```
 
-Under the deterministic test provider (`HAARNESS_TEST_PROVIDER=1`) the reviewer answers from `HAARNESS_TEST_AUTO_REVIEW` (`allow`, the default, `ask`, `deny`, `fail`, `slow` or `stall`), or from a `[review:<verdict>]` marker after a scripted call; real reviews never read either.
+Under the deterministic test provider (`HAARNESS_TEST_PROVIDER=1`) the reviewer answers from `HAARNESS_TEST_AUTO_REVIEW` (`allow`, the default, `ask`, `deny`, `fail`, `slow` and `slow-ask` (three seconds, then allow or ask) or `stall`), or from a `[review:<verdict>]` marker after a scripted call; real reviews never read either.
 
 Desktop tests drive actual Electron controls against a real Haarness server. The TUI script uses a real tmux terminal and real server with the deterministic test provider; it checks filesystem effects, pending requests, child agents, other chats, deny rules, questions, a change made by another client, daemon restarts and relaunch. No paid model or external side effects are needed.
 

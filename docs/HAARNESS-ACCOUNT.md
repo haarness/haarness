@@ -1,10 +1,12 @@
 # Sign in to Haarness
 
-> **User guide:** [Sign in and secure your account](https://haarness.ai/docs/cloud/sign-in). This page has the engineering detail.
+How the CLI, TUI and Desktop sign in to a Haarness account and use it: Cloud models and routers, billing, Cloud agents and sessions and the model tools that drive them, where account credentials live, and how development builds sign in to a local Cloud stack. For developers working on the account client and anyone scripting Cloud from the CLI.
 
-Run `haarness login`, finish sign-in in your browser, then choose a model under **Haarness Cloud**. For an SSH or headless terminal, use `haarness login --device` and approve the displayed code from another device. `haarness auth login haarness` is an alias for the same account flow. In the TUI, `/connect haarness` (or **Haarness Cloud** in the first-run picker) runs the same sign-in without leaving the terminal and lands in the Cloud model picker; **Manage providers → Haarness Cloud → Sign out of Haarness** signs out again.
+> **User guides:** [Sign in and secure your account](https://haarness.ai/docs/cloud/sign-in), [Credits and plans](https://haarness.ai/docs/cloud/credits-and-plans), [Cloud sessions](https://haarness.ai/docs/cloud/workspaces), [Reuse a setup with Cloud agents](https://haarness.ai/docs/cloud/agents).
 
-`/billing` in the TUI shows the plan and balances with the next step as a row to choose: **Add credits**, **Choose a plan** (or **Change plan**) and **Usage** open the matching Cloud page in your browser. Purchased credits are only spent once overage is on; when they are waiting on it, `/billing` says so and offers **Turn on overage**, and a refused request explains the same instead of reporting a raw `402`.
+Run `haarness login`, finish sign-in in your browser, then choose a model under **Haarness Cloud**. For an SSH or headless terminal, use `haarness login --device` and approve the displayed code from another device; `--no-browser` prints the sign-in link instead of opening a browser, and `--json` prints the link and the result as JSON lines for a program driving the sign-in. `haarness cloud login` and `haarness auth login haarness` are aliases for the same account flow (`--method headless` on the latter means `--device`). In the TUI, `/connect haarness` (or **Haarness Cloud** in the first-run picker) runs the same sign-in without leaving the terminal and lands in the Cloud model picker; **Manage providers → Haarness Cloud → Sign out of Haarness** signs out again.
+
+`/billing` (alias `/credits`) in the TUI shows the plan and balances with the next step as a row to choose: **Add credits**, **Choose a plan** (or **Change plan**) and **Usage** open the matching Cloud page in your browser; `/billing open`, `/billing topup` and `/billing usage` open those pages directly. Purchased credits are only spent once overage is on; when they are waiting on it, `/billing` says so and offers **Turn on overage**, and a refused request explains the same instead of reporting a raw `402`. From a shell, `haarness account --billing` prints the selected account's plan, credit balances and billing links (`--json` for the structured summary).
 
 Desktop has **Sign in to Haarness** in its sidebar and **Use Haarness Cloud** in Connect provider. The account dialog shows available credits and Cloud sessions, with links to billing and usage. Existing provider keys and self-hosted router connections continue to work independently.
 
@@ -32,7 +34,11 @@ can still prevent a listed model from serving a request.
 
 Each sign-in is named after the app and the computer in Cloud's **Settings → Devices**: `Haarness CLI on Studio`, or `Haarness Desktop on Studio` when Desktop signs in (it runs `haarness login` with `HAARNESS_LOGIN_APP=desktop`). The computer name is the one Remote control shows: macOS's computer name, else the host name.
 
-`haarness account` shows the signed-in user and selected account; `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud sessions; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
+`haarness account` shows the signed-in user and selected account (`--json` for the full status); `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud sessions; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
+
+## Cloud routers
+
+Haarness Cloud model requests go through one of the account's Cloud routers: the account's default, unless you choose another. `/router` (alias `/routers`) in the TUI lists them with the one in use marked and opens sign-in first when you are signed out; `haarness account --routers` prints them as JSON, and `haarness account --router <router-id>` chooses one. Desktop's account dialog shows a **Model router** choice when the account has more than one, grouped into routers that spend **Cloud credits** and routers that use **your provider keys** (no Cloud credits). The choice is saved on this computer, in `routers.json` in the account folder, separately for each Cloud service, account and API key, so switching accounts never carries it over. A self-hosted router you run is a provider connection instead; see [Connect Haarness Router](ROUTER.md).
 
 ## Cloud agents and sessions
 
@@ -82,6 +88,10 @@ After `haarness login`, the same tools are available to models in CLI, TUI and D
   and retrieve a template's public SSH deploy key.
 - `cloud_agent_session`: launch independent sessions, chat and read results, wait for a turn,
   interrupt, rename, archive, stop, resume or delete a session.
+- `cloud_chat`: list, create, rename and archive the separate chats inside one running session
+  (they share its files and compute), and ask, read, wait on or interrupt one of them.
+- `cloud_schedule`: run a prompt in a session's chat on Cloud's own timetable, independent of
+  this computer (unlike the local `schedule` tool); it can wake a stopped session.
 
 For example, ask: "Find my Repository helper cloud agent. Launch a session from it, ask it
 to inspect the repository, and bring back the result." Follow up with "Ask that cloud session
@@ -136,7 +146,9 @@ a minute; unsupported/disconnected streams retain the one-second HTTP fallback. 
 replay a submitted message. Cancelling or dropping a wait closes its event subscription.
 
 Remote permission prompts remain user approvals in the session's Cloud chat. The tool returns
-`needs_attention` and its URL instead of approving them. Cancelling a synchronous ask attempts
+`needs_attention` and its URL instead of approving them. A message the model sends to a Cloud
+chat starts with `Message from another Haarness agent:`, so the remote chat (and Auto's reviewer
+there, when it is in Auto) never reads it as the person's words. Cancelling a synchronous ask attempts
 to interrupt only the turn it submitted; the session and files remain. Cancelling an observation
 does not interrupt someone else's work. Archive hides a session without stopping it; stop releases
 compute while retaining storage, and delete removes the session and its disk.
@@ -154,7 +166,7 @@ Release builds sign in to `https://haarness.ai`. **Development builds** (`cargo 
 | Use another local stack for every dev build | Build with `HAARNESS_CLOUD_DEV_API_URL=http://127.0.0.1:29080` and, when the web app runs on its own dev server, `HAARNESS_CLOUD_DEV_WEB_ORIGIN=http://127.0.0.1:29173` (`cargo` rebuilds the account crate when they change; `~/.cargo/config.toml` `[env]` keeps them) |
 | Point one run anywhere | `HAARNESS_CLOUD_API_URL` (and `HAARNESS_CLOUD_WEB_ORIGIN`) at run time, for any build; `HAARNESS_CLOUD_API_URL=https://haarness.ai` sends a dev build to production |
 
-Production credentials live in `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/haarness-cloud`), shared with the `haarness-cloud` CLI. Any other Cloud service keeps its own sign-in in `~/.config/haarness-cloud/services/<host>-<port>` (for example `services/127.0.0.1-18080`), so signing in to a local stack never signs a production install out. An explicit `HAARNESS_CLOUD_CONFIG_DIR` overrides both; when `HAARNESS_DATA_DIR` is set, native Haarness defaults to its `config/account` directory for isolated development. Set the explicit Cloud config directory when mixing both CLIs against a local stack. `--data-dir` changes runtime data, not the global account.
+Production credentials live in `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/haarness-cloud`), shared with the `haarness-cloud` CLI. Any other Cloud service keeps its own sign-in in `~/.config/haarness-cloud/services/<host>-<port>` (for example `services/127.0.0.1-18080`), so signing in to a local stack never signs a production install out. An absolute `HAARNESS_HOME` moves that folder to `$HAARNESS_HOME/config/account`, sharing nothing with the user's own sign-in. An explicit `HAARNESS_CLOUD_CONFIG_DIR` overrides all of these; when `HAARNESS_DATA_DIR` is set, native Haarness defaults to its `config/account` directory for isolated development. Set the explicit Cloud config directory when mixing both CLIs against a local stack. `--data-dir` changes runtime data, not the global account. The folder holds `credentials.json`, the selected account (`account.json`) and the Cloud router choice (`routers.json`). A `HAARNESS_API_KEY` (`hck_…` or `hcr_…`) is used instead of a stored browser sign-in without replacing it; see [API keys across clients](UNIFIED-API-KEYS.md).
 
 Only HTTPS and loopback HTTP are accepted for account/router traffic; token-bearing requests do not follow redirects.
 
@@ -178,3 +190,19 @@ The `cloud_agent_session` model tool supports inline `configuration` without `cl
 `update`, `save_agent` and `ssh_public_key`. It never reads or sets environment secret values.
 Desktop offers blank/template creation, instructions and advanced JSON settings; its session Settings
 button opens the shared Cloud editor. CLI/TUI/Desktop continue to share the account login.
+`haarness cloud session list --agent ID` lists only the sessions started from one template, and
+`haarness cloud session show ID` prints one session as JSON, including the `version` that
+`update` and `save-agent` need.
+
+## Verification
+
+```sh
+cargo test -p haarness-account
+# Opt-in and live: they use an existing login and spend credits or Cloud compute.
+HAARNESS_BILLING_LIVE=1 HAARNESS_CLOUD_API_URL=… HAARNESS_CLOUD_CONFIG_DIR=… python3 scripts/test-billing-tmux.py
+HAARNESS_CLOUD_TOOLS_LIVE=1 HAARNESS_CLOUD_API_URL=… HAARNESS_CLOUD_CONFIG_DIR=… python3 scripts/test-cloud-tools-live.py
+```
+
+`test-billing-tmux.py` makes one small paid model call through the Cloud router and checks the
+debit in the TUI's billing view; `test-cloud-tools-live.py` drives the Cloud model tools through a
+disposable server and tmux TUI, creating and deleting only its own sessions and template.

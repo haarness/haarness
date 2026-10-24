@@ -1,6 +1,8 @@
 # Configuration and resource scopes
 
-> **User guides:** [Configure Haarness](https://haarness.ai/docs/cli/configuration), [Data and storage](https://haarness.ai/docs/security/data-and-storage). This page has the engineering detail.
+Where Haarness reads configuration and keeps its data, how global, base-folder and project layers take precedence, instruction files, Claude Code compatibility, and lifecycle hooks. For developers changing configuration loading, operators shipping team defaults, and anyone writing hooks.
+
+> **User guides:** [Configure Haarness](https://haarness.ai/docs/cli/configuration), [Data and storage](https://haarness.ai/docs/security/data-and-storage).
 
 Haarness separates user configuration, project overrides, persistent runtime data, transient cache, and application state. Desktop, CLI, TUI, daemon, and management tools resolve these locations through the CLI composition root; Electron does not own a separate agent configuration.
 
@@ -18,6 +20,7 @@ Haarness separates user configuration, project overrides, persistent runtime dat
 | Conversations, project registrations, memory, schedules, plugin install records | `~/.local/share/haarness/` | Runtime records are keyed by workspace identity |
 | Daemon discovery, leases and other disposable caches | `~/.cache/haarness/` | Workspace-specific subdirectories |
 | Application state plane | `~/.local/state/haarness/` | Presentation state remains separate from agent configuration |
+| Terminal UI client files: `tui-state.toml` (language, theme, thinking display, sidebar), prompt history (`tui-history-v2.json`), stash, saved servers and their drafts, `@` resource picks, themes | `~/.config/haarness/` | — |
 | Chrome settings (`browser.chrome`) | `~/.config/haarness/haarness.json` or `.jsonc` | Can only tighten the global value; see below |
 | Haarness for Chrome: host wrapper, copied binary, unpacked extension, opt-out marker (and the host manifest on Windows) | `~/.local/share/haarness/browser/chrome/` | — |
 | Chrome upload staging | `~/.cache/haarness/browser/uploads/` | — |
@@ -138,11 +141,18 @@ Inside a command template, `@path` references that name a workspace file are app
 
 ## Message delivery preference
 
-`input.delivery` in native Haarness JSON/JSONC files accepts `"steer"` (the built-in default) or `"queue"`. Desktop General settings and `/input-mode` in both clients share this value on the selected server. `/input-mode` toggles only the current project, writing its `.haarness/haarness.json{,c}` without modifying an inherited ancestor. `/input-mode reset` removes the current directory's override and restores inheritance. This non-executable preference applies on the next submission, including during active work. See [Steer and Queue](INPUT-QUEUE.md) for commands and API examples.
+`input.delivery` in native Haarness JSON/JSONC files accepts `"steer"` (the built-in default) or `"queue"`. It is read from the global files and then the project layers, like other settings, and both clients change it through the server's `input-settings` management resource (`crates/haarness-cli/src/input_settings.rs`).
+
+- **Desktop:** Settings → General → **Messages sent while working** is one **Steer | Queue** choice of what a message sent during work does in this project, with a caption naming where the value lives. Without a project override it is the global setting ("All projects"), and choosing changes it in the global `haarness.json{,c}`. **Override for this project** saves this project's own value in its `.haarness/haarness.json{,c}`, after which choices change only this project; **Use global setting (…)** removes it again, naming the value the project falls back to. Where a parent folder sets the value, the caption says **Parent folder** and a choice saves an override here, since the global setting would not reach it. With project configuration disabled only the global setting applies.
+- **`/input-mode`** in either client (`steer`, `queue`, `toggle`, the default, or `reset`) changes only the current project, writing its `.haarness/haarness.json{,c}` without modifying an inherited ancestor. `/input-mode reset` removes the current directory's override and restores inheritance.
+
+Saves are serialized by a lock in the global folder and keep unrelated keys and JSONC comments. This non-executable preference applies on the next submission, including during active work. See [Steer and Queue](INPUT-QUEUE.md) for commands and API examples.
 
 ## Interface language
 
 The interface defaults to English on both clients, regardless of OS or terminal language. Use `/language` in either client, `/language en` to restore English, or Desktop Settings → General → Language. This is a saved client presentation preference, separate from project agent configuration: the TUI uses its saved state (then explicit `[tui].language` in application `config.toml`), and Desktop uses its local preferences. See [supported languages and translation behavior](../locales/README.md).
+
+The TUI keeps such choices in `tui-state.toml` in the global configuration folder (`<data dir>/config` with `--data-dir` or `HAARNESS_DATA_DIR`). Each change reads, updates and rewrites the whole file, one change at a time, writing beside it and moving the result into place, so a read never finds it half written; when the file is a symbolic link (a dotfiles folder), the file it leads to is rewritten and the link stays (`write_whole` in `crates/haarness-tui/src/config.rs`). Files an earlier version kept in the platform folder (`~/Library/Application Support/dev.haarness.haarness` on macOS) are copied over once, without overwriting.
 
 ## Existing installations
 
@@ -190,7 +200,7 @@ The same rule covers the other shell text Haarness runs from configuration. An M
 | --- | --- | --- | --- |
 | `SessionStart` | a chat is created; not a chat started inside another (a task subagent, a workflow's thread or agent), so a slow hook never holds up their first prompt | `source` (`startup`), `agent` | `source` |
 | `UserPromptSubmit` | a root turn starts | `prompt` | — |
-| `PreToolUse` / `PermissionRequest` | before a tool runs (the `question` tool too) / before the user is prompted | `tool_name`, `tool_input`; `PermissionRequest` adds `permission_patterns`, `allow_always` and, when that is true, `always_patterns` and `permission_suggestions` | tool name (Claude aliases accepted) |
+| `PreToolUse` / `PermissionRequest` | before a tool runs (the `question` tool too) / before the user is prompted | `tool_name`, `tool_input`; `PermissionRequest` adds `permission_patterns`, `allow_always` and, when that is true, `always_patterns` and `permission_suggestions` | tool name / the permission asked (`bash`, `edit`, `external_directory`, …); Claude aliases accepted |
 | `PostToolUse` / `PostToolUseFailure` | after a tool finishes (an answered question too, with the answer as its output) | `tool_name`, `tool_input`, `tool_response`, `error` | tool name |
 | `FileChanged` | after a successful `write`, `edit`, `multiedit` or notebook edit | `tool_name`, `tool_input`, `file_path` | tool name |
 | `Stop` | a root turn completed | — | — |

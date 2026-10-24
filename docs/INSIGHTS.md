@@ -1,6 +1,10 @@
 # Cross-project analytics
 
-> **User guide:** [See your usage and cost](https://haarness.ai/docs/cli/stats-and-insights). This page has the engineering detail.
+How `haarness stats`, `haarness insights`, the TUI's `/stats` and `/insights` and the
+`/v1/stats` and `/v1/insights` routes read local history, what they count and what a
+report contains. For contributors changing the analytics and anyone checking a figure.
+
+> **User guide:** [See your usage and cost](https://haarness.ai/docs/cli/stats-and-insights).
 
 `haarness stats` and `haarness insights` read session history across every workspace
 in the current local data root. Servers can be running or stopped. Analytics do not
@@ -20,7 +24,8 @@ With no filters, all recorded history is included. `--days N` selects turns star
 within a rolling UTC window, including all recorded events of those turns.
 `--limit N` selects the most recently active matching sessions across projects.
 `--project` accepts an ID, unique name or root path; `--current-project` includes
-the project's other registered workspaces. `--data-dir` selects an isolated installation.
+the project's other registered workspaces. The hidden global `--data-dir` (or
+`HAARNESS_DATA_DIR`) selects an isolated installation.
 
 JSON and HTML contain project, model, tool, file, day and session breakdowns.
 The HTML report also includes deterministic findings. `insights` writes a unique
@@ -29,9 +34,11 @@ opens the browser; `--no-open` and `--no-llm` explicitly describe the defaults.
 `--output-dir` selects another directory. Existing reports are never replaced.
 
 In the TUI, `/stats` shows a summary panel. `/insights` also saves HTML on the
-**client's machine** and copies its path; with `--open` it also opens the report,
+**client's machine**, as `haarness-insights-<id>.html` (owner-only on Unix) in the system
+temporary folder, and copies its path; with `--open` it also opens the report,
 except over SSH. Both accept `--days N`, `--limit N`, `--current-project` and
-`--project ID`. Attached clients analyze the server's history.
+`--project ID`. Attached clients analyze the server's history. Desktop has no
+analytics view.
 
 ## Accounting and coverage
 
@@ -65,8 +72,10 @@ execution status; they do not infer task quality or developer productivity.
 - `GET /v1/stats` returns the versioned JSON report.
 - `GET /v1/insights` returns `{ "summary": "...", "html": "..." }` without writing a server file.
 - Query parameters: `days`, `project`, `currentProject`, `limit`.
-- Both require the server token and a shared workspace registry. Scope is the
-  server's entire local data root. OpenAPI publishes both endpoints and schemas.
+- Both use the server's ordinary authentication and need its shared workspace
+  registry (without one they answer "shared workspace history is not configured").
+  Scope is the server's entire local data root. OpenAPI publishes both endpoints
+  and schemas.
 
 ## Verification
 

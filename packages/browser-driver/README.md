@@ -1,7 +1,13 @@
 # @haarness/browser-driver
 
 The Chromium page driver behind Haarness's `browser_*` tools, shared by its two
-browser hosts:
+browser hosts. This README is for contributors changing a browser tool or
+either host; how agents use the browsers is in
+[docs/BROWSER.md](../../docs/BROWSER.md), and the user guides are
+[Preview pages and use the browser](https://haarness.ai/docs/desktop/previews-and-browser)
+and [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome).
+
+The two hosts:
 
 - **Haarness Desktop** (`apps/desktop`) drives its isolated Haarness browser:
   Electron `WebContentsView`s whose traffic goes through the connected server.
@@ -24,7 +30,7 @@ dependencies, pinned to the exact versions Desktop uses.
 | --- | --- |
 | `rpc` | The `Browser` namespace: every tool's input and output schema (`Operations`), `Command`/`Result`/`Outcome` (server ↔ host), `HostCommand`/`HostResult`/`HostOutcome` and `FileRef` (Chrome bridge ↔ extension), and codecs bound to this package's `effect`. |
 | `types` | The host boundary: `CdpTransport`, `PageSurface`, `FileStore`, `FileInput`, `PageOptions`, `Page`. |
-| `page` | `createPage(surface, cdp, options)`: snapshots and element refs, input, frames, dialogs, evaluation, waits, screenshots, uploads, diagnostics and the permission targets of every page tool. `lastRef()` reads the ref counter. |
+| `page` | `createPage(surface, cdp, options)`: snapshots and element refs, input, frames, dialogs, evaluation, waits, screenshots, uploads, diagnostics and the permission targets of every page tool. While an action runs and for 5 s after, it holds back file choosers the page opens (`Page.setInterceptFileChooserDialog` with `cancel`, in every frame session) and adds a `fileChooser` note pointing the agent to `browser_files_upload`; `personActed()` ends the hold when the person presses a key or a mouse button in the page. `lastRef()` reads the ref counter. |
 | `cdp` | `createCdpEvents` (the event fan-out and iframe-session filter both transports use), `abortError`, `waitFor`. |
 | `errors` | `protocolError` (CDP failures with a recovery hint), `browserFailure` (an error as a tool outcome) and `BrowserCodeError` (a failure with a host code such as `unsupported`). Hints default to the Haarness browser's wording; pass `"chrome"` for Chrome's. |
 | `policy` | `normalizeURL`, `destinationOrigin`, `browserSiteAccess` (site rules), `wwwTwin` and `navigationResources` (the permission target of loading a URL, for a host's `tabs.open`). |
@@ -67,6 +73,9 @@ await page.ready;
 page.navigationStarted();
 // For each server command (already decoded):
 const result = await page.execute(command, signal);
+// When the person presses a key or a mouse button in the page (Desktop does;
+// the extension cannot see that input, so its hold always lasts 5 s):
+page.personActed();
 ```
 
 A host keeps tab management (`tabs.list/open/focus/close`), its connection to
