@@ -2907,7 +2907,8 @@ fn parse_agent_permissions(values: &[String]) -> Result<Vec<haarness_core::Permi
             if pattern.trim().is_empty() {
                 anyhow::bail!("agent permission pattern cannot be empty: {value}");
             }
-            let decision = match decision {
+            // In any letter case, as in haarness.json.
+            let decision = match decision.to_ascii_lowercase().as_str() {
                 "allow" => PermissionDecision::Allow,
                 "ask" => PermissionDecision::Ask,
                 "deny" => PermissionDecision::Deny,
@@ -16881,6 +16882,25 @@ request_timeout = 0
             super::compile_permissions(&upper).unwrap()[0].decision,
             PermissionDecision::Deny
         );
+    }
+
+    #[test]
+    fn an_agent_permission_flag_reads_in_any_letter_case() {
+        use haarness_core::PermissionDecision;
+        let rules =
+            super::parse_agent_permissions(&["edit:*=Deny".into(), "bash:*=ASK".into()]).unwrap();
+        let decisions: Vec<_> = rules
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.decision))
+            .collect();
+        assert_eq!(
+            decisions,
+            vec![
+                ("edit:*", PermissionDecision::Deny),
+                ("bash:*", PermissionDecision::Ask)
+            ]
+        );
+        assert!(super::parse_agent_permissions(&["edit:*=dney".into()]).is_err());
     }
 
     #[test]
