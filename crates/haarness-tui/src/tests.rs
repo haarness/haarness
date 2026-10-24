@@ -115,6 +115,7 @@ fn fixture_thread() -> Thread {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         revert: None,
+        directory: None,
     }
 }
 
@@ -20406,6 +20407,7 @@ async fn ctrl_five_detaches_the_terminal_view() {
             cols: 80,
             rows: 24,
             created: false,
+            directory: None,
         },
     ]));
     crate::input::handle_key(
@@ -20432,6 +20434,7 @@ fn a_new_terminal_tab_can_take_focus() {
         cols: 20,
         rows: 4,
         created: false,
+        directory: None,
     };
     let (first, second, third) = (info("first"), info("second"), info("third"));
     let mut terminal =

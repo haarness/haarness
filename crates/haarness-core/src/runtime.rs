@@ -1395,6 +1395,12 @@ pub struct AgentRuntime {
     /// threads. They reset with the provider process by design.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    /// Stores of the chats that work in a folder of their own: each such
+    /// folder is checkpointed by itself instead of the project folder.
+    folder_snapshots: Option<Arc<dyn crate::SnapshotFolders>>,
+    /// Held while a new chat's folder is chosen and the chat stored, so two
+    /// chats asking for one folder at once get two.
+    folder_choice: Arc<AsyncMutex<()>>,
     /// Serializes undo and redo across every thread of the workspace: one
     /// thread's conflict checks must not interleave with another's writes.
     /// A runtime owns exactly one snapshot store, so this gate is per store.
@@ -1539,6 +1545,8 @@ impl AgentRuntime {
             tool_execution_gates: Arc::new(DashMap::new()),
             tool_promotions: Arc::new(DashMap::new()),
             snapshots: None,
+            folder_snapshots: None,
+            folder_choice: Arc::new(AsyncMutex::new(())),
             restore_gate: Arc::new(AsyncMutex::new(())),
             queue_pauses: Arc::new(DashMap::new()),
             approval_modes,
@@ -1562,6 +1570,69 @@ impl AgentRuntime {
     pub fn with_snapshots(mut self, snapshots: Arc<dyn crate::SnapshotStore>) -> Self {
         self.snapshots = Some(snapshots);
         self
+    }
+
+    /// Checkpoint the chats that work in a folder of their own
+    /// ([`Thread::directory`]), each in its folder, whether or not the
+    /// project folder itself is checkpointed.
+    #[must_use]
+    pub fn with_folder_snapshots(mut self, folders: Arc<dyn crate::SnapshotFolders>) -> Self {
+        self.folder_snapshots = Some(folders);
+        self
+    }
+
+    /// Where chat `thread` works: its own folder, or the project folder.
+    fn thread_workspace(&self, thread: &Thread) -> CoreResult<PathBuf> {
+        thread_workspace(&self.workspace, thread)
+    }
+
+    /// The snapshot store of `workspace`, where chat `thread` works.
+    fn snapshots_at(
+        &self,
+        thread: &Thread,
+        workspace: &Path,
+    ) -> CoreResult<Option<Arc<dyn crate::SnapshotStore>>> {
+        working_snapshots(
+            self.snapshots.as_ref(),
+            self.folder_snapshots.as_ref(),
+            thread,
+            workspace,
+        )
+    }
+
+    /// The snapshot store undo, redo and the last turn's review of chat `id`
+    /// use.
+    async fn undo_snapshots(&self, id: ThreadId) -> CoreResult<Arc<dyn crate::SnapshotStore>> {
+        let thread = self.repository.get_thread(id).await?;
+        let workspace = self.thread_workspace(&thread)?;
+        self.snapshots_at(&thread, &workspace)?
+            .ok_or_else(|| CoreError::Invalid("snapshots are disabled".into()))
+    }
+
+    /// The folder a new chat asked for (relative to the project folder),
+    /// made and canonical: the first of `<path>`, `<path>-2`, `<path>-3`, …
+    /// that no other chat works in. The caller holds `folder_choice` until
+    /// the chat is stored.
+    async fn choose_chat_folder(&self, requested: &str) -> CoreResult<String> {
+        let parts = crate::chat_folders::relative_parts(requested)?;
+        for choice in 1..=CHAT_FOLDER_CHOICES {
+            let numbered = crate::chat_folders::numbered(&parts, choice);
+            let numbered = numbered.iter().map(String::as_str).collect::<Vec<_>>();
+            let folder = crate::chat_folders::create_inside(&self.workspace, &numbered)?;
+            let folder = folder.to_str().map(str::to_owned).ok_or_else(|| {
+                CoreError::Invalid(format!(
+                    "The chat folder {} has a name that is not valid Unicode.",
+                    folder.display()
+                ))
+            })?;
+            if !self.repository.directory_in_use(&folder).await? {
+                return Ok(folder);
+            }
+        }
+        Err(CoreError::Conflict(format!(
+            "Other chats already work in {requested} and its next {} numbered folders.",
+            CHAT_FOLDER_CHOICES - 1
+        )))
     }
 
     /// Attach lifecycle hooks (PreToolUse/PostToolUse/UserPromptSubmit/Stop).
@@ -2287,11 +2358,15 @@ impl AgentRuntime {
                 "text or an attachment is required".into(),
             ));
         }
-        request.attachments = crate::attachments::admit_off_executor(
-            std::mem::take(&mut request.attachments),
-            self.workspace.clone(),
-        )
-        .await?;
+        if !request.attachments.is_empty() {
+            // A relative attachment is read from where the chat works.
+            let workspace = self.thread_workspace(&self.repository.get_thread(thread_id).await?)?;
+            request.attachments = crate::attachments::admit_off_executor(
+                std::mem::take(&mut request.attachments),
+                workspace,
+            )
+            .await?;
+        }
         loop {
             let thread = self.repository.get_thread(thread_id).await?;
             let active_turn = self
@@ -2506,6 +2581,19 @@ impl AgentRuntime {
         }
         if request.ultracode.is_none() {
             request.ultracode = Some(components.config.default_ultracode);
+        }
+        // Held until the chat is stored, so no other chat takes its folder.
+        let mut _folder_choice = None;
+        if let Some(requested) = request.directory.take() {
+            _folder_choice = Some(self.folder_choice.lock().await);
+            request.directory = Some(self.choose_chat_folder(&requested).await?);
+        } else if let Some(parent) = request.parent_id {
+            // A workflow's chat and its agents work where their parent does.
+            request.directory = match self.repository.get_thread(parent).await {
+                Ok(parent) => parent.directory,
+                Err(CoreError::NotFound(_)) => None,
+                Err(error) => return Err(error),
+            };
         }
         let thread = match (self.repository.create_thread(request).await, chosen) {
             // A concurrent create with the same id won the insert.
@@ -2754,11 +2842,12 @@ impl AgentRuntime {
                 CoreError::Invalid(format!("unknown provider {}", thread.provider))
             })?;
             let custom = self.custom_agent(&thread.agent);
+            let workspace = self.thread_workspace(&thread)?;
             let context = SystemPromptContext {
                 provider: &thread.provider,
                 model: &thread.model,
-                workspace: &self.workspace,
-                git_repository: workspace_is_git_repository(&self.workspace),
+                workspace: &workspace,
+                git_repository: thread_is_git_repository(&thread, &workspace),
                 created_at: thread.created_at,
                 output_style: components.config.output_style.as_ref(),
             };
@@ -3646,10 +3735,7 @@ impl AgentRuntime {
         let _admission_guard = admission_lock.lock().await;
         // Held from the backup capture through the saved undo state.
         let _restore_guard = self.restore_gate.lock().await;
-        let snapshots = self
-            .snapshots
-            .as_ref()
-            .ok_or_else(|| CoreError::Invalid("snapshots are disabled".into()))?;
+        let snapshots = &self.undo_snapshots(id).await?;
         if self.active.contains_key(&id) {
             return Err(CoreError::Conflict(
                 "cannot revert while a turn is running".into(),
@@ -3892,10 +3978,7 @@ impl AgentRuntime {
                 "cannot unrevert while a turn is running".into(),
             ));
         }
-        let snapshots = self
-            .snapshots
-            .as_ref()
-            .ok_or_else(|| CoreError::Invalid("snapshots are disabled".into()))?;
+        let snapshots = &self.undo_snapshots(id).await?;
         let thread = self.repository.get_thread(id).await?;
         let root = self.resolve_root(&thread).await;
         let state = thread
@@ -3993,10 +4076,7 @@ impl AgentRuntime {
         summary: bool,
         path: Option<&str>,
     ) -> CoreResult<Vec<haarness_protocol::FileDiff>> {
-        let snapshots = self
-            .snapshots
-            .as_ref()
-            .ok_or_else(|| CoreError::Invalid("snapshots are disabled".into()))?;
+        let snapshots = &self.undo_snapshots(id).await?;
         // An undone turn stays in the transcript until new work confirms the
         // undo, but its files are gone: only checkpoints before the undo
         // boundary describe the workspace.
@@ -4147,11 +4227,13 @@ impl AgentRuntime {
             )));
         }
         let thread = self.repository.get_thread(thread_id).await?;
+        let workspace = self.thread_workspace(&thread)?;
+        let snapshots = self.snapshots_at(&thread, &workspace)?;
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
         }
         let mut engine = components.config.permission_defaults(&thread.agent, name);
-        engine.set_workspace(&self.workspace);
+        engine.set_workspace(&workspace);
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
@@ -4319,7 +4401,7 @@ impl AgentRuntime {
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
         }
-        let plans = ask_plans(name, &arguments, &self.workspace);
+        let plans = ask_plans(name, &arguments, &workspace);
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -4457,7 +4539,7 @@ impl AgentRuntime {
                             .prompts
                             .text(crate::PromptName::AutoReview),
                         model: (thread.provider.clone(), thread.model.clone()),
-                        workspace: self.workspace.clone(),
+                        workspace: workspace.clone(),
                         state: Arc::clone(&self.approval_modes.reviews),
                         cancel: cancel.clone(),
                     })
@@ -4472,7 +4554,7 @@ impl AgentRuntime {
             // without a card reads nothing.
             let script_card = shows_script(name, &arguments);
             let read_script = || {
-                let (engine, arguments, workspace) = (&engine, &arguments, &self.workspace);
+                let (engine, arguments, workspace) = (&engine, &arguments, &workspace);
                 async move {
                     if script_card {
                         let readable = script_readable(engine.clone(), None, workspace);
@@ -4673,7 +4755,7 @@ impl AgentRuntime {
                     script,
                     seal: Some(seal),
                 }) if resolution.once && !seal.holds().await => {
-                    Some(script_changed(&script.path, &self.workspace))
+                    Some(script_changed(&script.path, &workspace))
                 }
                 _ => None,
             };
@@ -4715,7 +4797,7 @@ impl AgentRuntime {
         }
         let mut before_snapshot = None;
         if allowed.is_ok() && tool.side_effectful_for(&arguments) {
-            if let Some(snapshots) = &self.snapshots {
+            if let Some(snapshots) = &snapshots {
                 let info = snapshots.capture(thread_id).await?;
                 let item = self
                     .repository
@@ -4747,7 +4829,7 @@ impl AgentRuntime {
             && allowed.is_ok()
             && let Some(hooks) = &components.hooks
         {
-            execution.shell_env = hooks.shell_env(thread_id, &self.workspace).await;
+            execution.shell_env = hooks.shell_env(thread_id, &workspace).await;
         }
         let (mut output, is_error) = match allowed {
             Ok(()) => {
@@ -4758,7 +4840,7 @@ impl AgentRuntime {
                             execution,
                             thread_id,
                             turn_id: TurnId::new(),
-                            workspace: self.workspace.clone(),
+                            workspace: workspace.clone(),
                             authorized_external_paths,
                             cancel: cancel.clone(),
                             invoker: None,
@@ -4818,7 +4900,7 @@ impl AgentRuntime {
                 );
             }
         }
-        if let (Some(snapshots), Some(before)) = (&self.snapshots, before_snapshot) {
+        if let (Some(snapshots), Some(before)) = (&snapshots, before_snapshot) {
             let after = snapshots.capture(thread_id).await?;
             let item = self
                 .repository
@@ -5512,11 +5594,15 @@ impl AgentRuntime {
             ));
         }
         let _reload = self.reload_gate.read().await;
-        request.attachments = crate::attachments::admit_off_executor(
-            std::mem::take(&mut request.attachments),
-            self.workspace.clone(),
-        )
-        .await?;
+        if !request.attachments.is_empty() {
+            // A relative attachment is read from where the chat works.
+            let workspace = self.thread_workspace(&self.repository.get_thread(thread_id).await?)?;
+            request.attachments = crate::attachments::admit_off_executor(
+                std::mem::take(&mut request.attachments),
+                workspace,
+            )
+            .await?;
+        }
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn
@@ -5611,6 +5697,10 @@ impl AgentRuntime {
             ));
         }
         let thread = self.repository.get_thread(thread_id).await?;
+        // A chat folder that leads out of the project refuses the message
+        // before a turn exists.
+        let workspace = self.thread_workspace(&thread)?;
+        let snapshots = self.snapshots_at(&thread, &workspace)?;
         let effective_agent = request.agent.as_deref().unwrap_or(&thread.agent);
         if components
             .config
@@ -5831,7 +5921,11 @@ impl AgentRuntime {
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
             cancel,
-            workspace: self.workspace.clone(),
+            workspace,
+            runtime_workspace: self.workspace.clone(),
+            runtime_snapshots: self.snapshots.clone(),
+            folder_snapshots: self.folder_snapshots.clone(),
+            folder_choice: self.folder_choice.clone(),
             permissions: self.permissions.clone(),
             questions: self.questions.clone(),
             question_events: self.question_events.clone(),
@@ -5861,7 +5955,7 @@ impl AgentRuntime {
             advertised_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
             config: components.config.clone(),
-            snapshots: self.snapshots.clone(),
+            snapshots,
             restore_gate: self.restore_gate.clone(),
             hooks: components.hooks.clone(),
             snapshot_boundary: user_item.sequence.saturating_sub(1),
@@ -6239,7 +6333,15 @@ struct RunnerTask {
     command_started: AtomicBool,
     skill_rules: Mutex<Vec<PermissionRule>>,
     cancel: CancellationToken,
+    /// Where this turn's tools work: the chat's own folder, or the project
+    /// folder (`runtime_workspace`).
     workspace: PathBuf,
+    /// The runtime's project folder and stores, for handles built from this
+    /// task (whose other chats may work elsewhere).
+    runtime_workspace: PathBuf,
+    runtime_snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    folder_snapshots: Option<Arc<dyn crate::SnapshotFolders>>,
+    folder_choice: Arc<AsyncMutex<()>>,
     permissions: Arc<DashMap<String, PendingPermission>>,
     questions: Arc<DashMap<String, PendingQuestion>>,
     question_events: Arc<Mutex<()>>,
@@ -6281,6 +6383,7 @@ struct RunnerTask {
     advertised_tools: Mutex<HashSet<String>>,
     last_tool_catalog: Mutex<Option<ToolCatalogResponse>>,
     config: Arc<RuntimeConfig>,
+    /// The store of `workspace`.
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
     /// The runtime's restore gate, passed on to handles built from this task.
     restore_gate: Arc<AsyncMutex<()>>,
@@ -8352,7 +8455,7 @@ impl RunnerTask {
                     self.publish_item(ItemData::QueueConsumed { item_id })
                         .await?;
                 }
-                let git_repository = workspace_is_git_repository(&self.workspace);
+                let git_repository = thread_is_git_repository(&self.thread, &self.workspace);
                 let base = if let Some(custom) = self.custom_agent(agent) {
                     // Custom bodies replace only the role-specific guidance;
                     // the runtime/environment contract remains universal.
@@ -11161,6 +11264,8 @@ impl RunnerTask {
                     provider: Some(provider.clone()),
                     model: Some(model.clone()),
                     ultracode: Some(self.turn.ultracode),
+                    // A child agent works in its parent's folder.
+                    directory: self.thread.directory.clone(),
                 })
                 .await?
         };
@@ -11378,7 +11483,12 @@ impl RunnerTask {
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
             cancel: cancel.clone(),
+            // The child's folder is its parent's.
             workspace: self.workspace.clone(),
+            runtime_workspace: self.runtime_workspace.clone(),
+            runtime_snapshots: self.runtime_snapshots.clone(),
+            folder_snapshots: self.folder_snapshots.clone(),
+            folder_choice: self.folder_choice.clone(),
             permissions: self.permissions.clone(),
             questions: self.questions.clone(),
             question_events: self.question_events.clone(),
@@ -11704,7 +11814,7 @@ impl RunnerTask {
             turn_admissions: self.turn_admissions.clone(),
             title_jobs: self.title_jobs.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
-            workspace: self.workspace.clone(),
+            workspace: self.runtime_workspace.clone(),
             permissions: self.permissions.clone(),
             questions: self.questions.clone(),
             question_events: self.question_events.clone(),
@@ -11723,7 +11833,9 @@ impl RunnerTask {
             tool_settings_mutation: self.tool_settings_mutation.clone(),
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
-            snapshots: self.snapshots.clone(),
+            snapshots: self.runtime_snapshots.clone(),
+            folder_snapshots: self.folder_snapshots.clone(),
+            folder_choice: self.folder_choice.clone(),
             restore_gate: self.restore_gate.clone(),
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
@@ -11981,6 +12093,42 @@ fn workspace_is_git_repository(workspace: &Path) -> bool {
     workspace
         .ancestors()
         .any(|directory| directory.join(".git").exists())
+}
+
+/// Whether chat `thread`, working in `workspace`, works in a Git repository.
+/// A chat's own folder is its project: a repository above it is not its.
+fn thread_is_git_repository(thread: &Thread, workspace: &Path) -> bool {
+    if thread.directory.is_some() {
+        workspace.join(".git").exists()
+    } else {
+        workspace_is_git_repository(workspace)
+    }
+}
+
+/// How many numbered folders a new chat may try (`<path>`, `<path>-2`, …).
+const CHAT_FOLDER_CHOICES: usize = 1000;
+
+/// Where chat `thread` works: its own folder (made again when someone
+/// deleted it), or `project`, the server's project folder.
+fn thread_workspace(project: &Path, thread: &Thread) -> CoreResult<PathBuf> {
+    match &thread.directory {
+        Some(directory) => crate::chat_folders::reopen(project, directory),
+        None => Ok(project.to_path_buf()),
+    }
+}
+
+/// The snapshot store of `workspace`, where chat `thread` works: the
+/// project's for a chat without a folder, else its folder's own.
+fn working_snapshots(
+    project: Option<&Arc<dyn crate::SnapshotStore>>,
+    folders: Option<&Arc<dyn crate::SnapshotFolders>>,
+    thread: &Thread,
+    workspace: &Path,
+) -> CoreResult<Option<Arc<dyn crate::SnapshotStore>>> {
+    if thread.directory.is_none() {
+        return Ok(project.cloned());
+    }
+    folders.map(|folders| folders.open(workspace)).transpose()
 }
 
 fn validate_custom_agent_mode(agent: &crate::config::CustomAgent, child: bool) -> CoreResult<()> {
@@ -15033,6 +15181,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             revert: None,
+            directory: None,
         };
         let ids = super::descendant_thread_ids(
             &[

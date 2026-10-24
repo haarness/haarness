@@ -156,7 +156,6 @@ impl NativeToolRegistry {
     ) -> Self {
         let mut registry = Self::build(workspace.clone(), mcp, skills, skill_infos);
         let tool: Arc<dyn Tool> = Arc::new(WorkflowTool {
-            workspace,
             coordinator: workflows,
         });
         registry.tools.insert(tool.definition().name.clone(), tool);
@@ -215,25 +214,22 @@ impl NativeToolRegistry {
     }
 
     /// Attach post-edit formatting/diagnostics and the model-facing LSP query
-    /// tool without changing the stable constructors used by embedders.
+    /// tool without changing the stable constructors used by embedders. Paths
+    /// resolve where each call works (`ToolContext::workspace`).
     #[must_use]
-    pub fn with_language(mut self, workspace: PathBuf, language: Arc<LanguageService>) -> Self {
+    pub fn with_language(mut self, language: Arc<LanguageService>) -> Self {
         for name in ["read", "write", "edit", "multiedit", "apply_patch"] {
             let Some(inner) = self.tools.remove(name) else {
                 continue;
             };
             let tool: Arc<dyn Tool> = Arc::new(LanguageAwareTool {
                 name,
-                workspace: workspace.clone(),
                 language: Arc::clone(&language),
                 inner,
             });
             self.tools.insert(name.into(), tool);
         }
-        let tool: Arc<dyn Tool> = Arc::new(LspTool {
-            workspace,
-            language,
-        });
+        let tool: Arc<dyn Tool> = Arc::new(LspTool { language });
         self.tools.insert(tool.definition().name.clone(), tool);
         self
     }
@@ -280,7 +276,6 @@ impl NativeToolRegistry {
         ] {
             let tool: Arc<dyn Tool> = Arc::new(BuiltinTool {
                 kind,
-                workspace: workspace.clone(),
                 client: web_client(),
                 skills: skills.clone(),
                 skill_catalog: skill_catalog.clone(),
@@ -628,7 +623,6 @@ impl WorkflowHost for McpCodeHost {
 
 struct LanguageAwareTool {
     name: &'static str,
-    workspace: PathBuf,
     language: Arc<LanguageService>,
     inner: Arc<dyn Tool>,
 }
@@ -663,7 +657,7 @@ impl Tool for LanguageAwareTool {
             if let Some(file) = arguments
                 .get("path")
                 .and_then(Value::as_str)
-                .and_then(|path| language_path(&self.workspace, path))
+                .and_then(|path| language_path(&context.workspace, path))
             {
                 let language = Arc::clone(&self.language);
                 let cancel = context.cancel.clone();
@@ -675,7 +669,7 @@ impl Tool for LanguageAwareTool {
         let paths = mutation_paths(self.name, &arguments)
             .into_iter()
             .filter_map(|path| {
-                language_path(&self.workspace, &path).map(|resolved| (path, resolved))
+                language_path(&context.workspace, &path).map(|resolved| (path, resolved))
             })
             .collect::<Vec<_>>();
         let mut before = Vec::with_capacity(paths.len());
@@ -695,13 +689,12 @@ impl Tool for LanguageAwareTool {
             )
             .await;
         refresh_formatted_diffs(&mut output, before).await;
-        append_language_report(&mut output, &self.workspace, &reports);
+        append_language_report(&mut output, &context.workspace, &reports);
         Ok(output)
     }
 }
 
 struct LspTool {
-    workspace: PathBuf,
     language: Arc<LanguageService>,
 }
 
@@ -750,11 +743,11 @@ impl Tool for LspTool {
             }
         };
         let requested = string(&arguments, "filePath")?;
-        let file = haarness_core::resolve_permission_path(&self.workspace, requested);
-        let root = self
+        let file = haarness_core::resolve_permission_path(&context.workspace, requested);
+        let root = context
             .workspace
             .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
+            .unwrap_or_else(|_| context.workspace.clone());
         if !file.starts_with(root) && !context.authorized_external_paths.contains(&file) {
             return Err(CoreError::Invalid(
                 "LSP path is outside the workspace and was not authorized".into(),
@@ -1828,7 +1821,6 @@ impl ToolRegistry for NativeToolRegistry {
 }
 
 struct WorkflowTool {
-    workspace: PathBuf,
     coordinator: Arc<WorkflowCoordinator>,
 }
 
@@ -1930,7 +1922,7 @@ impl Tool for WorkflowTool {
                     ));
                 }
                 let result = create_workflow_file(
-                    &self.workspace,
+                    &context.workspace,
                     self.coordinator.catalog().as_ref(),
                     name,
                     source,
@@ -1949,7 +1941,7 @@ impl Tool for WorkflowTool {
                 if let Some(value) = path.as_ref()
                     && Path::new(value).is_relative()
                 {
-                    path = Some(self.workspace.join(value).display().to_string());
+                    path = Some(context.workspace.join(value).display().to_string());
                 }
                 let name = (source.is_none() && path.is_none())
                     .then(|| input.get("name").and_then(Value::as_str).map(str::to_owned))
@@ -2416,7 +2408,6 @@ enum Kind {
 }
 struct BuiltinTool {
     kind: Kind,
-    workspace: PathBuf,
     client: reqwest::Client,
     skills: Option<Arc<dyn SkillRegistry>>,
     skill_catalog: Arc<str>,
@@ -2805,14 +2796,14 @@ impl Tool for BuiltinTool {
                 )
                 .await?;
                 self.instructions
-                    .attach(&mut output, &path, &self.workspace, context.thread_id);
+                    .attach(&mut output, &path, &context.workspace, context.thread_id);
                 Ok(output)
             }
             Kind::ImageGenerate => {
                 generate_media(
                     GeneratedMediaKind::Image,
                     &args,
-                    &self.workspace,
+                    &context.workspace,
                     media_client(),
                     &context.cancel,
                 )
@@ -2822,7 +2813,7 @@ impl Tool for BuiltinTool {
                 generate_media(
                     GeneratedMediaKind::Video,
                     &args,
-                    &self.workspace,
+                    &context.workspace,
                     media_client(),
                     &context.cancel,
                 )
@@ -2831,7 +2822,7 @@ impl Tool for BuiltinTool {
             Kind::List => {
                 let requested = string(&args, "path")?;
                 let path = self.resolve_existing(requested, &context)?;
-                let secrets = SecretFilter::new(&self.workspace, requested, &path, None);
+                let secrets = SecretFilter::new(&context.workspace, requested, &path, None);
                 let mut entries = tokio::fs::read_dir(&path).await.map_err(tool_error)?;
                 let mut names = Vec::new();
                 let mut skipped = Skipped::default();
@@ -2873,17 +2864,17 @@ impl Tool for BuiltinTool {
                     ));
                 }
                 let pattern = root.join(pattern).to_string_lossy().into_owned();
-                let workspace = self
+                let workspace = context
                     .workspace
                     .canonicalize()
-                    .unwrap_or_else(|_| self.workspace.clone());
+                    .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
                     .as_ref()
                     .and_then(|invoker| invoker.read_rules());
-                let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
-                let named = self.workspace.clone();
+                let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
+                let named = context.workspace.clone();
                 let cancel = context.cancel.clone();
                 // The walk reads folders synchronously and `**` follows links
                 // (one to `/` reaches everything), so it runs off the async
@@ -2925,7 +2916,7 @@ impl Tool for BuiltinTool {
                     .invoker
                     .as_ref()
                     .and_then(|invoker| invoker.read_rules());
-                let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
+                let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
                 // The walker searches a file it is given whatever its filters
                 // say, so a secret-named or denied one, or a link to one, is
                 // left out here, before anything reads it.
@@ -2968,7 +2959,7 @@ impl Tool for BuiltinTool {
                                     "{}:{}:{}",
                                     entry
                                         .path()
-                                        .strip_prefix(&self.workspace)
+                                        .strip_prefix(&context.workspace)
                                         .unwrap_or(entry.path())
                                         .display(),
                                     index + 1,
@@ -3109,7 +3100,7 @@ impl Tool for BuiltinTool {
                         && same_entry(
                             &source,
                             &destination,
-                            &haarness_core::resolve_permission_entry(&self.workspace, target),
+                            &haarness_core::resolve_permission_entry(&context.workspace, target),
                         )
                     {
                         return Err(CoreError::Invalid(format!(
@@ -3162,7 +3153,7 @@ impl Tool for BuiltinTool {
                                     &entry,
                                     &destination,
                                     &haarness_core::resolve_permission_entry(
-                                        &self.workspace,
+                                        &context.workspace,
                                         &target,
                                     ),
                                 ) {
@@ -3241,7 +3232,7 @@ impl Tool for BuiltinTool {
                         }
                         path
                     }
-                    None => self.workspace.clone(),
+                    None => context.workspace.clone(),
                 };
                 let timeout = args
                     .get("timeout")
@@ -3339,7 +3330,7 @@ impl Tool for BuiltinTool {
 }
 impl BuiltinTool {
     fn resolve_existing(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        let path = haarness_core::resolve_permission_path(&self.workspace, value)
+        let path = haarness_core::resolve_permission_path(&context.workspace, value)
             .canonicalize()
             .map_err(tool_error)?;
         self.ensure_within(path, context)
@@ -3347,7 +3338,7 @@ impl BuiltinTool {
     /// A file the tool removes (a delete, the old name of a move): a link
     /// there is the entry itself, so only the folder holding it is followed.
     fn resolve_entry(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        let path = haarness_core::resolve_permission_entry(&self.workspace, value);
+        let path = haarness_core::resolve_permission_entry(&context.workspace, value);
         std::fs::symlink_metadata(&path).map_err(tool_error)?;
         self.ensure_within(path, context)
     }
@@ -3355,7 +3346,7 @@ impl BuiltinTool {
         if value.is_empty() {
             return Err(CoreError::Invalid("path cannot be empty".into()));
         }
-        let joined = haarness_core::resolve_permission_path(&self.workspace, value);
+        let joined = haarness_core::resolve_permission_path(&context.workspace, value);
         if joined.exists() {
             return self.ensure_within(joined.canonicalize().map_err(tool_error)?, context);
         }
@@ -3373,7 +3364,7 @@ impl BuiltinTool {
         self.ensure_within(joined, context)
     }
     fn ensure_within(&self, path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
-        let root = self.workspace.canonicalize().map_err(tool_error)?;
+        let root = context.workspace.canonicalize().map_err(tool_error)?;
         let output_root = tool_output_dir();
         let is_tool_output = output_root
             .canonicalize()
@@ -4769,8 +4760,7 @@ mod tests {
             std::env::temp_dir().join(format!("haarness-language-tools-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         let language = language_test_service(&workspace);
-        let registry = NativeToolRegistry::new(workspace.clone())
-            .with_language(workspace.clone(), language.clone());
+        let registry = NativeToolRegistry::new(workspace.clone()).with_language(language.clone());
 
         let write = registry.get("write").unwrap();
         let written = write
@@ -6640,7 +6630,6 @@ mod webfetch_tests {
         let workspace = std::env::current_dir().unwrap();
         let tool = BuiltinTool {
             kind: Kind::WebFetch,
-            workspace: workspace.clone(),
             client: web_client(),
             skills: None,
             skill_catalog: Arc::from(""),
@@ -6693,7 +6682,6 @@ mod webfetch_tests {
     fn webfetch_tool() -> BuiltinTool {
         BuiltinTool {
             kind: Kind::WebFetch,
-            workspace: std::env::current_dir().unwrap(),
             client: web_client(),
             skills: None,
             skill_catalog: Arc::from(""),
@@ -6747,7 +6735,7 @@ mod webfetch_tests {
         let output = tool
             .execute(
                 json!({"url": format!("http://{address}/start")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             )
             .await
             .unwrap();
@@ -6832,7 +6820,7 @@ mod webfetch_tests {
         let output = tool
             .execute(
                 json!({"url": format!("http://{address}/start")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             )
             .await
             .unwrap();
@@ -6874,7 +6862,7 @@ mod webfetch_tests {
         let error = tool
             .execute(
                 json!({"url": format!("http://{address}/endless")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             )
             .await
             .unwrap_err();
@@ -6905,7 +6893,7 @@ mod webfetch_tests {
             Duration::from_secs(10),
             tool.execute(
                 json!({"url": format!("http://{address}/large")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             ),
         )
         .await
@@ -6933,7 +6921,7 @@ mod webfetch_tests {
     async fn stop_abandons_a_fetch_whose_body_never_finishes() {
         let (address, server) = stalled_server().await;
         let tool = webfetch_tool();
-        let context = composite_context(&tool.workspace);
+        let context = composite_context(&std::env::current_dir().unwrap());
         let cancel = context.cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;

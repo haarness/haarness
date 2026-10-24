@@ -6,7 +6,7 @@ mod archive;
 mod input;
 mod snapshots;
 mod workflows;
-pub use snapshots::SqliteSnapshotStore;
+pub use snapshots::{SqliteSnapshotFolders, SqliteSnapshotStore};
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
@@ -564,6 +564,26 @@ impl SqliteStore {
                 .map_err(storage)?;
         }
         input::migrate(&connection)?;
+        // A chat's own working folder. Checked rather than numbered, like the
+        // runtime settings below: an older server opening this database again
+        // ignores the column, and no numbered step depends on it.
+        let has_directory: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='directory')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if !has_directory {
+            connection
+                .execute_batch("ALTER TABLE threads ADD COLUMN directory TEXT;")
+                .map_err(storage)?;
+        }
+        connection
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_threads_directory ON threads(directory) WHERE directory IS NOT NULL;",
+            )
+            .map_err(storage)?;
         // Runtime settings are deliberately idempotent instead of consuming
         // a numbered migration: optional adapters can ignore this extension,
         // while every SQLite database (including one upgraded through several
@@ -619,7 +639,7 @@ impl SqliteStore {
             request.attachments = input.attachments;
         }
         let thread_raw = tx.query_row(
-            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json FROM threads WHERE id=?1",
+            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory FROM threads WHERE id=?1",
             [id.to_string()], raw_thread,
         ).optional().map_err(storage)?.ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
         let thread = decode_thread(thread_raw)?;
@@ -778,14 +798,16 @@ impl ThreadRepository for SqliteStore {
             created_at: now,
             updated_at: now,
             revert: None,
+            // The runtime resolved it to the folder's canonical absolute path.
+            directory: request.directory,
         };
         // A client-chosen id can name an existing chat: report the conflict
         // instead of overwriting it (the runtime then returns that chat).
         let inserted = self.connection.lock().execute(
-            "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent,schedule_json)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(id) DO NOTHING",
+            "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent,schedule_json,directory)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO NOTHING",
             params![thread.id.to_string(), thread.title, thread.parent_id.map(|id| id.to_string()), false,
-                thread.agent, thread.provider, thread.model, time(thread.created_at), time(thread.updated_at), thread.ultracode, thread.is_subagent, thread.schedule.as_ref().map(serde_json::to_string).transpose().map_err(storage)?],
+                thread.agent, thread.provider, thread.model, time(thread.created_at), time(thread.updated_at), thread.ultracode, thread.is_subagent, thread.schedule.as_ref().map(serde_json::to_string).transpose().map_err(storage)?, thread.directory],
         ).map_err(storage)?;
         if inserted == 0 {
             return Err(CoreError::Conflict(format!(
@@ -800,7 +822,7 @@ impl ThreadRepository for SqliteStore {
         let connection = self.connection.lock();
         let mut statement = connection
             .prepare(
-                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json
+                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
              FROM threads WHERE (?1 OR archived = 0) ORDER BY updated_at DESC",
             )
             .map_err(storage)?;
@@ -811,9 +833,20 @@ impl ThreadRepository for SqliteStore {
             .collect()
     }
 
+    async fn directory_in_use(&self, directory: &str) -> CoreResult<bool> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE directory=?1)",
+                [directory],
+                |row| row.get(0),
+            )
+            .map_err(storage)
+    }
+
     async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
         let raw = self.connection.lock().query_row(
-            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json FROM threads WHERE id=?1",
+            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory FROM threads WHERE id=?1",
             [id.to_string()], raw_thread,
         ).optional().map_err(storage)?.ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
         decode_thread(raw)
@@ -873,7 +906,7 @@ impl ThreadRepository for SqliteStore {
         };
         let raw = self.connection.lock().query_row(
             "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title IN (?4,?5)
-             RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json",
+             RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory",
             params![id.to_string(), title, time(Utc::now()), expected, also], raw_thread,
         ).optional().map_err(storage)?;
         raw.map(decode_thread).transpose()
@@ -1223,6 +1256,8 @@ impl ThreadRepository for SqliteStore {
             created_at: now,
             updated_at: now,
             revert: None,
+            // A fork goes on working where its source works.
+            directory: parent.directory,
         };
         let limit =
             up_to_sequence.map_or(i64::MAX, |value| i64::try_from(value).unwrap_or(i64::MAX));
@@ -1236,10 +1271,10 @@ impl ThreadRepository for SqliteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
         tx.execute(
-            "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent,directory)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![fork.id.to_string(), fork.title, id.to_string(), false,
-                fork.agent, fork.provider, fork.model, time(now), time(now), fork.ultracode, fork.is_subagent],
+                fork.agent, fork.provider, fork.model, time(now), time(now), fork.ultracode, fork.is_subagent, fork.directory],
         )
         .map_err(storage)?;
         {
@@ -1670,6 +1705,7 @@ type RawThread = (
     bool,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 type RawTurn = (
     String,
@@ -1704,6 +1740,7 @@ fn raw_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawThread> {
         row.get(13)?,
         row.get(14)?,
         row.get(15)?,
+        row.get(16)?,
     ))
 }
 fn raw_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTurn> {
@@ -1784,6 +1821,7 @@ fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
         created_at: parse_time(&raw.7)?,
         updated_at: parse_time(&raw.8)?,
         revert,
+        directory: raw.16,
     })
 }
 fn decode_turn(raw: RawTurn) -> CoreResult<Turn> {
@@ -2288,6 +2326,74 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(committed.data, ItemData::Compaction { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_chat_folder_survives_reload_and_forks_and_stays_off_archives() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-chat-folder-{}", Uuid::now_v7()));
+        let path = directory.join("sessions.db");
+        let store = SqliteStore::open(&path).unwrap();
+        let plain = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        // A database from before chat folders: no column, no index.
+        store
+            .connection
+            .lock()
+            .execute_batch(
+                "DROP INDEX idx_threads_directory; ALTER TABLE threads DROP COLUMN directory;",
+            )
+            .unwrap();
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.get_thread(plain.id).await.unwrap().directory, None);
+        let folder = "/chats/2026-10-24/hello";
+        let chat = store
+            .create_thread(CreateThreadRequest {
+                directory: Some(folder.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(chat.directory.as_deref(), Some(folder));
+        assert!(store.directory_in_use(folder).await.unwrap());
+        assert!(
+            !store
+                .directory_in_use("/chats/2026-10-24/other")
+                .await
+                .unwrap()
+        );
+        let fork = store.fork_thread(chat.id, None, None).await.unwrap();
+        assert_eq!(fork.directory.as_deref(), Some(folder));
+        drop(store);
+        // Opening it again changes nothing.
+        let store = SqliteStore::open(&path).unwrap();
+        for id in [chat.id, fork.id] {
+            assert_eq!(
+                store.get_thread(id).await.unwrap().directory.as_deref(),
+                Some(folder)
+            );
+        }
+        assert!(
+            store
+                .list_threads(false)
+                .await
+                .unwrap()
+                .iter()
+                .any(|thread| thread.id == chat.id && thread.directory.as_deref() == Some(folder))
+        );
+        // A folder is this computer's: an archive carries none.
+        let archive = store.export_session_archive(chat.id, false).await.unwrap();
+        assert!(
+            archive
+                .threads
+                .iter()
+                .all(|entry| entry.thread.directory.is_none())
+        );
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

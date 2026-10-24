@@ -562,6 +562,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             revert: None,
             schedule: None,
+            directory: None,
         };
         let id = thread.id;
         let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
