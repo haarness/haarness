@@ -3329,6 +3329,73 @@ enum Planned {
     Removed,
 }
 
+/// What a patch's earlier operations leave at each path they touch.
+struct PatchFiles {
+    files: HashMap<PathBuf, Planned>,
+    /// The project's disk ignores letter case (macOS's and Windows' do by
+    /// default): `Foo.txt` and `foo.txt` are one file there.
+    fold_case: bool,
+}
+
+impl PatchFiles {
+    fn new(context: &ToolContext) -> Self {
+        Self {
+            files: HashMap::new(),
+            fold_case: folds_case(&context.workspace),
+        }
+    }
+
+    /// The path an earlier operation gave the file `path` names, and what it
+    /// left there.
+    fn find(&self, path: &Path) -> Option<(&PathBuf, &Planned)> {
+        self.files.get_key_value(path).or_else(|| {
+            let folded = self.fold_case.then(|| fold(path))?;
+            self.files.iter().find(|(key, _)| fold(key) == folded)
+        })
+    }
+
+    fn get(&self, path: &Path) -> Option<&Planned> {
+        self.find(path).map(|(_, planned)| planned)
+    }
+
+    /// Whether two paths name one file.
+    fn same(&self, left: &Path, right: &Path) -> bool {
+        left == right || (self.fold_case && fold(left) == fold(right))
+    }
+
+    fn insert(&mut self, path: PathBuf, planned: Planned) {
+        if self.fold_case {
+            let folded = fold(&path);
+            self.files.retain(|key, _| fold(key) != folded);
+        }
+        self.files.insert(path, planned);
+    }
+}
+
+fn fold(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+/// Whether the disk holding `folder` ignores letter case: the folder's path
+/// in swapped case leads to the folder itself.
+fn folds_case(folder: &Path) -> bool {
+    let Ok(folder) = folder.canonicalize() else {
+        return false;
+    };
+    let text = folder.to_string_lossy();
+    let swapped: String = text
+        .chars()
+        .map(|letter| {
+            if letter.is_ascii_lowercase() {
+                letter.to_ascii_uppercase()
+            } else {
+                letter.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    swapped != text && same_file(&folder, Path::new(&swapped))
+}
+
 /// The one write a patch operation makes.
 enum PatchStep {
     Write {
@@ -3365,7 +3432,7 @@ async fn plan_patch(
     operations: Vec<haarness_core::patch::FileOp>,
     context: &ToolContext,
 ) -> CoreResult<PatchPlan> {
-    let mut planned: HashMap<PathBuf, Planned> = HashMap::new();
+    let mut planned = PatchFiles::new(context);
     let mut plan = PatchPlan {
         steps: Vec::new(),
         diffs: Vec::new(),
@@ -3402,9 +3469,9 @@ async fn plan_patch(
                 }
                 // A file an earlier operation writes is read as it leaves it.
                 let earlier = match resolve_new(&path, context) {
-                    Ok(key) => match planned.get(&key) {
-                        Some(Planned::Text(text)) => Some((key, text.clone())),
-                        Some(Planned::Removed) => return Err(gone()),
+                    Ok(key) => match planned.find(&key) {
+                        Some((key, Planned::Text(text))) => Some((key.clone(), text.clone())),
+                        Some((_, Planned::Removed)) => return Err(gone()),
                         None => None,
                     },
                     Err(_) => None,
@@ -3428,7 +3495,7 @@ async fn plan_patch(
                     // is its own entry.
                     let entry = match resolve_entry(&path, context) {
                         Ok(entry) => entry,
-                        Err(_) if planned.contains_key(&resolved) => resolved.clone(),
+                        Err(_) if planned.get(&resolved).is_some() => resolved.clone(),
                         Err(error) => return Err(at(&path, error)),
                     };
                     let removed = match planned.get(&entry) {
@@ -3439,7 +3506,9 @@ async fn plan_patch(
                     let target_entry =
                         haarness_core::resolve_permission_entry(&context.workspace, &target);
                     // A file the patch adds earlier is checked here.
-                    if destination == entry || same_entry(&entry, &destination, &target_entry) {
+                    if planned.same(&destination, &entry)
+                        || same_entry(&entry, &destination, &target_entry)
+                    {
                         return Err(CoreError::Invalid(format!(
                             "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
                         )));
@@ -3455,8 +3524,8 @@ async fn plan_patch(
                         replacement_diff(&target, destination_before, &updated),
                         &mut plan.diffs_truncated,
                     );
-                    planned.insert(destination.clone(), Planned::Text(updated.clone()));
                     planned.insert(entry.clone(), Planned::Removed);
+                    planned.insert(destination.clone(), Planned::Text(updated.clone()));
                     plan.steps.push((
                         format!("moved {path} → {target}"),
                         PatchStep::Move {
@@ -3500,8 +3569,11 @@ async fn plan_patch(
                 // the patch adds earlier is its own entry.
                 let resolved = match resolve_entry(&path, context) {
                     Ok(resolved) => resolved,
-                    Err(error) => match resolve_new(&path, context) {
-                        Ok(key) if matches!(planned.get(&key), Some(Planned::Text(_))) => key,
+                    Err(error) => match resolve_new(&path, context)
+                        .ok()
+                        .and_then(|key| planned.find(&key))
+                    {
+                        Some((key, Planned::Text(_))) => key.clone(),
                         _ => return Err(at(&path, error)),
                     },
                 };
@@ -3529,7 +3601,7 @@ async fn plan_patch(
 }
 
 /// Whether an earlier operation of the patch removes the entry `path` names.
-fn removed_entry(path: &str, planned: &HashMap<PathBuf, Planned>, context: &ToolContext) -> bool {
+fn removed_entry(path: &str, planned: &PatchFiles, context: &ToolContext) -> bool {
     let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
     matches!(planned.get(&entry), Some(Planned::Removed))
 }
@@ -3537,20 +3609,26 @@ fn removed_entry(path: &str, planned: &HashMap<PathBuf, Planned>, context: &Tool
 /// Where a patch writes `path`: the entry itself when an earlier operation
 /// removes it (a link it deletes no longer leads anywhere), else the file
 /// the path leads to.
-fn planned_target(
-    path: &str,
-    planned: &HashMap<PathBuf, Planned>,
-    context: &ToolContext,
-) -> CoreResult<PathBuf> {
-    if removed_entry(path, planned, context) {
-        let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
+fn planned_target(path: &str, planned: &PatchFiles, context: &ToolContext) -> CoreResult<PathBuf> {
+    let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
+    if matches!(planned.get(&entry), Some(Planned::Removed)) {
         return ensure_within(entry, context);
     }
-    resolve_new(path, context)
+    let resolved = resolve_new(path, context)?;
+    // Another spelling of a file an earlier operation removes (`README.md`
+    // deleted, then `readme.md` added on a disk that ignores letter case) is
+    // written as the patch spells it, not under the name it had. A link
+    // still leads where it leads.
+    let link =
+        std::fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    if !link && matches!(planned.get(&resolved), Some(Planned::Removed)) {
+        return ensure_within(entry, context);
+    }
+    Ok(resolved)
 }
 
 /// What `path` holds before an operation, as the earlier ones leave it.
-async fn planned_body(planned: &HashMap<PathBuf, Planned>, path: &Path) -> ExistingDiffBody {
+async fn planned_body(planned: &PatchFiles, path: &Path) -> ExistingDiffBody {
     match planned.get(path) {
         Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
         Some(Planned::Removed) => ExistingDiffBody::Missing,
@@ -6380,6 +6458,57 @@ export default workflow({
             )
             .await;
         assert!(matches!(escape, Err(CoreError::PermissionDenied(_))));
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_renames_by_letter_case_and_finds_a_file_it_adds_in_another_case() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-case-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("README.md"), "# hi\n").unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: &str| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            let input = input.to_owned();
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+        let names = || {
+            let mut names = std::fs::read_dir(&workspace)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        // On any disk the file ends up as the patch spells it.
+        run("*** Begin Patch\n*** Delete File: README.md\n*** Add File: readme.md\n+# hi\n*** End Patch\n")
+            .await
+            .unwrap();
+        assert_eq!(names(), ["readme.md"]);
+        // On a disk that ignores letter case, a file the patch adds is found
+        // by another case, as it was when each operation wrote at once.
+        if workspace.join("README.MD").exists() {
+            run(concat!(
+                "*** Begin Patch\n*** Add File: Foo.txt\n+one\n",
+                "*** Update File: foo.txt\n@@\n-one\n+two\n",
+                "*** Add File: Gone.txt\n+x\n*** Delete File: gone.txt\n*** End Patch\n"
+            ))
+            .await
+            .unwrap();
+            assert_eq!(names(), ["Foo.txt", "readme.md"]);
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("Foo.txt")).unwrap(),
+                "two\n"
+            );
+        }
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
