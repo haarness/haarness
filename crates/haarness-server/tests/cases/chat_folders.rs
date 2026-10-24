@@ -1399,3 +1399,65 @@ async fn the_file_apis_of_a_project_chat_are_the_project_folder_s_as_before() {
         assert_eq!(found, ["src/main.rs"], "{query}");
     }
 }
+
+#[tokio::test]
+async fn search_finds_a_chat_s_files_past_a_big_dependency_folder_and_honours_ignore_files() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.chat_home();
+    let thread = chat(&runtime, Some("2026-10-24/deps")).await.unwrap();
+    let root = folder(&thread);
+    // More entries than a search walks, in a folder that is no repository.
+    for package in 0..300 {
+        let directory = root.join(format!("node_modules/pkg{package:03}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in 0..200 {
+            std::fs::File::create(directory.join(format!("f{file}.js"))).unwrap();
+        }
+    }
+    std::fs::create_dir_all(root.join("zz-src")).unwrap();
+    std::fs::write(root.join("zz-src/app.ts"), "x").unwrap();
+    std::fs::create_dir_all(root.join("generated")).unwrap();
+    std::fs::write(root.join("generated/app.ts"), "x").unwrap();
+    std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let search = |query: &str| {
+        let url = format!(
+            "{base}/v1/files/search?q={query}&limit=50&threadId={}",
+            thread.id
+        );
+        let client = client.clone();
+        async move {
+            client
+                .get(url)
+                .bearer_auth("fixture-token")
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<String>>()
+                .await
+                .unwrap()
+        }
+    };
+    let started = std::time::Instant::now();
+    assert_eq!(
+        search("app.ts").await,
+        ["zz-src/app.ts"],
+        "the ignored copy is left out"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // Named, the dependency folder is searched.
+    assert!(
+        search("node_modules/pkg007/f19")
+            .await
+            .contains(&"node_modules/pkg007/f19.js".to_owned())
+    );
+    // `.ignore` counts as `.gitignore` does.
+    std::fs::remove_file(root.join(".gitignore")).unwrap();
+    std::fs::write(root.join(".ignore"), "generated/\n").unwrap();
+    assert_eq!(search("app.ts").await, ["zz-src/app.ts"]);
+}
