@@ -13575,11 +13575,11 @@ async fn permission_hook_answer(
         .patterns
         .iter()
         .filter(|pattern| !plan.is_resolved(pattern))
-        .cloned()
+        .map(|pattern| hook_spelling(&plan.permission, pattern).into_owned())
         .collect();
     let mut calls = Vec::new();
     if !own.is_empty() {
-        calls.push((own, detail.clone()));
+        calls.push((own, hook_detail(&plan.permission, detail)));
     }
     for (pattern, path) in &plan.resolved {
         calls.push((vec![pattern.clone()], with_target_path(detail, path)));
@@ -13623,6 +13623,42 @@ async fn permission_hook_answer(
     } else {
         HookAnswer::Open
     }
+}
+
+/// Whether `permission` names files by path, so a `~/…` pattern of it is a
+/// file in the home folder.
+fn names_files(permission: &str) -> bool {
+    matches!(permission, "read" | "edit" | "list" | "lsp")
+}
+
+/// A pattern as hooks and extensions judge it: a file path written with `~`
+/// is the file in the home folder, so a hook keyed on absolute paths meets
+/// it. The card and the rules an answer suggests keep it as written.
+fn hook_spelling<'a>(permission: &str, pattern: &'a str) -> std::borrow::Cow<'a, str> {
+    if names_files(permission) {
+        crate::permissions::expand_home(pattern)
+    } else {
+        std::borrow::Cow::Borrowed(pattern)
+    }
+}
+
+/// A tool's arguments as hooks and extensions see them: the file path a
+/// `~` names, as in [`hook_spelling`].
+fn hook_detail(permission: &str, detail: &serde_json::Value) -> serde_json::Value {
+    let mut detail = detail.clone();
+    if names_files(permission)
+        && let Some(object) = detail.as_object_mut()
+    {
+        for key in ["path", "file_path", "filePath"] {
+            if let Some(value) = object.get_mut(key)
+                && let Some(path) = value.as_str()
+                && let std::borrow::Cow::Owned(expanded) = crate::permissions::expand_home(path)
+            {
+                *value = json!(expanded);
+            }
+        }
+    }
+    detail
 }
 
 /// Whether a hook may answer Always for `plan`: it remembers the plan's
@@ -16892,6 +16928,105 @@ mod tests {
             assert!(plans[1].resolved.is_empty(), "{tool}");
         }
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    /// A hook that refuses files in a home folder by their absolute path
+    /// meets a `~/…` path too, while the card keeps `~/…`.
+    #[tokio::test]
+    async fn permission_hooks_judge_the_file_a_home_folder_path_names() {
+        struct DenyHome(
+            std::path::PathBuf,
+            parking_lot::Mutex<Vec<(Vec<String>, serde_json::Value)>>,
+        );
+        #[async_trait::async_trait]
+        impl crate::HookPort for DenyHome {
+            async fn pre_tool_use(
+                &self,
+                _: ThreadId,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> crate::HookDecision {
+                crate::HookDecision::default()
+            }
+            async fn post_tool_use(
+                &self,
+                _: ThreadId,
+                _: &str,
+                _: &serde_json::Value,
+                _: &str,
+                _: bool,
+            ) -> Option<String> {
+                None
+            }
+            async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> crate::HookDecision {
+                crate::HookDecision::default()
+            }
+            async fn permission_request(
+                &self,
+                _: ThreadId,
+                _: &str,
+                patterns: &[String],
+                _: Option<&[String]>,
+                detail: &serde_json::Value,
+            ) -> crate::HookDecision {
+                self.1.lock().push((patterns.to_vec(), detail.clone()));
+                let home = self.0.to_string_lossy().into_owned();
+                let under = |value: &str| value.starts_with(&format!("{home}/"));
+                let denied = patterns.iter().any(|pattern| under(pattern))
+                    || detail["path"].as_str().is_some_and(under);
+                crate::HookDecision {
+                    permission: Some(if denied {
+                        crate::PermissionDecision::Deny
+                    } else {
+                        crate::PermissionDecision::Allow
+                    }),
+                    ..crate::HookDecision::default()
+                }
+            }
+            async fn stop(&self, _: ThreadId) {}
+        }
+        let root =
+            std::env::temp_dir().join(format!("haarness-hook-home-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("work/project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let home = root.join("home").canonicalize().unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let _home = crate::permissions::TestHome::set(&home);
+        let hook = DenyHome(home.clone(), parking_lot::Mutex::new(Vec::new()));
+        for (tool, arguments) in [
+            ("read", json!({"path":"~/notes.txt"})),
+            ("write", json!({"path":"~/notes.txt","content":"x"})),
+        ] {
+            let plans = super::ask_plans(tool, &arguments, &workspace);
+            let plan = plans.last().unwrap();
+            // The card and an Always answer keep the path as written.
+            assert_eq!(plan.patterns, vec!["~/notes.txt"], "{tool}");
+            let answer =
+                super::permission_hook_answer(&hook, ThreadId::new(), plan, None, &arguments).await;
+            assert!(matches!(answer, super::HookAnswer::Refused(_)), "{tool}");
+        }
+        let calls = hook.1.lock().clone();
+        assert_eq!(
+            calls[0].0,
+            vec![home.join("notes.txt").display().to_string()]
+        );
+        assert_eq!(
+            calls[0].1["path"],
+            json!(home.join("notes.txt").display().to_string())
+        );
+        // A project file named as written is judged as before.
+        let plans = super::ask_plans("read", &json!({"path":"src/lib.rs"}), &workspace);
+        let answer = super::permission_hook_answer(
+            &hook,
+            ThreadId::new(),
+            plans.last().unwrap(),
+            None,
+            &json!({"path":"src/lib.rs"}),
+        )
+        .await;
+        assert!(matches!(answer, super::HookAnswer::Allowed { .. }));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
