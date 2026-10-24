@@ -160,6 +160,7 @@ fn content(path: String, data: Vec<u8>) -> files::FileContent {
         mime: mime.into(),
         revision,
         size,
+        directory: None,
     }
 }
 
@@ -339,6 +340,7 @@ pub async fn restore_preview(
     // recheck the current file after backup. A concurrent edit always aborts the restore.
     let file = files::write_file(
         State(state),
+        Query(files::FileScope::default()),
         Json(files::FileWrite {
             path: input.path,
             content: restored.content,

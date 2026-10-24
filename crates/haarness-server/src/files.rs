@@ -1,5 +1,7 @@
 //! Bounded workspace file access for graphical clients. Every path is resolved
-//! beneath the server workspace; edits use revisions to detect external changes.
+//! beneath the server workspace, or beneath a chat's own folder when the
+//! request names that chat (`threadId`); edits use revisions to detect
+//! external changes.
 use crate::ServerState;
 use axum::{
     Json, Router,
@@ -22,11 +24,27 @@ type Failure = (StatusCode, String);
 static EDIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
 pub struct FileQuery {
     #[serde(default)]
     pub path: String,
     #[serde(default)]
     pub hidden: bool,
+    /// See [`FileScope::thread_id`].
+    #[serde(default)]
+    pub thread_id: Option<haarness_protocol::ThreadId>,
+}
+/// Which folder a file request is about.
+#[derive(Deserialize, IntoParams, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FileScope {
+    /// The chat whose folder the request is about: for a chat with a
+    /// folder of its own, paths are relative to that folder and confined to
+    /// it (a link out of it, to another chat's folder too, is refused).
+    /// Omitted, or for a chat of the project folder, the server's project
+    /// folder.
+    #[serde(default)]
+    pub thread_id: Option<haarness_protocol::ThreadId>,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +59,10 @@ pub struct FileEntry {
 pub struct FileListing {
     pub entries: Vec<FileEntry>,
     pub truncated: bool,
+    /// The chat folder (canonical and absolute) the entries' paths are
+    /// relative to, when the listing was asked for a chat with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct FileContent {
@@ -50,6 +72,10 @@ pub struct FileContent {
     pub mime: String,
     pub revision: String,
     pub size: u64,
+    /// The chat folder (canonical and absolute) `path` is relative to, when
+    /// the request named a chat with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
 pub struct FileWrite {
@@ -82,6 +108,29 @@ pub fn routes() -> Router<ServerState> {
         .route("/files/action", post(mutate_file))
         .merge(crate::preview::routes())
         .layer(DefaultBodyLimit::max(15 * 1024 * 1024))
+}
+/// The folder a request's paths are relative to: the chat's own folder for
+/// a chat with one (as reads see it: a deleted one is not made again, one a
+/// link stands in for is refused), else the server's project folder. The
+/// second value names the chat folder for the response.
+pub(crate) async fn root_for(
+    state: &ServerState,
+    thread: Option<haarness_protocol::ThreadId>,
+) -> Result<(PathBuf, Option<String>), Failure> {
+    let Some(thread) = thread else {
+        return Ok((state.workspace.clone(), None));
+    };
+    match state.runtime.chat_folder(thread).await {
+        Ok(Some(folder)) => {
+            let shown = folder.display().to_string();
+            Ok((folder, Some(shown)))
+        }
+        Ok(None) => Ok((state.workspace.clone(), None)),
+        Err(haarness_core::CoreError::NotFound(message)) => {
+            Err((StatusCode::NOT_FOUND, format!("not found: {message}")))
+        }
+        Err(error) => Err(bad(error)),
+    }
 }
 fn bad(error: impl std::fmt::Display) -> Failure {
     (StatusCode::BAD_REQUEST, error.to_string())
@@ -223,10 +272,11 @@ pub async fn list_files(
     State(state): State<ServerState>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileListing>, Failure> {
+    let (base, directory) = root_for(&state, query.thread_id).await?;
     tokio::task::spawn_blocking(move || {
-        let path = resolve(&state.workspace, &query.path, false).map_err(folder)?;
+        let path = resolve(&base, &query.path, false).map_err(folder)?;
         let listed = path.canonicalize().map_err(io(FOLDER_GONE))?;
-        let root = state.workspace.canonicalize().map_err(bad)?;
+        let root = base.canonicalize().map_err(bad)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(path).map_err(io(FOLDER_GONE))? {
             let entry = entry.map_err(bad)?;
@@ -244,7 +294,7 @@ pub async fn list_files(
                 name,
                 path: entry
                     .path()
-                    .strip_prefix(&state.workspace)
+                    .strip_prefix(&base)
                     .map_err(bad)?
                     .to_string_lossy()
                     .replace('\\', "/"),
@@ -262,6 +312,7 @@ pub async fn list_files(
         Ok(Json(FileListing {
             entries,
             truncated: false,
+            directory,
         }))
     })
     .await
@@ -273,8 +324,9 @@ pub async fn read_file(
     State(state): State<ServerState>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileContent>, Failure> {
+    let (base, directory) = root_for(&state, query.thread_id).await?;
     tokio::task::spawn_blocking(move || {
-        let real = resolve_for_read(&state.workspace, &query.path)?;
+        let real = resolve_for_read(&base, &query.path)?;
         let data = bytes(&real)?;
         let revision = hash(&data);
         let size = data.len() as u64;
@@ -316,6 +368,7 @@ pub async fn read_file(
             mime,
             revision,
             size,
+            directory,
         }))
     })
     .await
@@ -336,16 +389,18 @@ fn decode_write(input: &FileWrite) -> Result<Vec<u8>, Failure> {
     Ok(data)
 }
 
-#[utoipa::path(put,path="/v1/files/content",request_body=FileWrite,responses((status=200,body=FileContent)))]
+#[utoipa::path(put,path="/v1/files/content",params(FileScope),request_body=FileWrite,responses((status=200,body=FileContent)))]
 pub async fn write_file(
     State(state): State<ServerState>,
+    Query(scope): Query<FileScope>,
     Json(input): Json<FileWrite>,
 ) -> Result<Json<FileContent>, Failure> {
+    let (base, directory) = root_for(&state, scope.thread_id).await?;
     let _guard = EDIT.lock().await;
     let events = state.runtime.events().clone();
-    let changed_path = input.path.clone();
+    let changed = changed(&input.path, scope.thread_id, directory.as_deref());
     let result = tokio::task::spawn_blocking(move || {
-        let path = resolve(&state.workspace, &input.path, true)?;
+        let path = resolve(&base, &input.path, true)?;
         let data = decode_write(&input)?;
         let current = if path.exists() {
             bytes(&path)?
@@ -386,41 +441,53 @@ pub async fn write_file(
             content: input.content,
             encoding: input.encoding.unwrap_or_else(|| "utf8".into()),
             mime: "text/plain".into(),
+            directory,
         }))
     })
     .await
     .map_err(bad)??;
-    events.publish(
-        "files.updated",
-        None,
-        None,
-        None,
-        serde_json::json!({"path": changed_path}),
-    );
+    events.publish("files.updated", None, None, None, changed);
     Ok(result)
 }
 
-#[utoipa::path(post,path="/v1/files/action",request_body=FileAction,responses((status=200,body=serde_json::Value)))]
+/// A `files.updated` payload: the changed path, and for a chat folder the
+/// chat and folder it is relative to.
+fn changed(
+    path: &str,
+    thread: Option<haarness_protocol::ThreadId>,
+    directory: Option<&str>,
+) -> serde_json::Value {
+    match directory {
+        Some(directory) => {
+            serde_json::json!({"path": path, "threadId": thread, "directory": directory})
+        }
+        None => serde_json::json!({"path": path}),
+    }
+}
+
+#[utoipa::path(post,path="/v1/files/action",params(FileScope),request_body=FileAction,responses((status=200,body=serde_json::Value)))]
 pub async fn mutate_file(
     State(state): State<ServerState>,
+    Query(scope): Query<FileScope>,
     Json(input): Json<FileAction>,
 ) -> Result<Json<serde_json::Value>, Failure> {
+    let (base, directory) = root_for(&state, scope.thread_id).await?;
     let _guard = EDIT.lock().await;
     let events = state.runtime.events().clone();
-    let changed_path = input.path.clone();
+    let changed = changed(&input.path, scope.thread_id, directory.as_deref());
     let result = tokio::task::spawn_blocking(move || {
         if input.path.is_empty() || input.path == "." {
             return Err(bad("Select a workspace entry"));
         }
-        let path = resolve(&state.workspace, &input.path, input.action == "mkdir")?;
-        if path.canonicalize().ok() == state.workspace.canonicalize().ok() {
+        let path = resolve(&base, &input.path, input.action == "mkdir")?;
+        if path.canonicalize().ok() == base.canonicalize().ok() {
             return Err(bad("Select a workspace entry"));
         }
         match input.action.as_str() {
             "mkdir" => fs::create_dir(path).map_err(bad)?,
             "rename" => {
                 let target = resolve(
-                    &state.workspace,
+                    &base,
                     input
                         .target
                         .as_deref()
@@ -448,13 +515,7 @@ pub async fn mutate_file(
     })
     .await
     .map_err(bad)??;
-    events.publish(
-        "files.updated",
-        None,
-        None,
-        None,
-        serde_json::json!({"path": changed_path}),
-    );
+    events.publish("files.updated", None, None, None, changed);
     Ok(result)
 }
 
