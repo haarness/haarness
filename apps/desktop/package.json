@@ -83,6 +83,9 @@
     ],
     "asar": true,
     "npmRebuild": false,
+    "toolsets": {
+      "appimage": "1.0.3"
+    },
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
