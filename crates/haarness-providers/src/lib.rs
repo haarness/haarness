@@ -440,6 +440,9 @@ impl ModelProvider for Limited {
     fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
         self.inner.explicit_prompt_cache_scope(model)
     }
+    fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
+        self.inner.image_limits(model)
+    }
     async fn stream(
         &self,
         mut request: haarness_core::ProviderRequest,

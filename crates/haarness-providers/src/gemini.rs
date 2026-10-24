@@ -685,6 +685,17 @@ mod tests {
     #[derive(Clone, Default)]
     struct FixtureState(Arc<Mutex<Vec<Value>>>);
 
+    #[test]
+    fn the_gemini_api_takes_the_default_image_budget() {
+        // Google raised the inline request size past 20 MB; a stricter cut
+        // would leave out screenshots a request could carry.
+        let provider = GeminiProvider::for_test("http://127.0.0.1:9".into());
+        assert_eq!(
+            provider.image_limits("gemini-2.5-flash"),
+            haarness_core::ImageLimits::default()
+        );
+    }
+
     async fn structured_content(
         State(state): State<FixtureState>,
         Json(request): Json<Value>,
