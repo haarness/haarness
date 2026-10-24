@@ -52,6 +52,17 @@ impl<R: BufRead> Lines<R> {
         }
     }
 
+    /// Whether anything follows the lines read so far.
+    pub(super) fn more(&mut self) -> CoreResult<bool> {
+        loop {
+            match self.reader.fill_buf() {
+                Ok(buffer) => return Ok(!buffer.is_empty()),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(CoreError::Tool(error.to_string())),
+            }
+        }
+    }
+
     /// The next line, `None` at the end. Stop ends it even inside a line
     /// that never ends.
     pub(super) fn next_line(&mut self, cancel: &CancellationToken) -> CoreResult<Option<Line<'_>>> {
@@ -185,15 +196,13 @@ pub(super) fn open_text(path: &Path) -> CoreResult<(impl BufRead, bool)> {
 /// What `read` shows of a text file: `limit` lines (2000 when none is
 /// given) from line `offset` (zero-based), each cut at [`LINE_CHARS`]
 /// characters, joined by `\n`. It stops early at 2,000 lines or 50 KB, and
-/// then, or when the default limit ends before the file does, says where to
-/// go on.
+/// then, or when its limit ends before the file does, says where to go on.
 pub(super) fn read_text(
     path: &Path,
     offset: usize,
     limit: Option<usize>,
     cancel: &CancellationToken,
 ) -> CoreResult<String> {
-    let given = limit.is_some();
     let limit = limit.unwrap_or(READ_DEFAULT_LINES);
     let (reader, binary) = open_text(path)?;
     let mut lines = Lines::new(reader, READ_LINE_BYTES);
@@ -228,10 +237,8 @@ pub(super) fn read_text(
         bytes += size;
         shown_lines.push(text);
     }
-    let more = stop.is_none()
-        && !given
-        && shown_lines.len() == limit
-        && lines.next_line(cancel)?.is_some();
+    // Any byte after the last line shown is another line.
+    let more = stop.is_none() && limit > 0 && shown_lines.len() == limit && lines.more()?;
     let mut notes = Vec::new();
     // Said so the model does not write the file back from what it was shown.
     if replaced {
@@ -247,7 +254,8 @@ pub(super) fn read_text(
         notes.push(format!("(more lines follow; read on with offset={next})"));
     }
     let text = shown_lines.join("\n");
-    Ok(match (text.is_empty(), notes.is_empty()) {
+    // An empty line shown is a line: its note still comes after it.
+    Ok(match (shown_lines.is_empty(), notes.is_empty()) {
         (_, true) => text,
         (true, false) => notes.join("\n"),
         (false, false) => format!("{text}\n\n{}", notes.join("\n")),

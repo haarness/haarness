@@ -6874,9 +6874,16 @@ export default workflow({
         let next = read_text_of(&root, json!({"path":"long.txt","offset":count,"limit":1}))
             .await
             .unwrap();
-        assert_eq!(next.text, body.lines().nth(count).unwrap());
-        // The default limit ending before the file does says where to go on;
-        // a limit the call gives does not.
+        assert_eq!(
+            next.text,
+            format!(
+                "{}\n\n(more lines follow; read on with offset={})",
+                body.lines().nth(count).unwrap(),
+                count + 1
+            )
+        );
+        // A limit, the default one or one the call gives, ending before the
+        // file does says where to go on.
         let short = (0..2_500)
             .map(|line| format!("{line}"))
             .collect::<Vec<_>>()
@@ -6892,25 +6899,30 @@ export default workflow({
             "{}",
             &default.text[default.text.len() - 80..]
         );
-        let given = read_text_of(&root, json!({"path":"short.txt","limit":2000}))
+        let given = read_text_of(&root, json!({"path":"short.txt","limit":500}))
             .await
             .unwrap();
         assert!(
-            given.text.ends_with("\n1999"),
+            given
+                .text
+                .ends_with("499\n\n(more lines follow; read on with offset=500)"),
             "{}",
-            &given.text[given.text.len() - 40..]
+            &given.text[given.text.len() - 60..]
         );
         let rest = read_text_of(&root, json!({"path":"short.txt","offset":2000}))
             .await
             .unwrap();
         assert!(rest.text.ends_with("\n2499") && !rest.text.contains("more lines"));
-        // A limit inside the budget reads as it always did, without a note.
+        // A limit inside the budget reads the lines it always did.
         let small = read_text_of(&root, json!({"path":"long.txt","offset":10,"limit":5}))
             .await
             .unwrap();
         assert_eq!(
             small.text,
-            body.lines().skip(10).take(5).collect::<Vec<_>>().join("\n")
+            format!(
+                "{}\n\n(more lines follow; read on with offset=15)",
+                body.lines().skip(10).take(5).collect::<Vec<_>>().join("\n")
+            )
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -6930,12 +6942,19 @@ export default workflow({
                     read_text_of(&root, json!({"path":"f.txt","offset":offset,"limit":limit}))
                         .await
                         .unwrap();
-                let expected = body
+                let shown = body.lines().skip(offset).take(limit).count();
+                let mut expected = body
                     .lines()
                     .skip(offset)
                     .take(limit)
                     .collect::<Vec<_>>()
                     .join("\n");
+                if body.lines().count() > offset + limit {
+                    expected = format!(
+                        "{expected}\n\n(more lines follow; read on with offset={})",
+                        offset + shown
+                    );
+                }
                 assert_eq!(result.text, expected, "{body:?} {offset} {limit}");
             }
             std::fs::remove_dir_all(root).unwrap();
