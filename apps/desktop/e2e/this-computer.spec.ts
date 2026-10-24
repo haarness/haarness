@@ -98,6 +98,42 @@ function homeClient() {
   return new Haarness({ baseUrl: endpoint.url, token: endpoint.token });
 }
 
+/** The project's own server. */
+function projectClient() {
+  const endpoint = JSON.parse(
+    execFileSync(binary, ["--workspace", project, "desktop"], {
+      env,
+      input: JSON.stringify({ action: "connect" }),
+      encoding: "utf8",
+      timeout: 240000,
+    }),
+  );
+  return new Haarness({ baseUrl: endpoint.url, token: endpoint.token });
+}
+
+/** An image pasted into the message box, as Cmd+V gives one. */
+async function pasteImage(name: string) {
+  await composer().focus();
+  await page.evaluate((name) => {
+    const transfer = new DataTransfer();
+    const png = Uint8Array.from(
+      atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="),
+      (c) => c.charCodeAt(0),
+    );
+    transfer.items.add(new File([png], name, { type: "image/png" }));
+    document.activeElement!.dispatchEvent(
+      new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }),
+    );
+  }, name);
+}
+
+/** An agent picked from the @ list: a chip of the draft. */
+async function mentionAgent(name: string) {
+  await composer().fill("@" + name);
+  await page.locator("#prompt-mentions").getByRole("option").filter({ hasText: new RegExp("^" + name) }).first().click();
+  await expect(page.getByLabel("Attached context", { exact: true })).toContainText(name);
+}
+
 /** The servers running for the chat home (a daemon per workspace). */
 function homeDaemons() {
   const home = join(temporary, "desktop", "Chat folders");
@@ -312,7 +348,11 @@ test("chats without a project: a ready first launch, a folder of their own on on
   }, project);
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
-  // Typed first, then a folder chosen: the text goes along.
+  // Typed first, then a folder chosen: the text, a pasted image and an @
+  // chip go along.
+  await mentionAgent("explore");
+  await pasteImage("along.png");
+  await expect(page.getByRole("button", { name: "Remove along.png", exact: true })).toBeVisible();
   await composer().fill("Take this along");
   await newChatFolder().click();
   const picker = page.getByRole("dialog", { name: "Choose a folder", exact: true });
@@ -321,25 +361,47 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await ready();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: pocket-project");
   await expect(composer()).toHaveValue("Take this along");
+  await expect(page.getByRole("button", { name: "Remove along.png", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Attached context", { exact: true })).toContainText("explore");
   await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on in pocket-project?");
   await send("Project message please");
   await expect(page.locator(".transcript")).toContainText("Echo: Project message please", { timeout: 60000 });
+  // Both went with the message to the project.
+  const projectApi = projectClient();
+  try {
+    const [sent] = await projectApi.listThreads();
+    const message = (await projectApi.listItems(sent.id)).find((item) => item.data.type === "user_message");
+    expect(message?.data.type === "user_message" && message.data.attachments?.length).toBe(1);
+    expect(message?.data.type === "user_message" && message.data.text).toContain('agent "explore"');
+  } finally {
+    projectApi.close();
+  }
   await expect(page.locator(".project-list")).toContainText("Echo: Project message please");
   await expect.poll(() => stat(join(home, today(), "project-message-please")).then(() => true, () => false)).toBe(false);
   await expect(rows()).toHaveCount(2);
   await expect(chatFolder()).toHaveAccessibleName("Chat folder: pocket-project");
-  // The chip goes back to No folder, which opens This computer's new chat.
+  // The chip goes back to No folder, which opens This computer's new chat;
+  // what the project's new chat holds goes along that way too.
   await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Remove along.png", exact: true })).toHaveCount(0);
+  await pasteImage("back.png");
+  await mentionAgent("plan");
   await newChatFolder().click();
   await expect(picker.getByRole("option")).toHaveText(["No folder", "pocket-project"]);
   await page.evaluate(() => ((window as any).loadingMarkSeen = false));
   await picker.getByRole("option", { name: "No folder" }).click();
   await ready();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
-  // What was taken along is not left behind as well.
+  // What was taken along the first time is not left behind as well.
   await expect(composer()).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Remove along.png", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove back.png", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Attached context", { exact: true })).toContainText("plan");
   // Going back to This computer shows its message box at once too.
   expect(await loadingMarkSeen()).toBe(false);
+  await page.getByRole("button", { name: "Remove back.png", exact: true }).click();
+  await page.getByRole("button", { name: "Remove context @plan", exact: true }).click();
+  await expect(page.getByLabel("Attached context", { exact: true })).toHaveCount(0);
 
   // The chat home is never a project.
   await expect(page.locator(".project-list .project-heading")).toHaveText(["pocket-project"]);

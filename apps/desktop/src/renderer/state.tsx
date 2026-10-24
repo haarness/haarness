@@ -1103,24 +1103,46 @@ function createApp(saved?: Preferences) {
     if (state.connection?.chatHome || homeOpening()) setHomeUsed(true);
   });
   /**
-   * Moves the new chat elsewhere (`move`, the folder chip's choice) with
-   * what was typed in it: typed first and a folder chosen after, the text
-   * goes along, unless the new chat there has a draft of its own.
+   * Moves the new chat elsewhere (`move`, the folder chip's choice) with its
+   * draft: typed first and a folder chosen after, the text, attachments and
+   * context chips go along, unless the new chat there has a draft of its own
+   * (any of the three), which then stays as it was, and so does this one.
    */
   async function moveNewChat(move: () => Promise<unknown>) {
     const fromKey = draftKey();
     const fromStored = "draft:" + newDraftScope() + ":";
-    const text = state.selected ? "" : (state.drafts[fromKey] ?? "");
+    const fresh = !state.selected;
+    const text = fresh ? (state.drafts[fromKey] ?? "") : "";
+    const files = fresh ? attachmentDrafts.get(fromKey) : [];
+    const chips = fresh ? (contexts()[fromKey] ?? []) : [];
     const result = await move();
     const toKey = draftKey();
-    if (!text.trim() || state.selected || toKey === fromKey) return result;
+    if ((!text.trim() && !files.length && !chips.length) || state.selected || toKey === fromKey)
+      return result;
     const toStored = "draft:" + newDraftScope() + ":";
-    const own = state.drafts[toKey] ?? (await window.haarness.storage(toStored));
-    if ((typeof own === "string" && own.trim()) || draftKey() !== toKey) return result;
-    set("drafts", toKey, text);
-    set("drafts", fromKey, "");
-    await window.haarness.storage(toStored, text);
-    await window.haarness.storage(fromStored, "");
+    const [own] = await Promise.all([
+      state.drafts[toKey] ?? window.haarness.storage(toStored),
+      loadAttachmentDraft(toKey),
+      loadPromptContext(toKey),
+    ]);
+    if (
+      (typeof own === "string" && own.trim()) ||
+      attachmentDrafts.get(toKey).length ||
+      contexts()[toKey]?.length ||
+      draftKey() !== toKey
+    )
+      return result;
+    if (text.trim()) {
+      set("drafts", toKey, text);
+      set("drafts", fromKey, "");
+    }
+    await Promise.all([
+      ...(text.trim()
+        ? [window.haarness.storage(toStored, text), window.haarness.storage(fromStored, "")]
+        : []),
+      ...(files.length ? [setAttachmentDraft(toKey, files), setAttachmentDraft(fromKey, [])] : []),
+      ...(chips.length ? [setPromptContext(toKey, chips), setPromptContext(fromKey, [])] : []),
+    ]);
     return result;
   }
   /** The message box shows: a project or This computer is open, or This
