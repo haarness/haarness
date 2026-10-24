@@ -2869,5 +2869,6 @@
   "{count} tool calls": "{count} araç çağrısı",
   "less than a day left at this pace": "bu hızla bir günden az kaldı",
   "about 1 day left at this pace": "bu hızla yaklaşık 1 gün kaldı",
-  "about {count} days left at this pace": "bu hızla yaklaşık {count} gün kaldı"
+  "about {count} days left at this pace": "bu hızla yaklaşık {count} gün kaldı",
+  "Can't reach the server · still waiting": "Sunucuya ulaşılamıyor · beklemeye devam ediliyor"
 }

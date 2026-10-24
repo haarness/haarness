@@ -1386,12 +1386,19 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let frame = spinner[usize::try_from((app.tick / 2) % 10).unwrap_or(0)];
             let waited = login.started.elapsed().as_secs();
+            // A server that stops answering the checks for a while leaves
+            // the sign-in waiting; the same row says so, quietly.
+            let waiting = if login.unreachable_since.is_some() {
+                "Can't reach the server · still waiting"
+            } else {
+                "Waiting for you to finish in the browser…"
+            };
             body.push(Line::new(vec![
                 Span::new(format!("{frame} "), theme.primary),
                 Span::new(
                     format!(
                         "{} {}",
-                        language.text("Waiting for you to finish in the browser…"),
+                        language.text(waiting),
                         if waited >= 60 {
                             format!("{}m {:02}s", waited / 60, waited % 60)
                         } else {

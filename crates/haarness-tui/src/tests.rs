@@ -19246,6 +19246,210 @@ async fn connect_picker_lists_providers_and_falls_back_to_a_key_prompt_offline()
     ));
 }
 
+/// One sign-in check, sent and its answer taken, as the frame ticks do.
+async fn sign_in_check(app: &mut App, client: &crate::api::ApiClient) {
+    app.connect.login.as_mut().unwrap().last_poll = None;
+    app.poll_login(client).await.unwrap();
+    assert!(
+        app.connect.login.as_ref().unwrap().check.is_some(),
+        "a check is sent"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app
+        .connect
+        .login
+        .as_ref()
+        .is_some_and(|login| login.check.is_some())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the check never came back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        app.poll_login(client).await.unwrap();
+    }
+}
+
+/// What the sign-in server does with the next request.
+enum SignInReply {
+    /// Answers 200 with this JSON.
+    Json(&'static str),
+    /// Closes the connection without an answer.
+    Drop,
+    /// Holds the connection open without an answer.
+    Hold,
+    /// Refuses with this status and JSON error.
+    Refuse(u16, &'static str),
+}
+
+/// A server that replies to each request with the next of `script` (then
+/// refuses with 404) and keeps what it was sent.
+async fn sign_in_server(
+    script: Vec<SignInReply>,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = seen.clone();
+    tokio::spawn(async move {
+        let mut script = script.into_iter();
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let Ok(read) = socket.read(&mut chunk).await else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            requests
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).into_owned());
+            let reply = script.next().unwrap_or(SignInReply::Refuse(
+                404,
+                r#"{"code":"not_found","message":"Not found"}"#,
+            ));
+            let (status, body) = match reply {
+                SignInReply::Json(body) => (200, body),
+                SignInReply::Refuse(status, body) => (status, body),
+                SignInReply::Drop => continue,
+                SignInReply::Hold => {
+                    tokio::spawn(async move {
+                        let _ = socket.read(&mut chunk).await;
+                    });
+                    continue;
+                }
+            };
+            let head = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        }
+    });
+    (
+        crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap(),
+        seen,
+    )
+}
+
+fn waiting_sign_in(app: &mut App) {
+    app.connect.login = Some(crate::connect::PendingLogin {
+        id: "login-1".into(),
+        provider: "openai".into(),
+        name: "OpenAI".into(),
+        method: "device".into(),
+        url: "https://auth.example/codex/device".into(),
+        code: "ABCD-EFGH".into(),
+        state: crate::connect::LoginState::Pending,
+        started: std::time::Instant::now(),
+        last_poll: None,
+        check: None,
+        unreachable_since: None,
+        opened: false,
+    });
+    app.open_overlay(crate::state::Overlay::ProviderLogin);
+}
+
+/// A check whose connection drops leaves the sign-in waiting, and the next
+/// answer still finishes it; a refusal ends it at once; Escape leaves at
+/// once while a check hangs, and the server is still told.
+#[tokio::test]
+async fn a_dropped_sign_in_check_keeps_waiting_and_a_refusal_ends_it() {
+    let mut app = connect_fixture();
+    let (client, _) = sign_in_server(vec![
+        SignInReply::Json(r#"{"data":{"state":"pending"}}"#),
+        SignInReply::Drop,
+        SignInReply::Json(r#"{"data":{"state":"connected"}}"#),
+    ])
+    .await;
+    waiting_sign_in(&mut app);
+    sign_in_check(&mut app, &client).await;
+    let login = app.connect.login.as_ref().unwrap();
+    assert_eq!(login.state, crate::connect::LoginState::Pending);
+    assert!(login.unreachable_since.is_none());
+    sign_in_check(&mut app, &client).await;
+    let login = app.connect.login.as_ref().unwrap();
+    assert_eq!(
+        login.state,
+        crate::connect::LoginState::Pending,
+        "a dropped check"
+    );
+    assert!(login.unreachable_since.is_some());
+    sign_in_check(&mut app, &client).await;
+    assert!(app.connect.login.is_none(), "the sign-in finished");
+    assert!(app.notice.contains("OpenAI connected"), "{}", app.notice);
+
+    let (client, _) = sign_in_server(vec![SignInReply::Refuse(
+        404,
+        r#"{"code":"not_found","message":"Login expired; start again"}"#,
+    )])
+    .await;
+    waiting_sign_in(&mut app);
+    sign_in_check(&mut app, &client).await;
+    let state = app.connect.login.as_ref().unwrap().state.clone();
+    let crate::connect::LoginState::Failed(reason) = state else {
+        panic!("{state:?}");
+    };
+    assert!(reason.contains("Login expired"), "{reason}");
+
+    // The server answers neither the check nor the cancel.
+    let (client, seen) = sign_in_server(vec![SignInReply::Hold, SignInReply::Hold]).await;
+    waiting_sign_in(&mut app);
+    app.poll_login(&client).await.unwrap();
+    assert!(app.connect.login.as_ref().unwrap().check.is_some());
+    let pressed = std::time::Instant::now();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(pressed.elapsed() < std::time::Duration::from_secs(1));
+    assert!(app.connect.login.is_none());
+    assert!(app.notice.contains("cancelled"), "{}", app.notice);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|request| request.contains("login_cancel"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server was not told"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure() {
     let mut app = connect_fixture();
@@ -19260,6 +19464,8 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
         state: crate::connect::LoginState::Pending,
         started: std::time::Instant::now(),
         last_poll: None,
+        check: None,
+        unreachable_since: None,
         opened: false,
     });
     app.open_overlay(crate::state::Overlay::ProviderLogin);
@@ -19279,8 +19485,27 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
     assert!(rendered.contains("c copy code"), "{rendered}");
     assert!(!rendered.contains("Details"), "{rendered}");
 
-    // The server going away is reported on the screen, not swallowed.
-    app.poll_login(&client).await.unwrap();
+    // A server that stops answering leaves the sign-in waiting, and the
+    // waiting row says so, quietly.
+    sign_in_check(&mut app, &client).await;
+    let login = app.connect.login.as_ref().unwrap();
+    assert_eq!(login.state, crate::connect::LoginState::Pending);
+    let rendered = app
+        .lines((100, 30))
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Can't reach the server · still waiting"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ABCD-EFGH"), "{rendered}");
+    // Twenty seconds without an answer: the server going away is reported on
+    // the screen, not swallowed.
+    app.connect.login.as_mut().unwrap().unreachable_since =
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(21));
+    sign_in_check(&mut app, &client).await;
     let state = app.connect.login.as_ref().unwrap().state.clone();
     assert!(
         matches!(state, crate::connect::LoginState::Failed(_)),

@@ -2,6 +2,7 @@
 //! the model picker. The server owns the catalog and the OAuth handshake; this
 //! module owns the steps, the polling, and what happens when it succeeds.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -15,6 +16,12 @@ use crate::{
 
 /// How often the wait screen asks the server whether the sign-in finished.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How long one of those checks may take before it counts as unanswered.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the server may go unanswering before the wait screen says the
+/// sign-in could not finish. A dropped connection or a slow proxy for a few
+/// checks leaves the sign-in running; the person may be finishing it.
+const UNREACHABLE_LIMIT: Duration = Duration::from_secs(20);
 /// Sentinel values in the provider picker that are not providers.
 const CUSTOM: &str = "\u{0}custom";
 const ROUTER: &str = "\u{0}router";
@@ -118,9 +125,45 @@ pub(crate) struct PendingLogin {
     pub code: String,
     pub state: LoginState,
     pub started: Instant,
+    /// When the last check was sent.
     pub(crate) last_poll: Option<Instant>,
+    /// The check in flight; it runs off the TUI's loop and leaves its
+    /// answer here.
+    pub(crate) check: Option<Arc<Mutex<Option<CheckAnswer>>>>,
+    /// Since when the checks go unanswered (the start of the first that
+    /// did), while they do.
+    pub(crate) unreachable_since: Option<Instant>,
     /// Whether we managed to hand the URL to a browser ourselves.
     pub opened: bool,
+}
+
+/// What one sign-in check came back with.
+#[derive(Clone, Debug)]
+pub(crate) enum CheckAnswer {
+    /// The server's view of the sign-in.
+    Answered(serde_json::Value),
+    /// The server refused the check: the sign-in is gone.
+    Refused(String),
+    /// No answer: a dropped connection, a timeout, a gateway in between.
+    Unanswered(String),
+}
+
+/// Ask the server how the sign-in `id` is doing, within [`CHECK_TIMEOUT`].
+async fn check_login(client: &ApiClient, id: &str) -> CheckAnswer {
+    let input = json!({"action":"login_status","id":id});
+    match tokio::time::timeout(CHECK_TIMEOUT, client.manage("providers", &input)).await {
+        Err(_) => CheckAnswer::Unanswered("The server did not answer in time".into()),
+        Ok(Ok(view)) => CheckAnswer::Answered(view),
+        Ok(Err(error)) => {
+            let gateway = crate::api::refusal_status(&error)
+                .is_some_and(|status| matches!(status.as_u16(), 502..=504));
+            if error.downcast_ref::<reqwest::Error>().is_some() || gateway {
+                CheckAnswer::Unanswered(format!("{error:#}"))
+            } else {
+                CheckAnswer::Refused(format!("{error:#}"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -459,6 +502,8 @@ impl App {
                     state: LoginState::Failed(format!("{error:#}")),
                     started: Instant::now(),
                     last_poll: None,
+                    check: None,
+                    unreachable_since: None,
                     opened: false,
                 });
                 self.open_overlay(Overlay::ProviderLogin);
@@ -477,6 +522,8 @@ impl App {
             state: LoginState::Pending,
             started: Instant::now(),
             last_poll: None,
+            check: None,
+            unreachable_since: None,
             opened: false,
         };
         anyhow::ensure!(
@@ -525,28 +572,53 @@ impl App {
         self.finish_connect(&provider.id, client).await
     }
 
-    /// Called from the frame tick while the wait screen is open.
+    /// Called from the frame tick while the wait screen is open. Each check
+    /// runs off the TUI's loop, so a server that does not answer never holds
+    /// up keys or frames; a few unanswered checks leave the sign-in waiting
+    /// (the screen says so), and only [`UNREACHABLE_LIMIT`] of them, or a
+    /// refusal, ends it.
     pub(crate) async fn poll_login(&mut self, client: &ApiClient) -> Result<()> {
         let Some(login) = self.connect.login.as_mut() else {
             return Ok(());
         };
-        if login.state != LoginState::Pending
-            || login
-                .last_poll
-                .is_some_and(|at| at.elapsed() < POLL_INTERVAL)
-        {
+        if login.state != LoginState::Pending {
             return Ok(());
         }
-        login.last_poll = Some(Instant::now());
-        let id = login.id.clone();
-        let view = match client
-            .manage("providers", &json!({"action":"login_status","id":id}))
-            .await
-        {
-            Ok(view) => view,
-            Err(error) => {
-                if let Some(login) = self.connect.login.as_mut() {
-                    login.state = LoginState::Failed(format!("{error:#}"));
+        let Some(check) = &login.check else {
+            if login
+                .last_poll
+                .is_none_or(|at| at.elapsed() >= POLL_INTERVAL)
+            {
+                login.last_poll = Some(Instant::now());
+                let answer = Arc::new(Mutex::new(None));
+                login.check = Some(answer.clone());
+                let (client, id) = (client.clone(), login.id.clone());
+                tokio::spawn(async move {
+                    let checked = check_login(&client, &id).await;
+                    *answer.lock().unwrap_or_else(PoisonError::into_inner) = Some(checked);
+                });
+            }
+            return Ok(());
+        };
+        let Some(answer) = check.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return Ok(());
+        };
+        login.check = None;
+        let view = match answer {
+            CheckAnswer::Answered(view) => {
+                login.unreachable_since = None;
+                view
+            }
+            CheckAnswer::Refused(error) => {
+                login.state = LoginState::Failed(error);
+                return Ok(());
+            }
+            CheckAnswer::Unanswered(error) => {
+                let since = *login
+                    .unreachable_since
+                    .get_or_insert_with(|| login.last_poll.unwrap_or_else(Instant::now));
+                if since.elapsed() >= UNREACHABLE_LIMIT {
+                    login.state = LoginState::Failed(error);
                 }
                 return Ok(());
             }
@@ -556,36 +628,30 @@ impl App {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| "sign-in failed".into());
-        let provider = self
-            .connect
-            .login
-            .as_ref()
-            .map(|login| login.provider.clone())
-            .unwrap_or_default();
+        let provider = login.provider.clone();
         match state {
             "connected" => {
-                if let Some(login) = self.connect.login.as_mut() {
-                    login.state = LoginState::Connected;
-                }
+                login.state = LoginState::Connected;
                 self.finish_connect(&provider, client).await?;
             }
-            "failed" | "cancelled" => {
-                if let Some(login) = self.connect.login.as_mut() {
-                    login.state = LoginState::Failed(error);
-                }
-            }
+            "failed" | "cancelled" => login.state = LoginState::Failed(error),
             _ => {}
         }
         Ok(())
     }
 
-    /// Leave the wait screen and tell the server to stop waiting.
-    pub(crate) async fn cancel_login(&mut self, client: &ApiClient) {
+    /// Leave the wait screen at once and tell the server to stop waiting,
+    /// also when it is not answering.
+    pub(crate) fn cancel_login(&mut self, client: &ApiClient) {
         if let Some(login) = self.connect.login.take() {
             if login.state == LoginState::Pending {
-                let _ = client
-                    .manage("providers", &json!({"action":"login_cancel","id":login.id}))
-                    .await;
+                let client = client.clone();
+                let id = login.id;
+                tokio::spawn(async move {
+                    let _ = client
+                        .manage("providers", &json!({"action":"login_cancel","id":id}))
+                        .await;
+                });
                 self.notice = format!("Sign-in to {} cancelled", login.name);
             }
         }

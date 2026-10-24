@@ -2869,5 +2869,6 @@
   "{count} tool calls": "Вызовов инструментов: {count}",
   "less than a day left at this pace": "при таком темпе осталось меньше дня",
   "about 1 day left at this pace": "при таком темпе остался примерно 1 день",
-  "about {count} days left at this pace": "Дней при таком темпе: около {count}"
+  "about {count} days left at this pace": "Дней при таком темпе: около {count}",
+  "Can't reach the server · still waiting": "Сервер недоступен · ожидание продолжается"
 }
