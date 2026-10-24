@@ -807,8 +807,8 @@ mod tests {
     fn a_chat_folder_s_terminal_starts_there_and_is_that_chat_s_alone() {
         let root = std::env::temp_dir().join(format!("haarness-pty-folder-{}", PtyId::new()));
         let project = root.join("project");
-        std::fs::create_dir_all(project.join("day/first")).unwrap();
-        std::fs::create_dir_all(project.join("day/second")).unwrap();
+        std::fs::create_dir_all(project.join("2026-10-24/first")).unwrap();
+        std::fs::create_dir_all(project.join("2026-10-24/second")).unwrap();
         std::fs::create_dir_all(root.join("outside")).unwrap();
         std::os::unix::fs::symlink(root.join("outside"), project.join("out")).unwrap();
         let manager = PtyManager::new(project.clone(), EventBus::new(64));
@@ -819,8 +819,10 @@ mod tests {
             directory,
             ..PtyCreateRequest::default()
         };
-        let first = project.canonicalize().unwrap().join("day/first");
-        let opened = manager.create(shell(Some("day/first".into()))).unwrap();
+        let first = project.canonicalize().unwrap().join("2026-10-24/first");
+        let opened = manager
+            .create(shell(Some("2026-10-24/first".into())))
+            .unwrap();
         assert_eq!(opened.cwd, first.display().to_string());
         assert_eq!(opened.directory.as_deref(), Some(first.to_str().unwrap()));
         // The absolute folder a thread reports names the same terminal.
@@ -829,14 +831,16 @@ mod tests {
             .unwrap();
         assert_eq!((again.id, again.created), (opened.id, false));
         // Another chat, and the project itself, each get their own.
-        let second = manager.create(shell(Some("day/second".into()))).unwrap();
+        let second = manager
+            .create(shell(Some("2026-10-24/second".into())))
+            .unwrap();
         assert!(second.created);
         let project_terminal = manager.create(shell(None)).unwrap();
         assert!(project_terminal.created);
         assert_eq!(project_terminal.directory, None);
         assert_eq!(manager.list().len(), 3);
         // Folders outside the project, missing ones, and cwd beside directory are refused.
-        for refused in ["out", "../outside", "day/missing", "/tmp"] {
+        for refused in ["out", "../outside", "2026-10-24/missing", "/tmp"] {
             assert!(
                 manager.create(shell(Some(refused.into()))).is_err(),
                 "{refused}"
@@ -846,7 +850,7 @@ mod tests {
             manager
                 .create(PtyCreateRequest {
                     cwd: Some("day".into()),
-                    ..shell(Some("day/first".into()))
+                    ..shell(Some("2026-10-24/first".into()))
                 })
                 .is_err()
         );

@@ -42,10 +42,16 @@ impl Fixture {
             String::new(),
             RuntimeConfig::default(),
         )
-        .with_folder_snapshots(Arc::new(
-            haarness_store::SqliteSnapshotFolders::open(&database).unwrap(),
-        ));
+        .with_folder_snapshots(Arc::new(haarness_store::SqliteSnapshotFolders::open(
+            &database,
+        )));
         (runtime, requests)
+    }
+
+    /// The same runtime, run as the chat home.
+    fn chat_home(&self) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
+        let (runtime, requests) = self.runtime();
+        (runtime.as_chat_home(), requests)
     }
 }
 impl Drop for Fixture {
@@ -157,19 +163,41 @@ async fn a_chat_folder_is_made_inside_numbered_when_taken_and_refused_outside() 
     );
 
     // Named outside the project, absolute, empty or odd: refused, plainly.
+    // A file where a folder would be is passed over, as a taken name is.
+    std::fs::write(fixture.workspace.join("2026-10-24/taken"), "a file").unwrap();
+    let past_file = chat(&runtime, Some("2026-10-24/taken")).await.unwrap();
+    assert_eq!(
+        folder(&past_file),
+        fixture.workspace.join("2026-10-24/taken-2")
+    );
+    // A chat's absolute folder is shared as it is (a schedule's runs).
+    let shared = chat(&runtime, first.directory.as_deref()).await.unwrap();
+    assert_eq!(shared.directory, first.directory);
+
+    // Named outside the project, absolute, empty, at or below another
+    // chat's folder, through a link, or not `<date>/<name>`: refused, plainly.
     std::fs::create_dir_all(fixture.root.join("outside")).unwrap();
-    std::os::unix::fs::symlink(fixture.root.join("outside"), fixture.workspace.join("out"))
-        .unwrap();
-    std::os::unix::fs::symlink(".", fixture.workspace.join("here")).unwrap();
+    std::os::unix::fs::symlink(
+        fixture.root.join("outside"),
+        fixture.workspace.join("2026-10-22"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(".", fixture.workspace.join("2026-10-21")).unwrap();
+    std::os::unix::fs::symlink(folder(&first), fixture.workspace.join("2026-10-24/alias")).unwrap();
     for refused in [
         "../escape",
         "/tmp/x",
         fixture.root.join("outside").to_str().unwrap(),
+        fixture.workspace.join("2026-10-24").to_str().unwrap(),
         "",
-        "a//b",
-        "a/./b",
-        "out/chat",
-        "here",
+        "2026-10-24",
+        "2026-10-24/hello/inner",
+        "2026-10-24//b",
+        "2026-10-24/./b",
+        "day/chat",
+        "~/x",
+        "2026-10-22/chat",
+        "2026-10-21/chat",
     ] {
         let error = chat(&runtime, Some(refused)).await.unwrap_err();
         assert!(matches!(error, CoreError::Invalid(_)), "{refused}: {error}");
@@ -178,6 +206,13 @@ async fn a_chat_folder_is_made_inside_numbered_when_taken_and_refused_outside() 
     assert!(
         !fixture.root.join("outside/chat").exists(),
         "nothing made through the link"
+    );
+    assert!(!fixture.workspace.join("chat").exists());
+    // A link where a chat's folder would be is passed over like a file.
+    let past_link = chat(&runtime, Some("2026-10-24/alias")).await.unwrap();
+    assert_eq!(
+        folder(&past_link),
+        fixture.workspace.join("2026-10-24/alias-2")
     );
 }
 
@@ -241,7 +276,7 @@ async fn the_api_refuses_a_folder_outside_the_project_and_says_it_takes_one() {
     let created: Thread = client
         .post(format!("{base}/v1/threads"))
         .bearer_auth("fixture-token")
-        .json(&json!({"provider": "echo", "model": "echo-1", "directory": "day/chat"}))
+        .json(&json!({"provider": "echo", "model": "echo-1", "directory": "2026-10-24/chat"}))
         .send()
         .await
         .unwrap()
@@ -250,7 +285,7 @@ async fn the_api_refuses_a_folder_outside_the_project_and_says_it_takes_one() {
         .json()
         .await
         .unwrap();
-    assert_eq!(folder(&created), fixture.workspace.join("day/chat"));
+    assert_eq!(folder(&created), fixture.workspace.join("2026-10-24/chat"));
     // The wire form names it `directory`.
     let listed: Value = client
         .get(format!("{base}/v1/threads"))
@@ -275,8 +310,8 @@ async fn the_api_refuses_a_folder_outside_the_project_and_says_it_takes_one() {
 async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
     let fixture = Fixture::new();
     let (runtime, requests) = fixture.runtime();
-    let a = chat(&runtime, Some("day/a")).await.unwrap();
-    let b = chat(&runtime, Some("day/b")).await.unwrap();
+    let a = chat(&runtime, Some("2026-10-24/a")).await.unwrap();
+    let b = chat(&runtime, Some("2026-10-24/b")).await.unwrap();
 
     // The model's shell, a person's `!` and a workflow's shell run there.
     for thread in [&a, &b] {
@@ -348,7 +383,7 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
     assert!(!preview.is_error, "{}", preview.output.text);
     assert_eq!(
         preview.output.metadata["preview"]["path"],
-        "day/a/page.html"
+        "2026-10-24/a/page.html"
     );
     turn(&runtime, b.id, r#"!tool list {"path":"."}"#).await;
     assert_eq!(last_result(&runtime, b.id, "list").await, "");
@@ -415,7 +450,7 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
 async fn a_relative_attachment_is_read_from_the_chat_folder() {
     let fixture = Fixture::new();
     let (runtime, _) = fixture.runtime();
-    let thread = chat(&runtime, Some("day/attach")).await.unwrap();
+    let thread = chat(&runtime, Some("2026-10-24/attach")).await.unwrap();
     std::fs::write(folder(&thread).join("notes.txt"), "the chat's notes").unwrap();
     std::fs::write(fixture.workspace.join("notes.txt"), "the home's notes").unwrap();
     let mut request = turn_request("read this");
@@ -447,8 +482,8 @@ async fn a_relative_attachment_is_read_from_the_chat_folder() {
 async fn undo_in_a_chat_folder_restores_that_folder_alone() {
     let fixture = Fixture::new();
     let (runtime, _) = fixture.runtime();
-    let a = chat(&runtime, Some("day/a")).await.unwrap();
-    let b = chat(&runtime, Some("day/b")).await.unwrap();
+    let a = chat(&runtime, Some("2026-10-24/a")).await.unwrap();
+    let b = chat(&runtime, Some("2026-10-24/b")).await.unwrap();
     turn(
         &runtime,
         a.id,
@@ -495,7 +530,7 @@ async fn undo_in_a_chat_folder_restores_that_folder_alone() {
 async fn children_and_forks_work_in_their_parent_s_folder() {
     let fixture = Fixture::new();
     let (runtime, _) = fixture.runtime();
-    let parent = chat(&runtime, Some("day/parent")).await.unwrap();
+    let parent = chat(&runtime, Some("2026-10-24/parent")).await.unwrap();
     turn(&runtime, parent.id, &tasks_prompt(1, "pwd -P")).await;
     let child = runtime
         .list_threads(false)
@@ -539,7 +574,7 @@ async fn a_plan_is_written_in_the_chat_folder_and_nothing_else_is() {
             agent: Some("plan".into()),
             provider: Some("echo".into()),
             model: Some("echo-1".into()),
-            directory: Some("day/plan".into()),
+            directory: Some("2026-10-24/plan".into()),
             ..Default::default()
         })
         .await
@@ -571,7 +606,7 @@ async fn a_plan_is_written_in_the_chat_folder_and_nothing_else_is() {
 async fn a_deleted_chat_folder_is_made_again_for_its_next_turn() {
     let fixture = Fixture::new();
     let (runtime, _) = fixture.runtime();
-    let thread = chat(&runtime, Some("day/gone")).await.unwrap();
+    let thread = chat(&runtime, Some("2026-10-24/gone")).await.unwrap();
     std::fs::remove_dir_all(folder(&thread)).unwrap();
     turn(&runtime, thread.id, &pwd()).await;
     assert!(folder(&thread).is_dir());
@@ -618,4 +653,204 @@ async fn an_ordinary_chat_works_in_the_project_folder_as_before() {
         runtime.revert(thread.id, None).await,
         Err(CoreError::Invalid(message)) if message == "snapshots are disabled"
     ));
+}
+
+/// The folder a chat home gives a chat of its own: `<today>/chat-<4>`.
+fn fresh(fixture: &Fixture, thread: &Thread) -> PathBuf {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let id = thread.id.0.simple().to_string();
+    fixture
+        .workspace
+        .join(today)
+        .join(format!("chat-{}", &id[id.len() - 4..]))
+}
+
+#[tokio::test]
+async fn in_the_chat_home_every_chat_works_in_a_folder_of_its_own() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.chat_home();
+    // A client that names no folder (the TUI, ACP, `run`, an older client,
+    // a workflow started on its own): a new one.
+    let plain = chat(&runtime, None).await.unwrap();
+    assert_eq!(folder(&plain), fresh(&fixture, &plain));
+    assert!(folder(&plain).is_dir());
+    turn(&runtime, plain.id, &pwd()).await;
+    assert_eq!(
+        last_result(&runtime, plain.id, "bash").await,
+        format!("exit: 0\n{}\n", folder(&plain).display())
+    );
+    let other = chat(&runtime, None).await.unwrap();
+    assert_ne!(other.directory, plain.directory);
+    // A chat made under another (a workflow's agents, a task) shares it.
+    let child = runtime
+        .create_thread(CreateThreadRequest {
+            parent_id: Some(plain.id),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(child.directory, plain.directory);
+    // A create retried with its id, twice at once: one chat, one folder.
+    let id = ThreadId::new();
+    let create = || {
+        runtime.create_thread(CreateThreadRequest {
+            id: Some(id),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+    };
+    let (left, right) = tokio::join!(create(), create());
+    let (left, right) = (left.unwrap(), right.unwrap());
+    assert_eq!((left.id, &left.directory), (right.id, &right.directory));
+    let date = folder(&left).parent().unwrap().to_path_buf();
+    let named = format!("chat-{}", &id.0.simple().to_string()[28..]);
+    assert!(
+        std::fs::read_dir(&date)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| entry.file_name().to_string_lossy() != format!("{named}-2")),
+        "no second folder"
+    );
+    // The same named twice at once (two clients): one waits for the other.
+    let (named_left, named_right) = tokio::join!(
+        chat(&runtime, Some("2026-10-24/same")),
+        chat(&runtime, Some("2026-10-24/same"))
+    );
+    assert_ne!(
+        named_left.unwrap().directory,
+        named_right.unwrap().directory
+    );
+}
+
+#[tokio::test]
+async fn an_imported_chat_in_the_chat_home_gets_a_folder_of_its_own() {
+    // Exported from another computer's project, with a folder named in the
+    // archive by hand, which is never trusted.
+    let elsewhere = Fixture::new();
+    let (project, _) = elsewhere.runtime();
+    let source = chat(&project, None).await.unwrap();
+    turn(&project, source.id, "hello").await;
+    let fork = project.fork_thread(source.id, None, None).await.unwrap();
+    let mut archive = project
+        .export_session_archive(source.id, false)
+        .await
+        .unwrap();
+    for entry in &mut archive.threads {
+        entry.thread.directory = Some("/etc".into());
+    }
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.chat_home();
+    runtime.import_session_archive(archive).await.unwrap();
+    let imported = runtime.get_thread(source.id).await.unwrap();
+    assert_eq!(folder(&imported), fresh(&fixture, &imported));
+    assert_eq!(
+        runtime.get_thread(fork.id).await.unwrap().directory,
+        imported.directory,
+        "its fork works there too"
+    );
+    turn(&runtime, source.id, &pwd()).await;
+    assert_eq!(
+        last_result(&runtime, source.id, "bash").await,
+        format!("exit: 0\n{}\n", folder(&imported).display())
+    );
+    // Imported into a project, it works in the project folder.
+    let another = Fixture::new();
+    let (other, _) = another.runtime();
+    let archive = project
+        .export_session_archive(source.id, false)
+        .await
+        .unwrap();
+    other.import_session_archive(archive).await.unwrap();
+    assert_eq!(other.get_thread(source.id).await.unwrap().directory, None);
+}
+
+#[tokio::test]
+async fn a_chat_stored_without_a_folder_gets_one_before_it_works_in_the_chat_home() {
+    let fixture = Fixture::new();
+    let database = fixture.root.join("db.sqlite");
+    // Stored as one from before chats had folders.
+    let legacy = SqliteStore::open(&database)
+        .unwrap()
+        .create_thread(CreateThreadRequest {
+            title: Some("Before".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(legacy.directory, None);
+    let (runtime, _) = fixture.chat_home();
+    turn(&runtime, legacy.id, &pwd()).await;
+    let now = runtime.get_thread(legacy.id).await.unwrap();
+    assert_eq!(folder(&now), fresh(&fixture, &now));
+    assert_eq!(
+        last_result(&runtime, legacy.id, "bash").await,
+        format!("exit: 0\n{}\n", folder(&now).display())
+    );
+    // A person's own command there too.
+    let item = runtime.run_shell(legacy.id, "pwd -P".into()).await.unwrap();
+    assert!(
+        matches!(&item.data, ItemData::ToolResult { output, .. }
+            if *output == format!("exit: 0\n{}\n", folder(&now).display())),
+        "{:?}",
+        item.data
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_put_in_place_of_a_chat_folder_refuses_the_chat_s_work() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let a = chat(&runtime, Some("2026-10-24/a")).await.unwrap();
+    let b = chat(&runtime, Some("2026-10-24/b")).await.unwrap();
+    std::fs::write(folder(&b).join("secret.txt"), "B").unwrap();
+    for target in [folder(&b), fixture.workspace.join("2026-10-24")] {
+        let _ = std::fs::remove_dir_all(folder(&a));
+        let _ = std::fs::remove_file(folder(&a));
+        std::os::unix::fs::symlink(&target, folder(&a)).unwrap();
+        let refused = runtime
+            .start_turn(a.id, turn_request(&pwd()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, CoreError::Invalid(message) if message.contains("link")),
+            "{refused}"
+        );
+        assert!(
+            runtime
+                .run_shell(a.id, "cat secret.txt".into())
+                .await
+                .is_err()
+        );
+        assert!(runtime.diff_last_turn(a.id).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn reading_never_makes_a_deleted_chat_folder_again() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let thread = chat(&runtime, Some("2026-10-24/read")).await.unwrap();
+    turn(
+        &runtime,
+        thread.id,
+        r#"!tool write {"path":"a.txt","content":"a"}"#,
+    )
+    .await;
+    std::fs::remove_dir_all(folder(&thread)).unwrap();
+    let _ = runtime.diff_last_turn(thread.id).await;
+    let _ = runtime.diff_last_turn_review(thread.id, true, None).await;
+    runtime
+        .resource_mention_policy(Some(thread.id), None)
+        .await
+        .unwrap();
+    assert!(!folder(&thread).exists(), "a review made the folder again");
+    // A turn, which may write, does.
+    turn(&runtime, thread.id, &pwd()).await;
+    assert!(folder(&thread).is_dir());
 }

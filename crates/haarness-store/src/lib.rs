@@ -833,6 +833,17 @@ impl ThreadRepository for SqliteStore {
             .collect()
     }
 
+    async fn assign_thread_directory(&self, id: ThreadId, directory: &str) -> CoreResult<Thread> {
+        self.connection
+            .lock()
+            .execute(
+                "UPDATE threads SET directory=?2 WHERE id=?1 AND directory IS NULL",
+                params![id.to_string(), directory],
+            )
+            .map_err(storage)?;
+        self.get_thread(id).await
+    }
+
     async fn directory_in_use(&self, directory: &str) -> CoreResult<bool> {
         self.connection
             .lock()
