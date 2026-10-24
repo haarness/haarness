@@ -22,7 +22,14 @@ impl Drop for Fixture {
 }
 
 fn runtime(workspace: &Path, rules: &[(&str, D)]) -> AgentRuntime {
-    configured(workspace, rules, RuntimeConfig::default())
+    configured(
+        workspace,
+        rules,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    )
 }
 
 fn configured(workspace: &Path, rules: &[(&str, D)], mut config: RuntimeConfig) -> AgentRuntime {
@@ -309,6 +316,7 @@ async fn a_deny_for_a_reading_holds_in_auto_under_yolo_for_direct_calls_and_in_c
         &fixture.0,
         &[("bash:rm *", D::Deny)],
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             auto_approve: true,
             ..RuntimeConfig::default()
         },
@@ -412,6 +420,7 @@ async fn a_command_too_long_to_read_is_refused_by_a_deny_in_auto_yolo_schedules_
         &fixture.0,
         &[("bash:rm *", D::Deny)],
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             auto_approve: true,
             ..RuntimeConfig::default()
         },
@@ -443,8 +452,12 @@ async fn a_command_too_long_to_read_under_an_ask_waits_for_a_person_in_auto_and_
     let fixture = Fixture::new();
     let command = stacked("printf hi > hi.txt");
     for config in [
-        RuntimeConfig::default(),
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             auto_approve: true,
             ..RuntimeConfig::default()
         },

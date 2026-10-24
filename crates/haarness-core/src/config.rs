@@ -95,6 +95,9 @@ pub struct RuntimeConfig {
     pub disabled_agents: Vec<String>,
     /// How Auto reviews eligible requests (`auto_review`).
     pub auto_review: crate::AutoReviewSettings,
+    /// The mode of a chat with no setting of its own up its chain
+    /// (`defaults.approval_mode`).
+    pub approval_mode: haarness_protocol::ApprovalMode,
 }
 
 impl RuntimeConfig {

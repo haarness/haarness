@@ -299,6 +299,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
 
 fn ask_write_config() -> RuntimeConfig {
     RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
         base_rules: vec![PermissionRule {
             pattern: "edit:*".into(),
             decision: PermissionDecision::Ask,
@@ -342,6 +343,7 @@ async fn deferred_tool_is_loaded_then_executed_on_the_following_provider_round()
         PathBuf::from("."),
         String::new(),
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             lazy_tools: LazyToolSettings {
                 mode: LazyToolMode::Always,
                 ..LazyToolSettings::default()
@@ -520,7 +522,10 @@ async fn availability_override_is_execution_authority_and_survives_recovery() {
         EventBus::new(32),
         root.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     runtime.recover().await.unwrap();
     let thread = runtime
@@ -554,6 +559,7 @@ async fn availability_override_is_execution_authority_and_survives_recovery() {
         root.clone(),
         String::new(),
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             lazy_tools: LazyToolSettings {
                 mode: LazyToolMode::Always,
                 ..LazyToolSettings::default()
@@ -585,6 +591,7 @@ async fn availability_override_is_execution_authority_and_survives_recovery() {
         root.clone(),
         String::new(),
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             lazy_tools: LazyToolSettings {
                 mode: LazyToolMode::Always,
                 ..LazyToolSettings::default()
@@ -678,6 +685,7 @@ async fn denied_loader_restores_only_allowed_tools_and_completes_the_turn() {
             PathBuf::from("."),
             String::new(),
             RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
                 base_rules: rules
                     .into_iter()
                     .map(|(pattern, decision)| PermissionRule {
@@ -859,6 +867,7 @@ async fn a_server_whose_tools_are_all_denied_keeps_its_resources_from_the_model(
             PathBuf::from("."),
             String::new(),
             RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
                 base_rules: rules,
                 ..RuntimeConfig::default()
             },

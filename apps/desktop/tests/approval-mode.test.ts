@@ -292,3 +292,11 @@ test("the shield says Auto asks a reviewer only where the server's does", async 
     "Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.",
   );
 });
+
+test("new chats start in Auto unless Review was chosen for them here", async () => {
+  const { newChatAuto } = await import("../src/renderer/approval-mode");
+  assert.equal(newChatAuto({}, "a"), true);
+  assert.equal(newChatAuto({ a: { root: false } }, "a"), true);
+  assert.equal(newChatAuto({ a: { "*": false } }, "a"), false);
+  assert.equal(newChatAuto({ a: { "*": false } }, "b"), true);
+});

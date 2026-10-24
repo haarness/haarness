@@ -97,7 +97,10 @@ fn runtime(
     workspace: &Path,
     hooks: Option<Arc<dyn HookPort>>,
 ) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: PermissionDecision::Allow,

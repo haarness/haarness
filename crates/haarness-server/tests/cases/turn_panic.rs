@@ -51,7 +51,10 @@ async fn a_panic_in_a_turn_fails_that_turn_and_the_chat_takes_the_next_message()
         EventBus::new(256),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let thread = echo_thread(&runtime).await;
     let turn = runtime
