@@ -25,6 +25,15 @@ if [ ! -x "$binary" ]; then
     cargo build -q -p haarness-cli
 fi
 command -v jq >/dev/null
+# `--data-dir` holds Haarness's own folders; the run also gets a home of its
+# own, so the person's Cloud sign-in, ~/.claude and global skills stay out of
+# it, Cloud is out of reach and no usage statistics are sent.
+home="$temporary/home"
+mkdir -p "$home"
+export HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_DATA_HOME="$home/.local/share" \
+    XDG_CACHE_HOME="$home/.cache" HAARNESS_HOME="$temporary/haarness-home" \
+    HAARNESS_CLOUD_API_URL=http://127.0.0.1:9 HAARNESS_TELEMETRY=0
+unset HAARNESS_DATA_DIR HAARNESS_CLOUD_CONFIG_DIR
 
 source_cli() {
     env HAARNESS_TEST_PROVIDER=1 "$binary" --data-dir "$source_data" \

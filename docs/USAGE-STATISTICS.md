@@ -31,7 +31,7 @@ Desktop shows the same report under **Settings → General → Share usage stati
 
 A running Haarness server checks a minute after it starts and then every 30 minutes, and sends when the last report is more than six hours old. Each day's snapshot replaces the one Cloud already has for that day, so several servers, retries and restarts never count anything twice. `haarness telemetry send` sends now.
 
-Reports come from the background server that the TUI, Desktop and `haarness run` start, so automation reports too. To keep CI and scripts out of the statistics, set `HAARNESS_TELEMETRY=0` there.
+Reports come from the background server that the TUI, Desktop and `haarness run` start, so automation reports too. To keep CI and scripts out of the statistics, set `HAARNESS_TELEMETRY=0` there. Haarness's own test harnesses do: the SDK fixture server, tmux panes built with `scripts/e2e_tmux.pane_command`, the scripts that build their own environment, `scripts/test-all.sh` and the Desktop Playwright specs (except `usage-statistics.spec.ts`, which turns them on with Cloud on a closed local port), checked by `scripts/tests/test_e2e_isolation.py`.
 
 ## Turn it off
 
