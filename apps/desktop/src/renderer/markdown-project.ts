@@ -99,10 +99,17 @@ function literalBlock(token: Tokens.HTML, breaks: boolean, type: "paragraph" | "
   const tag = BLOCK_TAG.exec(token.text);
   const name = tag?.[2].toLowerCase();
   if (!tag || !name || SHOWN.has(name)) return;
-  if (!tag[1] && WRAPPERS.has(name) && /<[A-Za-z]/.test(token.text.slice(tag[0].length))) return;
+  if (WRAPPERS.has(name) && (tag[1] || /<[A-Za-z]/.test(token.text.slice(tag[0].length)))) return;
   const text = token.text.replace(/\n+$/, "");
   const tokens = marked.Lexer.lexInline(text, { gfm: true, breaks });
   literalTags(tokens);
+  // A closing tag that starts its own block (`</plan>` after the blocks its
+  // opening one began) is a word as that one is; read as markup it left an
+  // empty paragraph.
+  if (tag[1]) {
+    const at = tokens.findIndex((part) => part.type === "html");
+    if (at >= 0) tokens[at] = { type: "text", raw: tokens[at].raw, text: (tokens[at] as Tokens.Tag).text, escaped: false };
+  }
   // A paragraph of its own, or in a tight list item the item's text.
   Object.assign(token, { type, text, tokens });
 }
