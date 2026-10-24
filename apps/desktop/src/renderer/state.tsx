@@ -91,6 +91,7 @@ import {
 } from "../projects";
 import { chatFolderPath, newChatFolder } from "./chat-folder";
 import { createProjectOverview } from "./project-overview";
+import { carryDraft } from "./draft-carry";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
 import {
@@ -1106,6 +1107,8 @@ function createApp(saved?: Preferences) {
   createEffect(() => {
     if (state.connection?.chatHome || homeOpening()) setHomeUsed(true);
   });
+  /** The busy mark last written from live state (see HOME_BUSY). */
+  let homeBusy: boolean | undefined;
   /**
    * This computer is followed from launch when work may be going on there:
    * its daemon runs (read from its own record, so nothing starts for the
@@ -1117,6 +1120,11 @@ function createApp(saved?: Preferences) {
       window.haarness.chatHomeRunning().catch(() => false),
       window.haarness.storage(HOME_BUSY).catch(() => false),
     ]);
+    // Read once: what was busy is followed this time, and the mark is set
+    // again only by what is busy now. A chat home that cannot open is not
+    // tried again at every launch after.
+    if (busy === true && homeBusy === undefined)
+      void window.haarness.storage(HOME_BUSY, false).catch(() => {});
     if (running || busy === true) setHomeUsed(true);
   }
   /**
@@ -1149,16 +1157,27 @@ function createApp(saved?: Preferences) {
       draftKey() !== toKey
     )
       return result;
-    if (text.trim()) {
-      set("drafts", toKey, text);
-      set("drafts", fromKey, "");
-    }
-    await Promise.all([
+    await carryDraft([
       ...(text.trim()
-        ? [window.haarness.storage(toStored, text), window.haarness.storage(fromStored, "")]
+        ? [
+            {
+              write: () => {
+                set("drafts", toKey, text);
+                return window.haarness.storage(toStored, text);
+              },
+              clear: () => {
+                set("drafts", fromKey, "");
+                return window.haarness.storage(fromStored, "");
+              },
+            },
+          ]
         : []),
-      ...(files.length ? [setAttachmentDraft(toKey, files), setAttachmentDraft(fromKey, [])] : []),
-      ...(chips.length ? [setPromptContext(toKey, chips), setPromptContext(fromKey, [])] : []),
+      ...(files.length
+        ? [{ write: () => setAttachmentDraft(toKey, files), clear: () => setAttachmentDraft(fromKey, []) }]
+        : []),
+      ...(chips.length
+        ? [{ write: () => setPromptContext(toKey, chips), clear: () => setPromptContext(fromKey, []) }]
+        : []),
     ]);
     return result;
   }
@@ -1562,7 +1581,6 @@ function createApp(saved?: Preferences) {
   // Whether a chat of This computer is running or waiting for an answer,
   // kept as it changes while its chats are followed live: what the next
   // launch reads (followHomeAtLaunch).
-  let homeBusy: boolean | undefined;
   createEffect(() => {
     const id = state.chatHomeAt.id;
     if (!id) return;

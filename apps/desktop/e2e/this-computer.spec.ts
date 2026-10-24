@@ -450,13 +450,19 @@ test("chats without a project: a ready first launch, a folder of their own on on
  * `slow` exists and refused while `fail` does: a daemon slow to start, or
  * one that cannot. */
 async function wrappedBinary() {
-  const flags = { slow: join(temporary, "slow-home"), fail: join(temporary, "fail-home") };
+  const flags = {
+    slow: join(temporary, "slow-home"),
+    fail: join(temporary, "fail-home"),
+    // A line for every call that opens the chat home.
+    calls: join(temporary, "home-calls"),
+  };
   const wrapper = join(temporary, "haarness-wrapper");
   await writeFile(
     wrapper,
     `#!/bin/sh
 case " $* " in
   *" --chat-home "*" desktop "*|*" --chat-home desktop"*)
+    echo call >> "${flags.calls}"
     if [ -e "${flags.slow}" ]; then sleep 5; fi
     if [ -e "${flags.fail}" ]; then echo "The chat home could not start (test)" >&2; exit 3; fi
     ;;
@@ -676,4 +682,44 @@ test("This computer is followed from launch when work may be going on there: its
   await expect(rows()).toHaveCount(2);
   await page.waitForTimeout(2000);
   expect(homeDaemons()).toBe(0);
+});
+
+test("a chat of This computer busy at the last quit has it tried at the next launch only: one that cannot open is not tried at every launch after", async () => {
+  const flags = await wrappedBinary();
+  await mkdir(chatHomeFolder(join(temporary, "desktop")));
+  const home = await realpath(chatHomeFolder(join(temporary, "desktop")));
+  // Last time a chat of This computer was busy as Haarness quit, and a
+  // project was the place left open.
+  await writeFile(
+    join(temporary, "desktop", "desktop.json"),
+    JSON.stringify({
+      preferences: {},
+      credentials: {},
+      recent: [
+        { id: "local:" + project, label: "pocket-project", workspace: project, remote: false, trust: true },
+        { id: "local:" + home, label: "Chat folders", workspace: home, remote: false, trust: false, chatHome: true },
+      ],
+      values: {
+        "active-project": "local:" + project,
+        "active-server": "local",
+        "server-project:local": "local:" + project,
+        "chat-home-busy:v1": true,
+      },
+    }),
+  );
+  await writeFile(flags.fail, "");
+  const calls = () => readFile(flags.calls, "utf8").then((text) => text.split("\n").filter(Boolean).length, () => 0);
+  await launch();
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  // It is tried, and fails quietly beside the project.
+  await expect.poll(calls, { timeout: 30000 }).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => window.haarness.storage("chat-home-busy:v1"))).toBe(false);
+  await app!.close();
+  const before = await calls();
+  await launch();
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  await page.waitForTimeout(3000);
+  expect(await calls()).toBe(before);
 });

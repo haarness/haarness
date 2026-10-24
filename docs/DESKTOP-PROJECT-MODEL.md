@@ -86,9 +86,12 @@ approvals). It is saved once
 among the desktop's locations. Its chats are followed live (running and
 waiting marks, notifications) from launch when work may be going on there:
 its daemon already runs, which Desktop reads from the daemon's own record
-(`<cache>/workspaces/*/runtime.json`, its process alive and its server
-answering) without starting anything, or one of its chats was running or
-waiting for an answer when Haarness last quit. Otherwise its daemon starts
+(`<cache>/workspaces/*/runtime.json`: its process alive, and the server at its
+address, asked without following a redirect, calling itself Haarness with the
+record's process and folder) without starting anything, or one of its chats
+was running or waiting for an answer when Haarness last quit (read once: that
+launch tries it, and only what is busy then marks it again, so a chat home
+that cannot open is not tried at every launch). Otherwise its daemon starts
 only when This computer is used: its new chat or one of its chats is shown,
 its + or No folder is chosen, or Search is open; until then the sidebar lists
 its chats from the cache of the last session. It is never a
@@ -102,7 +105,8 @@ a searchable list: **No folder**, the projects in sidebar order, and **Open
 folder…** (the system folder chooser; a chat's own folder chosen there opens
 that chat). The draft started before choosing (its text, attachments and @
 context chips) goes along to the new chat there, unless that one has a draft
-of its own, which then stays, and so does this one. In a narrow chat the chips show only
+of its own, which then stays, and so does this one. Each part is written there
+before any leaves here, so a write that fails never loses it. In a narrow chat the chips show only
 their icons. For a chat that has started it names
 the folder the chat works in, the chat's own folder or its project, and offers
 Reveal in Finder; a chat never moves. The new-chat heading reads "What should
