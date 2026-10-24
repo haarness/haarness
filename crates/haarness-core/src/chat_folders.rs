@@ -153,7 +153,7 @@ pub fn numbered(parts: &[&str], n: usize) -> Vec<String> {
     if n > 1
         && let Some(last) = owned.last_mut()
     {
-        last.push_str(&format!("-{n}"));
+        *last = format!("{last}-{n}");
     }
     owned
 }
