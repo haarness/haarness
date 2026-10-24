@@ -90,9 +90,48 @@ async function createSection(name: string, group: string) {
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(titles(section(group))).toContainText([name]);
 }
+/** Where each row's label starts in an open menu, to the pixel. */
+const labelStarts = (menu: Locator) =>
+  menu.locator(":scope > button, :scope > .menu-branch > button").evaluateAll((rows) =>
+    rows.map((row) => {
+      const label = row.querySelector(".menu-item-label");
+      if (label) return Math.round(label.getBoundingClientRect().left);
+      const text = [...row.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+      const range = document.createRange();
+      range.selectNodeContents(text!);
+      return Math.round(range.getBoundingClientRect().left);
+    }),
+  );
+/** Where the live choice's tick sits, and how far in: in a column of its own
+ * before the label ("start"), or at the row's end as a picker's ✓ ("end"). */
+const tickPlace = (menu: Locator) =>
+  menu.locator('[aria-checked="true"]').evaluate((row) => {
+    const box = row.getBoundingClientRect();
+    const end = row.querySelector(".select-check");
+    const start = row.querySelector(".menu-check svg");
+    if (end && !start)
+      return { place: "end", glyph: end.textContent?.trim(), inset: Math.round(box.right - end.getBoundingClientRect().right) };
+    if (start && !end) return { place: "start", inset: Math.round(start.getBoundingClientRect().left - box.left) };
+    return undefined;
+  });
 async function fileUnder(name: string, group: string) {
   await options(name);
   await item("Section").click();
+  // Sections are a live choice without icons: ticked in a column of their
+  // own, so their labels line up with New section…'s, beside its icon.
+  const starts = await labelStarts(page.locator(".menu-branch-panel"));
+  expect(starts.length).toBeGreaterThan(1);
+  expect(new Set(starts).size).toBe(1);
+  expect(await tickPlace(page.locator(".menu-branch-panel"))).toEqual({ place: "start", inset: 8 });
+  if (process.env.HAARNESS_SCREENSHOTS) {
+    for (const theme of ["dark", "light"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator(".menu-branch-panel").screenshot({
+        path: join(process.env.HAARNESS_SCREENSHOTS, `section-menu-${theme}.png`),
+      });
+    }
+  }
   await page.getByRole("menuitemradio", { name: group, exact: true }).click();
 }
 async function pin(name: string, pinned = true) {
@@ -1044,7 +1083,9 @@ test("sidebar prompt keys move through the open chat's prompts and back to the n
 
 test("sidebar rows show when a chat was last active, and a scheduled run's waiting label and Archive chats' count speak the reader's language", async () => {
   const de: Record<string, string> = JSON.parse(await readFile(resolve("../../locales/de.json"), "utf8"));
-  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  // Chats start in Auto, where the reviewer answers an ask: the scheduled run
+  // waits for a person in Review.
+  const alpha = await open("alpha", 'approval_mode="review"\n[permissions]\nbash="ask"\n');
   await alpha.createThread({ title: "Quiet chat", provider: "echo", model: "echo-1" });
   // The age sits in the row without joining its name.
   const quiet = project("alpha").getByRole("button", { name: "Quiet chat", exact: true });
@@ -1109,7 +1150,9 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
 });
 
 test("sidebar Select chats archives several chats at once, notes a chat still working, and Escape leaves it", async () => {
-  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  // Chats start in Auto, where the reviewer answers an ask: "Two" waits for a
+  // person in Review.
+  const alpha = await open("alpha", 'approval_mode="review"\n[permissions]\nbash="ask"\n');
   const threads: Awaited<ReturnType<Haarness["createThread"]>>[] = [];
   for (const title of ["One", "Two", "Three", "Four"])
     threads.push(await alpha.createThread({ title, provider: "echo", model: "echo-1" }));

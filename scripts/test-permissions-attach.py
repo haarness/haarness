@@ -2,18 +2,20 @@
 """Real server and attached TUI: ordinary tools, manual approvals and retired policy migration."""
 import http.server, json, os, pathlib, shlex, subprocess, tempfile, threading, time, urllib.request, urllib.error
 import e2e_scratch
+from e2e_env import clean_env
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-permissions-attach-')).resolve()
 workspace = root/'server-project'; workspace.mkdir()
 local = root/'client-project'; local.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
-(state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash = { "printf blocked*" = "deny", "printf review*" = "ask" }\n')
+# Chats start in Auto; the approvals here wait for a person, so ask for Review.
+(state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash = { "printf blocked*" = "deny", "printf review*" = "ask" }\n')
 legacy = state/'data/sandbox.json'; legacy.write_text('{"profile":"offline","allowedHosts":[]}')
 (workspace/'.env').write_text('TEST_ONLY=read-approval-proof')
 (workspace/'service.env').write_text('TEST_ONLY=named-env-proof')
 (workspace/'.env.example').write_text('EXAMPLE=public-proof')
-env = {k:v for k,v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_SERVER_TOKEN='', HAARNESS_SERVER_PASSWORD='', HAARNESS_TEST_PROVIDER='1', HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
 name = 'haarness-permissions-'+str(os.getpid()); url = None; checks = []
 class Web(http.server.BaseHTTPRequestHandler):

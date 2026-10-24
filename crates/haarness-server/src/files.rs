@@ -409,10 +409,24 @@ pub async fn write_file(
     Json(input): Json<FileWrite>,
 ) -> Result<Json<FileContent>, Failure> {
     let (base, directory) = root_for(&state, scope.thread_id).await?;
-    let _guard = EDIT.lock().await;
     let events = state.runtime.events().clone();
     let changed = changed(&input.path, scope.thread_id, directory.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
+    let result = save(base, input, directory).await?;
+    events.publish("files.updated", None, None, None, changed);
+    Ok(result)
+}
+
+/// Save the editor's copy of a file. It waits for an agent's file tool that
+/// holds the file (through its formatter), so the save is not written over;
+/// the revision check then sees what the tool left.
+async fn save(
+    base: PathBuf,
+    input: FileWrite,
+    directory: Option<String>,
+) -> Result<Json<FileContent>, Failure> {
+    let _file = hold(&base, [input.path.as_str()]).await?;
+    let _guard = EDIT.lock().await;
+    tokio::task::spawn_blocking(move || {
         let path = resolve(&base, &input.path, true)?;
         let data = decode_write(&input)?;
         let current = if path.exists() {
@@ -455,9 +469,24 @@ pub async fn write_file(
         }))
     })
     .await
-    .map_err(bad)??;
-    events.publish("files.updated", None, None, None, changed);
-    Ok(result)
+    .map_err(bad)?
+}
+
+/// Wait for an agent's file tools that hold `paths` (through their
+/// formatter). Taken before `EDIT`, so a change waiting for one file holds
+/// up no change of another; tools never take `EDIT`.
+async fn hold<'a>(
+    base: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<crate::file_lock::FileLocks, Failure> {
+    crate::file_lock::lock(
+        paths
+            .into_iter()
+            .map(|path| haarness_core::resolve_permission_path(base, path)),
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(bad)
 }
 
 /// A `files.updated` payload: the changed path, and for a chat folder the
@@ -482,10 +511,23 @@ pub async fn mutate_file(
     Json(input): Json<FileAction>,
 ) -> Result<Json<serde_json::Value>, Failure> {
     let (base, directory) = root_for(&state, scope.thread_id).await?;
-    let _guard = EDIT.lock().await;
     let events = state.runtime.events().clone();
     let changed = changed(&input.path, scope.thread_id, directory.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
+    let result = act(base, input).await?;
+    events.publish("files.updated", None, None, None, changed);
+    Ok(result)
+}
+
+/// Make, rename or delete an entry. A file renamed or deleted waits for an
+/// agent's file tool that holds it, whose formatter would bring it back.
+async fn act(base: PathBuf, input: FileAction) -> Result<Json<serde_json::Value>, Failure> {
+    let held = match input.action.as_str() {
+        "rename" | "delete" => [Some(input.path.as_str()), input.target.as_deref()],
+        _ => [None, None],
+    };
+    let _files = hold(&base, held.into_iter().flatten()).await?;
+    let _guard = EDIT.lock().await;
+    tokio::task::spawn_blocking(move || {
         if input.path.is_empty() || input.path == "." {
             return Err(bad("Select a workspace entry"));
         }
@@ -525,9 +567,7 @@ pub async fn mutate_file(
         Ok(Json(serde_json::json!({"ok":true})))
     })
     .await
-    .map_err(bad)??;
-    events.publish("files.updated", None, None, None, changed);
-    Ok(result)
+    .map_err(bad)?
 }
 
 /// A folder inside the scope, held once its real place is checked: files are
@@ -796,6 +836,98 @@ fn same_folder(stat: &nix::sys::stat::FileStat, checked: &Path) -> Result<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn a_change_waiting_for_one_file_holds_up_no_change_of_another() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-save-other-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        for name in ["held.txt", "other.txt", "gone.txt"] {
+            fs::write(root.join(name), "before\n").unwrap();
+        }
+        let input = |path: &str| -> FileWrite {
+            serde_json::from_value(serde_json::json!({
+                "path": path, "content": "after\n", "revision": hash(b"before\n")
+            }))
+            .unwrap()
+        };
+        // An agent's edit holds one file while its formatter runs.
+        let held = crate::file_lock::lock(
+            [root.join("held.txt")],
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let waiting = tokio::spawn(save(root.clone(), input("held.txt"), None));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let delete: FileAction = serde_json::from_value(
+            serde_json::json!({"action": "delete", "path": "gone.txt", "confirm": true}),
+        )
+        .unwrap();
+        let deleted = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let saved = save(root.clone(), input("other.txt"), None).await.unwrap();
+            assert_eq!(saved.revision, hash(b"after\n"));
+            act(root.clone(), delete).await.unwrap().0
+        })
+        .await
+        .expect("a change of another file waited");
+        assert_eq!(deleted, serde_json::json!({"ok": true}));
+        assert!(!waiting.is_finished());
+        assert_eq!(
+            fs::read_to_string(root.join("other.txt")).unwrap(),
+            "after\n"
+        );
+        assert!(!root.join("gone.txt").exists());
+        // A delete of the held file waits for it too.
+        let delete: FileAction = serde_json::from_value(
+            serde_json::json!({"action": "delete", "path": "held.txt", "confirm": true}),
+        )
+        .unwrap();
+        let deleting = tokio::spawn(act(root.clone(), delete));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!deleting.is_finished(), "the delete did not wait");
+        drop(held);
+        // The save goes first, then the delete it queued behind.
+        assert_eq!(waiting.await.unwrap().unwrap().revision, hash(b"after\n"));
+        assert_eq!(
+            deleting.await.unwrap().unwrap().0,
+            serde_json::json!({"ok": true})
+        );
+        assert!(!root.join("held.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_save_waits_for_a_file_tool_that_holds_the_file() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-save-lock-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        fs::write(root.join("notes.txt"), "agent\n").unwrap();
+        // An agent's edit holds the file while its formatter runs.
+        let held = crate::file_lock::lock(
+            [root.join("notes.txt")],
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let input: FileWrite = serde_json::from_value(serde_json::json!({
+            "path": "notes.txt", "content": "editor\n", "revision": hash(b"agent\n")
+        }))
+        .unwrap();
+        let saving = tokio::spawn(save(root.clone(), input, None));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!saving.is_finished(), "the save did not wait");
+        fs::write(root.join("notes.txt"), "formatted\n").unwrap();
+        drop(held);
+        // The save then sees the formatter's copy and asks for a reload.
+        let refused = saving.await.unwrap().map(|_| ()).unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "formatted\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn uploads_decode_binary_without_breaking_legacy_text_or_size_limits() {
         let mut input: FileWrite = serde_json::from_value(

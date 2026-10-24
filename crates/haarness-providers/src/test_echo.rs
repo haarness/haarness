@@ -27,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 /// - `::mdslow` — emits Markdown in delayed chunks for live-rendering E2E.
 /// - `::scrollstream` — reflows delayed Markdown while scroll tests are paused.
 /// - `::long <n>` — emits `n` numbered marker lines.
+/// - `::finish <reason> [text]` — ends the response with finish reason
+///   `reason` (`max_tokens`, `refusal`) after `text`, or after reasoning
+///   alone.
 /// - `[review:<verdict>]` after a `!tool` directive's arguments picks the
 ///   verdict of Auto's deterministic reviewer (see
 ///   [`haarness_core::auto_review::test_review`]).
@@ -119,6 +122,8 @@ impl ModelProvider for EchoProvider {
         }
 
         let mut events = Vec::new();
+        // How the response ends; `::finish` names another reason.
+        let mut finish = "completed".to_owned();
         // A side question scripts against the question itself, and its reply
         // names the side chat's previous question, so a client test can see
         // that a follow-up carried its thread.
@@ -326,6 +331,17 @@ impl ModelProvider for EchoProvider {
                 }
             ))));
             events.push(Ok(ProviderEvent::TextDelta("Reasoned reply".into())));
+        } else if let Some(rest) = directive.strip_prefix("::finish ") {
+            let (reason, text) = rest
+                .trim()
+                .split_once(char::is_whitespace)
+                .map_or((rest.trim(), ""), |(reason, text)| (reason, text.trim()));
+            reason.clone_into(&mut finish);
+            events.push(Ok(if text.is_empty() {
+                ProviderEvent::ReasoningDelta("Thinking at length".into())
+            } else {
+                ProviderEvent::TextDelta(text.to_owned())
+            }));
         } else if directive.starts_with("::md") {
             events.push(Ok(ProviderEvent::TextDelta(
                 "**bold** and `code`\n\n```rust\nfn main() {}\n```".into(),
@@ -352,9 +368,7 @@ impl ModelProvider for EchoProvider {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         }));
-        events.push(Ok(ProviderEvent::Finished {
-            reason: "completed".into(),
-        }));
+        events.push(Ok(ProviderEvent::Finished { reason: finish }));
         let wants_tools = events
             .iter()
             .any(|event| matches!(event, Ok(ProviderEvent::ToolCall { .. })));
@@ -574,6 +588,22 @@ mod tests {
             &long[0],
             ProviderEvent::TextDelta(text)
                 if text.contains("marker-1") && text.contains("marker-3")
+        ));
+
+        let limited = events(vec![user("::finish max_tokens")]).await;
+        assert!(matches!(&limited[0], ProviderEvent::ReasoningDelta(_)));
+        assert!(matches!(
+            limited.last(),
+            Some(ProviderEvent::Finished { reason }) if reason == "max_tokens"
+        ));
+        let refused = events(vec![user("::finish refusal partial text")]).await;
+        assert!(matches!(
+            &refused[0],
+            ProviderEvent::TextDelta(text) if text == "partial text"
+        ));
+        assert!(matches!(
+            refused.last(),
+            Some(ProviderEvent::Finished { reason }) if reason == "refusal"
         ));
 
         let reasoned = events(vec![user("::reason carefully")]).await;

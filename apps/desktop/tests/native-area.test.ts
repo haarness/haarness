@@ -15,7 +15,7 @@ Object.assign(globalThis, {
     },
   },
 });
-const { TOAST_SETTLE, floatingBox, floatingSpan, onNativeArea, setNativeArea, toastPlace } = await import("../src/renderer/native-area");
+const { TOAST_SETTLE, floatingBox, floatingSpan, frameTop, onNativeArea, setNativeArea, toastPlace } = await import("../src/renderer/native-area");
 const rect = (left: number, width: number, top = 40, height = 28) =>
   ({ left, right: left + width, top, bottom: top + height, width, height, x: left, y: top }) as DOMRect;
 
@@ -54,6 +54,39 @@ test("right-to-left windows measure toasts from the left edge", () => {
   setNativeArea(rect(0, 440, 40, 800));
   assert.equal(properties.get("--native-inline-end"), "440px");
   (document.documentElement as { dir: string }).dir = "ltr";
+});
+
+// Settings is a modal at most 1040x760 in the middle of a larger window: in a
+// 1200x900 one, [80, 1120] across and [70, 830] down. Placed against the
+// window, a list or menu opened near its edges hung over what it covers.
+const settings = { left: 80, right: 1120, top: 70, bottom: 830 };
+
+test("a layer opened in a dialog keeps 8px inside the dialog's box", () => {
+  setNativeArea(undefined);
+  // A 200px select at the panel's end: its 240px list ends where the select ends, inside.
+  assert.deepEqual(floatingBox(rect(896, 200), 240, 240, settings), { width: 240, left: 1096 - 240 });
+  assert.deepEqual(floatingBox(rect(1000, 100), 240, 240, settings), { width: 240, left: 1100 - 240 });
+  // A control nearer the edge than 8px: the list keeps 8px in.
+  assert.deepEqual(floatingBox(rect(1040, 76), 240, 240, settings), { width: 240, left: 1120 - 8 - 240 });
+  assert.deepEqual(floatingBox(rect(896, 200), 240, 240), { width: 240, left: 896 });
+  // A searchable list shrinks to its minimum before leaving the dialog.
+  assert.deepEqual(floatingBox(rect(100, 200), 1100, 260, settings), { width: 1024, left: 88 });
+  // A dialog narrower than the layer's minimum: placed against the window, as before.
+  assert.deepEqual(floatingBox(rect(500, 120), 360, 260, { left: 450, right: 690, top: 70, bottom: 830 }), { width: 360, left: 500 });
+});
+
+test("in a dialog a layer opens below or above its anchor where it fits inside, and a list may shorten to stay there", () => {
+  // Room below in the dialog: below, as in the window.
+  assert.deepEqual(frameTop(rect(600, 200, 300, 30), 300, 6, settings), { top: 336 });
+  // Near the dialog's bottom the window has room below, the dialog only above.
+  assert.deepEqual(frameTop(rect(600, 200, 700, 30), 300, 6, settings), { top: 394 });
+  // Neither side holds it whole: a list shortens to the larger room, while five rows still show.
+  assert.deepEqual(frameTop(rect(600, 200, 420, 30), 420, 6, settings, 200), { top: 456, height: 366 });
+  assert.deepEqual(frameTop(rect(600, 200, 700, 30), 700, 6, settings, 200), { top: 70 + 8, height: 616 });
+  // Too little room, a menu that cannot scroll, or no dialog: placed against the window.
+  assert.equal(frameTop(rect(600, 200, 420, 30), 420, 6, settings), undefined);
+  assert.equal(frameTop(rect(600, 200, 100, 30), 300, 6, { left: 0, right: 1200, top: 60, bottom: 260 }, 200), undefined);
+  assert.equal(frameTop(rect(600, 200, 300, 30), 300, 6), undefined);
 });
 
 // The toast column: up to 400px, 16px in from the window's inline end: [784, 1184] in a 1200px window.

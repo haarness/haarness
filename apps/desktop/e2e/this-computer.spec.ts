@@ -477,14 +477,19 @@ exec "${binary}" "$@"
 
 test("opening This computer from a project chat shows its new chat at once, and a message sent meanwhile goes when it is open", async () => {
   const flags = await wrappedBinary();
-  // A project remembered from before, and no chat home yet.
+  // A project remembered from before, and no chat home yet. Chats start in
+  // Auto; Review was picked for new chats in this project, so its pill starts
+  // there.
   await writeFile(
     join(temporary, "desktop", "desktop.json"),
     JSON.stringify({
       preferences: {},
       credentials: {},
       recent: [{ id: "local:" + project, label: "pocket-project", workspace: project, remote: false, trust: true }],
-      values: { "active-project": "local:" + project, "active-server": "local", "server-project:local": "local:" + project },
+      values: {
+        "active-project": "local:" + project, "active-server": "local", "server-project:local": "local:" + project,
+        "approval-modes:v1": { ["local:" + project]: { "*": false } },
+      },
     }),
   );
   // A Git project: its new chat offers the checkout beside the folder chip.

@@ -14,6 +14,7 @@ Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 import e2e_scratch
+from e2e_env import clean_env
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-redaction-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
@@ -21,7 +22,7 @@ workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
 SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret',
            'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
-           'fixture-review-secret', 'fixture-inner-secret', 'fixture-at']
+           'fixture-review-secret', 'fixture-inner-secret', 'fixture-at', 'fixture-proxy-secret']
 
 # A remote MCP server that wants OAuth and offers a `file:` sign-in link, and one that writes down the
 # headers its client sent.
@@ -60,6 +61,8 @@ marker = root/'helper-ran'
 (state/'config/config.toml').write_text('''[defaults]
 provider = "echo"
 model = "echo-1"
+# Chats start in Auto; the review log case needs a request that waits for a person.
+approval_mode = "review"
 
 [mcp.keyed]
 transport = "streamable_http"
@@ -69,7 +72,7 @@ timeoutMs = 2000
 [mcp.local]
 transport = "stdio"
 command = "/nonexistent/fixture-mcp"
-args = ["--api-key", "fixture-arg-secret", "--token", "fixture-flag-secret", "--region", "eu"]
+args = ["--api-key", "fixture-arg-secret", "--token", "fixture-flag-secret", "--region", "eu", "--proxy", "fixture:fixture-proxy-secret@127.0.0.1:3128"]
 enabled = false
 
 [permissions]
@@ -96,7 +99,7 @@ refs_entry = {'type': 'local', 'command': ['python3', str(root/'refs_server.py')
                           'oauthClientId': 'fixture-client', 'enabled': False},
             'helper': {'type': 'remote', 'url': f'http://127.0.0.1:{port}/helper/mcp', 'oauth': False,
                        'headersHelper': 'printf \'{"X-Fixture":"%s","X-Quoted":"${FIXTURE_HELPER_VALUE}"}\' "${FIXTURE_HELPER_VALUE}"'}}}))
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
            # The variable's value names another; it must reach the server as written.
@@ -187,7 +190,8 @@ try:
     assert keyed['config']['url'] == 'http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu', keyed
     local = json.loads(cli('mcp', 'get', 'local'))
     clean(json.dumps(local), 'mcp get')
-    assert local['config']['args'] == ['--api-key', '<redacted>', '--token', '<redacted>', '--region', 'eu'], local
+    assert local['config']['args'] == ['--api-key', '<redacted>', '--token', '<redacted>', '--region', 'eu',
+                                       '--proxy', '<redacted>@127.0.0.1:3128'], local
     shown = cli('mcp', 'get', 'keyed', '--show-secrets')
     assert 'fixture-url-secret' in shown and 'hunter2' in shown, shown
     check('haarness mcp get hides URL and argument credentials and shows them with --show-secrets')
@@ -209,7 +213,8 @@ try:
     kept = json.loads(cli('mcp', 'get', 'keyed', '--show-secrets'))['config']['url']
     assert kept == 'http://someone:hunter2@127.0.0.1:9/mcp?api_key=fixture-url-secret&region=eu', kept
     kept = json.loads(cli('mcp', 'get', 'local', '--show-secrets'))['config']['args']
-    assert kept == ['--api-key', 'fixture-arg-secret', '--token', 'fixture-flag-secret', '--region', 'eu'], kept
+    assert kept == ['--api-key', 'fixture-arg-secret', '--token', 'fixture-flag-secret', '--region', 'eu',
+                    '--proxy', 'fixture:fixture-proxy-secret@127.0.0.1:3128'], kept
     check('the settings view and edit form hide them, and saving the form unchanged keeps the real values')
 
     # Edited arguments (as the model's mcp_manage or a person sends them): each hidden value stays

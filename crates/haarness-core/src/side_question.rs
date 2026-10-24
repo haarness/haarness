@@ -62,6 +62,7 @@ impl PreparedPrompts {
         turn: Option<TurnId>,
         mut catalog: Vec<ToolDefinition>,
         messages: &[ProviderMessage],
+        origins: &[crate::image_budget::Origin],
     ) -> Option<(Arc<dyn ModelProvider>, ProviderRequest)> {
         catalog.sort_by(|a, b| a.name.cmp(&b.name));
         let snapshot = self.0.iter().find(|snapshot| {
@@ -70,6 +71,17 @@ impl PreparedPrompts {
                 && snapshot.catalog == catalog
                 && messages.starts_with(&snapshot.source)
         })?;
+        // What came since the turn's request (a tool's screenshots) can pass
+        // the provider's image limits and move the cut, which the prepared
+        // request no longer matches: such a question is prepared afresh. The
+        // cut replays the history, so only images it adds can move it.
+        let limits = snapshot.provider.image_limits(&snapshot.request.model);
+        let earlier = origins.get(..snapshot.source.len())?;
+        if crate::image_budget::removed(messages, origins, limits)
+            != crate::image_budget::removed(&snapshot.source, earlier, limits)
+        {
+            return None;
+        }
         let mut request = snapshot.request.clone();
         request
             .messages
@@ -157,6 +169,83 @@ mod tests {
             attachments: vec![],
         }
     }
+    /// Takes two images in a request and is never asked anything.
+    struct TwoImages;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for TwoImages {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+        fn info(&self) -> haarness_protocol::ProviderInfo {
+            haarness_protocol::ProviderInfo {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                authenticated: true,
+                models: Vec::new(),
+            }
+        }
+        fn image_limits(&self, _model: &str) -> crate::ImageLimits {
+            crate::ImageLimits {
+                count: Some(2),
+                ..crate::ImageLimits::default()
+            }
+        }
+        async fn stream(
+            &self,
+            _: ProviderRequest,
+            _: tokio_util::sync::CancellationToken,
+        ) -> crate::CoreResult<crate::ProviderStream> {
+            unreachable!("a prepared request is only read")
+        }
+    }
+
+    #[test]
+    fn a_side_question_is_prepared_afresh_once_new_images_move_the_cut() {
+        let shot = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "screenshot".into(),
+            output: "Screenshot taken".into(),
+            is_error: false,
+            attachments: vec![format!("data:image/png;name={id}.png;base64,AAAA")],
+        };
+        let source = vec![text("Look"), call("a"), shot("a")];
+        let request = ProviderRequest {
+            model: "fixture".into(),
+            system: String::new(),
+            messages: source.clone(),
+            tools: Vec::new(),
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: crate::RequestParameters::default(),
+        };
+        let (thread, turn) = (ThreadId::new(), TurnId::new());
+        let origins = |count: usize| vec![crate::image_budget::Origin::default(); count];
+        let mut prepared = PreparedPrompts::default();
+        prepared.remember(
+            thread,
+            turn,
+            Arc::new(TwoImages),
+            source.clone(),
+            Vec::new(),
+            request,
+        );
+        // One more screenshot fits: the prepared request is reused.
+        let mut messages = source;
+        messages.extend([call("b"), shot("b")]);
+        let (_, reused) = prepared
+            .request(thread, Some(turn), Vec::new(), &messages, &origins(5))
+            .expect("the prepared request is reused");
+        assert_eq!(reused.messages, messages);
+        // A third passes two images, and the cut would move.
+        messages.extend([call("c"), shot("c")]);
+        assert!(
+            prepared
+                .request(thread, Some(turn), Vec::new(), &messages, &origins(7))
+                .is_none()
+        );
+    }
+
     #[test]
     fn only_a_side_chats_first_question_carries_the_instructions() {
         let first = prompt("  What changed?\n", true);

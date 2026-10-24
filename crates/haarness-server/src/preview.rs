@@ -25,21 +25,13 @@ fn bad(error: impl std::fmt::Display) -> Failure {
 fn failure(error: Failure) -> CoreError {
     CoreError::Tool(error.1)
 }
+/// Where a workspace's preview versions live, under the server's data folder.
+#[must_use]
+pub fn versions_folder(workspace: &Path) -> Option<PathBuf> {
+    directory(workspace).ok()
+}
 fn directory(workspace: &Path) -> Result<PathBuf, Failure> {
-    let root = std::env::var_os("HAARNESS_DATA_DIR")
-        .map(|root| PathBuf::from(root).join("data"))
-        // HAARNESS_HOME keeps everything under one folder.
-        .or_else(|| {
-            std::env::var_os("HAARNESS_HOME")
-                .map(PathBuf::from)
-                .filter(|root| root.is_absolute())
-                .map(|root| root.join("data"))
-        })
-        .or_else(|| {
-            directories::ProjectDirs::from("dev", "haarness", "haarness")
-                .map(|p| p.data_local_dir().to_owned())
-        })
-        .ok_or_else(|| bad("Preview storage is unavailable"))?;
+    let root = crate::data_folder().ok_or_else(|| bad("Preview storage is unavailable"))?;
     Ok(root.join("preview").join(files::hash(
         workspace
             .canonicalize()
@@ -198,7 +190,9 @@ impl Tool for PreviewTool {
             .canonicalize()
             .map_err(|e| CoreError::Tool(e.to_string()))?;
         tokio::task::spawn_blocking(move || {
-            let requested = Path::new(arguments["filePath"].as_str().unwrap());
+            // `~/site/index.html` is in the home folder, as for the other file tools.
+            let requested = haarness_core::expand_home(arguments["filePath"].as_str().unwrap());
+            let requested = Path::new(requested.as_ref());
             let relative = if requested.is_absolute() { requested.strip_prefix(&folder).map_err(|_| bad("Preview must be inside the workspace"))? } else { requested };
             let within = folder.strip_prefix(&root).map_err(|_| bad("Preview must be inside the workspace"))?;
             let path = within.join(relative).to_string_lossy().replace('\\', "/");
@@ -358,6 +352,48 @@ pub async fn restore_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `~/page.html` is in the home folder, outside the project, never a
+    /// project folder named `~` (that one is `./~/page.html`).
+    #[tokio::test]
+    async fn a_preview_path_from_the_home_folder_is_outside_the_project() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-preview-home-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("~")).unwrap();
+        fs::write(root.join("~/page.html"), "<h1>in the project</h1>").unwrap();
+        let workspace = root.canonicalize().unwrap();
+        // Versions a test records stay out of the real app-data folder.
+        if let Some(project) = directories::ProjectDirs::from("dev", "haarness", "haarness") {
+            assert!(
+                !directory(&workspace)
+                    .unwrap()
+                    .starts_with(project.data_local_dir())
+            );
+        }
+        let refused = PreviewTool(workspace.clone())
+            .execute(
+                json!({"filePath": "~/page.html"}),
+                ToolContext {
+                    execution: haarness_core::ExecutionSettings::default(),
+                    thread_id: haarness_protocol::ThreadId::new(),
+                    turn_id: haarness_protocol::TurnId::new(),
+                    workspace: workspace.clone(),
+                    authorized_external_paths: Vec::new(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    invoker: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("Preview must be inside the workspace"),
+            "{refused}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn versions_are_workspace_scoped_bounded_and_verified() {
         let root = std::env::temp_dir().join(format!("haarness-preview-{}", uuid::Uuid::now_v7()));

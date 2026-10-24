@@ -19,6 +19,7 @@
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-sm);
   line-height: 1.5;
   white-space: pre;

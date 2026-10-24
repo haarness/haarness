@@ -87,6 +87,12 @@ HAARNESS_BUN=/absolute/path/to/bun-linux-x64-baseline/bun \
   npm --prefix apps/desktop run package -- --linux --x64
 ```
 
+electron-builder's legacy AppImage runtime for arm64 needs the unversioned `libz.so`, which only
+zlib's development package installs, so the arm64 AppImage (0.1.3's too) did not start on a stock
+system; `test-release-linux.py` refuses it. Desktop's `package.json` therefore sets
+`build.toolsets.appimage: "1.0.3"` (a static type2 runtime), which starts on a stock Ubuntu 22.04
+arm64; a Linux desktop session has not run it yet.
+
 **Windows** links the C runtime statically (`.cargo/config.toml`), so `haarness.exe` starts on a
 clean machine without the Visual C++ Redistributable, and x64 bundles Bun's baseline build as
 Linux does. Check it:
@@ -96,8 +102,9 @@ need not match the architecture it publishes.
 
 ### Without GitHub Actions (local cross-builds)
 
-When the workflow cannot run (a blocked billing account), two machines cover all six platforms.
-Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), same steps as above:
+When the workflow cannot run (a blocked billing account), a Mac covers all six platforms (macOS
+natively, the rest in Docker), or a Mac and one Linux x64 machine. Same tag, same Bun 1.3.14 per
+target (checked against Bun's `SHASUMS256.txt`), same steps as above:
 
 - **A Mac** builds both macOS architectures with `VERSION=<v>
   ~/work/haarness/haarness-deploy/scripts/release-macos.sh`: a clean worktree of the tag in
@@ -107,8 +114,10 @@ Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), s
   index per architecture in `release-<v>/dist/macos-*`. It signs and notarizes as Signing
   describes and fails closed: no Developer ID or notarization key, or a package Gatekeeper does
   not call "Notarized Developer ID", stops the build (`ALLOW_UNSIGNED=1` builds ad hoc, the
-  owner's explicit call only). It holds the build lock; the run takes about 45 minutes, most of
-  it Apple's notarization.
+  owner's explicit call only), as does a program in the app's `Resources/bin` without the package's
+  architecture (`haarness-voice` is universal since 0.1.3's x64 app carried an arm64-only one).
+  Heavy steps take the build lock; with warm caches the run took 23 minutes on 2026-10-24, its six
+  notarizations (CLI, app, DMG per architecture) mostly overlapping.
 - **One Linux x64 machine** builds the rest (`haarness-deploy/scripts/release-linux-windows.sh`
   on the Ubuntu box; haarness-deploy's README, "Binary releases", has the exact commands):
   `cargo zigbuild` for both Linux targets (`.2.17`),
@@ -118,6 +127,18 @@ Same tag, same Bun 1.3.14 per target (checked against Bun's `SHASUMS256.txt`), s
   its version, so the arm64 Linux package needs `qemu-user-static` and `libc6-arm64-cross` with
   `QEMU_LD_PREFIX=/usr/aarch64-linux-gnu`; the same setup runs the arm64 CLI, and Docker's
   `--platform linux/arm64` gives an arm64 distribution for the smoke turn.
+- **Or the same Mac, in Docker** (`haarness-deploy/scripts/release-linux-windows-docker.sh`, next to
+  the Mac's release folder): the Linux machine's steps in containers made from the Dockerfile beside
+  it (Ubuntu 22.04 amd64 under Rosetta with the toolchains above; `haarness-wine` is WineHQ's 10.0,
+  as Ubuntu's 6.0.3 lacks the `bcryptprimitives.dll` every Rust 1.78+ program imports), cargo
+  caches in named volumes, then the platform checks: `test-release-package.py` and
+  `test-release-linux.py` per Linux architecture (arm64 natively in an arm64 container), each NSIS
+  installer's contents, the x64 CLI's `--version` and `doctor` under Wine, and both installer tests.
+  On Docker Desktop's arm64 kernel the amd64 image runs arm64 programs natively once the arm64 loader
+  and C library sit where the kernel looks (`/lib/ld-linux-aarch64.so.1`, `/lib/aarch64-linux-gnu`).
+  Rosetta refuses to start an x64 AppImage (the AppImage magic in its ELF header), so the x64 AppImage
+  is read as a squashfs there and its installed icon is not proven. Rosetta and Wine are not x64 Linux
+  or Windows, and nothing runs Windows arm64 code: say so in the final proof.
 - Add Rust targets from inside the checkout (`rustup target add …`): run elsewhere, they go to the
   default toolchain instead of the one `rust-toolchain.toml` pins, and the build fails with
   "can't find crate for `core`".
@@ -211,9 +232,13 @@ Each `spctl` must say `accepted`, `source=Notarized Developer ID` and the team `
 The standalone CLI (`haarness-macos-<arch>`) is a download of its own. Linked, it carries only
 the linker's ad-hoc signature, which Gatekeeper rejects for a browser-downloaded binary (curl
 installs add no quarantine, so `install.sh` never noticed). The script signs it with the
-Developer ID and hardened runtime, checks that it still starts (x64 through Rosetta), and
-notarizes it as a zip. A bare binary cannot be stapled: Gatekeeper fetches its ticket online
-when a quarantined copy first runs. `spctl -t exec` and `codesign --test-requirement '=notarized'`
+Developer ID, hardened runtime, a secure timestamp and one entitlement,
+`com.apple.security.cs.disable-library-validation`: the CLI extracts OpenTUI's library and opens it,
+and the hardened runtime refuses a library without the team's signature ("mapping process and
+mapped file (non-platform) have different Team IDs"), so without it `--version` works while `doctor`
+and the TUI fail. It checks that the signed CLI starts and loads OpenTUI (`--version`, `doctor`; x64
+through Rosetta), and notarizes it as a zip. A bare binary cannot be stapled: Gatekeeper fetches its
+ticket online when a quarantined copy first runs. `spctl -t exec` and `codesign --test-requirement '=notarized'`
 do not look tickets up, so they say "Unnotarized Developer ID" even for a notarized CLI. Prove it
 with the lookup Gatekeeper makes instead (`FOUND` with a `signedTicket` field; an ad-hoc binary
 gives `NOT_FOUND`):

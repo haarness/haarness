@@ -81,6 +81,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-sm);
   line-height: 1.55;
   color: var(--text);

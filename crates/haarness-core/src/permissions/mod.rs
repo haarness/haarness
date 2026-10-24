@@ -587,7 +587,8 @@ impl PermissionEngine {
             .split_once(':')
             .filter(|(permission, _)| *permission == "edit")
             .map(|(_, target)| target)
-            .filter(|target| is_config_path(Path::new(target)))
+            // `~/.config/haarness/config.toml` is the file in the home folder.
+            .filter(|target| is_config_path(Path::new(expand_home(target).as_ref())))
         {
             let name = Path::new(target)
                 .file_name()
@@ -656,6 +657,10 @@ impl PermissionEngine {
         let Some((permission, target)) = operation.split_once(':') else {
             return Vec::new();
         };
+        // `~/notes.txt` is the file in the home folder, as the tools read it.
+        let expanded = expand_home(target);
+        let from_home = matches!(expanded, std::borrow::Cow::Owned(_));
+        let target = expanded.as_ref();
         if !PATH_PERMISSIONS.contains(&permission)
             || target.is_empty()
             || target == "*"
@@ -671,6 +676,9 @@ impl PermissionEngine {
         let mut spellings = Vec::new();
         if given.is_absolute() {
             let named = normalize_absolute(given);
+            if from_home {
+                spellings.push((format!("{permission}:{}", named.to_string_lossy()), true));
+            }
             let relative = named
                 .strip_prefix(&configured)
                 .or_else(|_| named.strip_prefix(&root))
@@ -912,7 +920,11 @@ fn canonical_tool_permission(tool: &str) -> &str {
 /// current Claude-compatible spelling. They are one authority boundary, so a
 /// policy written with either name must govern calls made through either
 /// alias. Normalize both rules and evaluated operations to prevent an alias
-/// from bypassing a deny/ask decision.
+/// from bypassing a deny/ask decision. Upstream OpenCode names the MCP
+/// resource tools `opencode_list_mcp_resources` and
+/// `opencode_read_mcp_resource`, with the same patterns, and Haarness reads
+/// OpenCode's configuration files: a rule under those names governs
+/// `mcp_resource_list` and `mcp_resource_read`.
 fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
     for (alias, canonical) in [
         ("todo:", "todowrite:"),
@@ -920,6 +932,8 @@ fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
         ("apply_patch:", "edit:"),
         ("patch:", "edit:"),
         ("multiedit:", "edit:"),
+        ("opencode_list_mcp_resources:", "mcp_resource_list:"),
+        ("opencode_read_mcp_resource:", "mcp_resource_read:"),
     ] {
         if let Some(suffix) = value.strip_prefix(alias) {
             return std::borrow::Cow::Owned(format!("{canonical}{suffix}"));
@@ -930,9 +944,9 @@ fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
 
 fn normalize_rule_aliases(mut rule: PermissionRule) -> PermissionRule {
     if let Some((permission, target)) = rule.pattern.split_once(':')
-        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && let Some(home) = home_folder()
     {
-        let home = PathBuf::from(home).to_string_lossy().into_owned();
+        let home = home.to_string_lossy().into_owned();
         let expanded = if let Some(suffix) = target.strip_prefix("~/") {
             Some(format!("{home}/{suffix}"))
         } else if target == "~" {
@@ -994,6 +1008,65 @@ fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
     }
 }
 
+/// The folder a leading `~` names, for tool paths and rules alike, as shell
+/// readings take it: `HOME`, else `USERPROFILE`.
+fn home_folder() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.with(|home| home.borrow().clone()) {
+        return Some(home);
+    }
+    haarness_protocol::home_dir()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The home folder a test gives its own thread ([`TestHome`]), so a test
+    /// can put a project inside a home folder without changing the
+    /// environment every test shares.
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, `~` on this thread names `home`.
+#[cfg(test)]
+pub(crate) struct TestHome;
+
+#[cfg(test)]
+impl TestHome {
+    pub(crate) fn set(home: &Path) -> Self {
+        TEST_HOME.with(|test| *test.borrow_mut() = Some(home.to_path_buf()));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        TEST_HOME.with(|test| *test.borrow_mut() = None);
+    }
+}
+
+/// A tool path with a leading `~` read as a shell reads it: `~` alone and
+/// `~/…` (and `~\…` on Windows) are in the home folder. `~name/…` and a `~`
+/// anywhere else stay as written, so a project folder named `~` is written
+/// `./~`. Without a home folder the path stays as written.
+#[must_use]
+pub fn expand_home(value: &str) -> std::borrow::Cow<'_, str> {
+    let rest = if value == "~" {
+        Some("")
+    } else {
+        value
+            .strip_prefix("~/")
+            .or_else(|| value.strip_prefix("~\\").filter(|_| cfg!(windows)))
+    };
+    match (rest, home_folder().filter(|home| home.is_absolute())) {
+        (Some(""), Some(home)) => std::borrow::Cow::Owned(home.to_string_lossy().into_owned()),
+        (Some(rest), Some(home)) => {
+            std::borrow::Cow::Owned(home.join(rest).to_string_lossy().into_owned())
+        }
+        _ => std::borrow::Cow::Borrowed(value),
+    }
+}
+
 /// Resolve a model-supplied tool path the same way for permission checks and
 /// tool execution. Existing paths (including symlinks) are canonicalized;
 /// for a new path the nearest existing ancestor is canonicalized and the
@@ -1018,12 +1091,14 @@ pub fn resolve_permission_entry(workspace: &Path, value: &str) -> PathBuf {
     }
 }
 
-/// `value` on the canonical workspace, with `.` and `..` folded.
+/// `value` on the canonical workspace, with `.` and `..` folded and a
+/// leading `~` read as the home folder ([`expand_home`]).
 fn joined_path(workspace: &Path, value: &str) -> PathBuf {
     let workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| normalize_absolute(workspace));
-    let requested = Path::new(value);
+    let value = expand_home(value);
+    let requested = Path::new(value.as_ref());
     normalize_absolute(&if requested.is_absolute() {
         requested.to_path_buf()
     } else {
@@ -1065,7 +1140,8 @@ pub(crate) fn names_inside(workspace: &Path, value: &str) -> bool {
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| configured.clone());
-    let given = Path::new(value);
+    let value = expand_home(value);
+    let given = Path::new(value.as_ref());
     if given.is_absolute() {
         let named = normalize_absolute(given);
         named.starts_with(&root) || named.starts_with(&configured)
@@ -1602,6 +1678,45 @@ mod tests {
     }
 
     #[test]
+    fn upstream_resource_tool_names_govern_the_resource_tools() {
+        let mut engine = PermissionEngine::build_defaults();
+        for (pattern, decision) in [
+            ("opencode_read_mcp_resource:*", PermissionDecision::Deny),
+            (
+                "opencode_read_mcp_resource:docs:*",
+                PermissionDecision::Allow,
+            ),
+            ("opencode_list_mcp_resources:wiki", PermissionDecision::Ask),
+        ] {
+            engine.add_rule(rule(pattern, decision));
+        }
+        assert_eq!(
+            engine.evaluate("mcp_resource_read:wiki:wiki://page"),
+            PermissionDecision::Deny
+        );
+        // In its own place in the rule order: the later allow decides.
+        assert_eq!(
+            engine.evaluate("mcp_resource_read:docs:docs://setup"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            engine.evaluate("mcp_resource_list:wiki"),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            engine.evaluate("mcp_resource_list:docs"),
+            PermissionDecision::Allow
+        );
+        let mut whole = PermissionEngine::build_defaults();
+        whole.add_rule(rule(
+            "opencode_read_mcp_resource:*",
+            PermissionDecision::Deny,
+        ));
+        assert!(whole.disables_tool("mcp_resource_read"));
+        assert!(!whole.disables_tool("mcp_resource_list"));
+    }
+
+    #[test]
     fn edit_tool_aliases_share_one_permission_boundary() {
         let mut engine = PermissionEngine::build_defaults();
         engine.add_rule(rule("edit:*", PermissionDecision::Deny));
@@ -1790,6 +1905,111 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(engine.evaluate("bash:cargo run"), PermissionDecision::Ask);
+    }
+
+    #[test]
+    fn a_leading_tilde_in_a_tool_path_is_the_home_folder() {
+        let home = home_folder().expect("tests run with a home folder");
+        assert_eq!(expand_home("~"), home.to_string_lossy());
+        assert_eq!(
+            expand_home("~/notes.txt"),
+            home.join("notes.txt").to_string_lossy()
+        );
+        for kept in ["~user/x", "a/~/b", "./~/x", "~x", "notes~", ""] {
+            assert_eq!(expand_home(kept), kept);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(expand_home("~\\x"), "~\\x");
+
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("~")).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+        // Never a folder named `~` inside the project.
+        assert_eq!(
+            resolve_permission_path(&workspace, "~/haarness-no-such-file"),
+            real_home.join("haarness-no-such-file")
+        );
+        assert_eq!(resolve_permission_path(&workspace, "~"), real_home);
+        assert_eq!(
+            resolve_permission_entry(&workspace, "~/link"),
+            real_home.join("link")
+        );
+        assert_eq!(
+            resolve_permission_path(&workspace, "./~/x"),
+            workspace.join("~/x")
+        );
+        assert!(!names_inside(&workspace, "~/x"));
+        assert!(names_inside(&workspace, "./~/x"));
+
+        // A rule for a home folder meets a tool path written with `~`, and
+        // a project file written through it meets the project's rules.
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:~/.ssh/*", PermissionDecision::Deny));
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.set_workspace(&workspace);
+        assert_eq!(
+            engine.evaluate("read:~/.ssh/id_rsa"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            engine.evaluate("read:./~/.ssh/id_rsa"),
+            PermissionDecision::Allow
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    /// A project in the home folder, as most are: `~/project/…` is a
+    /// project file for its rules, and Haarness's own configuration in the
+    /// home folder asks for an edit written with `~` too.
+    #[test]
+    fn a_project_file_written_from_the_home_folder_meets_the_project_rules() {
+        let root = std::env::temp_dir()
+            .join(format!("haarness-tilde-home-{}", uuid::Uuid::now_v7()))
+            .join("home");
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("secrets")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let guard = TestHome::set(&home);
+        assert_eq!(
+            resolve_permission_path(&workspace, "~/project/secrets/key"),
+            workspace.join("secrets/key")
+        );
+        assert!(names_inside(&workspace, "~/project/secrets/key"));
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.add_rule(rule("edit:~/notes/*", PermissionDecision::Deny));
+        engine.set_workspace(&workspace);
+        for operation in ["read:~/project/secrets/key", "read:secrets/key"] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Deny,
+                "{operation}"
+            );
+        }
+        assert_eq!(
+            engine.evaluate("edit:~/notes/todo.md"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            engine.evaluate(&format!("edit:{}/notes/todo.md", home.display())),
+            PermissionDecision::Deny
+        );
+        // The global configuration folder, named from a home folder that
+        // holds it.
+        if let Some(global) = global_config_dir()
+            && let (Some(parent), Some(name)) = (global.parent(), global.file_name())
+        {
+            drop(guard);
+            let _home = TestHome::set(parent);
+            let edit = format!("edit:~/{}/config.toml", name.to_string_lossy());
+            let evaluation = engine.evaluate_detailed(&edit);
+            assert_eq!(evaluation.decision, PermissionDecision::Ask, "{edit}");
+            assert!(evaluation.protected, "{edit}");
+        }
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]

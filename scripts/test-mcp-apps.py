@@ -10,6 +10,7 @@ Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import json, os, pathlib, shlex, subprocess, sys, tempfile, time, urllib.request, uuid
 import e2e_scratch
+from e2e_env import clean_env
 
 repo = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
@@ -20,7 +21,7 @@ workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True)
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n\n'
     f'[mcp.app]\ntransport = "stdio"\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(fixture))}]\nenabled = true\n\n'
     f'[mcp.evil]\ntransport = "stdio"\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(fixture))}]\nenabled = true\n')
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1', LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
 session = f'haarness-mcp-apps-{os.getpid()}'

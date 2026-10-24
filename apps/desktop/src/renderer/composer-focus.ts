@@ -3,10 +3,12 @@
 
 /**
  * Puts the keyboard in the message box once it shows and takes input (a
- * chat still loading hides it), unless the reader has put the keyboard
- * somewhere other than `from` meanwhile. Gives up after about two seconds.
+ * chat of another project hides it while it opens), unless the reader has
+ * put the keyboard somewhere other than `from` meanwhile. Gives up after
+ * about two seconds. `now` tries at once as well, for a box already showing
+ * the chat just chosen, so keys pressed in the next moment reach it.
  */
-export function focusComposerWhenShown(from: Element | null) {
+export function focusComposerWhenShown(from: Element | null, now = false) {
   let frames = 120;
   const land = () => {
     const focused = document.activeElement;
@@ -16,5 +18,6 @@ export function focusComposerWhenShown(from: Element | null) {
       box.focus();
     else if (frames-- > 0) requestAnimationFrame(land);
   };
-  requestAnimationFrame(land);
+  if (now) land();
+  else requestAnimationFrame(land);
 }

@@ -7,7 +7,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::highlight::highlight_block;
 use crate::theme::Theme;
-use crate::view::span::wrap_spans;
+use crate::view::span::{decorate_prefix, wrap_spans};
 
 pub fn render_markdown(text: &str, width: usize, theme: &Theme, indent: &str) -> Vec<Line> {
     let mut renderer = Renderer {
@@ -37,6 +37,13 @@ pub fn render_markdown(text: &str, width: usize, theme: &Theme, indent: &str) ->
         .is_some_and(|line| line.text().trim().is_empty())
     {
         renderer.lines.pop();
+    }
+    // The margin every row starts with is layout: a selection copies the
+    // reply from its first letter, as it was written.
+    for line in &mut renderer.lines {
+        if line.spans.first().is_some_and(|span| span.selectable) {
+            decorate_prefix(line, indent);
+        }
     }
     renderer.lines
 }
@@ -99,7 +106,12 @@ impl Renderer<'_> {
         }
         let spans = std::mem::take(&mut self.inline);
         let (first, cont) = self.prefixes();
-        let wrapped = wrap_spans(&spans, self.width, &first, &cont, self.theme.muted);
+        let mut wrapped = wrap_spans(&spans, self.width, &first, &cont, self.theme.muted);
+        // A quote's bar is decoration; a list's marker is the text's own.
+        let bar = format!("{}{}", self.indent, "▎ ".repeat(self.quote_depth as usize));
+        for line in &mut wrapped {
+            decorate_prefix(line, &bar);
+        }
         self.lines.extend(wrapped);
         self.prefix_override = None;
     }

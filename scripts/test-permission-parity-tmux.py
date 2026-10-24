@@ -2,15 +2,17 @@
 """Real attached TUI coverage for repository consent, dynamic context, and nested tasks."""
 import json,os,pathlib,shlex,subprocess,tempfile,time,urllib.request,uuid
 import e2e_scratch
+from e2e_env import clean_env
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-parity-tmux-')).resolve()
 workspace=root/'primary';linked=root/'linked';workspace.mkdir()
 config=workspace/'.haarness';(config/'commands').mkdir(parents=True)
-(config/'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_depth=2\nsubagent_concurrency=1\n')
+# Chats start in Auto; these approvals wait for a person, so the project (and its linked worktree) asks for Review.
+(config/'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_depth=2\nsubagent_concurrency=1\n')
 (config/'commands/context.md').write_text('---\ndescription: Dynamic context\n---\nContext: !`printf TMUX_CONTEXT_PROOF`\n')
 def git(*args):subprocess.run(['git','-C',str(workspace),*args],check=True,capture_output=True)
 git('init','-b','main');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-m','fixture');git('worktree','add','-b','linked',str(linked))
 binary=str(pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve())
-env={k:v for k,v in os.environ.items() if not k.startswith('HAARNESS_')};env.update(HAARNESS_HOME=str(root/'home'),HAARNESS_DATA_DIR=str(root/'data'),HAARNESS_TEST_PROVIDER='1',HAARNESS_SERVER_TOKEN='',HAARNESS_SERVER_PASSWORD='')
+env=clean_env();env.update(HAARNESS_HOME=str(root/'home'),HAARNESS_DATA_DIR=str(root/'data'),HAARNESS_TEST_PROVIDER='1',HAARNESS_SERVER_TOKEN='',HAARNESS_SERVER_PASSWORD='')
 name='haarness-parity-'+uuid.uuid4().hex[:10];connections=[];checks=[]
 def cli(ws,*args,input=None):return subprocess.run([binary,'--workspace',str(ws),*args],input=input,env=env,text=True,capture_output=True,check=True,timeout=60).stdout
 def connect(ws):

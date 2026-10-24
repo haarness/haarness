@@ -8,6 +8,7 @@ import sys
 import tempfile
 import urllib.request
 import uuid
+from e2e_env import ISOLATED
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve()
@@ -46,7 +47,7 @@ for line in sys.stdin:
     config = f'[defaults]\nprovider="openai"\nmodel={json.dumps(model)}\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n[mcp.fixture]\ntransport="stdio"\ncommand={json.dumps(sys.executable)}\nargs={json.dumps([str(fixture),nonce,str(log)])}\nenabled=true\n'
     (workspace / '.haarness/config.toml').write_text(config)
     subprocess.run(['git', 'init', '-q', str(workspace)], check=True)
-    env = {'PATH': os.environ['PATH'], 'HOME': str(root / 'home'), 'HAARNESS_HOME': str(root / 'home'), 'HAARNESS_DATA_DIR': str(root / 'data'), 'OPENAI_API_KEY': key, 'USER': os.environ.get('USER', 'fixture'), 'LANG': 'en_US.UTF-8'}
+    env = {**ISOLATED, 'PATH': os.environ['PATH'], 'HOME': str(root / 'home'), 'HAARNESS_HOME': str(root / 'home'), 'HAARNESS_DATA_DIR': str(root / 'data'), 'OPENAI_API_KEY': key, 'USER': os.environ.get('USER', 'fixture'), 'LANG': 'en_US.UTF-8'}
     args = [str(BINARY), '--workspace', str(workspace), '--trust-project']
     connection = None
     try:

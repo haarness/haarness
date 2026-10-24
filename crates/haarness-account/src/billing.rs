@@ -87,6 +87,15 @@ pub fn days_left(
     u64::try_from(left * 7 / spent_7_days).ok()
 }
 
+/// How long the credits last at this pace, in whole days (see [`days_left`]).
+fn forecast(days: u64) -> String {
+    match days {
+        0 => "less than a day left at this pace".into(),
+        1 => "about 1 day left at this pace".into(),
+        days => format!("about {days} days left at this pace"),
+    }
+}
+
 /// Human-readable credits without floating-point rounding or loss of precision.
 /// JSON snapshots retain the exact decimal string.
 pub fn display_credits(value: &str) -> String {
@@ -187,9 +196,7 @@ impl State {
                 lines
                     .push("Out of credits   add credits or turn overage on to keep working".into());
             } else if let Some(days) = s.days_left {
-                lines.push(format!(
-                    "Forecast         about {days} days left at this pace"
-                ));
+                lines.push(format!("Forecast         {}", forecast(days)));
             }
             if let Some(at) = &s.resets_at {
                 lines.push(format!("Allowance reset  {at}"));
@@ -529,5 +536,17 @@ async fn connection(
             }
             _ => return ready,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forecast;
+
+    #[test]
+    fn the_forecast_counts_whole_days() {
+        assert_eq!(forecast(0), "less than a day left at this pace");
+        assert_eq!(forecast(1), "about 1 day left at this pace");
+        assert_eq!(forecast(6), "about 6 days left at this pace");
     }
 }

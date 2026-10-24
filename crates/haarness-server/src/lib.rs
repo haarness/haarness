@@ -7,6 +7,8 @@ pub mod browser;
 pub mod browser_policy;
 mod cloud_tools;
 mod command;
+mod data_folder;
+mod file_lock;
 pub mod files;
 pub mod front;
 pub mod hooks;
@@ -24,6 +26,7 @@ pub mod vcs;
 pub mod workflow;
 
 pub use api::{ServerHandle, ServerState, serve};
+pub use data_folder::{data_folder, use_data_folder};
 pub use hooks::{ConfiguredHooks, HookEntry};
 pub use plugins::PluginRegistry;
 pub use skills::FilesystemSkillRegistry;

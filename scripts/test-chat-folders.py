@@ -16,6 +16,7 @@ HAARNESS_DATA_DIR; stdlib only.
 """
 import json, os, pathlib, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 import e2e_scratch
+from e2e_env import clean_env
 
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-chat-folders-')).resolve()
 data = root / 'data'
@@ -23,9 +24,10 @@ home = root / 'app' / 'Chat folders'
 project = root / 'project'
 for folder in (home, project, data / 'config'):
     folder.mkdir(parents=True)
-(data / 'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+# Chats start in Auto; a write into another chat's folder must wait for a person, so ask for Review.
+(data / 'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n')
 binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve())
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(
     HAARNESS_HOME=str(root / 'home'),
     HAARNESS_DATA_DIR=str(data),

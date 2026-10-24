@@ -32,7 +32,8 @@ with tempfile.TemporaryDirectory(prefix='haarness-recent-fixes-') as directory:
     root = Path(directory).resolve()
     workspace = root / 'workspace'
     (workspace / '.haarness').mkdir(parents=True)
-    (workspace / '.haarness/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+    # Chats start in Auto; the outside-folder asks wait for a person, so ask for Review.
+    (workspace / '.haarness/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n')
     outside = root / 'external space'
     outside.mkdir()
     (outside / 'input').write_text('external-read-proof')

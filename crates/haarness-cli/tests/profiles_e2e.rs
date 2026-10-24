@@ -20,10 +20,16 @@ impl Fixture {
         for name in ["source", "target", "cloud"] {
             fs::create_dir_all(root.join(name).join("workspace")).unwrap();
         }
+        fs::create_dir_all(root.join("home")).unwrap();
         Self { root, server: None }
     }
     fn command(&self, name: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_haarness"));
+        // `--data-dir` holds Haarness's own folders. The home holds the rest
+        // a run reads (the Cloud sign-in, `~/.claude`, global skills), so
+        // the person's own never reach the test, and usage statistics stay
+        // off with Cloud out of reach.
+        let home = self.root.join("home");
         command
             .args([
                 "--data-dir",
@@ -33,6 +39,15 @@ impl Fixture {
             ])
             .env_remove("HAARNESS_PROFILE_URL")
             .env_remove("HAARNESS_PROFILE_TOKEN")
+            .env_remove("HAARNESS_DATA_DIR")
+            .env_remove("HAARNESS_CLOUD_CONFIG_DIR")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.join(".cache"))
+            .env("HAARNESS_HOME", self.root.join("haarness-home"))
+            .env("HAARNESS_CLOUD_API_URL", "http://127.0.0.1:9")
+            .env("HAARNESS_TELEMETRY", "0")
             .env("HAARNESS_TEST_PROVIDER", "1")
             .env("RUST_LOG", "warn");
         command
@@ -164,6 +179,36 @@ impl Drop for Fixture {
             let _ = self.output(name, &["serve", "--stop"]);
         }
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Every command the fixture runs reads a home of its own, never the
+/// person's: their Cloud sign-in, Claude Code folder and data folder stay out.
+#[test]
+fn the_fixture_runs_haarness_with_a_home_of_its_own() {
+    use std::ffi::OsStr;
+    let fixture = Fixture::new();
+    let command = fixture.command("source");
+    let env: std::collections::HashMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
+    for name in [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "HAARNESS_HOME",
+    ] {
+        let value = env.get(OsStr::new(name)).copied().flatten();
+        assert!(
+            value.is_some_and(|path| PathBuf::from(path).starts_with(&fixture.root)),
+            "{name}: {value:?}"
+        );
+    }
+    assert_eq!(
+        env.get(OsStr::new("HAARNESS_TELEMETRY")),
+        Some(&Some(OsStr::new("0")))
+    );
+    for removed in ["HAARNESS_DATA_DIR", "HAARNESS_CLOUD_CONFIG_DIR"] {
+        assert_eq!(env.get(OsStr::new(removed)), Some(&None), "{removed}");
     }
 }
 

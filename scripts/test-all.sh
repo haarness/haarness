@@ -8,6 +8,8 @@ cargo run -q -p xtask -- architecture
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p haarness-cli
+# The release servers the scripts below start never report usage statistics to Haarness Cloud.
+export HAARNESS_TELEMETRY="${HAARNESS_TELEMETRY:-0}"
 python3 vendor/ripgrep/verify.py
 HAARNESS_BIN=./target/release/haarness python3 ./scripts/test-ripgrep.py
 HAARNESS_BIN=./target/release/haarness python3 ./scripts/test-extensions.py

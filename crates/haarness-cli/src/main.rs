@@ -1429,6 +1429,12 @@ async fn cli_main() -> Result<()> {
         require_system_certificates()?;
     }
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
+    // `--data-dir` holds the server's own files too (preview versions, saved
+    // tool output, workflow leases), as HAARNESS_DATA_DIR always did.
+    if base_paths.root.is_some() {
+        haarness_server::use_data_folder(base_paths.data.clone());
+        haarness_workflows::use_cache_folder(base_paths.cache.clone());
+    }
     // An edit of the global configuration or the base folder asks a person;
     // tell the permission engine which folders those are in this process.
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
@@ -2907,7 +2913,8 @@ fn parse_agent_permissions(values: &[String]) -> Result<Vec<haarness_core::Permi
             if pattern.trim().is_empty() {
                 anyhow::bail!("agent permission pattern cannot be empty: {value}");
             }
-            let decision = match decision {
+            // In any letter case, as in haarness.json.
+            let decision = match decision.to_ascii_lowercase().as_str() {
                 "allow" => PermissionDecision::Allow,
                 "ask" => PermissionDecision::Ask,
                 "deny" => PermissionDecision::Deny,
@@ -4718,9 +4725,22 @@ async fn run_command(
         // the server then answers its eligible requests once, for this run,
         // its agents and workflows, and whatever runs in it later, and every
         // app shows the chat in Auto. What always asks is still asked below.
+        let mut earlier = None;
         if approvals.auto {
-            let set = set_chat_auto(&client, thread.id).await;
-            discard_refused_chat(&client, &thread, created, set).await?;
+            // A chat whose turn runs elsewhere refuses this run's prompt: say
+            // so before that turn's chat, and the turn with it, goes to Auto.
+            // A workflow runs in a chat of its own and is not refused.
+            let refusable = !created && args.workflow.is_none();
+            if refusable && client.active_turn(thread.id).await?.is_some() {
+                anyhow::bail!(haarness_core::CHAT_BUSY);
+            }
+            if refusable {
+                let (previous, set) = switch_to_auto(&client, thread.id).await?;
+                earlier = EarlierMode::of(&previous, set.revision);
+            } else {
+                let set = set_chat_auto(&client, thread.id, None).await;
+                discard_refused_chat(&client, &thread, created, set).await?;
+            }
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
@@ -4799,6 +4819,14 @@ async fn run_command(
             }
             if goal {
                 let set = set_goal_for_run_client(&client, thread.id, prompt.clone()).await;
+                // Refused before the run's turn exists (a turn started
+                // elsewhere since the check above, the goal itself refused):
+                // the chat is not this run's to keep in Auto.
+                if set.is_err()
+                    && let Some(earlier) = &earlier
+                {
+                    earlier.put_back(&client, thread.id).await;
+                }
                 discard_refused_chat(&client, &thread, created, set).await?;
             }
             let turn = client
@@ -4826,6 +4854,17 @@ async fn run_command(
                     },
                 )
                 .await;
+            // A turn refused before it exists (one started elsewhere after
+            // the check above, an unknown command): the chat is not this
+            // run's to keep in Auto. A request whose answer was lost may
+            // have started its turn, so only a refusal counts.
+            if let Err(error) = &turn
+                && haarness_tui::api::refusal_status(error)
+                    .is_some_and(|status| status.is_client_error())
+                && let Some(earlier) = &earlier
+            {
+                earlier.put_back(&client, thread.id).await;
+            }
             let turn = discard_refused_chat(&client, &thread, created, turn).await?;
             let printed_through = if goal {
                 let result =
@@ -4928,19 +4967,145 @@ async fn require_shared_approval_modes(client: &haarness_tui::api::ApiClient) ->
     Ok(())
 }
 
-/// Put a chat in Auto on its server, whatever it was.
-async fn set_chat_auto(client: &haarness_tui::api::ApiClient, thread: ThreadId) -> Result<()> {
+/// Put a chat in Auto on its server: whatever it was, or only while its mode
+/// is still at `revision`.
+async fn set_chat_auto(
+    client: &haarness_tui::api::ApiClient,
+    thread: ThreadId,
+    revision: Option<String>,
+) -> Result<haarness_protocol::ApprovalModeInfo> {
     client
         .set_approval_mode(
             thread,
             &haarness_protocol::SetApprovalModeRequest {
                 mode: haarness_protocol::ApprovalModeSetting::Auto,
-                revision: None,
+                revision,
             },
         )
         .await
-        .context("Could not put this chat in Auto")?;
-    Ok(())
+        .context("Could not put this chat in Auto")
+}
+
+/// Put a chat the run did not create in Auto: its mode before, and after.
+/// The switch names the version it read, so a mode someone sets between the
+/// read and the switch is read again, never lost when it is put back.
+async fn switch_to_auto(
+    client: &haarness_tui::api::ApiClient,
+    thread: ThreadId,
+) -> Result<(
+    haarness_protocol::ApprovalModeInfo,
+    haarness_protocol::ApprovalModeInfo,
+)> {
+    let mut attempt = 0;
+    loop {
+        let previous = client.approval_mode(thread).await?;
+        match set_chat_auto(client, thread, Some(previous.revision.clone())).await {
+            Ok(set) => return Ok((previous, set)),
+            Err(error)
+                if attempt < 2
+                    && haarness_tui::api::refusal_status(&error)
+                        == Some(reqwest::StatusCode::CONFLICT) =>
+            {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// The setting `--auto` replaced on a chat the run did not create, and the
+/// version its change made.
+struct EarlierMode {
+    setting: haarness_protocol::ApprovalModeSetting,
+    revision: String,
+}
+
+impl EarlierMode {
+    /// `previous` as a setting to put back, or `None` when the chat was in
+    /// Auto by its own setting already. `revision` is the one `--auto` set.
+    fn of(previous: &haarness_protocol::ApprovalModeInfo, revision: String) -> Option<Self> {
+        use haarness_protocol::{ApprovalMode, ApprovalModeSetting};
+        let own = previous.explicit && previous.source_thread_id == previous.thread_id;
+        let setting = match (own, previous.mode) {
+            (true, ApprovalMode::Auto) => return None,
+            (true, ApprovalMode::Review) => ApprovalModeSetting::Review,
+            (false, _) => ApprovalModeSetting::Inherit,
+        };
+        Some(Self { setting, revision })
+    }
+
+    /// Put the setting back, unless someone changed the mode since; say so
+    /// when the chat stays in Auto for another reason.
+    async fn put_back(&self, client: &haarness_tui::api::ApiClient, thread: ThreadId) {
+        let put = client
+            .set_approval_mode(
+                thread,
+                &haarness_protocol::SetApprovalModeRequest {
+                    mode: self.setting,
+                    revision: Some(self.revision.clone()),
+                },
+            )
+            .await;
+        let Err(error) = put else { return };
+        let status = haarness_tui::api::refusal_status(&error);
+        if status == Some(reqwest::StatusCode::CONFLICT) {
+            return;
+        }
+        // The status only: a connection error names the server's address.
+        let answered = status
+            .map(|status| format!(" (the server answered {status})"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            io::stderr(),
+            "The chat was left in Auto: its earlier mode could not be put back{answered}."
+        );
+    }
+}
+
+#[cfg(test)]
+mod earlier_mode_tests {
+    use super::EarlierMode;
+    use haarness_protocol::{ApprovalMode, ApprovalModeInfo, ApprovalModeSetting, ThreadId};
+
+    fn info(mode: ApprovalMode, explicit: bool, own: bool) -> ApprovalModeInfo {
+        let thread = ThreadId::new();
+        ApprovalModeInfo {
+            thread_id: thread,
+            mode,
+            source_thread_id: if own { thread } else { ThreadId::new() },
+            explicit,
+            revision: "r1".into(),
+        }
+    }
+
+    /// What `--auto` puts back: the chat's own Review, nothing when it was in
+    /// Auto by its own setting, and no setting of its own otherwise.
+    #[test]
+    fn auto_puts_back_the_setting_it_replaced() {
+        let back =
+            |previous| EarlierMode::of(&previous, "r2".into()).map(|earlier| earlier.setting);
+        assert_eq!(
+            back(info(ApprovalMode::Review, true, true)),
+            Some(ApprovalModeSetting::Review)
+        );
+        assert_eq!(back(info(ApprovalMode::Auto, true, true)), None);
+        assert_eq!(
+            back(info(ApprovalMode::Review, false, true)),
+            Some(ApprovalModeSetting::Inherit)
+        );
+        // Auto from the agent that delegated to it: the chat's own setting
+        // goes, and it follows that agent again.
+        assert_eq!(
+            back(info(ApprovalMode::Auto, true, false)),
+            Some(ApprovalModeSetting::Inherit)
+        );
+        assert_eq!(
+            EarlierMode::of(&info(ApprovalMode::Review, false, true), "r2".into())
+                .unwrap()
+                .revision,
+            "r2"
+        );
+    }
 }
 
 async fn discard_refused_chat<T>(
@@ -8907,7 +9072,8 @@ fn mcp_config_for_display(
             value["url"] = serde_json::Value::String(redact::url(url).into_owned());
         }
         if !entry.args.is_empty() {
-            value["args"] = serde_json::json!(redact::args(&entry.args));
+            value["args"] =
+                serde_json::json!(redact::command_args(entry.command.as_deref(), &entry.args));
         }
     }
     Ok(value)
@@ -9637,7 +9803,8 @@ struct FileConfig {
     execution: BTreeMap<String, serde_json::Value>,
     defaults: Option<DefaultsSection>,
     experimental: Option<ExperimentalSection>,
-    permissions: Option<BTreeMap<String, toml::Value>>,
+    /// `[permissions]`, in the order written: later rules override earlier ones.
+    permissions: Option<toml::Table>,
     compaction: Option<CompactionSection>,
     snapshots: Option<SnapshotsSection>,
     tools: Option<ToolsSection>,
@@ -10282,34 +10449,40 @@ fn folder_snapshots_enabled(config: Option<&SnapshotsSection>) -> bool {
 /// Reclaim expired checkpoints once at startup and then hourly. Pruning is
 /// blocking SQLite work, so it runs on the blocking pool and never competes
 /// with the turn path; a failure is logged and retried on the next pass.
+/// `retention_days = 0` keeps every checkpoint, and the pass only removes
+/// what unfinished captures left.
 fn spawn_snapshot_retention(
     snapshots: haarness_store::SqliteSnapshotFolders,
     config: &SnapshotsSection,
-) {
-    if config.retention_days == 0 {
-        return;
-    }
-    let retention = chrono::Duration::days(i64::from(config.retention_days));
+) -> tokio::task::JoinHandle<()> {
+    let retention = (config.retention_days > 0)
+        .then(|| chrono::Duration::days(i64::from(config.retention_days)));
     let keep = config.keep_per_thread;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
         loop {
             ticker.tick().await;
             let snapshots = snapshots.clone();
-            let report =
-                tokio::task::spawn_blocking(move || snapshots.prune(retention, keep)).await;
+            let report = tokio::task::spawn_blocking(move || match retention {
+                Some(retention) => snapshots.prune(retention, keep),
+                None => snapshots.sweep(),
+            })
+            .await;
             match report {
-                Ok(Ok(report)) if report.snapshots > 0 => tracing::info!(
-                    snapshots = report.snapshots,
-                    blobs = report.blobs,
-                    "pruned expired workspace checkpoints"
-                ),
+                Ok(Ok(report)) if report != haarness_store::PruneReport::default() => {
+                    tracing::info!(
+                        snapshots = report.snapshots,
+                        blobs = report.blobs,
+                        abandoned = report.abandoned,
+                        "pruned workspace checkpoints"
+                    );
+                }
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "snapshot retention pass failed"),
                 Err(error) => tracing::warn!(%error, "snapshot retention task panicked"),
             }
         }
-    });
+    })
 }
 
 fn load_config(paths: &Paths, workspace: &Path, trust: bool) -> Result<FileConfig> {
@@ -10333,10 +10506,12 @@ fn merge_file_config(config: &mut FileConfig, project_config: FileConfig) {
         merge_defaults(merged, defaults);
     }
     if let Some(project_permissions) = project_config.permissions {
-        // Project rules append after global rules: last match wins.
+        // A project's table for a tool replaces the global one here; every
+        // layer's own rules follow these in layer order (`JsonLayers::rules`),
+        // so the last match still wins.
         config
             .permissions
-            .get_or_insert_with(BTreeMap::new)
+            .get_or_insert_with(toml::Table::new)
             .extend(project_permissions);
     }
     if project_config.compaction.is_some() {
@@ -10478,47 +10653,70 @@ fn apply_json_goal_config(config: &mut FileConfig, layers: &jsonconfig::JsonLaye
     }
 }
 
-/// Compile `[permissions]` TOML into ordered engine rules. Tool-level string
-/// entries compile first (`edit = "ask"` → `edit:*`), then per-tool pattern
-/// tables (`[permissions.bash] "git push*" = "ask"` → `bash:git push*`), so
-/// specific patterns override tool-level decisions under last-match-wins.
-fn compile_permissions(
-    map: &BTreeMap<String, toml::Value>,
-) -> Result<Vec<haarness_core::PermissionRule>> {
+/// `[permissions]` in the order its rules apply: tool-level string entries
+/// first, then each tool's pattern table (`[permissions.bash]` or an inline
+/// table), each group in the order the file writes it, except that a `"*"`
+/// catch-all reads before its neighbours, as reading the table sorted by name
+/// always put it: `"*" = "allow"` written after `"git push*" = "deny"` never
+/// overrides that deny. [`compile_permissions`] and the migration to
+/// `haarness.json` both read it so.
+fn ordered_permissions(map: &toml::Table) -> Vec<(&String, &toml::Value)> {
+    let strings = catch_all_first(map.iter().filter(|(_, value)| !value.is_table()));
+    let tables = catch_all_first(map.iter().filter(|(_, value)| value.is_table()));
+    strings.into_iter().chain(tables).collect()
+}
+
+/// `entries` in the order written, with the `"*"` one first.
+fn catch_all_first<'a>(
+    entries: impl Iterator<Item = (&'a String, &'a toml::Value)>,
+) -> Vec<(&'a String, &'a toml::Value)> {
+    let (mut first, rest): (Vec<_>, Vec<_>) = entries.partition(|(key, _)| key.as_str() == "*");
+    first.extend(rest);
+    first
+}
+
+/// Compile `[permissions]` TOML into ordered engine rules, in the order of
+/// [`ordered_permissions`]: tool-level string entries (`edit = "ask"` →
+/// `edit:*`) before per-tool pattern tables (`[permissions.bash] "git
+/// push*" = "ask"` → `bash:git push*`), so specific patterns override
+/// tool-level decisions under last-match-wins.
+fn compile_permissions(map: &toml::Table) -> Result<Vec<haarness_core::PermissionRule>> {
     use haarness_core::{PermissionDecision, PermissionRule};
     fn decision(value: &str) -> Result<PermissionDecision> {
-        match value {
+        // In any letter case, as in haarness.json.
+        match value.to_ascii_lowercase().as_str() {
             "allow" => Ok(PermissionDecision::Allow),
             "ask" => Ok(PermissionDecision::Ask),
             "deny" => Ok(PermissionDecision::Deny),
-            other => anyhow::bail!("permission decision must be allow|ask|deny, got {other}"),
+            _ => anyhow::bail!("permission decision must be allow|ask|deny, got {value}"),
         }
     }
     let mut rules = Vec::new();
-    for (tool, value) in map {
-        if let toml::Value::String(text) = value {
-            let pattern = if tool == "*" {
-                "*".to_owned()
-            } else {
-                format!("{tool}:*")
-            };
-            rules.push(PermissionRule {
-                pattern,
-                decision: decision(text)?,
-            });
-        }
-    }
-    for (tool, value) in map {
-        if let toml::Value::Table(patterns) = value {
-            for (pattern, entry) in patterns {
-                let text = entry.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("[permissions.{tool}] entries must be strings")
-                })?;
+    for (tool, value) in ordered_permissions(map) {
+        match value {
+            toml::Value::String(text) => {
+                let pattern = if tool == "*" {
+                    "*".to_owned()
+                } else {
+                    format!("{tool}:*")
+                };
                 rules.push(PermissionRule {
-                    pattern: format!("{tool}:{pattern}"),
+                    pattern,
                     decision: decision(text)?,
                 });
             }
+            toml::Value::Table(patterns) => {
+                for (pattern, entry) in catch_all_first(patterns.iter()) {
+                    let text = entry.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("[permissions.{tool}] entries must be strings")
+                    })?;
+                    rules.push(PermissionRule {
+                        pattern: format!("{tool}:{pattern}"),
+                        decision: decision(text)?,
+                    });
+                }
+            }
+            _ => {}
         }
     }
     Ok(rules)
@@ -11845,6 +12043,14 @@ enum BusyServer {
     Reuse,
 }
 
+/// Whether a notice about the server this client starts or reuses is also
+/// printed: to a person at a terminal, unless this process's TUI is drawing
+/// on it (it restarts its server while open), where the text would stay
+/// over the frame. The log has it either way.
+fn notices_on_stderr(stderr_is_terminal: bool, tui_on_screen: bool) -> bool {
+    stderr_is_terminal && !tui_on_screen
+}
+
 /// The daemon keeps the OTEL settings it started with. A client that asks for
 /// trace export and reuses a daemon exporting elsewhere (or nowhere) is told
 /// so; restarting the daemon would cancel turns other windows may be running.
@@ -11864,7 +12070,7 @@ fn warn_trace_endpoint_mismatch(discovery: &RuntimeDiscovery) {
         discovery.pid
     );
     tracing::warn!("{notice}");
-    if io::stderr().is_terminal() {
+    if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal()) {
         eprintln!("haarness: {notice}");
     }
 }
@@ -11904,7 +12110,7 @@ fn notice_base_folder_change(discovery: &RuntimeDiscovery, current: &str, remedy
         wanted.display()
     );
     tracing::warn!("{notice}");
-    if io::stderr().is_terminal() {
+    if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal()) {
         eprintln!("haarness: {notice}");
     }
 }
@@ -12003,7 +12209,8 @@ async fn ensure_workspace_server_at(
                 {
                     let notice = format!("{error}. Using it as it is meanwhile.");
                     tracing::warn!("{notice}");
-                    if io::stderr().is_terminal() {
+                    if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal())
+                    {
                         eprintln!("haarness: {notice}");
                     }
                     warn_trace_endpoint_mismatch(&discovery);
@@ -12870,6 +13077,69 @@ mod tests {
             true
         ));
         assert!(!super::folder_snapshots_enabled(Some(&configuration)));
+    }
+
+    #[tokio::test]
+    async fn the_retention_pass_runs_when_every_checkpoint_is_kept() {
+        use haarness_core::SnapshotStore;
+
+        let root =
+            std::env::temp_dir().join(format!("haarness-retention-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let database = root.join("haarness.db");
+        haarness_store::SqliteStore::open(&database).unwrap();
+        let snapshots =
+            haarness_store::SqliteSnapshotStore::open(&database, workspace.clone()).unwrap();
+        fs::write(workspace.join("kept.txt"), "kept\n").unwrap();
+        snapshots
+            .capture(haarness_protocol::ThreadId::new())
+            .await
+            .unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        // Expired, and no checkpoint is kept per chat.
+        connection
+            .execute(
+                "UPDATE snapshots SET created_at='2000-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
+        // A capture that fails at its last write leaves a blob no checkpoint names.
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'no room'); END;",
+            )
+            .unwrap();
+        fs::write(workspace.join("failed.txt"), "only the failed capture's\n").unwrap();
+        snapshots
+            .capture(haarness_protocol::ThreadId::new())
+            .await
+            .unwrap_err();
+        let count = |table: &str| {
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count("snapshot_blobs"), 2);
+
+        let config = super::SnapshotsSection {
+            retention_days: 0,
+            keep_per_thread: 0,
+            ..Default::default()
+        };
+        let task = super::spawn_snapshot_retention(snapshots.folders(), &config);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while count("snapshot_blobs") > 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        task.abort();
+        assert_eq!(count("snapshot_blobs"), 1, "the failed capture's blob goes");
+        assert_eq!(count("snapshots"), 1, "every checkpoint stays, however old");
+        drop(connection);
+        let _ = fs::remove_dir_all(root);
     }
 
     use std::{ffi::OsString, fs, path::PathBuf, sync::Arc, time::Duration};
@@ -16851,7 +17121,7 @@ request_timeout = 0
     #[test]
     fn permission_config_compiles_to_ordered_rules() {
         use haarness_core::PermissionDecision;
-        let map: BTreeMap<String, toml::Value> = toml::from_str(
+        let map: toml::Table = toml::from_str(
             r#"
             edit = "allow"
             "*" = "ask"
@@ -16864,16 +17134,103 @@ request_timeout = 0
         let rules = super::compile_permissions(&map).unwrap();
         let patterns: Vec<_> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
         // String entries compile first, pattern tables after — so specific
-        // patterns win under last-match-wins.
+        // patterns win under last-match-wins. The `"*"` catch-all reads
+        // first, and the rest in the order written.
         assert_eq!(
             patterns,
-            vec!["*", "edit:*", "bash:git push*", "bash:git status*"]
+            vec!["*", "edit:*", "bash:git status*", "bash:git push*"]
         );
         assert_eq!(rules[0].decision, PermissionDecision::Ask);
-        assert_eq!(rules[2].decision, PermissionDecision::Deny);
+        assert_eq!(rules[3].decision, PermissionDecision::Deny);
 
-        let bad: BTreeMap<String, toml::Value> = toml::from_str(r#"edit = "maybe""#).unwrap();
+        let bad: toml::Table = toml::from_str(r#"edit = "maybe""#).unwrap();
         assert!(super::compile_permissions(&bad).is_err());
+        let upper: toml::Table = toml::from_str(r#"edit = "Deny""#).unwrap();
+        assert_eq!(
+            super::compile_permissions(&upper).unwrap()[0].decision,
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn an_agent_permission_flag_reads_in_any_letter_case() {
+        use haarness_core::PermissionDecision;
+        let rules =
+            super::parse_agent_permissions(&["edit:*=Deny".into(), "bash:*=ASK".into()]).unwrap();
+        let decisions: Vec<_> = rules
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.decision))
+            .collect();
+        assert_eq!(
+            decisions,
+            vec![
+                ("edit:*", PermissionDecision::Deny),
+                ("bash:*", PermissionDecision::Ask)
+            ]
+        );
+        assert!(super::parse_agent_permissions(&["edit:*=dney".into()]).is_err());
+    }
+
+    #[test]
+    fn toml_permission_rules_apply_in_the_order_they_are_written() {
+        use haarness_core::{PermissionDecision, PermissionEngine};
+        let engine = |text: &str| {
+            let config: FileConfig = toml::from_str(text).unwrap();
+            PermissionEngine::new(
+                super::compile_permissions(config.permissions.as_ref().unwrap()).unwrap(),
+            )
+        };
+        // Sorted, `git push --force*` would come first (a space sorts
+        // before `*`) and the broader allow after it would win.
+        let written = engine(
+            r#"
+            [permissions.bash]
+            "git push*" = "allow"
+            "git push --force*" = "deny"
+        "#,
+        );
+        assert_eq!(
+            written.evaluate("bash:git push --force origin main"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            written.evaluate("bash:git push origin main"),
+            PermissionDecision::Allow
+        );
+        // A `"*"` catch-all reads first wherever it is written, as sorting
+        // put it: it never overrides the rules written before it.
+        let last = engine(
+            r#"
+            [permissions.bash]
+            "echo secret*" = "deny"
+            "*" = "allow"
+        "#,
+        );
+        assert_eq!(
+            last.evaluate("bash:echo secret x"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(last.evaluate("bash:echo plain"), PermissionDecision::Allow);
+        let tool_wide = engine(
+            r#"
+            [permissions]
+            bash = "ask"
+            "*" = "allow"
+        "#,
+        );
+        assert_eq!(tool_wide.evaluate("bash:echo hi"), PermissionDecision::Ask);
+        assert_eq!(tool_wide.evaluate("edit:x"), PermissionDecision::Allow);
+        let asks = engine(
+            r#"
+            [permissions.bash]
+            "echo hi*" = "allow"
+            "*" = "ask"
+        "#,
+        );
+        assert_eq!(
+            asks.evaluate("bash:echo hi there"),
+            PermissionDecision::Allow
+        );
     }
 
     #[test]
@@ -17370,6 +17727,15 @@ request_timeout = 0
         assert_eq!(config.execution.shell_timeout_ms, 0);
         assert_eq!(config.execution.subagent_concurrency, 6);
         assert_eq!(config.execution.subagent_depth, 3);
+    }
+
+    /// A notice about the server goes to a person's terminal, but never while
+    /// this process's TUI draws on it: the TUI restarts its server while open.
+    #[test]
+    fn server_notices_stay_off_a_terminal_the_tui_draws_on() {
+        assert!(crate::notices_on_stderr(true, false));
+        assert!(!crate::notices_on_stderr(true, true));
+        assert!(!crate::notices_on_stderr(false, false));
     }
 
     #[test]

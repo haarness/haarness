@@ -69,11 +69,15 @@ a {
   color: var(--primary);
   text-underline-offset: 2px;
 }
+/* Monospace text keeps one character to a cell wherever --mono is set: no
+   ligatures from the font, such as a Linux `monospace` set to Fira Code or
+   JetBrains Mono joining `!=` and `->` into one glyph. */
 pre,
 code,
 kbd,
 samp {
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-feature-settings: "calt" 0;
 }
 pre {
@@ -502,6 +506,7 @@ html[dir="rtl"] :is(pre, code, .cm-editor, .xterm) {
 }
 .path {
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-sm);
   overflow-wrap: anywhere;
   color: var(--muted);

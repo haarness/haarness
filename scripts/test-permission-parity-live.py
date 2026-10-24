@@ -2,9 +2,10 @@
 """Real-model skill/helper/extension proof, with isolated state and persisted records."""
 import json,os,pathlib,subprocess,tempfile,time,urllib.request,uuid
 import e2e_scratch
+from e2e_env import clean_env
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-parity-live-')).resolve();ws=root/'workspace';ws.mkdir();home=root/'home';config=home/'config';config.mkdir(parents=True)
 binary=str(pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve())
-env={k:v for k,v in os.environ.items() if not k.startswith('HAARNESS_')};env.update(HAARNESS_HOME=str(home),HAARNESS_DATA_DIR=str(root/'data'))
+env=clean_env();env.update(HAARNESS_HOME=str(home),HAARNESS_DATA_DIR=str(root/'data'))
 if not env.get('OPENAI_API_KEY'):
  auth=json.loads((pathlib.Path.home()/'.local/share/haarness/auth.json').read_text());env['OPENAI_API_KEY']=auth['openai']['key']
 model=os.environ.get('HAARNESS_PARITY_MODEL','gpt-5.6-luna')
