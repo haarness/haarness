@@ -13,10 +13,12 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 5. backquotes: the commands in backquotes of an unquoted here-document meet the rules (an `rm *`
    deny refuses `cat > n.md <<EOF` holding `rm -rf victim` in backquotes), while one under an
    allowed `cat *` with `"*": "ask"` runs without a question, as before.
+6. dev: a redirect into `/dev/shm` asks for the folder like any path outside the project, while
+   `/dev/null`, `/dev/stderr` and the other stream devices ask nothing.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash, backquotes). No model is called; nothing outside the fixture is
+toml_order, cd_link, resource_alias, backslash, backquotes, dev). No model is called; nothing outside the fixture is
 touched.
 """
 import json
@@ -186,8 +188,22 @@ def case_backquotes():
            'allowed cat with backquotes run as before')
 
 
+def case_dev():
+    """Only stream devices skip the outside-folder check of a redirect."""
+    _, env = environment('dev')
+    folder = project('dev')
+    try:
+        output = bash(env, folder, 'echo x > /dev/shm/haarness-e2e-probe', code=1)
+        assert 'Stopped:' in output and '/dev/shm' in output, output
+        output = bash(env, folder, 'echo quiet > /dev/null && echo loud > /dev/stderr && echo done', code=0)
+        assert 'done' in output and 'Stopped' not in output, output
+    finally:
+        stop(env, folder)
+    passed('a redirect into /dev/shm asks; /dev/null and /dev/stderr do not')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
-         'backslash': case_backslash, 'backquotes': case_backquotes}
+         'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
