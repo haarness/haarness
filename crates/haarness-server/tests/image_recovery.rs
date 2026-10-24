@@ -454,3 +454,36 @@ async fn a_request_refused_for_its_number_of_images_leaves_out_the_oldest() {
     assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
     assert_eq!(sent(&fixture.requests()[0]), ["d.png", "e.png", "f.png"]);
 }
+
+#[tokio::test]
+async fn geminis_size_refusal_is_recorded_as_a_request_too_large() {
+    let fixture = Fixture::new(
+        r#"HTTP 400 Bad Request: {"error":{"code":400,"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#,
+    );
+    *fixture.provider.most.lock().unwrap() = Some(3);
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+    for name in ["a", "b", "c", "d"] {
+        let done = turn(&runtime, thread, name, vec![image(&format!("{name}.png"))]).await;
+        assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    }
+    let requests = fixture.requests();
+    assert_eq!(sent(requests.last().unwrap()), ["c.png", "d.png"]);
+    let items = runtime.items(thread, None).await.unwrap();
+    let omitted = items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::MediaOmitted {
+                names,
+                oldest,
+                too_large,
+                ..
+            } => Some((names.clone(), *oldest, *too_large)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        omitted,
+        vec![(vec!["a.png".to_owned(), "b.png".to_owned()], true, true)]
+    );
+}
