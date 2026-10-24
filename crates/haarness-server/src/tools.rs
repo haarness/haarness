@@ -2710,7 +2710,7 @@ impl Tool for BuiltinTool {
         }
         match self.kind {
             Kind::Read => {
-                let path = self.resolve_existing(string(&args, "path")?, &context)?;
+                let path = resolve_existing(string(&args, "path")?, &context)?;
                 // Workflow `ctx.agent({ files })` must use the same direct
                 // read permission/hook path as every other workspace read,
                 // but it also needs a race-safe canonical media path and a
@@ -2821,7 +2821,7 @@ impl Tool for BuiltinTool {
             }
             Kind::List => {
                 let requested = string(&args, "path")?;
-                let path = self.resolve_existing(requested, &context)?;
+                let path = resolve_existing(requested, &context)?;
                 let secrets = SecretFilter::new(&context.workspace, requested, &path, None);
                 let mut entries = tokio::fs::read_dir(&path).await.map_err(tool_error)?;
                 let mut names = Vec::new();
@@ -2847,7 +2847,7 @@ impl Tool for BuiltinTool {
             }
             Kind::Glob => {
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
-                let root = self.resolve_existing(requested, &context)?;
+                let root = resolve_existing(requested, &context)?;
                 if !root.is_dir() {
                     return Err(CoreError::Invalid(format!(
                         "glob path must be a directory: {}",
@@ -2910,7 +2910,7 @@ impl Tool for BuiltinTool {
             Kind::Grep => {
                 let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
-                let root = self.resolve_existing(requested, &context)?;
+                let root = resolve_existing(requested, &context)?;
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
@@ -2981,7 +2981,7 @@ impl Tool for BuiltinTool {
             Kind::Write => {
                 let requested_path = string(&args, "path")?;
                 let new_contents = string(&args, "content")?;
-                let path = self.resolve_new(requested_path, &context)?;
+                let path = resolve_new(requested_path, &context)?;
                 let existing = existing_diff_body(&path).await;
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
@@ -2999,7 +2999,7 @@ impl Tool for BuiltinTool {
             }
             Kind::Edit => {
                 let requested_path = string(&args, "path")?;
-                let path = self.resolve_existing(requested_path, &context)?;
+                let path = resolve_existing(requested_path, &context)?;
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
                 let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
@@ -3026,7 +3026,7 @@ impl Tool for BuiltinTool {
             }
             Kind::MultiEdit => {
                 let requested_path = string(&args, "path")?;
-                let path = self.resolve_existing(requested_path, &context)?;
+                let path = resolve_existing(requested_path, &context)?;
                 let edits = args
                     .get("edits")
                     .and_then(Value::as_array)
@@ -3093,10 +3093,8 @@ impl Tool for BuiltinTool {
                         move_to: Some(target),
                         ..
                     } = operation
-                        && let (Ok(source), Ok(destination)) = (
-                            self.resolve_entry(path, &context),
-                            self.resolve_new(target, &context),
-                        )
+                        && let (Ok(source), Ok(destination)) =
+                            (resolve_entry(path, &context), resolve_new(target, &context))
                         && same_entry(
                             &source,
                             &destination,
@@ -3114,7 +3112,7 @@ impl Tool for BuiltinTool {
                 for operation in operations {
                     match operation {
                         haarness_core::patch::FileOp::Add { path, content } => {
-                            let resolved = self.resolve_new(&path, &context)?;
+                            let resolved = resolve_new(&path, &context)?;
                             let existing = existing_diff_body(&resolved).await;
                             if let Some(parent) = resolved.parent() {
                                 tokio::fs::create_dir_all(parent)
@@ -3136,7 +3134,7 @@ impl Tool for BuiltinTool {
                             move_to,
                             hunks,
                         } => {
-                            let resolved = self.resolve_existing(&path, &context)?;
+                            let resolved = resolve_existing(&path, &context)?;
                             let text = tokio::fs::read_to_string(&resolved)
                                 .await
                                 .map_err(tool_error)?;
@@ -3145,9 +3143,9 @@ impl Tool for BuiltinTool {
                             if let Some(target) = move_to {
                                 // The move takes the source's entry away: a
                                 // link goes, not the file it leads to.
-                                let entry = self.resolve_entry(&path, &context)?;
+                                let entry = resolve_entry(&path, &context)?;
                                 let removed = entry_diff_body(&entry).await;
-                                let destination = self.resolve_new(&target, &context)?;
+                                let destination = resolve_new(&target, &context)?;
                                 // A file the patch added earlier is checked here.
                                 if same_entry(
                                     &entry,
@@ -3201,7 +3199,7 @@ impl Tool for BuiltinTool {
                         }
                         haarness_core::patch::FileOp::Delete { path } => {
                             // A link is deleted itself, not the file it leads to.
-                            let resolved = self.resolve_entry(&path, &context)?;
+                            let resolved = resolve_entry(&path, &context)?;
                             let existing = entry_diff_body(&resolved).await;
                             tokio::fs::remove_file(&resolved)
                                 .await
@@ -3224,7 +3222,7 @@ impl Tool for BuiltinTool {
                         let value = value.as_str().ok_or_else(|| {
                             CoreError::Invalid("bash workdir must be a string".into())
                         })?;
-                        let path = self.resolve_existing(value, &context)?;
+                        let path = resolve_existing(value, &context)?;
                         if !path.is_dir() {
                             return Err(CoreError::Invalid(format!(
                                 "bash workdir is not a directory: {value}"
@@ -3328,56 +3326,54 @@ impl Tool for BuiltinTool {
         }
     }
 }
-impl BuiltinTool {
-    fn resolve_existing(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        let path = haarness_core::resolve_permission_path(&context.workspace, value)
-            .canonicalize()
-            .map_err(tool_error)?;
-        self.ensure_within(path, context)
+// Paths resolve where the call works (`ToolContext::workspace`): a chat's own
+// folder, or the project folder.
+fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+    let path = haarness_core::resolve_permission_path(&context.workspace, value)
+        .canonicalize()
+        .map_err(tool_error)?;
+    ensure_within(path, context)
+}
+/// A file the tool removes (a delete, the old name of a move): a link
+/// there is the entry itself, so only the folder holding it is followed.
+fn resolve_entry(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+    let path = haarness_core::resolve_permission_entry(&context.workspace, value);
+    std::fs::symlink_metadata(&path).map_err(tool_error)?;
+    ensure_within(path, context)
+}
+fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+    if value.is_empty() {
+        return Err(CoreError::Invalid("path cannot be empty".into()));
     }
-    /// A file the tool removes (a delete, the old name of a move): a link
-    /// there is the entry itself, so only the folder holding it is followed.
-    fn resolve_entry(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        let path = haarness_core::resolve_permission_entry(&context.workspace, value);
-        std::fs::symlink_metadata(&path).map_err(tool_error)?;
-        self.ensure_within(path, context)
+    let joined = haarness_core::resolve_permission_path(&context.workspace, value);
+    if joined.exists() {
+        return ensure_within(joined.canonicalize().map_err(tool_error)?, context);
     }
-    fn resolve_new(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        if value.is_empty() {
-            return Err(CoreError::Invalid("path cannot be empty".into()));
-        }
-        let joined = haarness_core::resolve_permission_path(&context.workspace, value);
-        if joined.exists() {
-            return self.ensure_within(joined.canonicalize().map_err(tool_error)?, context);
-        }
-        if std::fs::symlink_metadata(&joined)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err(CoreError::PermissionDenied(format!(
-                "refusing to write through a dangling symlink: {}",
-                joined.display()
-            )));
-        }
-        // `resolve_permission_path` already canonicalized the nearest existing
-        // ancestor and rebuilt the missing suffix. Authorize the exact new
-        // target (the capability carried by this call), not its parent.
-        self.ensure_within(joined, context)
+    if std::fs::symlink_metadata(&joined).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(CoreError::PermissionDenied(format!(
+            "refusing to write through a dangling symlink: {}",
+            joined.display()
+        )));
     }
-    fn ensure_within(&self, path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
-        let root = context.workspace.canonicalize().map_err(tool_error)?;
-        let output_root = tool_output_dir();
-        let is_tool_output = output_root
-            .canonicalize()
-            .is_ok_and(|output_root| path.starts_with(output_root));
-        let is_authorized_external = context.authorized_external_paths.contains(&path);
-        if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
-            return Err(CoreError::PermissionDenied(format!(
-                "external directory: {}",
-                path.display()
-            )));
-        }
-        Ok(path)
+    // `resolve_permission_path` already canonicalized the nearest existing
+    // ancestor and rebuilt the missing suffix. Authorize the exact new
+    // target (the capability carried by this call), not its parent.
+    ensure_within(joined, context)
+}
+fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
+    let root = context.workspace.canonicalize().map_err(tool_error)?;
+    let output_root = tool_output_dir();
+    let is_tool_output = output_root
+        .canonicalize()
+        .is_ok_and(|output_root| path.starts_with(output_root));
+    let is_authorized_external = context.authorized_external_paths.contains(&path);
+    if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
+        return Err(CoreError::PermissionDenied(format!(
+            "external directory: {}",
+            path.display()
+        )));
     }
+    Ok(path)
 }
 
 /// Which files `grep`, `glob` and `list` leave out: those the built-in read

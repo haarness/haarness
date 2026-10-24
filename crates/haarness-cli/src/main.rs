@@ -12781,6 +12781,7 @@ mod tests {
 
     #[test]
     fn the_chat_home_is_named_by_its_folder() {
+        use clap::FromArgMatches as _;
         let parse = |args: &[&str]| super::cli_command().try_get_matches_from(args).unwrap();
         for args in [
             &[
@@ -12800,7 +12801,6 @@ mod tests {
         ] {
             let matches = parse(args);
             assert!(!super::chat_home_unnamed(&matches), "{args:?}");
-            use clap::FromArgMatches as _;
             assert!(super::Cli::from_arg_matches(&matches).unwrap().chat_home);
         }
         assert!(super::chat_home_unnamed(&parse(&[
