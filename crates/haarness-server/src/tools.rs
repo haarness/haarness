@@ -6963,11 +6963,7 @@ export default workflow({
 
     #[tokio::test]
     async fn a_long_cjk_or_accented_line_reads_as_utf8() {
-        let body = format!(
-            "{}\n{}\nend\n",
-            "日".repeat(3_000),
-            format!("a{}", "é".repeat(5_000))
-        );
+        let body = format!("{}\na{}\nend\n", "日".repeat(3_000), "é".repeat(5_000));
         let (root, _) = read_fixture("wide.txt", body.as_bytes());
         let result = read_text_of(&root, json!({"path":"wide.txt"}))
             .await
