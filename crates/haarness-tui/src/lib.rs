@@ -44,12 +44,13 @@ use std::{path::PathBuf, time::Duration};
 /// How long the first frame waits for the provider catalog.
 const PROVIDERS_FIRST_FRAME: Duration = Duration::from_secs(1);
 
-/// Whether a TUI of this process is drawing on the terminal now. Anything
-/// else written to the terminal meanwhile stays over its frame, so a notice
-/// for the person goes to the log instead.
+/// Whether a TUI of this process is drawing on the terminal now, or the
+/// editor it handed the terminal to is. Anything else written to the terminal
+/// meanwhile stays over their screen, so a notice for the person goes to the
+/// log instead.
 #[must_use]
 pub fn owns_terminal() -> bool {
-    terminal::on_screen()
+    terminal::in_use()
 }
 
 use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
@@ -203,11 +204,13 @@ fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
             return;
         }
     };
+    let lent = crate::terminal::LentTerminal::new();
     crate::terminal::restore_terminal();
     let status = editor_command(&editor, &file).status();
     // Re-enter raw mode + alternate screen; the original guard still owns
     // final cleanup, so resuming must not create and leak a second guard.
     let _ = crate::terminal::resume_terminal();
+    drop(lent);
     if let Ok((width, height)) = crossterm::terminal::size() {
         renderer.resize(u32::from(width), u32::from(height));
     }

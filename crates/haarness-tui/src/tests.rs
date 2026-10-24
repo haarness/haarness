@@ -22543,6 +22543,17 @@ fn the_external_editor_gets_its_file_as_one_word() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// While the terminal is handed to `$EDITOR`, it counts as the TUI's: a
+/// server notice then goes to the log, not over the editor.
+#[test]
+fn the_terminal_lent_to_the_editor_is_still_the_tuis() {
+    assert!(!crate::owns_terminal(), "no TUI is drawing in a unit test");
+    let lent = crate::terminal::LentTerminal::new();
+    assert!(crate::owns_terminal());
+    drop(lent);
+    assert!(!crate::owns_terminal());
+}
+
 /// The `$EDITOR` draft is a new file in a new folder named so no one can
 /// guess it, both this user's only (`/tmp` is shared on Linux); an existing
 /// file is never written through, and the folder goes with the draft.

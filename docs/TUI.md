@@ -48,7 +48,7 @@ In the global configuration folder (`~/.config/haarness/` unless `HAARNESS_HOME`
 resources picked with `@`) and `themes/`. `[tui]` settings, including `[tui.keybinds]` and
 `[tui.statusline]`, are read from `config.toml` there; a binding saved in `/keybinds` wins. A theme
 file that cannot be read is named in the status line at launch and in the log, never printed: while
-the TUI draws on the terminal, nothing else writes to it (a server it restarts reports to the log).
+the TUI draws on the terminal, or the editor it handed the terminal to does, nothing else writes to it (a server it restarts reports to the log).
 
 ## Testing
 
