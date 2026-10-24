@@ -138,7 +138,7 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await expect(page.getByLabel("Chat starters")).toHaveCount(0);
   // This computer alone: nothing to switch to.
   await expect(page.getByRole("button", { name: "Switch server", exact: true })).toHaveCount(0);
-  await expect(section().getByRole("button", { name: "New chat without a folder", exact: true })).toBeVisible();
+  await expect(section().getByRole("button", { name: "New chat in This computer", exact: true })).toBeVisible();
 
   // The first message gives the chat its folder, named by what it says, and
   // its tools run there.
@@ -187,7 +187,7 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await expect(page.locator(".file-tabs").getByRole("button", { name: "notes.txt", exact: true })).toBeVisible();
 
   // This computer's + starts another chat, in a folder of its own.
-  await section().getByRole("button", { name: "New chat without a folder", exact: true }).click();
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
   await expect(composer()).toBeFocused();
   // Before its first message it has no folder, and the Files panel says so.
@@ -316,4 +316,85 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await expect(chatFolder()).toHaveAccessibleName("Chat folder: tool-bash-command-pwd");
   client = homeClient();
   expect(homeDaemons()).toBe(1);
+});
+
+/** Desktop's binary, with the chat home's `desktop` calls held back while
+ * `slow` exists and refused while `fail` does: a daemon slow to start, or
+ * one that cannot. */
+async function wrappedBinary() {
+  const flags = { slow: join(temporary, "slow-home"), fail: join(temporary, "fail-home") };
+  const wrapper = join(temporary, "haarness-wrapper");
+  await writeFile(
+    wrapper,
+    `#!/bin/sh
+case " $* " in
+  *" --chat-home "*" desktop "*|*" --chat-home desktop"*)
+    if [ -e "${flags.slow}" ]; then sleep 5; fi
+    if [ -e "${flags.fail}" ]; then echo "The chat home could not start (test)" >&2; exit 3; fi
+    ;;
+esac
+exec "${binary}" "$@"
+`,
+    { mode: 0o755 },
+  );
+  env.HAARNESS_BIN = wrapper;
+  return flags;
+}
+
+test("opening This computer from a project chat shows its new chat at once, and a message sent meanwhile goes when it is open", async () => {
+  const flags = await wrappedBinary();
+  // A project remembered from before, and no chat home yet.
+  await writeFile(
+    join(temporary, "desktop", "desktop.json"),
+    JSON.stringify({
+      preferences: {},
+      credentials: {},
+      recent: [{ id: "local:" + project, label: "pocket-project", workspace: project, remote: false, trust: true }],
+      values: { "active-project": "local:" + project, "active-server": "local", "server-project:local": "local:" + project },
+    }),
+  );
+  await launch();
+  await ready();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: pocket-project");
+  await send("A project chat first");
+  await expect(page.locator(".transcript")).toContainText("Echo: A project chat first", { timeout: 60000 });
+  // This computer's daemon is slow to start this time. (Opening the project
+  // showed the loading mark, as opening a project does.)
+  await page.evaluate(() => ((window as any).loadingMarkSeen = false));
+  await writeFile(flags.slow, "");
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
+  // At once: its new chat, not the project's chat under its name.
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
+  await expect(page.locator(".transcript")).not.toContainText("A project chat first");
+  await expect(composer()).toBeEnabled();
+  await send("Sent while it opens");
+  await expect(page.getByRole("button", { name: /Send message/ })).toHaveAttribute("aria-busy", "true");
+  await rm(flags.slow);
+  await expect(rows()).toHaveCount(1, { timeout: 60000 });
+  await expect(page.locator(".transcript")).toContainText("Echo: Sent while it opens", { timeout: 60000 });
+  expect(await loadingMarkSeen()).toBe(false);
+  await expect(page.locator(".project-list")).toContainText("Echo: A project chat first");
+});
+
+test("This computer that cannot open says so in its own words, and Retry opens it with what was typed", async () => {
+  const flags = await wrappedBinary();
+  await writeFile(flags.slow, "");
+  await writeFile(flags.fail, "");
+  await launch();
+  await expect(composer()).toBeEnabled();
+  await composer().fill("Typed before it failed");
+  const home = page.getByRole("region", { name: "Project home" });
+  await expect(home.getByRole("heading")).toHaveText("Couldn’t open This computer", { timeout: 60000 });
+  await expect(home.getByRole("alert")).toContainText("could not start");
+  await expect(home).not.toContainText("Couldn’t open project");
+  await expect(home.getByRole("button", { name: "Open project", exact: true })).toBeVisible();
+  await rm(flags.fail);
+  await rm(flags.slow);
+  await home.getByRole("button", { name: "Retry", exact: true }).click();
+  await ready();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  await expect(composer()).toHaveValue("Typed before it failed");
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });

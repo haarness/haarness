@@ -271,7 +271,9 @@ function ScheduleForm(props: {
           <div>
             <h2>{t(item ? "Edit schedule" : "Create schedule")}</h2>
             <p class="muted small">
-              {app.project()?.label ?? app.state.connection?.workspace}
+              {app.project()?.chatHome
+                ? t("This computer")
+                : (app.project()?.label ?? app.state.connection?.workspace)}
             </p>
           </div>
           <Button

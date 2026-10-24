@@ -310,8 +310,8 @@ function NewChatFolder() {
               <input
                 ref={search}
                 role="combobox"
-                aria-label={t("Search projects")}
-                placeholder={t("Search projects")}
+                aria-label={t("Search folders")}
+                placeholder={t("Search folders")}
                 autocomplete="off"
                 spellcheck={false}
                 aria-expanded="true"
