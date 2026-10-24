@@ -65,6 +65,12 @@ pub struct Schedule {
     pub backend: Backend,
     pub name: String,
     pub workspace: PathBuf,
+    /// The chat folder inside `workspace` its runs work in, shared with the
+    /// chat the schedule was made in (one without a project). Absent, each
+    /// run is a chat of the workspace (or, in the chat home, a chat with a
+    /// new folder of its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<PathBuf>,
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -87,6 +93,8 @@ pub struct CreateSchedule {
     pub prompt: Option<String>,
     pub request: Option<String>,
     pub workspace: PathBuf,
+    /// See [`Schedule::directory`]; it must be a folder inside `workspace`.
+    pub directory: Option<PathBuf>,
     pub model: Option<String>,
     pub agent: Option<String>,
     pub variant: Option<String>,
@@ -335,6 +343,19 @@ impl Scheduler {
         validate_trigger(&trigger)?;
         validate_model(input.model.as_deref())?;
         let workspace = canonical_directory(&input.workspace)?;
+        let directory = input
+            .directory
+            .as_deref()
+            .map(canonical_directory)
+            .transpose()?;
+        if let Some(directory) = &directory {
+            anyhow::ensure!(
+                directory.starts_with(&workspace) && directory != &workspace,
+                "schedule folder {} is not inside {}",
+                directory.display(),
+                workspace.display()
+            );
+        }
         let name = match input
             .name
             .or_else(|| parsed.and_then(|value| value.name))
@@ -349,6 +370,7 @@ impl Scheduler {
             backend: self.backend,
             name,
             workspace,
+            directory,
             prompt,
             model: clean(input.model),
             agent: clean(input.agent),
@@ -389,6 +411,12 @@ impl Scheduler {
                 .or_else(|| parsed.as_ref().and_then(|value| value.name.clone()))
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| current.name.clone()),
+            // A schedule moved to another workspace leaves its chat's folder.
+            directory: if input.workspace.is_some() {
+                None
+            } else {
+                current.directory.clone()
+            },
             workspace,
             prompt: input
                 .prompt
