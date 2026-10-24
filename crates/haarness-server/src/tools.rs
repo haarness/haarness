@@ -1575,8 +1575,13 @@ impl Tool for ScheduleTool {
             .ok_or_else(|| CoreError::Invalid("schedule action is required".into()))?;
         validate_schedule_input(input)?;
         // A chat that works in a folder of its own sees and changes only the
-        // schedules made in that folder, and schedules only into it.
+        // schedules made in that folder, and schedules only into it; a chat
+        // without one sees no chat's schedules.
         let own_folder = chat_folder(&self.workspace, &context);
+        let visible = |schedule: &haarness_scheduler::Schedule| match &own_folder {
+            Some(folder) => in_folder(schedule, folder),
+            None => schedule.directory.is_none(),
+        };
         if own_folder.is_some() && input.get("workspace").is_some_and(|value| !value.is_null()) {
             return Err(CoreError::Invalid(
                 "A chat with a folder of its own schedules only into its own folder; leave out workspace.".into(),
@@ -1590,11 +1595,8 @@ impl Tool for ScheduleTool {
                 .ok_or_else(|| {
                     CoreError::Invalid(format!("schedule id or name is required for {action}"))
                 })?;
-            let Some(folder) = &own_folder else {
-                return Ok(reference.to_owned());
-            };
             match self.scheduler.find(reference).map_err(schedule_error)? {
-                Some(schedule) if in_folder(&schedule, folder) => Ok(schedule.id.to_string()),
+                Some(schedule) if visible(&schedule) => Ok(schedule.id.to_string()),
                 // Another chat's schedule reads as no schedule at all.
                 _ => Err(CoreError::Tool(format!("schedule not found: {reference}"))),
             }
@@ -1602,9 +1604,7 @@ impl Tool for ScheduleTool {
         match action {
             "list" => {
                 let mut schedules = self.scheduler.list().map_err(schedule_error)?;
-                if let Some(folder) = &own_folder {
-                    schedules.retain(|schedule| in_folder(schedule, folder));
-                }
+                schedules.retain(|schedule| visible(schedule));
                 schedule_output("Schedules", &schedules)
             }
             "history" => {
@@ -5241,12 +5241,42 @@ mod tests {
         )
         .await
         .unwrap();
-        // The project's own chats see every schedule, as before.
-        let everything = tool
+        // A chat without a folder of its own sees only schedules without one,
+        // and can act on no chat's.
+        let projects = tool
             .execute(json!({"action": "list"}), context(&workspace))
             .await
             .unwrap();
-        assert_eq!(everything.metadata["schedule"].as_array().unwrap().len(), 2);
+        let names = projects.metadata["schedule"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["from-project"]);
+        for action in [
+            json!({"action": "history", "name": "from-chat"}),
+            json!({"action": "run", "name": "from-chat"}),
+            json!({"action": "delete", "name": "from-chat"}),
+            json!({"action": "enable", "name": "from-chat"}),
+            json!({"action": "disable", "name": "from-chat"}),
+            json!({"action": "update", "name": "from-chat", "prompt": "changed"}),
+        ] {
+            let refused = tool
+                .execute(action.clone(), context(&workspace))
+                .await
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("schedule not found"),
+                "{action}: {refused}"
+            );
+        }
+        tool.execute(
+            json!({"action": "update", "name": "from-project", "prompt": "still mine"}),
+            context(&workspace),
+        )
+        .await
+        .unwrap();
         tool.execute(
             json!({"action": "delete", "name": "from-chat"}),
             context(&folder),
