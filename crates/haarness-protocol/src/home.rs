@@ -13,15 +13,38 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 /// Whether this process is a test binary that cargo built
-/// (`target/<profile>/deps/<crate>-<hash>`). Such a run must never write into
-/// the folders of the person running it (Upstream PR #1145): where Haarness
-/// would otherwise fall back to the home's data or cache folder, a test
-/// binary gets [`test_folder`] instead.
+/// (`target/<profile>/deps/<crate>-<16 hex digits>`). Such a run must never
+/// write into the folders of the person running it (Upstream PR #1145): where
+/// Haarness would otherwise fall back to the home's data or cache folder, a
+/// test binary gets [`test_folder`] instead.
 #[must_use]
 pub fn test_binary() -> bool {
-    std::env::current_exe().ok().is_some_and(|executable| {
-        executable.parent().and_then(std::path::Path::file_name) == Some("deps".as_ref())
-    })
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|executable| test_binary_path(&executable))
+}
+
+/// Whether `executable` is where cargo puts a test binary:
+/// `<target>/<profile>/deps/<crate>-<16 hex digits>`, `.exe` on Windows.
+#[must_use]
+pub fn test_binary_path(executable: &std::path::Path) -> bool {
+    let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    let hashed = name.rsplit_once('-').is_some_and(|(krate, hash)| {
+        !krate.is_empty()
+            && krate
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && hash.len() == 16
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    let mut folders = executable
+        .ancestors()
+        .skip(1)
+        .filter_map(std::path::Path::file_name);
+    hashed && folders.next() == Some("deps".as_ref()) && folders.next().is_some()
 }
 
 /// A test binary's own folder for what Haarness keeps in the home: one per
@@ -80,6 +103,28 @@ fn written(value: std::ffi::OsString) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_cargo_test_binary_counts_as_one() {
+        use std::path::Path;
+        for path in [
+            "/w/target/debug/deps/haarness_server-68da16448a89bd70",
+            "/w/target/release/deps/api-a3a9605945d001ff",
+            "/w/target/debug/deps/haarness_cli-0123456789abcdef.exe",
+        ] {
+            assert!(test_binary_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/w/target/debug/haarness",
+            "/usr/local/deps/haarness",
+            "/opt/deps/haarness-0123456789abcdef0",
+            "/w/target/debug/deps/haarness-1234",
+            "/w/target/debug/deps/haarness-ghijklmnopqrstuv",
+            "/w/target/debug/build/haarness-0123456789abcdef",
+        ] {
+            assert!(!test_binary_path(Path::new(path)), "{path}");
+        }
+    }
 
     #[test]
     fn base_config_dir_is_unset_for_blank_and_relative_values() {
