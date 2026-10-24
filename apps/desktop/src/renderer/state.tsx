@@ -1093,6 +1093,12 @@ function createApp(saved?: Preferences) {
     state.openingNewChat &&
     !!state.chatHomeAt.id &&
     state.openingProject === chatHomeLocation().id;
+  /** This computer has been open (or opening) in this window: from then on
+   * its chats are followed live, so work running there keeps its marks. */
+  const [homeUsed, setHomeUsed] = createSignal(false);
+  createEffect(() => {
+    if (state.connection?.chatHome || homeOpening()) setHomeUsed(true);
+  });
   /** The message box shows: a project or This computer is open, or This
    * computer's new chat is opening. */
   const composerShown = () => !!state.connection || homeOpening();
@@ -1443,9 +1449,11 @@ function createApp(saved?: Preferences) {
               // Another computer is reached through Haarness Cloud: only
               // while it is the server shown, never in the background.
               (!current.remoteHost || serverKey(current) === state.activeServer) &&
-              (!!state.expandedProjects[projectKey(current)] ||
-                // This computer's chats are always listed.
-                !!current.chatHome ||
+              // This computer's chats show from its cache until it is used:
+              // its daemon starts only for people who chat there.
+              (current.chatHome
+                ? homeUsed() || state.searchOpen
+                : !!state.expandedProjects[projectKey(current)] ||
                 state.sidebarLayout === "flat" ||
                 state.searchOpen ||
                 Object.values(state.approvalModes[location.id] ?? {}).some(

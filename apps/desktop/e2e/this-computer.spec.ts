@@ -444,3 +444,32 @@ test("This computer that cannot open says so in its own words, and Retry opens i
   await expect(composer()).toHaveValue("Typed before it failed");
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
+
+test("This computer's daemon starts only when it is used: a launch on a project shows its chats from before without it", async () => {
+  await launch();
+  await expect(composer()).toBeEnabled();
+  await send("A chat from before");
+  await expect(rows()).toHaveCount(1, { timeout: 60000 });
+  await expect(page.locator(".transcript")).toContainText("Echo: A chat from before", { timeout: 60000 });
+  // The project is the place left open, so the next launch opens it.
+  await app!.evaluate(({ dialog }, directory) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+  }, project);
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  await ready();
+  await app!.close();
+  stopChatHome(binary, env);
+  await expect.poll(homeDaemons).toBe(0);
+  await launch();
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  // Its chats show as they were left, and nothing started for them.
+  await expect(rows()).toHaveCount(1);
+  await expect(rows().first()).toContainText("A chat from before");
+  await page.waitForTimeout(2000);
+  expect(homeDaemons()).toBe(0);
+  // Opening one of them starts it.
+  await rows().first().click();
+  await expect(page.locator(".transcript")).toContainText("Echo: A chat from before", { timeout: 60000 });
+  expect(homeDaemons()).toBe(1);
+});
