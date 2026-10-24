@@ -4813,6 +4813,14 @@ async fn run_command(
             }
             if goal {
                 let set = set_goal_for_run_client(&client, thread.id, prompt.clone()).await;
+                // Refused before the run's turn exists (a turn started
+                // elsewhere since the check above, the goal itself refused):
+                // the chat is not this run's to keep in Auto.
+                if set.is_err()
+                    && let Some(earlier) = &earlier
+                {
+                    earlier.put_back(&client, thread.id).await;
+                }
                 discard_refused_chat(&client, &thread, created, set).await?;
             }
             let turn = client
@@ -4840,10 +4848,13 @@ async fn run_command(
                     },
                 )
                 .await;
-            // A turn that started elsewhere after the check above: the chat
-            // is not this run's to keep in Auto.
+            // A turn refused before it exists (one started elsewhere after
+            // the check above, an unknown command): the chat is not this
+            // run's to keep in Auto. A request whose answer was lost may
+            // have started its turn, so only a refusal counts.
             if let Err(error) = &turn
-                && haarness_tui::api::refusal_status(error) == Some(reqwest::StatusCode::CONFLICT)
+                && haarness_tui::api::refusal_status(error)
+                    .is_some_and(|status| status.is_client_error())
                 && let Some(earlier) = &earlier
             {
                 earlier.put_back(&client, thread.id).await;
