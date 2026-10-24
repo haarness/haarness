@@ -2928,7 +2928,10 @@ export function Session() {
                         )
                       }
                     >
-                      <Icon name="shield" size="sm" />
+                      <Icon
+                        name={app.isAutoApproval() ? "approval-auto" : "approval-review"}
+                        size="sm"
+                      />
                       {/* The same two names as the TUI and the docs. */}
                       <span class="pill-label">
                         {app.isAutoApproval() ? t("Auto") : t("Review")}
@@ -3621,7 +3624,7 @@ function Permission(props: {
           {
             label: t("Allow once + Auto"),
             detail: t("Then Auto decides for this chat"),
-            icon: "shield" as const,
+            icon: "approval-auto" as const,
             divider: props.permission.allowAlways !== false,
             run: () => decide("auto"),
           },

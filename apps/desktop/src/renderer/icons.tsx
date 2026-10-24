@@ -86,6 +86,7 @@ import RefreshCw from "lucide-solid/icons/refresh-cw";
 import Search from "lucide-solid/icons/search";
 import Settings from "lucide-solid/icons/settings";
 import Shield from "lucide-solid/icons/shield";
+import ShieldCheck from "lucide-solid/icons/shield-check";
 import Split from "lucide-solid/icons/split";
 import Square from "lucide-solid/icons/square";
 import SquarePen from "lucide-solid/icons/square-pen";
@@ -191,7 +192,10 @@ const catalog = {
   /** Guidance sent into the work under way. */
   steer: CornerDownRight,
   stop: Square,
-  shield: Shield,
+  // Approvals: Review asks you; Auto decides for you. Two drawings, so the
+  // pill reads the same with only its icon, in any colour.
+  "approval-review": Shield,
+  "approval-auto": ShieldCheck,
   mic: Mic,
   jump: ArrowDown,
   alert: TriangleAlert,
