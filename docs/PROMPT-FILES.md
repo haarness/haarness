@@ -1,5 +1,7 @@
 # Prompt files
 
+How to replace or extend Haarness's built-in prompts from the base or global configuration folder, the `haarness prompt` commands, and the safety lines a replaced prompt keeps. For people who maintain a team's or a product's Haarness setup, and for developers changing the built-in prompts.
+
 Haarness sends built-in prompts: the main instructions of each built-in agent, the prompts that name a chat and summarize a long one, the instructions of Auto's reviewer, and a few sections and notices. A prompt file replaces one of them, or adds text before or after it, so you, your team or a product built on Haarness can change how the agent works without changing Haarness. Without prompt files, Haarness sends its built-in prompts byte for byte as before, and the cached prompt prefix of every request stays the same.
 
 Prompt files apply to every chat the server runs: the TUI, `haarness run`, `haarness serve`, Desktop and the SDKs.
@@ -84,11 +86,13 @@ Haarness reads prompt files from the `prompts` folder of these folders, lowest p
 | Order | Folder |
 | --- | --- |
 | 1 | The [base folder](CONFIGURATION-SCOPES.md#base-folder) named by `HAARNESS_BASE_CONFIG_DIR` |
-| 2 | The global configuration folder: `~/.config/haarness` (`$HAARNESS_HOME/config` or `$XDG_CONFIG_HOME/haarness` when set) |
+| 2 | The global configuration folder: `~/.config/haarness` (`$HAARNESS_HOME/config` or `$XDG_CONFIG_HOME/haarness` when set, `<data dir>/config` with `--data-dir` or `HAARNESS_DATA_DIR`) |
 
 Files for the same prompt apply in this order, each to the text the previous ones made: a base folder's files apply first, as defaults; a `replace` file in the global folder discards what the base folder's did, unless it uses `{{builtin}}`, and a `prepend` or `append` file adds to it.
 
 Haarness never reads prompt files from a project: not from its `.haarness` or `.opencode` folders, not from plugins, and not from any file inside the project that a link in one of the two folders leads to. Prompts are the agent's core instructions, and a cloned repository must not be able to rewrite them. A folder you name yourself inside the project (the base folder, or the global folder when the project is your home folder) stays yours and is read.
+
+An agent's edit of a global prompt file always asks a person, like an edit of [Haarness's own configuration files](PERMISSIONS-AND-EXECUTION.md#haarnesss-own-configuration-files). [Configuration profiles](PROFILES.md) do not carry the `prompts` folder; copy prompt files yourself, or ship them in a base folder.
 
 ## Safety baseline
 

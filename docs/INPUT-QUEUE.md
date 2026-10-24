@@ -1,6 +1,8 @@
 # Steer and Queue
 
-> **User guide:** [Send more while it works](https://haarness.ai/docs/desktop/the-conversation#send-more-while-it-works). This page has the engineering detail.
+How messages sent while the agent works are steered into the running turn or queued after it, in Desktop, the TUI, the server API and the SDKs, with the shared setting and its tests. For contributors and for client authors using the input API.
+
+> **User guide:** [Send more while it works](https://haarness.ai/docs/desktop/the-conversation#send-more-while-it-works).
 
 Use **Steer** to correct the task the agent is doing now. Use **Queue** to give it another task after the current work finishes.
 

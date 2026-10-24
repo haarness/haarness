@@ -1,7 +1,10 @@
 # Haarness brand assets
 
-The marks the app ships. Everything here is generated; the drawings, the grid
-and the reasoning live in the logo system these were chosen from.
+The marks Haarness ships: the logo, the wordmark and the app icons, which files
+to use where, and how the apps pick them up. It is for contributors working on
+the apps, the website or release packaging. Everything here is generated; the
+drawings, the grid and the reasoning live in the logo system these were chosen
+from.
 
 ```
 svg/   the artwork — mark, wordmark, lockup, app icon, favicon
@@ -35,6 +38,7 @@ the mark reads as something under load rather than a letter with a crossbar.
 | `png/app-icon-*.png` | 1024, 512, 256, 128 |
 | `png/mark-512.png`, `png/lockup-1600.png`, `png/wordmark-1200.png` | raster exports |
 | `icon.ico` | Windows; `assets/icon.ico` in the desktop app is a copy |
+| `png/app-icon-1024.png` | also the source of Haarness for Chrome's toolbar icons |
 
 ## How the app uses them
 
@@ -42,7 +46,12 @@ the mark reads as something under load rather than a letter with a crossbar.
 SVG so they inherit `currentColor` and scale off the font-size of whatever
 they sit in. It is the only place brand artwork belongs; functional icons stay
 in `icons.tsx`. The app icon is `apps/desktop/assets/icon.png`, copied from
-`png/app-icon-1024.png`.
+`png/app-icon-1024.png`; Linux packages take `apps/desktop/assets/linux-icons/`
+(16 to 512 px, the larger sizes copies of `png/app-icon-*.png`).
+
+Haarness for Chrome reads `png/app-icon-1024.png` at build time and writes its
+16, 32, 48, 96 and 128 px icons from it (`apps/browser-extension/vite.config.ts`),
+so a new app icon reaches the extension with its next build.
 
 The wordmark is set in the interface face at weight 600 and −0.03em tracking —
 the same values as the app's own type — and its H is redrawn at that face's cap
@@ -52,8 +61,9 @@ redistributable as outlines.
 
 ## Regenerating
 
-The artwork comes from the logo system in `~/Desktop/haarness-logo-system`,
-which holds six concepts, thirteen accents and the eight app palettes. To take
+The artwork comes from the logo system in `~/Desktop/haarness-logo-system` on
+the brand owner's computer (it is not in this repository), which holds six
+concepts, thirteen accents and the eight app palettes. To take
 a different branch of it:
 
 ```sh

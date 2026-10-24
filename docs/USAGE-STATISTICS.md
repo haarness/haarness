@@ -1,5 +1,9 @@
 # Usage statistics
 
+What the daily usage summary contains, when and how it is sent, and every way to turn it off. For developers changing the report, and for operators who need to keep CI or a fleet out of it.
+
+> **User guide:** [Data and storage](https://haarness.ai/docs/security/data-and-storage).
+
 Haarness shares a small daily summary of how it is used with Haarness Cloud, so the team can see which models, tools and features people rely on and where turns fail. It is on by default, and you can turn it off at any time.
 
 ## What is sent
@@ -36,7 +40,7 @@ Any of these:
 - Desktop: **Settings → General → Share usage statistics**.
 - TUI: `/usage-statistics` (or `/telemetry`) → **Stop sharing usage statistics**.
 - CLI: `haarness telemetry off` (`haarness telemetry on` turns it back on; `haarness telemetry status` shows the current state).
-- Environment: `HAARNESS_TELEMETRY=0` (also `false`, `off` or `no`), or `DO_NOT_TRACK=1`. The environment wins over the setting; `HAARNESS_TELEMETRY=1` turns sharing on whatever the setting says.
+- Environment: `HAARNESS_TELEMETRY=0` (also `false`, `off`, `no` or `disabled`), or `DO_NOT_TRACK=1` (or `true`). The environment wins over the setting; `HAARNESS_TELEMETRY=1` (or `true`, `on`, `yes`, `enabled`) turns sharing on whatever the setting or `DO_NOT_TRACK` says. While the environment decides, Desktop and the TUI show the choice without letting you change it.
 
 The setting is stored as `"telemetry": {"usage": false}` in the global `haarness.json`. Project configuration cannot change it: a repository you clone can neither turn sharing on nor off for you.
 

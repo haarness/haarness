@@ -1,6 +1,8 @@
 # Side questions with `/btw`
 
-> **User guide:** [Ask a side question](https://haarness.ai/docs/tui/messages#ask-a-side-question). This page has the engineering detail.
+How `/btw` side questions and side chats work: what the model is sent, the API and its limits, and how the TUI and Desktop show a side chat. It is for contributors and for integrators calling the side-question routes.
+
+> **User guide:** [Ask a side question](https://haarness.ai/docs/tui/messages#ask-a-side-question).
 
 `/btw <question>` asks the active session's provider a question using a snapshot
 of the current conversation. It reuses the main request's prepared system,

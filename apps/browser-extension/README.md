@@ -11,7 +11,7 @@ This README is for working on the extension. The architecture, both wire protoco
 | `manifest.config.ts` | Generates `manifest.json`: MV3, the pinned `key`, permissions, the version mapping |
 | `src/background.ts` | The service worker: wires the Chrome platform into the host |
 | `src/core/` | Browser-neutral logic: `host.ts` (commands, tab ownership, pause and stop), `registry.ts`, `queue.ts`, `policy.ts` and `fetch-policy.ts` (site decisions), `bridge.ts` and `protocol.ts` (bridge messages), `driver.ts` (the only import of the driver's page) |
-| `src/platform/chrome/` | Chrome adapters: `page.ts` (the driver's `PageSurface`), `cdp.ts` (`CdpTransport` over `chrome.debugger`), `session.ts` (the per-tab debugger session and its `Fetch` guard), `files.ts`, `downloads.ts`, `index.ts` (tabs, groups, storage) |
+| `src/platform/chrome/` | Chrome adapters: `page.ts` (the driver's `PageSurface`), `cdp.ts` (`CdpTransport` over `chrome.debugger`), `session.ts` (the per-tab debugger session and its `Fetch` guard), `files.ts`, `downloads.ts`, `wait.ts` (timeouts and cancellation), `index.ts` (tabs, groups, storage) |
 | `src/ui/`, `src/popup.html`, `src/welcome.html` | Solid UI: the popup (toolbar button) and the welcome page (setup guide and options) |
 | `tests/` | Unit tests with `chrome.*` fakes (`node --test`) |
 | `e2e/` | Playwright: `bridge.spec.ts` and `ui.spec.ts` (fake bridge), `stack.spec.ts` (real haarness) |

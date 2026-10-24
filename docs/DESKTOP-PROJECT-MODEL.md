@@ -1,5 +1,9 @@
 # Projects, worktrees, and conversations
 
+How Haarness Desktop models projects, Git worktrees and chats: how locations are identified and routed, where drafts and tabs belong, how local and remote servers are started and reused, and the host API behind remote projects. For contributors changing Desktop's sidebar, routing or runtime lifecycle.
+
+> **User guides:** [Work in a separate worktree](https://haarness.ai/docs/desktop/projects-and-panels#work-in-a-separate-worktree), [Organise projects and chats](https://haarness.ai/docs/desktop/projects-and-panels#organise-projects-and-chats).
+
 **Project** is the sidebar group. **Project folder** is its main checkout. A **Worktree** is an additional Git checkout belonging to that project. An ordinary non-Git folder is also a project. “Workspace” remains an internal API/storage term for a concrete working directory; it is not another desktop navigation concept.
 
 ## Identity and execution
@@ -13,8 +17,8 @@ Opening only a linked worktree also registers the primary project folder. Regist
 ## Navigation and drafts
 
 - Clicking another project's title activates it, restoring its last working location and conversation, and shows its conversation list; clicking the current project's title shows or hides its list. The chevron independently expands/collapses its conversation list. Selecting a project never reorders projects or collapses other expanded projects.
-- The project menu offers **Pin**, **Rename…** (a custom display name), **Section**, **Reveal in Finder**, **Archive chats** and **Remove project**. Sections list first, then unfiled projects under a **No section** heading once any section exists; a pin keeps a project at the top of its own group. Each group orders its rows through the shared persistent `list:projects` ordering, so Alt+arrows and drops move among the group's own rows, and a drop onto another group's row files the project there and places it beside that row. A custom name replaces the registry name wherever the desktop shows the project. Pin, name and section live in desktop storage (`project-presentation:v1`) keyed by project ID, and they follow a bare folder when it later resolves to its registered project. Archiving a project's chats archives every independent conversation in its available checkouts through the normal thread API and leaves the current chat open.
-- The project menu offers **Enable worktree view** for local Git projects. It replaces the flat list with collapsible **Local** and worktree groups, each with its own sessions, branch, new-chat button, and checkout menu. The preference and expansion states survive restarts. Creation, reset, removal, and refresh live in this sidebar; there is no separate Worktrees page. Non-Git folders retain the flat list.
+- The project menu offers **Pin**, **Rename…** (a custom display name), **Section**, **Reveal in Finder** (local folders), **New chat**, **Enable worktree view** (local Git projects), **Refresh project**, **Select chats**, **Archive chats** and **Remove project**. Sections list first, then unfiled projects under a **No section** heading once any section exists; a pin keeps a project at the top of its own group. Each group orders its rows through the shared persistent `list:projects` ordering, so Alt+arrows and drops move among the group's own rows, and a drop onto another group's row files the project there and places it beside that row. A custom name replaces the registry name wherever the desktop shows the project. Pin, name and section live in desktop storage (`project-presentation:v1`) keyed by project ID, and they follow a bare folder when it later resolves to its registered project. Archiving a project's chats archives every independent conversation in its available checkouts through the normal thread API and leaves the current chat open.
+- The project menu offers **Enable worktree view** for local Git projects. It replaces the flat list with collapsible **Local** and worktree groups, each with its own sessions, branch, new-chat button, and checkout menu (**Open checkout**, **Reset worktree…**, **Remove worktree…**). The preference and expansion states survive restarts. Creation, reset, removal, and refresh live in this sidebar; there is no separate Worktrees page. Non-Git folders retain the flat list.
 - In flat view, New chat defaults to **Project folder**. In worktree view it keeps the current checkout; each group also starts chats directly in its own folder. The composer still offers existing and new worktrees. Selecting a location, model, agent, or starter does not create a conversation.
 - Flat-view new-chat drafts belong to the project, so choosing a worktree preserves text and attachments. Worktree-view new-chat drafts belong to their concrete checkout. Switching views preserves each saved draft. Sending creates a conversation bound to the chosen folder. Existing-conversation drafts are always keyed by location and thread identity.
 - In flat view, independent conversations from all locations appear together; in worktree view they appear beneath their owning checkout. Delegated agent conversations are reached through the parent transcript; forks remain in the sidebar. `parentId` records lineage, while `isSubagent` distinguishes actual delegation. Worktree conversations have a small checkout badge; the title bar also identifies the active worktree.
@@ -63,7 +67,8 @@ another project. Sending never creates a hidden working folder.
 
 Opening a project or an existing conversation shows a centered Haarness mark
 until the selected history is loaded, without flashing the new-chat starters
-or project Home. A newer chat selection supersedes an earlier pending history
+or project Home. The mark fades in only after about a third of a second
+(`.chat-loading` in `project-home.css`), so a quick load shows none. A newer chat selection supersedes an earlier pending history
 request. The loading animation respects reduced-motion preferences.
 
 Older general-chat records migrate to ordinary projects in their existing
