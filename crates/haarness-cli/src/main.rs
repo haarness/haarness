@@ -9637,7 +9637,8 @@ struct FileConfig {
     execution: BTreeMap<String, serde_json::Value>,
     defaults: Option<DefaultsSection>,
     experimental: Option<ExperimentalSection>,
-    permissions: Option<BTreeMap<String, toml::Value>>,
+    /// `[permissions]`, in the order written: later rules override earlier ones.
+    permissions: Option<toml::Table>,
     compaction: Option<CompactionSection>,
     snapshots: Option<SnapshotsSection>,
     tools: Option<ToolsSection>,
@@ -10331,10 +10332,12 @@ fn merge_file_config(config: &mut FileConfig, project_config: FileConfig) {
         merge_defaults(merged, defaults);
     }
     if let Some(project_permissions) = project_config.permissions {
-        // Project rules append after global rules: last match wins.
+        // A project's table for a tool replaces the global one here; every
+        // layer's own rules follow these in layer order (`JsonLayers::rules`),
+        // so the last match still wins.
         config
             .permissions
-            .get_or_insert_with(BTreeMap::new)
+            .get_or_insert_with(toml::Table::new)
             .extend(project_permissions);
     }
     if project_config.compaction.is_some() {
@@ -10472,13 +10475,12 @@ fn apply_json_goal_config(config: &mut FileConfig, layers: &jsonconfig::JsonLaye
     }
 }
 
-/// Compile `[permissions]` TOML into ordered engine rules. Tool-level string
-/// entries compile first (`edit = "ask"` → `edit:*`), then per-tool pattern
-/// tables (`[permissions.bash] "git push*" = "ask"` → `bash:git push*`), so
-/// specific patterns override tool-level decisions under last-match-wins.
-fn compile_permissions(
-    map: &BTreeMap<String, toml::Value>,
-) -> Result<Vec<haarness_core::PermissionRule>> {
+/// Compile `[permissions]` TOML into ordered engine rules, in the order the
+/// file writes them. Tool-level string entries compile first (`edit = "ask"`
+/// → `edit:*`), then per-tool pattern tables (`[permissions.bash] "git
+/// push*" = "ask"` → `bash:git push*`), so specific patterns override
+/// tool-level decisions under last-match-wins.
+fn compile_permissions(map: &toml::Table) -> Result<Vec<haarness_core::PermissionRule>> {
     use haarness_core::{PermissionDecision, PermissionRule};
     fn decision(value: &str) -> Result<PermissionDecision> {
         match value {
@@ -16826,10 +16828,10 @@ request_timeout = 0
     #[test]
     fn permission_config_compiles_to_ordered_rules() {
         use haarness_core::PermissionDecision;
-        let map: BTreeMap<String, toml::Value> = toml::from_str(
+        let map: toml::Table = toml::from_str(
             r#"
-            edit = "allow"
             "*" = "ask"
+            edit = "allow"
             [bash]
             "git status*" = "allow"
             "git push*" = "deny"
@@ -16842,13 +16844,48 @@ request_timeout = 0
         // patterns win under last-match-wins.
         assert_eq!(
             patterns,
-            vec!["*", "edit:*", "bash:git push*", "bash:git status*"]
+            vec!["*", "edit:*", "bash:git status*", "bash:git push*"]
         );
         assert_eq!(rules[0].decision, PermissionDecision::Ask);
-        assert_eq!(rules[2].decision, PermissionDecision::Deny);
+        assert_eq!(rules[3].decision, PermissionDecision::Deny);
 
-        let bad: BTreeMap<String, toml::Value> = toml::from_str(r#"edit = "maybe""#).unwrap();
+        let bad: toml::Table = toml::from_str(r#"edit = "maybe""#).unwrap();
         assert!(super::compile_permissions(&bad).is_err());
+    }
+
+    #[test]
+    fn toml_permission_rules_apply_in_the_order_they_are_written() {
+        use haarness_core::{PermissionDecision, PermissionEngine};
+        // Sorted, `git push --force*` would come first (a space sorts
+        // before `*`) and the broader allow after it would win.
+        let config: FileConfig = toml::from_str(
+            r#"
+            [permissions]
+            edit = "allow"
+            "*" = "ask"
+            [permissions.bash]
+            "git push*" = "allow"
+            "git push --force*" = "deny"
+        "#,
+        )
+        .unwrap();
+        let rules = super::compile_permissions(config.permissions.as_ref().unwrap()).unwrap();
+        let patterns: Vec<_> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
+        assert_eq!(
+            patterns,
+            vec!["edit:*", "*", "bash:git push*", "bash:git push --force*"]
+        );
+        let engine = PermissionEngine::new(rules);
+        assert_eq!(
+            engine.evaluate("bash:git push --force origin main"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            engine.evaluate("bash:git push origin main"),
+            PermissionDecision::Allow
+        );
+        // A later catch-all overrides an earlier tool-wide string, as written.
+        assert_eq!(engine.evaluate("edit:src/main.rs"), PermissionDecision::Ask);
     }
 
     #[test]
