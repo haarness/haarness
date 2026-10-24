@@ -2085,15 +2085,17 @@ pub fn migrate_toml(config_toml: &Path, notices: &mut Vec<String>) -> Result<()>
         }
     }
     if let Some(permissions) = parsed.get("permissions").and_then(toml::Value::as_table) {
+        // In the order `config.toml` applied them, so `haarness.json` decides
+        // exactly as it did.
         let mut block = serde_json::Map::new();
-        for (tool, entry) in permissions {
+        for (tool, entry) in super::ordered_permissions(permissions) {
             match entry {
                 toml::Value::String(action) => {
                     block.insert(tool.clone(), Value::String(action.clone()));
                 }
                 toml::Value::Table(patterns) => {
                     let mut inner = serde_json::Map::new();
-                    for (pattern, action) in patterns {
+                    for (pattern, action) in super::catch_all_first(patterns.iter()) {
                         if let Some(action) = action.as_str() {
                             inner.insert(pattern.clone(), Value::String(action.into()));
                         }
@@ -3830,16 +3832,30 @@ mod tests {
     }
 
     #[test]
-    fn a_migrated_config_keeps_its_permission_rules_in_the_order_written() {
+    fn a_migrated_config_decides_exactly_as_the_toml_did() {
         let root =
             std::env::temp_dir().join(format!("haarness-migrate-order-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
         let toml = root.join("config.toml");
-        fs::write(
-            &toml,
-            "[permissions]\nedit = \"ask\"\n\"*\" = \"allow\"\n[permissions.bash]\n\"git push*\" = \"allow\"\n\"git push --force*\" = \"deny\"\n",
-        )
-        .unwrap();
+        // Tool-wide strings, inline tables and sub-tables interleaved, with
+        // catch-alls written last.
+        let text = r#"
+[permissions]
+edit = "allow"
+bash = { "echo secret*" = "deny", "*" = "allow" }
+"*" = "ask"
+webfetch = "deny"
+[permissions.read]
+"secrets/*" = "deny"
+"*" = "allow"
+[permissions.external_directory]
+"/tmp/*" = "allow"
+"/tmp/private/*" = "deny"
+"#;
+        fs::write(&toml, text).unwrap();
+        let config: super::super::FileConfig = toml::from_str(text).unwrap();
+        let expected =
+            super::super::compile_permissions(config.permissions.as_ref().unwrap()).unwrap();
         let mut notices = Vec::new();
         migrate_toml(&toml, &mut notices).unwrap();
         let migrated: Value =
@@ -3851,10 +3867,21 @@ mod tests {
             &root.join("haarness.json"),
             "permission",
         );
+        assert_eq!(rules, expected);
         let patterns: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
         assert_eq!(
             patterns,
-            vec!["edit:*", "*", "bash:git push*", "bash:git push --force*"]
+            vec![
+                "*",
+                "edit:*",
+                "webfetch:*",
+                "bash:*",
+                "bash:echo secret*",
+                "read:*",
+                "read:secrets/*",
+                "external_directory:/tmp/*",
+                "external_directory:/tmp/private/*",
+            ]
         );
         assert!(root.join("config.toml.migrated").exists());
         let _ = fs::remove_dir_all(&root);
