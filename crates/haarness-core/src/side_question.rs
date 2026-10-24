@@ -62,6 +62,7 @@ impl PreparedPrompts {
         turn: Option<TurnId>,
         mut catalog: Vec<ToolDefinition>,
         messages: &[ProviderMessage],
+        origins: &[crate::image_budget::Origin],
     ) -> Option<(Arc<dyn ModelProvider>, ProviderRequest)> {
         catalog.sort_by(|a, b| a.name.cmp(&b.name));
         let snapshot = self.0.iter().find(|snapshot| {
@@ -70,16 +71,23 @@ impl PreparedPrompts {
                 && snapshot.catalog == catalog
                 && messages.starts_with(&snapshot.source)
         })?;
+        // What came since the turn's request (a tool's screenshots) can pass
+        // the provider's image limits and move the cut, which the prepared
+        // request no longer matches: such a question is prepared afresh. The
+        // cut replays the history, so only images it adds can move it.
+        let limits = snapshot.provider.image_limits(&snapshot.request.model);
+        let removed = |messages: &[ProviderMessage], origins| {
+            crate::image_budget::bound(&mut messages.to_vec(), origins, limits)
+                .map_or(0, |cut| cut.removed)
+        };
+        let earlier = origins.get(..snapshot.source.len())?;
+        if removed(messages, origins) != removed(&snapshot.source, earlier) {
+            return None;
+        }
         let mut request = snapshot.request.clone();
         request
             .messages
             .extend_from_slice(&messages[snapshot.source.len()..]);
-        // What came since the turn's request (a tool's screenshots) can pass
-        // the provider's image limits; within them nothing changes.
-        crate::image_budget::bound(
-            &mut request.messages,
-            snapshot.provider.image_limits(&request.model),
-        );
         Some((snapshot.provider.clone(), request))
     }
 }
@@ -195,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn a_side_question_on_a_prepared_request_holds_its_images_to_the_limits() {
+    fn a_side_question_is_prepared_afresh_once_new_images_move_the_cut() {
         let shot = |id: &str| ProviderMessage::ToolResult {
             call_id: id.into(),
             name: "screenshot".into(),
@@ -214,6 +222,7 @@ mod tests {
             parameters: crate::RequestParameters::default(),
         };
         let (thread, turn) = (ThreadId::new(), TurnId::new());
+        let origins = |count: usize| vec![crate::image_budget::Origin::default(); count];
         let mut prepared = PreparedPrompts::default();
         prepared.remember(
             thread,
@@ -223,23 +232,19 @@ mod tests {
             Vec::new(),
             request,
         );
-        // Two more screenshots came since the turn's request was sent.
+        // One more screenshot fits: the prepared request is reused.
         let mut messages = source;
-        messages.extend([call("b"), shot("b"), call("c"), shot("c")]);
-        let (_, request) = prepared
-            .request(thread, Some(turn), Vec::new(), &messages)
+        messages.extend([call("b"), shot("b")]);
+        let (_, reused) = prepared
+            .request(thread, Some(turn), Vec::new(), &messages, &origins(5))
             .expect("the prepared request is reused");
-        let sent = request
-            .messages
-            .iter()
-            .filter(|message| {
-                matches!(message, ProviderMessage::ToolResult { attachments, .. } if !attachments.is_empty())
-            })
-            .count();
-        assert_eq!(sent, 1, "three images pass two; the oldest two are noted");
+        assert_eq!(reused.messages, messages);
+        // A third passes two images, and the cut would move.
+        messages.extend([call("c"), shot("c")]);
         assert!(
-            matches!(&request.messages[2], ProviderMessage::ToolResult { output, attachments, .. }
-                if attachments.is_empty() && output.contains("[Image a.png omitted"))
+            prepared
+                .request(thread, Some(turn), Vec::new(), &messages, &origins(7))
+                .is_none()
         );
     }
 

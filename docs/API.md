@@ -514,9 +514,10 @@ directly, on Bedrock or through Haarness Cloud, also 100 images in a request to
 a model with a 200K-token context window and 600 to a larger one. The cut moves
 only when the images kept pass the limit again, not with each new image, so the
 requests between two cuts carry the same history and the provider's prompt
-cache holds. A cut never takes the images the person attached to the message
-that opened the turn it happens in; when those alone pass the limit the request
-is sent as it is. That message is read from the history, not from the turn now
+cache holds. A cut never takes the images the person attached to their own
+messages (steers included, not what Haarness adds) in the turn the image that
+passed the limit belongs to; when those alone pass the limit the request is
+sent as it is. That turn is read from the history, not from the turn now
 running, so a new turn's first request repeats every earlier cut and reads the
 cache too. PDFs, audio and video are neither counted nor replaced. Stored
 messages do not change, and the transcript shows nothing: a cut is logged as

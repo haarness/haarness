@@ -13,18 +13,28 @@
 //! to the lower mark. A new image moves the cut only when the kept images
 //! pass a limit again, not on every request, so the replaced prefix, and the
 //! provider's prompt cache with it, stays the same between cuts. A cut never
-//! takes what the person attached to the message that opened the turn it
-//! happens in; when those alone pass a limit the request goes as it is, and a
-//! refusal is handled as before. Which message that is follows from the
-//! history alone, not from the turn now running, so a new turn replays every
-//! earlier cut the same way and its first request reads the cache too.
-//! Stored messages are never changed.
+//! takes what the person attached to their messages in the turn it happens
+//! in; when those alone pass a limit the request goes as it is, and a refusal
+//! is handled as before. That turn is the one the image that passed the limit
+//! belongs to, as the history records it, not the turn now running, so a new
+//! turn replays every earlier cut the same way and its first request reads
+//! the cache too. Stored messages are never changed.
 
 use std::collections::HashSet;
 
 use haarness_protocol::{Item, ItemData, TurnId};
 
 use crate::{ImageLimits, ProviderMessage};
+
+/// Where a provider message came from in the thread.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Origin {
+    /// The turn its item belongs to.
+    pub turn: Option<TurnId>,
+    /// Written by the person (a steer they queued included), not made by
+    /// Haarness for them.
+    pub person: bool,
+}
 
 /// What a cut left out of one request, for its log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,13 +64,20 @@ pub(crate) fn turn_attachments(items: &[Item], turn: Option<TurnId>) -> HashSet<
 }
 
 /// Replaces the oldest images of `messages` with a note once they pass
-/// `limits` (see the module documentation). `None` when every image stays.
-pub(crate) fn bound(messages: &mut [ProviderMessage], limits: ImageLimits) -> Option<Cut> {
+/// `limits` (see the module documentation). `origins` says where each
+/// message came from. `None` when every image stays.
+pub(crate) fn bound(
+    messages: &mut [ProviderMessage],
+    origins: &[Origin],
+    limits: ImageLimits,
+) -> Option<Cut> {
     struct Image {
         message: usize,
         source: String,
         bytes: usize,
     }
+    debug_assert_eq!(messages.len(), origins.len());
+    let origin = |message: usize| origins.get(message).copied().unwrap_or_default();
     let mut images = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         let attachments = match message {
@@ -100,11 +117,16 @@ pub(crate) fn bound(messages: &mut [ProviderMessage], limits: ImageLimits) -> Op
         if !over(kept, count, limit) {
             continue;
         }
-        let opening = person_message(messages, image.message);
+        // The person's own images in the turn this image belongs to stay.
+        let turn = origin(image.message).turn;
+        let own = |message: usize| {
+            let origin = origin(message);
+            origin.person && turn.is_some() && origin.turn == turn
+        };
         let mut position = 0;
         while over(kept, count, target) && position < sent.len() {
             let oldest = &images[sent[position]];
-            if Some(oldest.message) == opening {
+            if own(oldest.message) {
                 position += 1;
                 continue;
             }
@@ -127,29 +149,6 @@ pub(crate) fn bound(messages: &mut [ProviderMessage], limits: ImageLimits) -> Op
         bytes,
         kept,
     })
-}
-
-/// The message the person opened the turn at `at` with: the last user
-/// message at or before it, past the hidden context stored after it.
-fn person_message(messages: &[ProviderMessage], at: usize) -> Option<usize> {
-    let mut reminders = false;
-    for index in (0..=at).rev() {
-        match &messages[index] {
-            ProviderMessage::Text { role, content }
-                if role == "user" && crate::turn_context::is_turn_reminder(content) =>
-            {
-                reminders = true;
-            }
-            ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. }
-                if role == "user" =>
-            {
-                return Some(index);
-            }
-            _ if reminders => return None,
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Takes the first `source` out of `message`, naming it in the text instead.
@@ -260,12 +259,121 @@ mod tests {
             .count()
     }
 
+    /// The origins of a chat in which each user message a person wrote
+    /// opens a turn, and what follows it belongs to that turn.
+    fn turns(messages: &[ProviderMessage]) -> Vec<Origin> {
+        let mut turn = None;
+        messages
+            .iter()
+            .map(|message| {
+                let person = matches!(message,
+                    ProviderMessage::Text { role, content } if role == "user" && !crate::turn_context::is_turn_reminder(content))
+                    || matches!(message, ProviderMessage::Media { role, .. } if role == "user");
+                if person {
+                    turn = Some(TurnId::new());
+                }
+                Origin { turn, person }
+            })
+            .collect()
+    }
+
     fn bounded(
         mut messages: Vec<ProviderMessage>,
         limits: ImageLimits,
     ) -> (Vec<ProviderMessage>, Option<Cut>) {
-        let cut = bound(&mut messages, limits);
+        let origins = turns(&messages);
+        let cut = bound(&mut messages, &origins, limits);
         (messages, cut)
+    }
+
+    /// A chat whose messages say which turn they belong to and who wrote
+    /// them, as `provider_messages_with_origins` records it.
+    #[derive(Default)]
+    struct Chat {
+        messages: Vec<ProviderMessage>,
+        origins: Vec<Origin>,
+        turn: Option<TurnId>,
+    }
+
+    impl Chat {
+        /// A message the person wrote, opening a new turn.
+        fn opens(mut self, message: ProviderMessage) -> Self {
+            self.turn = Some(TurnId::new());
+            self.add(message, true)
+        }
+
+        fn add(mut self, message: ProviderMessage, person: bool) -> Self {
+            self.messages.push(message);
+            self.origins.push(Origin {
+                turn: self.turn,
+                person,
+            });
+            self
+        }
+
+        fn shots(mut self, names: &[&str], bytes: usize) -> Self {
+            for name in names {
+                for message in shot(name, bytes) {
+                    self = self.add(message, false);
+                }
+            }
+            self
+        }
+
+        fn bounded(mut self, limits: ImageLimits) -> Vec<String> {
+            bound(&mut self.messages, &self.origins, limits);
+            sent(&self.messages)
+        }
+    }
+
+    fn user(text: &str) -> ProviderMessage {
+        ProviderMessage::Text {
+            role: "user".into(),
+            content: text.into(),
+        }
+    }
+
+    const REMINDER: &str =
+        "<system-reminder>\nToday's date is now Saturday, 24 October 2026.\n</system-reminder>";
+
+    #[test]
+    fn the_persons_own_image_stays_whatever_comes_between_it_and_the_cut() {
+        let design = || ProviderMessage::Media {
+            role: "user".into(),
+            content: "match this design".into(),
+            attachments: vec![image("design", 8 * MIB)],
+        };
+        // A steer the person queued while the model worked.
+        let steered = Chat::default()
+            .opens(design())
+            .add(user(REMINDER), false)
+            .shots(&["s1", "s2"], 4 * MIB)
+            .add(
+                user("<system-reminder>\nThe user sent the following message while you were working:\nalso the footer\n</system-reminder>"),
+                true,
+            )
+            .shots(&["s3", "s4", "s5"], 4 * MIB);
+        assert_eq!(steered.bounded(ImageLimits::default()), ["design", "s5"]);
+        // A child agent's result delivered into the turn.
+        let delegated = Chat::default()
+            .opens(design())
+            .add(user(REMINDER), false)
+            .shots(&["s1"], 5 * MIB)
+            .add(
+                user("<task-result>the child agent finished</task-result>"),
+                false,
+            )
+            .shots(&["s2", "s3", "s4"], 5 * MIB);
+        assert_eq!(delegated.bounded(ImageLimits::default()), ["design", "s4"]);
+        // A compaction summary, which is a user message too.
+        let compacted = Chat::default()
+            .opens(design())
+            .add(
+                user("<compaction-summary>\nwhat happened so far\n</compaction-summary>"),
+                false,
+            )
+            .shots(&["s1", "s2", "s3", "s4", "s5"], 4 * MIB);
+        assert_eq!(compacted.bounded(ImageLimits::default()), ["design", "s5"]);
     }
 
     fn photos(names: &str, bytes: usize) -> Vec<ProviderMessage> {
@@ -377,7 +485,8 @@ mod tests {
         for name in ["e", "f", "g", "h"] {
             messages.extend(shot(name, 5 * MIB));
         }
-        bound(&mut messages, ImageLimits::default());
+        let origins = turns(&messages);
+        bound(&mut messages, &origins, ImageLimits::default());
         assert_eq!(sent(&messages), ["c", "d", "f", "g", "h"]);
 
         // A message that alone passes the limit goes as it is.
@@ -387,7 +496,8 @@ mod tests {
             content: "all of these".into(),
             attachments: alone.collect(),
         }];
-        assert_eq!(bound(&mut messages, ImageLimits::default()), None);
+        let origins = turns(&messages);
+        assert_eq!(bound(&mut messages, &origins, ImageLimits::default()), None);
         assert_eq!(sent(&messages).len(), 5);
     }
 
