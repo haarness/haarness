@@ -3,10 +3,12 @@
 
 1. toml_order: `[permissions]` rules in `config.toml` apply in the order written, kept as TOML and
    once migrated to `haarness.json`: a deny written after a broader allow refuses.
+2. cd_link: a `cd` through a link that the shell takes out of the project by name
+   (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order). No model is called; nothing outside the fixture is touched.
+toml_order, cd_link). No model is called; nothing outside the fixture is touched.
 """
 import json
 import os
@@ -42,12 +44,15 @@ def project(name, config=None):
     return folder
 
 
-def bash(env, folder, command, timeout=120):
-    """`haarness run` of one bash call: what the run printed."""
+def bash(env, folder, command, timeout=120, code=None):
+    """`haarness run` of one bash call: what the run printed. `code` checks how it exited."""
     line = '!tool bash ' + json.dumps({'command': command})
     result = subprocess.run([str(BINARY), '--workspace', str(folder), '--trust-project', 'run', line],
                             env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-    return result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    if code is not None:
+        assert (result.returncode == 0) == (code == 0), f'exit {result.returncode}: {output}'
+    return output
 
 
 def stop(env, folder):
@@ -80,7 +85,26 @@ def case_toml_order():
         passed(f'{name}: a deny written after a broader allow refuses')
 
 
-CASES = {'toml_order': case_toml_order}
+def case_cd_link():
+    """A cd the shell takes out of the project by name asks before the line runs."""
+    _, env = environment('cd-link')
+    folder = project('cd-link')
+    (folder / 'deep' / 'er' / 'x').mkdir(parents=True)
+    (folder / 'a').mkdir()
+    (folder / 'a' / 'l').symlink_to('../deep/er/x')
+    escaped = folder.parent / 'escaped.txt'
+    try:
+        output = bash(env, folder, 'cd a/l/../../.. && touch escaped.txt', code=1)
+        assert 'Stopped:' in output and str(folder.parent) in output, output
+        assert not escaped.exists(), 'the line ran outside the project without asking'
+        output = bash(env, folder, 'cd a/l/.. && pwd', code=0)
+        assert str(folder / 'a') in output, output
+    finally:
+        stop(env, folder)
+    passed('a cd out of the project through a link asks; one that stays inside runs')
+
+
+CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
