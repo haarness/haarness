@@ -63,29 +63,39 @@ pub async fn handle_mouse(
         MouseEventKind::Drag(MouseButton::Left) => {
             app.hovered_cell = None;
             if let Some(anchor) = app.mouse_down {
-                app.selection_range = Some((anchor, (event.column, event.row)));
+                // Within a cell of the press it is still a click (see the
+                // release), so nothing is painted as selected yet.
+                app.selection_range =
+                    (!within_a_cell(anchor, event)).then_some((anchor, (event.column, event.row)));
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
             let anchor = app.mouse_down.take();
+            // A press that moved a cell at most, on its row, is a click: a
+            // hand that shifts while it clicks must not copy a letter or two
+            // instead of pressing what it is on.
+            if anchor.is_some_and(|anchor| within_a_cell(anchor, event)) {
+                app.selection_range = None;
+                return click(app, event.row as usize, event.column as usize, client).await;
+            }
             if app.selection_range.is_some() {
-                // A drag ended: copy the selection, keep it painted.
+                // A drag ended: copy the selection.
                 let text = app.selected_text();
                 if !text.trim().is_empty() {
                     crate::terminal::copy_to_clipboard(&text);
                     app.notice = "Copied selection".into();
                 }
                 app.selection_range = None;
-            } else if let Some((column, row)) = anchor {
-                let stationary = event.column.abs_diff(column) <= 1 && event.row == row;
-                if stationary {
-                    return click(app, event.row as usize, event.column as usize, client).await;
-                }
             }
         }
         _ => {}
     }
     Ok(AppAction::Continue)
+}
+
+/// Whether the pointer is on the press's row, a cell from it at most.
+fn within_a_cell((column, row): (u16, u16), event: MouseEvent) -> bool {
+    event.row == row && event.column.abs_diff(column) <= 1
 }
 
 async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> Result<AppAction> {

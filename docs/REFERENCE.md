@@ -339,6 +339,8 @@ A paste longer than eight lines or 1,000 bytes stays one `[#1 pasted 20 lines]` 
 
 **Ctrl+B** shows or hides the sidebar. Where the terminal is wide enough to dock it beside the conversation, the TUI keeps that choice for its next launch (`sidebar` in `tui-state.toml`); on a narrower one it opens over the conversation until hidden, which is not kept.
 
+Drag with the mouse to copy text: the release copies what is highlighted, through OSC 52 and the system clipboard tool (`pbcopy`, `wl-copy` or `xclip`). A drag stays in the pane it started in, so a drag down the conversation never picks up the sidebar beside it, a dialog's text never the chat behind it, and the review's patch never its file tree. Gutters, the prompt's bar, the reply marker and a quote's bar are drawn but not copied; the same characters written in a message are. A press released within a cell of where it started is a click.
+
 Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. **Alt+Up**/**Alt+Down** move the transcript to the previous or next message, **Alt+Shift+Up**/**Alt+Shift+Down** between your prompts, **Alt+Home** to the start and **Alt+End** to your last prompt. See [TUI message browser](TUI-MESSAGES.md#move-between-messages).
 
 See [Side questions with `/btw`](SIDE-QUESTIONS.md) for isolated questions that leave the main transcript unchanged.
