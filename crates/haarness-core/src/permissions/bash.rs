@@ -813,7 +813,7 @@ impl Reader<'_> {
             {
                 continue;
             }
-            if value.starts_with("/dev/") {
+            if stream_device(&value, complete) {
                 continue;
             }
             // `>` (not `>>`) empties a file that is there already.
@@ -3368,6 +3368,31 @@ fn external_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Opt
     }
 }
 
+/// Whether a redirect names one of the devices a line reads or writes as a
+/// stream rather than a file: `/dev/null`, `zero`, `full`, `random`,
+/// `urandom`, `tty`, `stdin`, `stdout`, `stderr`, a descriptor (`/dev/fd/3`)
+/// and bash's own network paths (`/dev/tcp/host/port`, `/dev/udp/…`). Any
+/// other path under `/dev` is a path like any other: Linux's `/dev/shm` and
+/// `/dev/mqueue` hold files anyone can write, and a link there can lead
+/// anywhere.
+fn stream_device(value: &str, complete: bool) -> bool {
+    let Some(name) = value.strip_prefix("/dev/") else {
+        return false;
+    };
+    if name.starts_with("tcp/") || name.starts_with("udp/") {
+        return true;
+    }
+    if let Some(descriptor) = name.strip_prefix("fd/") {
+        return !complete
+            || (!descriptor.is_empty() && descriptor.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+    complete
+        && matches!(
+            name,
+            "null" | "zero" | "full" | "random" | "urandom" | "tty" | "stdin" | "stdout" | "stderr"
+        )
+}
+
 /// Where the shell's own `cd` takes a path from `workspace` when that is
 /// outside the project: by name, each `..` dropping the folder written
 /// before it whatever link that is, then into the folder that names (links
@@ -4751,6 +4776,38 @@ mod regression {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_redirect_into_dev_is_a_path_unless_it_names_a_stream() {
+        let workspace = std::env::current_dir().unwrap();
+        for command in [
+            "make > /dev/null 2>&1",
+            "echo x > /dev/stderr",
+            "echo x >/dev/stdout",
+            "read -r line < /dev/tty",
+            "exec 3< /dev/fd/0",
+            "cat < \"/dev/stdin\"",
+            "head -c 8 < /dev/urandom",
+            "echo ping > /dev/tcp/127.0.0.1/9",
+            "echo x > /dev/fd/$FD",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        for (command, folder) in [
+            ("echo x > /dev/shm/x", "/dev/shm/*"),
+            ("cat < /dev/shm/x", "/dev/shm/*"),
+            ("echo x > /dev/mqueue/q", "/dev/mqueue/*"),
+        ] {
+            let found = analyze(command, &workspace).external_dirs;
+            assert!(
+                found.iter().any(|dir| dir.ends_with(folder)),
+                "{command}: {found:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
