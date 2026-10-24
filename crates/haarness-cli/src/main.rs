@@ -4719,6 +4719,11 @@ async fn run_command(
         // its agents and workflows, and whatever runs in it later, and every
         // app shows the chat in Auto. What always asks is still asked below.
         if approvals.auto {
+            // A chat whose turn runs elsewhere refuses this run's prompt: say
+            // so before that turn's chat, and the turn with it, goes to Auto.
+            if !created && client.active_turn(thread.id).await?.is_some() {
+                anyhow::bail!(haarness_core::CHAT_BUSY);
+            }
             let set = set_chat_auto(&client, thread.id).await;
             discard_refused_chat(&client, &thread, created, set).await?;
         }

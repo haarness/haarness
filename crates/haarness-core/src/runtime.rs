@@ -5857,11 +5857,7 @@ impl AgentRuntime {
             if active_request_id == request.request_id {
                 return self.repository.get_turn(active_turn_id).await;
             }
-            // Read by people: `haarness run --session` or an editor over
-            // ACP sending to a chat busy elsewhere.
-            return Err(CoreError::Conflict(
-                "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.".into(),
-            ));
+            return Err(CoreError::Conflict(crate::CHAT_BUSY.into()));
         }
         let thread = self
             .with_chat_folder(self.repository.get_thread(thread_id).await?)

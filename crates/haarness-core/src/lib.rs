@@ -71,6 +71,11 @@ pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 /// provider error bodies, approval prompts, paths and client addresses.
 pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 
+/// Why a chat refuses a new turn while one is running: read by people, from
+/// `haarness run --session` or an editor over ACP sending to a chat busy
+/// elsewhere.
+pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
+
 /// The variable that names the chat an agent's shell command runs for. The
 /// shell tool sets it for each command the agent runs (see
 /// [`ExecutionSettings::person_shell`]); the other processes the server
