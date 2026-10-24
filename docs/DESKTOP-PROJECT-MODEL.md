@@ -95,11 +95,15 @@ first, from their Home.
 
 The message box's bottom row carries the folder chip. For a new chat it opens
 a searchable list: **No folder**, the projects in sidebar order, and **Open
-folder…** (the system folder chooser). For a chat that has started it names
+folder…** (the system folder chooser; a chat's own folder chosen there opens
+that chat). Text typed before choosing goes along to the new chat there,
+unless that one has a draft of its own. In a narrow chat the chips show only
+their icons. For a chat that has started it names
 the folder the chat works in, the chat's own folder or its project, and offers
 Reveal in Finder; a chat never moves. The new-chat heading reads "What should
 we work on?" without a project and "…in {project}?" with one. For a chat
-without a project the Files panel shows its own folder, a new terminal opens
+without a project the Files panel shows its own folder (its open files and
+unsaved edits wait for it while another of This computer's chats is open), a new terminal opens
 there (each chat has its own terminals), `@` and Search find the files in it,
 a reply's relative image or file link (`![](chart.png)`) starts there and may
 not leave it (every file read and write asks the server for that chat's folder,
