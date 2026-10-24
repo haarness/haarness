@@ -3157,114 +3157,23 @@ impl Tool for BuiltinTool {
                         )));
                     }
                 }
-                let mut report = Vec::new();
-                let mut diffs = Vec::new();
-                let mut diffs_truncated = false;
-                for operation in operations {
-                    match operation {
-                        haarness_core::patch::FileOp::Add { path, content } => {
-                            let resolved = resolve_new(&path, &context)?;
-                            let existing = existing_diff_body(&resolved).await;
-                            if let Some(parent) = resolved.parent() {
-                                tokio::fs::create_dir_all(parent)
-                                    .await
-                                    .map_err(tool_error)?;
-                            }
-                            tokio::fs::write(&resolved, &content)
-                                .await
-                                .map_err(tool_error)?;
-                            push_tool_diff(
-                                &mut diffs,
-                                replacement_diff(&path, existing, &content),
-                                &mut diffs_truncated,
-                            );
-                            report.push(format!("added {path}"));
-                        }
-                        haarness_core::patch::FileOp::Update {
-                            path,
-                            move_to,
-                            hunks,
-                        } => {
-                            let resolved = resolve_existing(&path, &context)?;
-                            let text = tokio::fs::read_to_string(&resolved)
-                                .await
-                                .map_err(tool_error)?;
-                            let updated = haarness_core::patch::apply_hunks(&text, &hunks)
-                                .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
-                            if let Some(target) = move_to {
-                                // The move takes the source's entry away: a
-                                // link goes, not the file it leads to.
-                                let entry = resolve_entry(&path, &context)?;
-                                let removed = entry_diff_body(&entry).await;
-                                let destination = resolve_new(&target, &context)?;
-                                // A file the patch added earlier is checked here.
-                                if same_entry(
-                                    &entry,
-                                    &destination,
-                                    &haarness_core::resolve_permission_entry(
-                                        &context.workspace,
-                                        &target,
-                                    ),
-                                ) {
-                                    return Err(CoreError::Invalid(format!(
-                                        "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
-                                    )));
-                                }
-                                let destination_before = existing_diff_body(&destination).await;
-                                if let Some(parent) = destination.parent() {
-                                    tokio::fs::create_dir_all(parent)
-                                        .await
-                                        .map_err(tool_error)?;
-                                }
-                                tokio::fs::write(&destination, &updated)
-                                    .await
-                                    .map_err(tool_error)?;
-                                tokio::fs::remove_file(&entry).await.map_err(tool_error)?;
-                                push_tool_diff(
-                                    &mut diffs,
-                                    deletion_diff(&path, removed),
-                                    &mut diffs_truncated,
-                                );
-                                push_tool_diff(
-                                    &mut diffs,
-                                    replacement_diff(&target, destination_before, &updated),
-                                    &mut diffs_truncated,
-                                );
-                                report.push(format!("moved {path} → {target}"));
-                            } else {
-                                tokio::fs::write(&resolved, &updated)
-                                    .await
-                                    .map_err(tool_error)?;
-                                push_tool_diff(
-                                    &mut diffs,
-                                    text_file_diff(
-                                        &path,
-                                        FileDiffStatus::Modified,
-                                        Some(&text),
-                                        Some(&updated),
-                                    ),
-                                    &mut diffs_truncated,
-                                );
-                                report.push(format!("updated {path}"));
-                            }
-                        }
-                        haarness_core::patch::FileOp::Delete { path } => {
-                            // A link is deleted itself, not the file it leads to.
-                            let resolved = resolve_entry(&path, &context)?;
-                            let existing = entry_diff_body(&resolved).await;
-                            tokio::fs::remove_file(&resolved)
-                                .await
-                                .map_err(tool_error)?;
-                            push_tool_diff(
-                                &mut diffs,
-                                deletion_diff(&path, existing),
-                                &mut diffs_truncated,
-                            );
-                            report.push(format!("deleted {path}"));
-                        }
-                    }
-                }
-                Ok(output_with_diffs(report.join("\n"), diffs, diffs_truncated))
+                // Every operation is worked out before anything is written,
+                // so a hunk that does not match leaves every file as it was.
+                let several = operations.len() > 1;
+                let plan = plan_patch(operations, &context)
+                    .await
+                    .map_err(|error| unchanged(error, several))?;
+                let report = plan
+                    .steps
+                    .iter()
+                    .map(|(line, _)| line.clone())
+                    .collect::<Vec<_>>();
+                write_patch(plan.steps).await?;
+                Ok(output_with_diffs(
+                    report.join("\n"),
+                    plan.diffs,
+                    plan.diffs_truncated,
+                ))
             }
             Kind::Bash => {
                 let command = string(&args, "command")?;
@@ -3377,6 +3286,324 @@ impl Tool for BuiltinTool {
         }
     }
 }
+/// What a patch leaves at a path once its earlier operations are done: the
+/// new text, or nothing.
+enum Planned {
+    Text(String),
+    Removed,
+}
+
+/// The one write a patch operation makes.
+enum PatchStep {
+    Write {
+        file: String,
+        path: PathBuf,
+        content: String,
+    },
+    Remove {
+        file: String,
+        entry: PathBuf,
+    },
+    /// Checked again just before it writes: a file the patch adds earlier
+    /// is on disk only then.
+    Move {
+        file: String,
+        target: String,
+        entry: PathBuf,
+        destination: PathBuf,
+        target_entry: PathBuf,
+        content: String,
+    },
+}
+
+struct PatchPlan {
+    /// Each operation's report line and its write, in patch order.
+    steps: Vec<(String, PatchStep)>,
+    diffs: Vec<FileDiff>,
+    diffs_truncated: bool,
+}
+
+/// Work out every operation of a patch without writing: each reads a file
+/// as the operations before it leave it.
+async fn plan_patch(
+    operations: Vec<haarness_core::patch::FileOp>,
+    context: &ToolContext,
+) -> CoreResult<PatchPlan> {
+    let mut planned: HashMap<PathBuf, Planned> = HashMap::new();
+    let mut plan = PatchPlan {
+        steps: Vec::new(),
+        diffs: Vec::new(),
+        diffs_truncated: false,
+    };
+    for operation in operations {
+        match operation {
+            haarness_core::patch::FileOp::Add { path, content } => {
+                let resolved = planned_target(&path, &planned, context)?;
+                let existing = planned_body(&planned, &resolved).await;
+                push_tool_diff(
+                    &mut plan.diffs,
+                    replacement_diff(&path, existing, &content),
+                    &mut plan.diffs_truncated,
+                );
+                planned.insert(resolved.clone(), Planned::Text(content.clone()));
+                plan.steps.push((
+                    format!("added {path}"),
+                    PatchStep::Write {
+                        file: path,
+                        path: resolved,
+                        content,
+                    },
+                ));
+            }
+            haarness_core::patch::FileOp::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
+                let gone = || CoreError::Tool(format!("{path}: an earlier operation removes it"));
+                if removed_entry(&path, &planned, context) {
+                    return Err(gone());
+                }
+                // A file an earlier operation writes is read as it leaves it.
+                let earlier = match resolve_new(&path, context) {
+                    Ok(key) => match planned.get(&key) {
+                        Some(Planned::Text(text)) => Some((key, text.clone())),
+                        Some(Planned::Removed) => return Err(gone()),
+                        None => None,
+                    },
+                    Err(_) => None,
+                };
+                let (resolved, text) = match earlier {
+                    Some(earlier) => earlier,
+                    None => {
+                        let resolved =
+                            resolve_existing(&path, context).map_err(|error| at(&path, error))?;
+                        let text = tokio::fs::read_to_string(&resolved)
+                            .await
+                            .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
+                        (resolved, text)
+                    }
+                };
+                let updated = haarness_core::patch::apply_hunks(&text, &hunks)
+                    .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
+                if let Some(target) = move_to {
+                    // The move takes the source's entry away: a link goes,
+                    // not the file it leads to. A file the patch adds earlier
+                    // is its own entry.
+                    let entry = match resolve_entry(&path, context) {
+                        Ok(entry) => entry,
+                        Err(_) if planned.contains_key(&resolved) => resolved.clone(),
+                        Err(error) => return Err(at(&path, error)),
+                    };
+                    let removed = match planned.get(&entry) {
+                        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                        _ => entry_diff_body(&entry).await,
+                    };
+                    let destination = planned_target(&target, &planned, context)?;
+                    let target_entry =
+                        haarness_core::resolve_permission_entry(&context.workspace, &target);
+                    // A file the patch adds earlier is checked here.
+                    if destination == entry || same_entry(&entry, &destination, &target_entry) {
+                        return Err(CoreError::Invalid(format!(
+                            "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                        )));
+                    }
+                    let destination_before = planned_body(&planned, &destination).await;
+                    push_tool_diff(
+                        &mut plan.diffs,
+                        deletion_diff(&path, removed),
+                        &mut plan.diffs_truncated,
+                    );
+                    push_tool_diff(
+                        &mut plan.diffs,
+                        replacement_diff(&target, destination_before, &updated),
+                        &mut plan.diffs_truncated,
+                    );
+                    planned.insert(destination.clone(), Planned::Text(updated.clone()));
+                    planned.insert(entry.clone(), Planned::Removed);
+                    plan.steps.push((
+                        format!("moved {path} → {target}"),
+                        PatchStep::Move {
+                            file: path,
+                            target,
+                            entry,
+                            destination,
+                            target_entry,
+                            content: updated,
+                        },
+                    ));
+                } else {
+                    push_tool_diff(
+                        &mut plan.diffs,
+                        text_file_diff(
+                            &path,
+                            FileDiffStatus::Modified,
+                            Some(&text),
+                            Some(&updated),
+                        ),
+                        &mut plan.diffs_truncated,
+                    );
+                    planned.insert(resolved.clone(), Planned::Text(updated.clone()));
+                    plan.steps.push((
+                        format!("updated {path}"),
+                        PatchStep::Write {
+                            file: path,
+                            path: resolved,
+                            content: updated,
+                        },
+                    ));
+                }
+            }
+            haarness_core::patch::FileOp::Delete { path } => {
+                if removed_entry(&path, &planned, context) {
+                    return Err(CoreError::Tool(format!(
+                        "{path}: an earlier operation removes it"
+                    )));
+                }
+                // A link is deleted itself, not the file it leads to. A file
+                // the patch adds earlier is its own entry.
+                let resolved = match resolve_entry(&path, context) {
+                    Ok(resolved) => resolved,
+                    Err(error) => match resolve_new(&path, context) {
+                        Ok(key) if matches!(planned.get(&key), Some(Planned::Text(_))) => key,
+                        _ => return Err(at(&path, error)),
+                    },
+                };
+                let existing = match planned.get(&resolved) {
+                    Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                    _ => entry_diff_body(&resolved).await,
+                };
+                push_tool_diff(
+                    &mut plan.diffs,
+                    deletion_diff(&path, existing),
+                    &mut plan.diffs_truncated,
+                );
+                planned.insert(resolved.clone(), Planned::Removed);
+                plan.steps.push((
+                    format!("deleted {path}"),
+                    PatchStep::Remove {
+                        file: path,
+                        entry: resolved,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Whether an earlier operation of the patch removes the entry `path` names.
+fn removed_entry(path: &str, planned: &HashMap<PathBuf, Planned>, context: &ToolContext) -> bool {
+    let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
+    matches!(planned.get(&entry), Some(Planned::Removed))
+}
+
+/// Where a patch writes `path`: the entry itself when an earlier operation
+/// removes it (a link it deletes no longer leads anywhere), else the file
+/// the path leads to.
+fn planned_target(
+    path: &str,
+    planned: &HashMap<PathBuf, Planned>,
+    context: &ToolContext,
+) -> CoreResult<PathBuf> {
+    if removed_entry(path, planned, context) {
+        let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
+        return ensure_within(entry, context);
+    }
+    resolve_new(path, context)
+}
+
+/// What `path` holds before an operation, as the earlier ones leave it.
+async fn planned_body(planned: &HashMap<PathBuf, Planned>, path: &Path) -> ExistingDiffBody {
+    match planned.get(path) {
+        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+        Some(Planned::Removed) => ExistingDiffBody::Missing,
+        None => existing_diff_body(path).await,
+    }
+}
+
+/// Write a planned patch in order. A write that fails says which operations
+/// were already applied.
+async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
+    let mut applied: Vec<String> = Vec::new();
+    for (line, step) in steps {
+        let note = |message: String| {
+            if applied.is_empty() {
+                message
+            } else {
+                format!("{message}; already applied: {}", applied.join(", "))
+            }
+        };
+        let failed = |message: String| CoreError::Tool(note(message));
+        match step {
+            PatchStep::Write {
+                file,
+                path,
+                content,
+            } => write_file(&path, &content)
+                .await
+                .map_err(|error| failed(format!("could not write {file}: {error}")))?,
+            PatchStep::Remove { file, entry } => tokio::fs::remove_file(&entry)
+                .await
+                .map_err(|error| failed(format!("could not delete {file}: {error}")))?,
+            PatchStep::Move {
+                file,
+                target,
+                entry,
+                destination,
+                target_entry,
+                content,
+            } => {
+                if same_entry(&entry, &destination, &target_entry) {
+                    return Err(CoreError::Invalid(note(format!(
+                        "{file}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                    ))));
+                }
+                write_file(&destination, &content)
+                    .await
+                    .map_err(|error| failed(format!("could not write {target}: {error}")))?;
+                tokio::fs::remove_file(&entry).await.map_err(|error| {
+                    failed(format!(
+                        "wrote {target} but could not remove {file}: {error}"
+                    ))
+                })?;
+            }
+        }
+        applied.push(line);
+    }
+    Ok(())
+}
+
+/// Write `content` to `path`, creating the folders it needs.
+async fn write_file(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, content).await
+}
+
+/// An I/O failure of one patch operation, naming its file.
+fn at(path: &str, error: CoreError) -> CoreError {
+    match error {
+        CoreError::Tool(message) => CoreError::Tool(format!("{path}: {message}")),
+        error => error,
+    }
+}
+
+/// A patch that failed before writing, saying so when it had other
+/// operations.
+fn unchanged(error: CoreError, several: bool) -> CoreError {
+    const NOTE: &str = "; no file was changed";
+    match error {
+        CoreError::Tool(message) if several => CoreError::Tool(format!("{message}{NOTE}")),
+        CoreError::Invalid(message) if several => CoreError::Invalid(format!("{message}{NOTE}")),
+        CoreError::PermissionDenied(message) if several => {
+            CoreError::PermissionDenied(format!("{message}{NOTE}"))
+        }
+        error => error,
+    }
+}
+
 // Paths resolve where the call works (`ToolContext::workspace`): a chat's own
 // folder, or the project folder.
 fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
@@ -5815,10 +6042,121 @@ export default workflow({
         .unwrap_err()
         .to_string();
         assert!(error.contains("names the same file"), "{error}");
+        // Refused before the file it adds was written.
+        assert!(!workspace.join("added.txt").exists());
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_plans_every_operation_before_it_writes() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-plan-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("first.txt"), "one\n").unwrap();
+        std::fs::write(workspace.join("second.txt"), "two\n").unwrap();
+        std::fs::write(workspace.join("blocker"), "a file\n").unwrap();
+        std::fs::write(workspace.join("windows.txt"), "a\r\nb\r\nc\r\n").unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: &str| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            let input = input.to_owned();
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+
+        // A later hunk that does not match leaves the earlier file as it was.
+        let error = run(concat!(
+            "*** Begin Patch\n*** Update File: first.txt\n@@\n-one\n+ONE\n",
+            "*** Update File: second.txt\n@@\n-absent\n+x\n*** End Patch\n"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("second.txt: hunk context not found: \"absent\"; no file was changed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("first.txt")).unwrap(),
+            "one\n"
+        );
+
+        // A write that fails partway says what it already applied.
+        let error = run(concat!(
+            "*** Begin Patch\n*** Add File: added.txt\n+a\n",
+            "*** Add File: blocker/inner.txt\n+b\n*** End Patch\n"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("could not write blocker/inner.txt"),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("; already applied: added added.txt"),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read_to_string(workspace.join("added.txt")).unwrap(),
             "a\n"
         );
+
+        // Operations read a file as the earlier ones leave it.
+        let output = run(concat!(
+            "*** Begin Patch\n*** Add File: made.txt\n+one\n",
+            "*** Update File: made.txt\n@@\n-one\n+two\n",
+            "*** Delete File: first.txt\n*** Add File: first.txt\n+fresh\n",
+            "*** Update File: windows.txt\n@@\n a\n-b\n+B\n+added\n*** End Patch\n"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("made.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("first.txt")).unwrap(),
+            "fresh\n"
+        );
+        // A CRLF file stays CRLF.
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("windows.txt")).unwrap(),
+            "a\r\nB\r\nadded\r\nc\r\n"
+        );
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(output.metadata["diffs"].clone()).unwrap();
+        let shown = diffs
+            .iter()
+            .map(|diff| (diff.file.as_str(), diff.status, diff.before.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown[..4],
+            [
+                ("made.txt", FileDiffStatus::Added, None),
+                ("made.txt", FileDiffStatus::Modified, Some("one\n")),
+                ("first.txt", FileDiffStatus::Deleted, Some("one\n")),
+                ("first.txt", FileDiffStatus::Added, None),
+            ]
+        );
+        let error = run(concat!(
+            "*** Begin Patch\n*** Delete File: made.txt\n",
+            "*** Update File: made.txt\n@@\n-two\n+three\n*** End Patch\n"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("made.txt: an earlier operation removes it; no file was changed"),
+            "{error}"
+        );
+        assert!(workspace.join("made.txt").exists());
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
