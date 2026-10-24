@@ -353,16 +353,56 @@ impl LanguageService {
         root: &Path,
         cancel: CancellationToken,
     ) -> Vec<FileReport> {
+        let reports = self.format_files(files, root, cancel.clone()).await;
+        self.diagnose_files(reports, root, cancel).await
+    }
+
+    /// The formatting half of [`Self::process_files`], for a caller that
+    /// holds the files while they are rewritten but not while language
+    /// servers answer.
+    pub async fn format_files(
+        self: &Arc<Self>,
+        files: Vec<PathBuf>,
+        root: &Path,
+        cancel: CancellationToken,
+    ) -> Vec<FileReport> {
         let futures = files.into_iter().map(|file| {
             let service = Arc::clone(self);
             let cancel = cancel.clone();
             let root = root.to_path_buf();
-            async move { service.process_file(file, &root, cancel).await }
+            async move { service.format_file(file, &root, cancel).await }
+        });
+        join_all(futures).await
+    }
+
+    /// The diagnostics half of [`Self::process_files`]: each report gains
+    /// what the language servers say about its file.
+    pub async fn diagnose_files(
+        self: &Arc<Self>,
+        reports: Vec<FileReport>,
+        root: &Path,
+        cancel: CancellationToken,
+    ) -> Vec<FileReport> {
+        let futures = reports.into_iter().map(|report| {
+            let service = Arc::clone(self);
+            let cancel = cancel.clone();
+            let root = root.to_path_buf();
+            async move { service.diagnose_file(report, &root, cancel).await }
         });
         join_all(futures).await
     }
 
     pub async fn process_file(
+        &self,
+        file: PathBuf,
+        root: &Path,
+        cancel: CancellationToken,
+    ) -> FileReport {
+        let report = self.format_file(file, root, cancel.clone()).await;
+        self.diagnose_file(report, root, cancel).await
+    }
+
+    async fn format_file(
         &self,
         file: PathBuf,
         root: &Path,
@@ -393,7 +433,21 @@ impl LanguageService {
                 Err(error) => report.warnings.push(format!("formatter {id}: {error}")),
             }
         }
-        if !state.lsp.enabled {
+        report
+    }
+
+    async fn diagnose_file(
+        &self,
+        mut report: FileReport,
+        root: &Path,
+        cancel: CancellationToken,
+    ) -> FileReport {
+        let state = self.state();
+        let Some(root) = self.root(root) else {
+            return report;
+        };
+        let file = report.file.clone();
+        if !state.lsp.enabled || !file.is_file() || !inside(&root, &file) {
             return report;
         }
         for (id, slot) in Self::matching_servers(&state, &file) {
