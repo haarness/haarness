@@ -161,6 +161,8 @@ When a connected MCP server declares resources, the model can list and read them
 | `mcp_resource_list` | The server name. Listing every server asks about each server it lists, so a rule about one server still applies. |
 | `mcp_resource_read` | `<server>:<uri>`. **Always** remembers `<server>:*`, every resource of that server and no other. |
 
+Upstream OpenCode's names for the two tools, `opencode_list_mcp_resources` and `opencode_read_mcp_resource`, mean the same here, with the same patterns, so a rule in an `opencode.json` shared with OpenCode applies: `"opencode_read_mcp_resource": "deny"` refuses `mcp_resource_read` and takes it from the model. Such a rule takes its own place in the rule order, like any other.
+
 In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. A rule or setting that takes every tool of a server away (`"mcp__docs__*": "deny"`) keeps its resources from the model as well, before either permission is asked: a listing of every server leaves it out, and a read naming it is refused as configured policy. A resource a person picks from the `@` list in Desktop or the TUI is read without asking, as attaching a file is, and no `PreToolUse` hook runs for it, but a deny for `<server>:<uri>` under the agent the message runs under (or the running turn's agent, for a message sent while one works) still keeps it out of the message (see [MCP resources](REFERENCE.md#plugins-skills-and-tools)). To be asked before reading anything but one server's resources:
 
 ```json
