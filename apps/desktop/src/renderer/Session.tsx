@@ -2287,7 +2287,7 @@ export function Session() {
                   when={!project()?.chatHome && (group()?.label ?? project()?.label)}
                   fallback={t("What should we work on?")}
                 >
-                  {(name) => projectHeading(t("What should we work on in {project}?"), name())}
+                  {(name) => projectHeading(t("What should we work on in {project}?"), name)}
                 </Show>
               </h2>
               {/* Starters are about code; a chat without a folder starts
@@ -3020,15 +3020,15 @@ export function Session() {
  * an ellipsis instead of leaving the mark alone on the next line. A Cloud
  * session's title is often a sentence, which must not end in a full stop
  * before the question mark. */
-function projectHeading(template: string, name: string) {
+function projectHeading(template: string, name: () => string) {
   const [before, after = ""] = template.split("{project}");
   const [, glued = "", rest = ""] = /^(\S*)([\s\S]*)$/.exec(after) ?? [];
   return (
     <>
       {before}
       <span class="heading-project">
-        <span class="heading-project-name" title={name}>
-          {name.replace(/[.!?。！？]+$/u, "")}
+        <span class="heading-project-name" title={name()}>
+          {name().replace(/[.!?。！？]+$/u, "")}
         </span>
         {glued}
       </span>
