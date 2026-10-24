@@ -5,10 +5,12 @@
    once migrated to `haarness.json`: a deny written after a broader allow refuses.
 2. cd_link: a `cd` through a link that the shell takes out of the project by name
    (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
+3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
+   read tool refuses `mcp_resource_read`.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link). No model is called; nothing outside the fixture is touched.
+toml_order, cd_link, resource_alias). No model is called; nothing outside the fixture is touched.
 """
 import json
 import os
@@ -46,7 +48,12 @@ def project(name, config=None):
 
 def bash(env, folder, command, timeout=120, code=None):
     """`haarness run` of one bash call: what the run printed. `code` checks how it exited."""
-    line = '!tool bash ' + json.dumps({'command': command})
+    return call(env, folder, 'bash', {'command': command}, timeout, code)
+
+
+def call(env, folder, name, arguments, timeout=120, code=None):
+    """`haarness run` of one tool call: what the run printed. `code` checks how it exited."""
+    line = f'!tool {name} ' + json.dumps(arguments)
     result = subprocess.run([str(BINARY), '--workspace', str(folder), '--trust-project', 'run', line],
                             env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     output = result.stdout + result.stderr
@@ -104,7 +111,24 @@ def case_cd_link():
     passed('a cd out of the project through a link asks; one that stays inside runs')
 
 
-CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link}
+def case_resource_alias():
+    """`opencode_read_mcp_resource` in opencode.json governs `mcp_resource_read`."""
+    _, env = environment('resource-alias')
+    fixture = REPO / 'crates/haarness-mcp/tests/fixtures/resources.py'
+    folder = project('resource-alias', {'mcp': {'docs': {'command': sys.executable, 'args': [str(fixture)]}}})
+    (folder / 'opencode.json').write_text(json.dumps({'permission': {'opencode_read_mcp_resource': {'*': 'deny'}}}))
+    try:
+        output = call(env, folder, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://setup'})
+        assert 'Run the fixture' not in output, output
+        assert 'tool mcp_resource_read is disabled' in output, output
+        output = call(env, folder, 'mcp_resource_list', {'server': 'docs'}, code=0)
+        assert 'docs://setup' in output, output
+    finally:
+        stop(env, folder)
+    passed('a deny under the upstream resource read name refuses the read; the listing still runs')
+
+
+CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
