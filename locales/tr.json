@@ -2869,5 +2869,16 @@
   "Choose a folder": "Klasör seçin",
   "Search folders": "Klasörlerde ara",
   "Opening This computer…": "Bu bilgisayar açılıyor…",
-  "Couldn’t open This computer": "Bu bilgisayar açılamadı"
+  "Couldn’t open This computer": "Bu bilgisayar açılamadı",
+  "no tools yet": "henüz araç yok",
+  "starting": "başlatılıyor",
+  "running in background": "arka planda çalışıyor",
+  "1 tool call": "1 araç çağrısı",
+  "{count} tool calls": "{count} araç çağrısı",
+  "less than a day left at this pace": "bu hızla bir günden az kaldı",
+  "about 1 day left at this pace": "bu hızla yaklaşık 1 gün kaldı",
+  "about {count} days left at this pace": "bu hızla yaklaşık {count} gün kaldı",
+  "Can't reach the server · still waiting": "Sunucuya ulaşılamıyor · beklemeye devam ediliyor",
+  "Theme {file} not loaded: {reason}": "{file} teması yüklenmedi: {reason}",
+  "The server did not answer in time": "Sunucu zamanında yanıt vermedi"
 }

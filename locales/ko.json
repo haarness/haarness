@@ -2869,5 +2869,16 @@
   "Choose a folder": "폴더 선택",
   "Search folders": "폴더 검색",
   "Opening This computer…": "이 컴퓨터를 여는 중…",
-  "Couldn’t open This computer": "이 컴퓨터를 열 수 없습니다"
+  "Couldn’t open This computer": "이 컴퓨터를 열 수 없습니다",
+  "no tools yet": "아직 도구 호출 없음",
+  "starting": "시작 중",
+  "running in background": "백그라운드에서 실행 중",
+  "1 tool call": "도구 호출 1회",
+  "{count} tool calls": "도구 호출 {count}회",
+  "less than a day left at this pace": "이 속도라면 하루도 남지 않음",
+  "about 1 day left at this pace": "이 속도라면 약 1일 남음",
+  "about {count} days left at this pace": "이 속도라면 약 {count}일 남음",
+  "Can't reach the server · still waiting": "서버에 연결할 수 없음 · 계속 기다리는 중",
+  "Theme {file} not loaded: {reason}": "테마 {file}을(를) 불러오지 못함: {reason}",
+  "The server did not answer in time": "서버가 제시간에 응답하지 않았습니다"
 }

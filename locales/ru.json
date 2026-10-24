@@ -592,8 +592,8 @@
   "Tool loading": "Загрузка инструментов",
   "Search tools": "Поиск инструментов",
   "Find a tool…": "Найти инструмент…",
-  "1 tool": "1 инструмент",
-  "{count} tools": "{count} инструментов",
+  "1 tool": "инструменты: 1",
+  "{count} tools": "инструменты: {count}",
   "1 turned off": "выключено: 1",
   "{count} turned off": "выключено: {count}",
   "No tool matches that search.": "Ни один инструмент не соответствует запросу.",
@@ -2869,5 +2869,16 @@
   "Choose a folder": "Выберите папку",
   "Search folders": "Поиск папок",
   "Opening This computer…": "Открываем «Этот компьютер»…",
-  "Couldn’t open This computer": "Не удалось открыть «Этот компьютер»"
+  "Couldn’t open This computer": "Не удалось открыть «Этот компьютер»",
+  "no tools yet": "инструменты ещё не вызывались",
+  "starting": "запуск",
+  "running in background": "работает в фоне",
+  "1 tool call": "вызовы инструментов: 1",
+  "{count} tool calls": "вызовы инструментов: {count}",
+  "less than a day left at this pace": "при таком темпе осталось меньше дня",
+  "about 1 day left at this pace": "при таком темпе осталось дней: около 1",
+  "about {count} days left at this pace": "при таком темпе осталось дней: около {count}",
+  "Can't reach the server · still waiting": "Сервер недоступен · ожидание продолжается",
+  "Theme {file} not loaded: {reason}": "Тема {file} не загружена: {reason}",
+  "The server did not answer in time": "Сервер не ответил вовремя"
 }

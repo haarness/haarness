@@ -1921,7 +1921,7 @@ while [ "$attempt" -lt 60 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
   echo "$pane" | grep -q "▾ agents" \
     && echo "$pane" | grep -Eq "!tool bash" \
-    && echo "$pane" | grep -Eq "[Gg]eneral.*bash.*tools" \
+    && echo "$pane" | grep -Eq "[Gg]eneral.*bash.*[0-9]+ tools?" \
     && echo "$pane" | grep -q "running in background" \
     && ! echo "$pane" | grep -Eq "needs approval|waiting for approval|Run a shell command: sleep" \
     && ! echo "$pane" | grep -q "until the Haarness server stops" \
@@ -1932,7 +1932,7 @@ while [ "$attempt" -lt 60 ]; do
 done
 if ! echo "$pane" | grep -q "▾ agents" \
   || ! echo "$pane" | grep -Eq "!tool bash" \
-  || ! echo "$pane" | grep -Eq "[Gg]eneral.*bash.*tools" \
+  || ! echo "$pane" | grep -Eq "[Gg]eneral.*bash.*[0-9]+ tools?" \
   || ! echo "$pane" | grep -q "running in background" \
   || echo "$pane" | grep -Eq "needs approval|waiting for approval|Run a shell command: sleep" \
   || echo "$pane" | grep -q "until the Haarness server stops" \

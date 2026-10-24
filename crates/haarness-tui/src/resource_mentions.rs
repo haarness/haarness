@@ -451,6 +451,7 @@ impl App {
     /// stays put; a list Esc hid stays hidden. A failed listing is asked for
     /// again at the next `@`.
     pub(crate) fn resources_arrived(&mut self, update: Update) {
+        self.list_generation += 1;
         let listing = &mut self.mention_resources;
         match update {
             Update::Servers {

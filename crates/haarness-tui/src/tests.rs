@@ -6451,6 +6451,134 @@ async fn task_updates_feed_live_child_rows() {
     );
 }
 
+/// One call is "1 tool" (the sidebar and the row under the delegation) and
+/// "1 tool call" (/tasks), in every language; a child that ended without
+/// calls says how it ended, never "no tools yet".
+#[tokio::test]
+async fn child_rows_count_one_call_and_end_without_calls() {
+    let thread = fixture_thread();
+    let child_thread = ThreadId::new();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "call-1".into(),
+            name: "task".into(),
+            arguments: serde_json::json!({"prompt": "audit the API", "agent": "general"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let client = offline_client();
+    let update = |state: &str, calls: u64| {
+        fixture_event(
+            "task.updated",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "callId": "call-1",
+                "childThreadId": child_thread,
+                "childTurnId": haarness_protocol::TurnId::new(),
+                "state": state,
+                "toolCalls": calls,
+                "lastTool": "grep",
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    app.reduce(update("running", 1), &client).await.unwrap();
+    let sidebar = |app: &App| -> String {
+        crate::view::sidebar::sidebar_lines(app, 38, 40)
+            .lines
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect()
+    };
+    let tasks = |app: &mut App| {
+        app.open_tasks_overlay();
+        let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+            panic!("child picker did not open");
+        };
+        let description = entries[0].description.clone();
+        app.close_overlay();
+        description
+    };
+    assert!(
+        sidebar(&app).contains("general · grep · 1 tool ·"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(frame_text(&app, (100, 30)).contains("↳ grep · 1 tool"));
+    assert!(tasks(&mut app).contains("· 1 tool call ·"));
+
+    app.language = crate::locale::Language::German;
+    assert!(
+        sidebar(&app).contains("general · grep · 1 Tool ·"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(tasks(&mut app).contains("· 1 Tool-Aufruf ·"));
+    app.reduce(update("running", 3), &client).await.unwrap();
+    assert!(tasks(&mut app).contains("· 3 Tool-Aufrufe ·"));
+    app.language = crate::locale::Language::English;
+
+    // In Russian and Polish a count reads as a label, so its noun never
+    // takes the wrong form for the number.
+    app.reduce(update("running", 3), &client).await.unwrap();
+    app.language = crate::locale::Language::Russian;
+    assert!(
+        sidebar(&app).contains("инструменты: 3"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(tasks(&mut app).contains("вызовы инструментов: 3"));
+    app.language = crate::locale::Language::Polish;
+    assert!(sidebar(&app).contains("narzędzia: 3"), "{}", sidebar(&app));
+    // Arabic and Bosnian nouns change past ten and at 21: a label too.
+    app.language = crate::locale::Language::Arabic;
+    assert!(sidebar(&app).contains("الأدوات: 3"), "{}", sidebar(&app));
+    app.language = crate::locale::Language::Bosnian;
+    assert!(sidebar(&app).contains("alati: 3"), "{}", sidebar(&app));
+    // One reads the same way as many.
+    app.reduce(update("running", 1), &client).await.unwrap();
+    app.language = crate::locale::Language::Russian;
+    assert!(
+        sidebar(&app).contains("инструменты: 1"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(tasks(&mut app).contains("вызовы инструментов: 1"));
+    app.language = crate::locale::Language::English;
+
+    for (state, row) in [
+        ("done", "└ completed"),
+        ("failed", "└ failed"),
+        ("cancelled", "└ cancelled"),
+    ] {
+        app.reduce(update(state, 0), &client).await.unwrap();
+        let text = frame_text(&app, (100, 30));
+        assert!(text.contains(row), "{state}: {text}");
+        assert!(
+            !text.contains("no tools yet") && !text.contains("tools ·"),
+            "{state}: {text}"
+        );
+        // Nor does the sidebar count calls it never made.
+        let side = sidebar(&app);
+        assert!(
+            side.contains(&format!("last grep · {state}")) || state == "done",
+            "{side}"
+        );
+        assert!(
+            state != "done" || side.contains("last grep · completed"),
+            "{side}"
+        );
+        assert!(!side.contains("0 tools"), "{state}: {side}");
+    }
+    app.reduce(update("failed", 1), &client).await.unwrap();
+    assert!(frame_text(&app, (100, 30)).contains("└ failed · 1 tool"));
+}
+
 #[tokio::test]
 async fn task_updates_cannot_create_phantom_agent_rows() {
     let thread = fixture_thread();
@@ -9227,6 +9355,606 @@ async fn clicking_a_chip_answers_the_approval() {
     }
     assert!(app.pending_permissions.is_empty());
     assert_eq!(server.await.unwrap().len(), 1);
+}
+
+/// Press, drag through and release, as a terminal reports a mouse drag on
+/// one row.
+async fn mouse_drag(
+    app: &mut App,
+    client: &crate::api::ApiClient,
+    row: u16,
+    press: u16,
+    release: u16,
+) {
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), press),
+        (MouseEventKind::Drag(MouseButton::Left), release),
+        (MouseEventKind::Up(MouseButton::Left), release),
+    ] {
+        crate::input::mouse::handle_mouse(
+            app,
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            client,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// A press beside an approval chip that slips onto it is a selection, not
+/// an answer; a press on the chip that slips within it still answers.
+#[tokio::test]
+async fn a_press_that_slips_onto_a_chip_does_not_answer() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-slip"));
+    let _ = app.lines((100, 40));
+    let chip = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| hit.target == crate::view::frame::HitTarget::PermissionOption(0))
+        .cloned()
+        .expect("Allow once chip is clickable");
+    let (row, start) = (
+        u16::try_from(chip.row).unwrap(),
+        u16::try_from(chip.start).unwrap(),
+    );
+    assert_ne!(
+        app.hit_at(chip.row, chip.start - 1),
+        Some(crate::view::frame::HitTarget::PermissionOption(0)),
+        "the press misses the chip"
+    );
+    let (watching, seen) = sign_in_server(Vec::new()).await;
+    mouse_drag(&mut app, &watching, row, start - 1, start).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(app.pending_permissions.len(), 1);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the card was answered: {:?}",
+        seen.lock().unwrap()
+    );
+    crate::terminal::take_copied();
+
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    let _ = app.lines((100, 40));
+    mouse_drag(&mut app, &client, row, start, start + 1).await;
+    assert!(
+        app.pending_permissions.is_empty(),
+        "a slip within the chip answers"
+    );
+    assert_eq!(server.await.unwrap().len(), 1);
+    assert_eq!(crate::terminal::take_copied(), Vec::<String>::new());
+}
+
+/// One mouse report on `row`.
+async fn mouse_at(
+    app: &mut App,
+    client: &crate::api::ApiClient,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) {
+    crate::input::mouse::handle_mouse(
+        app,
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        client,
+    )
+    .await
+    .unwrap();
+}
+
+/// Where the Allow once chip of the card on screen starts: (column, row).
+fn allow_once_chip(app: &App) -> (u16, u16) {
+    let chip = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| hit.target == crate::view::frame::HitTarget::PermissionOption(0))
+        .cloned()
+        .expect("Allow once chip is clickable");
+    (
+        u16::try_from(chip.start).unwrap(),
+        u16::try_from(chip.row).unwrap(),
+    )
+}
+
+/// A release answers only the card that was under the press: one that
+/// appeared under a held press, or replaced the one pressed, is not
+/// answered, nor is a chip reached by a press that left it and came back,
+/// or by a press beside it with no motion between.
+#[tokio::test]
+async fn a_release_answers_only_the_card_that_was_pressed() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, seen) = sign_in_server(Vec::new()).await;
+    let answered =
+        |seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| !seen.lock().unwrap().is_empty();
+
+    // A card appears under a press held on the conversation.
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-a"));
+    let _ = app.lines((100, 40));
+    let (column, row) = allow_once_chip(&app);
+    app.pending_permissions.clear();
+    let _ = app.lines((100, 40));
+    assert_ne!(
+        app.hit_at(usize::from(row), usize::from(column)),
+        Some(crate::view::frame::HitTarget::PermissionOption(0))
+    );
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-a"));
+    let _ = app.lines((100, 40));
+    assert_eq!(
+        allow_once_chip(&app),
+        (column, row),
+        "the chip is under the press"
+    );
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Drag(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a card that appeared under the press: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // Another request replaces the one pressed, in the same place.
+    let _ = app.lines((100, 40));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    app.pending_permissions = vec![pending_permission_fixture(&thread, "perm-b")];
+    let _ = app.lines((100, 40));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a card that replaced the pressed one: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // A press on the chip that leaves it and comes back.
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Drag(MouseButton::Left),
+        column + 8,
+        row - 3,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Drag(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a press that left the chip: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // A press beside the chip released on it, with no motion reported.
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column - 1,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a press beside the chip: {:?}",
+        seen.lock().unwrap()
+    );
+    assert_eq!(app.pending_permissions.len(), 1);
+
+    // A press and release on the chip still answers it.
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    for _ in 0..200 {
+        if answered(&seen) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("perm-b")),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+}
+
+/// The cell of the first hit whose target `matches`: (column, row).
+fn hit_cell(app: &App, matches: impl Fn(&crate::view::frame::HitTarget) -> bool) -> (u16, u16) {
+    let hit = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| matches(&hit.target))
+        .cloned()
+        .expect("the target is on screen");
+    (
+        u16::try_from(hit.start + 2).unwrap(),
+        u16::try_from(hit.row).unwrap(),
+    )
+}
+
+/// A list replaced under a held press is not acted on by its release: in
+/// /queue, a press on the third message, then Enter opening its actions
+/// with Remove under the pointer, removes nothing, with or without a slip.
+#[tokio::test]
+async fn a_list_replaced_under_a_held_press_is_not_clicked() {
+    let thread = fixture_thread();
+    let queue = haarness_protocol::InputQueue {
+        revision: 4,
+        items: ["first queued", "second queued", "third queued"]
+            .map(|text| queued_input(text, &[]))
+            .to_vec(),
+    };
+    // The /queue list, as the command opens it.
+    let listed = || {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.input_queue = queue.clone();
+        app.open_overlay(crate::state::Overlay::Options {
+            title: "Queued messages · paused — send when ready".into(),
+            kind: crate::state::OptionsKind::InputQueue,
+            entries: queue
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| crate::state::OptionEntry {
+                    label: format!("{}. {}", index + 1, item.text),
+                    description: "Enter for actions".into(),
+                    value: item.id.to_string(),
+                })
+                .collect(),
+        });
+        app
+    };
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    // A terminal size where Enter on the third message puts the action of
+    // the same row index (Remove) under the pointer: the case where a list
+    // row's index alone cannot tell the two lists apart.
+    let mut size = None;
+    for height in 16..60 {
+        let mut app = listed();
+        let lines = app.lines((120, height));
+        let (column, row) = screen_cell(&lines, "3. third queued");
+        let before = app.hit_at(usize::from(row), usize::from(column));
+        app.selection = 2;
+        crate::input::handle_key(&mut app, enter, &offline_client())
+            .await
+            .unwrap();
+        let _ = app.lines((120, height));
+        if app.hit_at(usize::from(row), usize::from(column)) == before {
+            size = Some((height, column, row));
+            break;
+        }
+    }
+    let (height, column, row) = size.expect("a size that puts Remove under the press");
+    for slip in [0, 1] {
+        let mut app = listed();
+        let (client, seen) = sign_in_server(Vec::new()).await;
+        let _ = app.lines((120, height));
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        )
+        .await;
+        crate::input::handle_key(&mut app, enter, &client)
+            .await
+            .unwrap();
+        let lines = app.lines((120, height));
+        let under = line_text(&lines[usize::from(row)]);
+        assert!(
+            under.contains("Remove"),
+            "Remove is under the press: {under}"
+        );
+        if slip == 1 {
+            mouse_at(
+                &mut app,
+                &client,
+                MouseEventKind::Drag(MouseButton::Left),
+                column + 1,
+                row,
+            )
+            .await;
+        }
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Up(MouseButton::Left),
+            column + slip,
+            row,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "slip {slip}: the message was removed: {:?}",
+            seen.lock().unwrap()
+        );
+        assert!(matches!(
+            app.overlay,
+            crate::state::Overlay::Options {
+                kind: crate::state::OptionsKind::InputQueueActions,
+                ..
+            }
+        ));
+        // A click on Remove itself still acts (the stub then refuses it,
+        // which is no concern here).
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            let _ = crate::input::mouse::handle_mouse(
+                &mut app,
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &client,
+            )
+            .await;
+        }
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("remove")),
+            "slip {slip}: the click on Remove acted: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+}
+
+/// A press where Confirm appears once "always" is staged under it is not a
+/// confirmation, and a question replaced by another under a held press is
+/// not answered (single choice) or marked (several).
+#[tokio::test]
+async fn a_staged_always_or_a_replaced_question_is_not_clicked() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, seen) = sign_in_server(Vec::new()).await;
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-j"));
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let stage = async |app: &mut App| {
+        for code in [KeyCode::Right, KeyCode::Enter] {
+            crate::input::handle_key(app, key(code), &client)
+                .await
+                .unwrap();
+        }
+    };
+    app.permission_focus = true;
+    let _ = app.lines((100, 40));
+    stage(&mut app).await;
+    assert!(
+        app.confirm_always.is_some(),
+        "Always stages the confirmation"
+    );
+    let _ = app.lines((100, 40));
+    let (column, row) = hit_cell(&app, |target| {
+        *target == crate::view::frame::HitTarget::PermissionOption(0)
+    });
+    crate::input::handle_key(&mut app, key(KeyCode::Esc), &client)
+        .await
+        .unwrap();
+    assert!(app.confirm_always.is_none());
+    let _ = app.lines((100, 40));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    app.permission_selection = 0;
+    app.permission_focus = true;
+    stage(&mut app).await;
+    assert!(app.confirm_always.is_some());
+    let _ = app.lines((100, 40));
+    assert_eq!(
+        app.hit_at(usize::from(row), usize::from(column)),
+        Some(crate::view::frame::HitTarget::PermissionOption(0)),
+        "Confirm is under the press"
+    );
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+    assert_eq!(app.pending_permissions.len(), 1);
+    app.pending_permissions.clear();
+    app.confirm_always = None;
+
+    let question = |id: &str, multiple: bool| haarness_protocol::PendingQuestionInfo {
+        question_id: id.into(),
+        prompt: "Which colour?".into(),
+        choices: vec!["red".into(), "green".into(), "blue".into()],
+        multiple,
+        custom: false,
+        thread_id: thread.id,
+        root_thread_id: Some(thread.id),
+        turn_id: None,
+        call_id: None,
+        created_at: Utc::now(),
+    };
+    for multiple in [true, false] {
+        app.pending_questions = vec![question("q1", multiple)];
+        app.question_selected.clear();
+        let _ = app.lines((100, 40));
+        let (column, row) = hit_cell(&app, |target| {
+            *target == crate::view::frame::HitTarget::QuestionChoice(1)
+        });
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        )
+        .await;
+        app.pending_questions = vec![question("q2", multiple)];
+        let _ = app.lines((100, 40));
+        assert_eq!(
+            app.hit_at(usize::from(row), usize::from(column)),
+            Some(crate::view::frame::HitTarget::QuestionChoice(1))
+        );
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            app.question_selected.is_empty(),
+            "multiple {multiple}: marked"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "multiple {multiple}: answered {:?}",
+            seen.lock().unwrap()
+        );
+        assert_eq!(app.pending_questions.len(), 1);
+    }
+}
+
+/// Over text, a drag of one cell copies: both cells of a wide glyph, or a
+/// two-letter word.
+#[tokio::test]
+async fn a_one_cell_drag_over_text_copies_it() {
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "A界Z then ok now".into(),
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let client = offline_client();
+    let lines = app.lines((80, 20));
+    let (wide, row) = screen_cell(&lines, "界");
+    crate::terminal::take_copied();
+    mouse_drag(&mut app, &client, row, wide, wide + 1).await;
+    assert_eq!(crate::terminal::take_copied(), vec!["界".to_owned()]);
+    let _ = app.lines((80, 20));
+    let (ok, row) = screen_cell(&lines, "ok now");
+    mouse_drag(&mut app, &client, row, ok, ok + 1).await;
+    assert_eq!(crate::terminal::take_copied(), vec!["ok".to_owned()]);
 }
 
 fn outside_write_event(thread: &Thread, id: &str) -> haarness_protocol::EventEnvelope {
@@ -12967,6 +13695,273 @@ fn selection_uses_display_cells_for_wide_glyphs() {
     let row = u16::try_from(row).expect("small frame");
     app.selection_range = Some(((prefix + 2, row), (prefix + 4, row)));
     assert_eq!(app.selected_text(), "界🙂");
+}
+
+/// Where `needle` starts on screen, as a mouse reports it: (column, row).
+fn screen_cell(lines: &[Line], needle: &str) -> (u16, u16) {
+    let row = lines
+        .iter()
+        .position(|line| line_text(line).contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not on screen"));
+    let text = line_text(&lines[row]);
+    let column = text[..text.find(needle).unwrap()].width();
+    (u16::try_from(column).unwrap(), u16::try_from(row).unwrap())
+}
+
+/// The cell just past `needle` on its row.
+fn screen_end(lines: &[Line], needle: &str) -> (u16, u16) {
+    let (column, row) = screen_cell(lines, needle);
+    (column + u16::try_from(needle.width()).unwrap() - 1, row)
+}
+
+/// A drag down a reply beside the docked sidebar copies the reply as it was
+/// written: none of the sidebar's text on the same rows, no reply marker and
+/// no margin. Dragging inside the sidebar copies only the sidebar.
+#[test]
+fn selection_beside_the_sidebar_copies_only_its_own_pane() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "summarise the plan".into(),
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five".into(),
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = true;
+    let lines = app.lines((120, 40));
+    let panel = 120 - app.sidebar_width(120);
+    assert!(panel < 120, "the sidebar is docked");
+    let (start, end) = (screen_cell(&lines, "alpha"), screen_end(&lines, "five"));
+    let beside: String = lines[usize::from(start.1)..=usize::from(end.1)]
+        .iter()
+        .map(|line| line_text(line).chars().skip(panel).collect::<String>())
+        .collect();
+    assert!(
+        !beside.trim().is_empty(),
+        "the sidebar has text on these rows: {lines:#?}"
+    );
+    app.selection_range = Some((start, end));
+    assert_eq!(
+        app.selected_text(),
+        "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five"
+    );
+    // The highlight is what the release copies: nothing in the sidebar.
+    let painted = app.lines((120, 40));
+    let selected = app.theme.primary;
+    let rows = usize::from(start.1)..=usize::from(end.1);
+    for (row, line) in painted
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| rows.contains(row))
+    {
+        let mut column = 0;
+        for span in &line.spans {
+            if span.bg == Some(selected) && !span.text.trim().is_empty() {
+                assert!(column < panel, "row {row} paints the sidebar");
+            }
+            column += span.width();
+        }
+    }
+
+    // From inside the sidebar, the conversation beside it stays out.
+    let side = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            !line_text(line)
+                .chars()
+                .skip(panel + 2)
+                .collect::<String>()
+                .trim()
+                .is_empty()
+        })
+        .map(|(row, _)| row)
+        .collect::<Vec<_>>();
+    let (first, last) = (side[0], side[side.len() - 1]);
+    let first = u16::try_from(first).unwrap();
+    let last = u16::try_from(last).unwrap();
+    app.selection_range = Some(((u16::try_from(panel).unwrap(), first), (119, last)));
+    let copied = app.selected_text();
+    assert!(!copied.is_empty());
+    for word in ["alpha", "beta", "summarise"] {
+        assert!(!copied.contains(word), "{copied}");
+    }
+}
+
+/// Gutters, rails and quote bars are drawn, not written: a selection leaves
+/// them out. The same glyphs written in a message are copied.
+#[test]
+fn selection_leaves_out_gutters_but_keeps_written_bars() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "first ask\n▎ my own bar".into(),
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::ToolCall {
+                call_id: "fails".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "cargo build"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item(
+            3,
+            &thread,
+            ItemData::ToolResult {
+                call_id: "fails".into(),
+                name: "bash".into(),
+                output: "exit: 1\nerror: first failure\n▏ printed bar".into(),
+                is_error: false,
+                metadata: serde_json::json!({"exit": 1, "truncated": false}),
+            },
+        ),
+        message_item(
+            4,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "Reply start\n▎ written bar\n\n> quoted aside\n\n- listed item".into(),
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let lines = app.lines((100, 40));
+
+    app.selection_range = Some((
+        screen_cell(&lines, "first ask"),
+        screen_end(&lines, "own bar"),
+    ));
+    assert_eq!(app.selected_text(), "first ask\n▎ my own bar");
+
+    app.selection_range = Some((
+        screen_cell(&lines, "error: first"),
+        screen_end(&lines, "printed bar"),
+    ));
+    assert_eq!(app.selected_text(), "error: first failure\n▏ printed bar");
+
+    // From the start of the row: the reply marker and the margin stay out
+    // too, a quote loses only its bar and a list keeps its marker.
+    let (_, reply) = screen_cell(&lines, "Reply start");
+    app.selection_range = Some(((0, reply), screen_end(&lines, "listed item")));
+    let copied = app.selected_text();
+    let rows: Vec<&str> = copied.lines().filter(|row| !row.is_empty()).collect();
+    assert_eq!(rows[0], "Reply start", "{copied}");
+    assert_eq!(rows[1], "▎ written bar", "{copied}");
+    assert_eq!(rows[2], "quoted aside", "{copied}");
+    assert!(
+        rows[3].ends_with("listed item") && !rows[3].starts_with(' '),
+        "{copied}"
+    );
+}
+
+/// A click whose pointer slips a cell before the release is still a click:
+/// it presses what it is on, paints nothing and copies nothing.
+#[tokio::test]
+async fn a_click_that_moves_one_cell_is_a_click_not_a_copy() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::ToolCall {
+                call_id: "ok".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "cat notes"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::ToolResult {
+                call_id: "ok".into(),
+                name: "bash".into(),
+                output: "exit: 0\nfirst line\nsecond line".into(),
+                is_error: false,
+                metadata: serde_json::json!({"exit": 0, "truncated": false}),
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let id = app.items[1].id;
+    let lines = app.lines((100, 30));
+    let (column, row) = screen_cell(&lines, "cat notes");
+    let client = offline_client();
+    let mouse = |kind, column| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    crate::terminal::take_copied();
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), column),
+        (MouseEventKind::Drag(MouseButton::Left), column + 1),
+    ] {
+        crate::input::mouse::handle_mouse(&mut app, mouse(kind, column), &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.selection_range, None, "a one-cell slip paints nothing");
+    crate::input::mouse::handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Up(MouseButton::Left), column + 1),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(app.expanded.contains(&id), "the click opened the output");
+    assert_eq!(crate::terminal::take_copied(), Vec::<String>::new());
+    assert_ne!(app.notice, "Copied selection");
+
+    // Two cells is a drag: it copies.
+    let lines = app.lines((100, 30));
+    let (column, row) = screen_cell(&lines, "first line");
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), column),
+        (MouseEventKind::Drag(MouseButton::Left), column + 4),
+        (MouseEventKind::Up(MouseButton::Left), column + 4),
+    ] {
+        crate::input::mouse::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(crate::terminal::take_copied(), vec!["first".to_owned()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -16861,6 +17856,114 @@ fn review_takes_the_whole_terminal_with_a_tree_a_patch_and_key_hints() {
     );
 }
 
+/// A drag down the review copies code: side by side, only the side it
+/// started on, and in either layout no line numbers, signs or rules.
+#[test]
+fn a_drag_down_the_review_copies_one_side_without_numbers_or_signs() {
+    // The cell just right of the last (or first) `│` on `row`.
+    let after_rule = |line: &Line, last: bool| {
+        let text = line_text(line);
+        let at = if last {
+            text.rfind('│')
+        } else {
+            text.find('│')
+        }
+        .unwrap();
+        u16::try_from(text[..at].width() + 1).unwrap()
+    };
+    let mut app = review_app();
+    let lines = app.lines((160, 24));
+    assert_eq!(
+        viewer_of(&app).layout_in_use(),
+        crate::diffview::DiffLayout::Split
+    );
+    let (_, first) = screen_cell(&lines, "pub const fn label");
+    let new_side = after_rule(&lines[usize::from(first)], true);
+    app.selection_range = Some(((new_side, first), (159, first + 2)));
+    assert_eq!(
+        app.selected_text(),
+        "    pub const fn label(self) -> &'static str {\n            Self::WorkingTree => \"working tree\",\n        }"
+    );
+    // The old side the same way.
+    let old_side = after_rule(&lines[usize::from(first)], false);
+    app.selection_range = Some(((old_side, first), (new_side - 2, first + 1)));
+    assert_eq!(
+        app.selected_text(),
+        "    pub const fn label(self) -> &'static str {\n            Self::WorkingTree => \"working\","
+    );
+
+    // From a file's header down into its code: the header, then the code of
+    // the side the pointer ends on.
+    let (header, top) = screen_cell(&lines, "crates/haarness-tui/src/diffview.rs");
+    app.selection_range = Some(((header, top), (150, first + 1)));
+    let copied = app.selected_text();
+    let rows: Vec<&str> = copied.lines().collect();
+    assert!(
+        rows[0].starts_with("crates/haarness-tui/src/diffview.rs") && rows[0].ends_with("modified"),
+        "{copied}"
+    );
+    assert_eq!(
+        &rows[1..],
+        [
+            "    pub const fn label(self) -> &'static str {",
+            "            Self::WorkingTree => \"working tree\","
+        ],
+        "{copied}"
+    );
+    app.selection_range = Some(((header, top), (new_side - 4, first + 1)));
+    let copied = app.selected_text();
+    assert!(
+        copied.ends_with("\n            Self::WorkingTree => \"working\","),
+        "{copied}"
+    );
+
+    let mut app = review_app_unified();
+    let lines = app.lines((160, 24));
+    let (_, first) = screen_cell(&lines, "Self::WorkingTree => \"working\",");
+    let (end, last) = screen_end(&lines, "Self::WorkingTree => \"working tree\",");
+    app.selection_range = Some((
+        (after_rule(&lines[usize::from(first)], false), first),
+        (end, last),
+    ));
+    assert_eq!(
+        app.selected_text(),
+        "            Self::WorkingTree => \"working\",\n            Self::WorkingTree => \"working tree\","
+    );
+}
+
+/// Code in the review is there to be copied: a one-cell drag over it
+/// copies, and a click still moves the cursor.
+#[tokio::test]
+async fn a_one_cell_drag_over_review_code_copies_it() {
+    let mut app = review_app_unified();
+    let client = offline_client();
+    let lines = app.lines((160, 24));
+    let (column, row) = screen_cell(&lines, "Self::WorkingTree => \"working tree\"");
+    let cursor = viewer_of(&app).cursor;
+    crate::terminal::take_copied();
+    mouse_drag(&mut app, &client, row, column, column + 1).await;
+    assert_eq!(crate::terminal::take_copied(), vec!["Se".to_owned()]);
+    assert_eq!(viewer_of(&app).cursor, cursor, "a drag moves no cursor");
+    let _ = app.lines((160, 24));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    assert_ne!(viewer_of(&app).cursor, cursor, "a click moves the cursor");
+}
+
 #[test]
 fn review_paints_added_and_removed_rows_in_their_diff_colors() {
     let app = review_app_unified();
@@ -18890,6 +19993,306 @@ async fn connect_picker_lists_providers_and_falls_back_to_a_key_prompt_offline()
     ));
 }
 
+/// One sign-in check, sent and its answer taken, as the frame ticks do.
+async fn sign_in_check(app: &mut App, client: &crate::api::ApiClient) {
+    app.connect.login.as_mut().unwrap().last_poll = None;
+    app.poll_login(client).await.unwrap();
+    assert!(
+        app.connect.login.as_ref().unwrap().check.is_some(),
+        "a check is sent"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app
+        .connect
+        .login
+        .as_ref()
+        .is_some_and(|login| login.check.is_some())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the check never came back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        app.poll_login(client).await.unwrap();
+    }
+}
+
+/// What the sign-in server does with the next request.
+enum SignInReply {
+    /// Answers 200 with this JSON.
+    Json(&'static str),
+    /// Closes the connection without an answer.
+    Drop,
+    /// Holds the connection open without an answer.
+    Hold,
+    /// Refuses with this status and JSON error.
+    Refuse(u16, &'static str),
+}
+
+/// A server that replies to each request with the next of `script` (then
+/// refuses with 404) and keeps what it was sent.
+async fn sign_in_server(
+    script: Vec<SignInReply>,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = seen.clone();
+    tokio::spawn(async move {
+        let mut script = script.into_iter();
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let Ok(read) = socket.read(&mut chunk).await else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            requests
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).into_owned());
+            let reply = script.next().unwrap_or(SignInReply::Refuse(
+                404,
+                r#"{"code":"not_found","message":"Not found"}"#,
+            ));
+            let (status, body) = match reply {
+                SignInReply::Json(body) => (200, body),
+                SignInReply::Refuse(status, body) => (status, body),
+                SignInReply::Drop => continue,
+                SignInReply::Hold => {
+                    tokio::spawn(async move {
+                        let _ = socket.read(&mut chunk).await;
+                    });
+                    continue;
+                }
+            };
+            let head = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        }
+    });
+    (
+        crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap(),
+        seen,
+    )
+}
+
+fn waiting_sign_in(app: &mut App) {
+    app.connect.login = Some(crate::connect::PendingLogin {
+        id: "login-1".into(),
+        provider: "openai".into(),
+        name: "OpenAI".into(),
+        method: "device".into(),
+        url: "https://auth.example/codex/device".into(),
+        code: "ABCD-EFGH".into(),
+        state: crate::connect::LoginState::Pending,
+        started: std::time::Instant::now(),
+        last_poll: None,
+        check: None,
+        unreachable_since: None,
+        misses: 0,
+        opened: false,
+    });
+    app.open_overlay(crate::state::Overlay::ProviderLogin);
+}
+
+/// A sign-in that gives up on a silent server tells it to stop waiting (it
+/// may hold the port a new attempt needs), as Retry does for the old one,
+/// and Escape back to the providers does not wait on the server.
+#[tokio::test]
+async fn a_sign_in_that_gives_up_tells_the_server_and_leaves_without_waiting() {
+    let told = |seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("login_cancel") && request.contains("login-1"))
+    };
+    let mut app = connect_fixture();
+    let (client, seen) = sign_in_server(vec![SignInReply::Drop]).await;
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().unreachable_since =
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(21));
+    sign_in_check(&mut app, &client).await;
+    let state = app.connect.login.as_ref().unwrap().state.clone();
+    let crate::connect::LoginState::Failed(reason) = state else {
+        panic!("{state:?}");
+    };
+    assert!(!reason.is_empty());
+    for _ in 0..500 {
+        if told(&seen) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        told(&seen),
+        "giving up told the server: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // Retry tells the server about the sign-in it replaces.
+    let (client, seen) = sign_in_server(Vec::new()).await;
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().state =
+        crate::connect::LoginState::Failed("timed out".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    for _ in 0..500 {
+        if told(&seen) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        told(&seen),
+        "retry told the server: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // Haarness's own reason for giving up reads in the person's language.
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().state =
+        crate::connect::LoginState::Failed("The server did not answer in time".into());
+    app.language = crate::locale::Language::German;
+    let rendered: String = app.lines((100, 30)).iter().map(line_text).collect();
+    assert!(
+        rendered.contains("Der Server hat nicht rechtzeitig geantwortet"),
+        "{rendered}"
+    );
+    app.language = crate::locale::Language::English;
+
+    // Escape from a failed sign-in is back at the providers at once, also
+    // when the server answers nothing.
+    let (client, _) = sign_in_server(vec![SignInReply::Hold, SignInReply::Hold]).await;
+    waiting_sign_in(&mut app);
+    app.connect.login.as_mut().unwrap().state =
+        crate::connect::LoginState::Failed("timed out".into());
+    let pressed = std::time::Instant::now();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(pressed.elapsed() < std::time::Duration::from_secs(1));
+    assert!(matches!(
+        app.overlay,
+        crate::state::Overlay::Options {
+            kind: crate::state::OptionsKind::ConnectProvider,
+            ..
+        }
+    ));
+    assert!(app.connect.login.is_none());
+}
+
+/// A check whose connection drops leaves the sign-in waiting, and the next
+/// answer still finishes it; a refusal ends it at once; Escape leaves at
+/// once while a check hangs, and the server is still told.
+#[tokio::test]
+async fn a_dropped_sign_in_check_keeps_waiting_and_a_refusal_ends_it() {
+    let mut app = connect_fixture();
+    let (client, _) = sign_in_server(vec![
+        SignInReply::Json(r#"{"data":{"state":"pending"}}"#),
+        SignInReply::Drop,
+        SignInReply::Json(r#"{"data":{"state":"connected"}}"#),
+    ])
+    .await;
+    waiting_sign_in(&mut app);
+    sign_in_check(&mut app, &client).await;
+    let login = app.connect.login.as_ref().unwrap();
+    assert_eq!(login.state, crate::connect::LoginState::Pending);
+    assert!(login.unreachable_since.is_none());
+    sign_in_check(&mut app, &client).await;
+    let login = app.connect.login.as_ref().unwrap();
+    assert_eq!(
+        login.state,
+        crate::connect::LoginState::Pending,
+        "a dropped check"
+    );
+    assert!(login.unreachable_since.is_some());
+    sign_in_check(&mut app, &client).await;
+    assert!(app.connect.login.is_none(), "the sign-in finished");
+    assert!(app.notice.contains("OpenAI connected"), "{}", app.notice);
+
+    let (client, _) = sign_in_server(vec![SignInReply::Refuse(
+        404,
+        r#"{"code":"not_found","message":"Login expired; start again"}"#,
+    )])
+    .await;
+    waiting_sign_in(&mut app);
+    sign_in_check(&mut app, &client).await;
+    let state = app.connect.login.as_ref().unwrap().state.clone();
+    let crate::connect::LoginState::Failed(reason) = state else {
+        panic!("{state:?}");
+    };
+    assert!(reason.contains("Login expired"), "{reason}");
+
+    // The server answers neither the check nor the cancel.
+    let (client, seen) = sign_in_server(vec![SignInReply::Hold, SignInReply::Hold]).await;
+    waiting_sign_in(&mut app);
+    app.poll_login(&client).await.unwrap();
+    assert!(app.connect.login.as_ref().unwrap().check.is_some());
+    let pressed = std::time::Instant::now();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(pressed.elapsed() < std::time::Duration::from_secs(1));
+    assert!(app.connect.login.is_none());
+    assert!(app.notice.contains("cancelled"), "{}", app.notice);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|request| request.contains("login_cancel"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server was not told"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure() {
     let mut app = connect_fixture();
@@ -18904,6 +20307,9 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
         state: crate::connect::LoginState::Pending,
         started: std::time::Instant::now(),
         last_poll: None,
+        check: None,
+        unreachable_since: None,
+        misses: 0,
         opened: false,
     });
     app.open_overlay(crate::state::Overlay::ProviderLogin);
@@ -18923,8 +20329,34 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
     assert!(rendered.contains("c copy code"), "{rendered}");
     assert!(!rendered.contains("Details"), "{rendered}");
 
-    // The server going away is reported on the screen, not swallowed.
-    app.poll_login(&client).await.unwrap();
+    // A server that stops answering leaves the sign-in waiting. One quick
+    // miss (a dropped request) changes nothing on screen; the second says
+    // so, quietly, on the waiting row.
+    let screen = |app: &App| {
+        app.lines((100, 30))
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    sign_in_check(&mut app, &client).await;
+    let login = app.connect.login.as_ref().unwrap();
+    assert_eq!(login.state, crate::connect::LoginState::Pending);
+    let rendered = screen(&app);
+    assert!(rendered.contains("Waiting for you to finish"), "{rendered}");
+    assert!(!rendered.contains("Can't reach the server"), "{rendered}");
+    sign_in_check(&mut app, &client).await;
+    let rendered = screen(&app);
+    assert!(
+        rendered.contains("Can't reach the server · still waiting"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ABCD-EFGH"), "{rendered}");
+    // Twenty seconds without an answer: the server going away is reported on
+    // the screen, not swallowed.
+    app.connect.login.as_mut().unwrap().unreachable_since =
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(21));
+    sign_in_check(&mut app, &client).await;
     let state = app.connect.login.as_ref().unwrap().state.clone();
     assert!(
         matches!(state, crate::connect::LoginState::Failed(_)),
@@ -19462,7 +20894,8 @@ async fn batch_children_are_live_rows_under_the_batch_call() {
         "rows do not repeat the status-line hint: {text}"
     );
     assert!(text.contains("task Audit server attack surface"), "{text}");
-    assert!(text.contains("└ no tools yet"), "{text}");
+    assert!(text.contains("└ completed"), "{text}");
+    assert!(!text.contains("no tools yet"), "a finished child: {text}");
     assert!(text.contains("task Audit execution and files"), "{text}");
     assert!(text.contains("↳ grep · 7 tools"), "{text}");
     let targets: Vec<String> = app
@@ -21715,6 +23148,78 @@ fn the_external_editor_gets_its_file_as_one_word() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited");
     assert!(!root.join("marker").exists());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// While the editor has the terminal, it counts as the TUI's: a server
+/// notice then goes to the log, not over the editor. The draft comes back.
+#[cfg(unix)]
+#[test]
+fn the_editor_has_the_terminal_while_it_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.composer.set_text("draft".into());
+    let mut renderer = haarness_opentui::Renderer::new(80, 24, true).unwrap();
+    assert!(!crate::owns_terminal(), "no TUI is drawing in a unit test");
+    let (running, seen) = (
+        std::sync::Arc::new(AtomicBool::new(true)),
+        std::sync::Arc::new(AtomicBool::new(false)),
+    );
+    let watcher = {
+        let (running, seen) = (running.clone(), seen.clone());
+        std::thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                if crate::owns_terminal() {
+                    seen.store(true, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+    };
+    crate::edit_draft(&mut app, &mut renderer, "sleep 0.3; printf edited >");
+    running.store(false, Ordering::Relaxed);
+    watcher.join().unwrap();
+    assert!(
+        seen.load(Ordering::Relaxed),
+        "the editor's terminal was not the TUI's"
+    );
+    assert!(!crate::owns_terminal(), "taken back");
+    assert_eq!(app.composer.text(), "edited");
+}
+
+/// The `$EDITOR` draft is a new file in a new folder named so no one can
+/// guess it, both this user's only (`/tmp` is shared on Linux); an existing
+/// file is never written through, and the folder goes with the draft.
+#[cfg(unix)]
+#[test]
+fn the_editor_draft_is_private_and_new() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let folder = crate::DraftFolder::new().unwrap();
+    let other = crate::DraftFolder::new().unwrap();
+    assert_ne!(folder.0, other.0, "each draft gets a folder of its own");
+    assert!(folder.0.starts_with(std::env::temp_dir()));
+    // `haarness-compose-` and a random id, never the process number.
+    let name = folder.0.file_name().unwrap().to_string_lossy().into_owned();
+    let id = name
+        .strip_prefix("haarness-compose-")
+        .expect("the draft folder's name");
+    assert!(
+        id.len() == 32 && id.chars().all(|character| character.is_ascii_hexdigit()),
+        "{name}"
+    );
+    assert_eq!(mode(&folder.0), 0o700);
+    let file = folder.write("draft text").unwrap();
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "draft text");
+    assert!(
+        folder.write("again").is_err(),
+        "a file already there is not written through"
+    );
+    let path = folder.0.clone();
+    drop(folder);
+    assert!(!path.exists());
 }
 
 /// After the task following the server's events ended by itself and started

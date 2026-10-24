@@ -2869,5 +2869,16 @@
   "Choose a folder": "เลือกโฟลเดอร์",
   "Search folders": "ค้นหาโฟลเดอร์",
   "Opening This computer…": "กำลังเปิดคอมพิวเตอร์เครื่องนี้…",
-  "Couldn’t open This computer": "ไม่สามารถเปิดคอมพิวเตอร์เครื่องนี้ได้"
+  "Couldn’t open This computer": "ไม่สามารถเปิดคอมพิวเตอร์เครื่องนี้ได้",
+  "no tools yet": "ยังไม่ได้ใช้เครื่องมือ",
+  "starting": "กำลังเริ่ม",
+  "running in background": "ทำงานเบื้องหลัง",
+  "1 tool call": "เรียกใช้เครื่องมือ 1 ครั้ง",
+  "{count} tool calls": "เรียกใช้เครื่องมือ {count} ครั้ง",
+  "less than a day left at this pace": "เหลือไม่ถึงหนึ่งวันในอัตรานี้",
+  "about 1 day left at this pace": "เหลือประมาณ 1 วันในอัตรานี้",
+  "about {count} days left at this pace": "เหลือประมาณ {count} วันในอัตรานี้",
+  "Can't reach the server · still waiting": "ติดต่อเซิร์ฟเวอร์ไม่ได้ · ยังรออยู่",
+  "Theme {file} not loaded: {reason}": "ไม่ได้โหลดธีม {file}: {reason}",
+  "The server did not answer in time": "เซิร์ฟเวอร์ไม่ตอบกลับภายในเวลาที่กำหนด"
 }
