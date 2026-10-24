@@ -120,6 +120,10 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   requestAnimationFrame(() => requestAnimationFrame(done));
 }
 
+/** Text up to this long is drawn on this thread (about 3 ms here); longer
+ * text is drawn by the worker. */
+const DRAWN_HERE = 64 * 1024;
+
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
  * break. `base` is the folder its relative links start from (the file's own
@@ -266,6 +270,12 @@ export function Markdown(props: {
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  // A message of the conversation is drawn here as it comes in, so its row
+  // has its full height from its first frame: from the worker it would come
+  // in empty and grow a frame later, moving what is read twice, and a saved
+  // reply taking the place of the live one would leave the list short for
+  // that frame. Text being written, and very long text, go to the worker.
+  const here = conversation && !props.live && props.text.length <= DRAWN_HERE;
   const client = createMarkdownClient((update, live) => {
     if (disposed) return;
     (patch ??= createMarkdownDOM(host, {
@@ -311,7 +321,7 @@ export function Markdown(props: {
     }
     host.dataset.markdownReady = "true";
     host.dispatchEvent(new CustomEvent("markdown-ready", { bubbles: true }));
-  });
+  }, here);
   createEffect(() => {
     host.dataset.markdownReady = "false";
     client.update(props.text, !!props.live, !props.document);

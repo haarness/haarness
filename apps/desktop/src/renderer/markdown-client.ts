@@ -76,12 +76,13 @@ function dispatch(client: Client) {
   }
 }
 
-export function createMarkdownClient(receive: Client["receive"]) {
+/** `here`: drawn on this thread from the first text, as each update comes. */
+export function createMarkdownClient(receive: Client["receive"], here = false) {
   clearTimeout(idle);
   const key = ++sequence;
   let revision = 0;
   let disposed = false;
-  const client: Client = { receive, buffered: [], rendered: [] };
+  const client: Client = { receive, buffered: [], rendered: [], local: here };
   clients.set(key, client);
   return {
     update(text: string, live: boolean, breaks = true) {
