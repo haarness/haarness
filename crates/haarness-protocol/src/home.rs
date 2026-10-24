@@ -12,6 +12,28 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Whether this process is a test binary that cargo built
+/// (`target/<profile>/deps/<crate>-<hash>`). Such a run must never write into
+/// the folders of the person running it (Upstream PR #1145): where Haarness
+/// would otherwise fall back to the home's data or cache folder, a test
+/// binary gets [`test_folder`] instead.
+#[must_use]
+pub fn test_binary() -> bool {
+    std::env::current_exe().ok().is_some_and(|executable| {
+        executable.parent().and_then(std::path::Path::file_name) == Some("deps".as_ref())
+    })
+}
+
+/// A test binary's own folder for what Haarness keeps in the home: one per
+/// process under the system temp folder, so tests of separate runs never see
+/// each other's files.
+#[must_use]
+pub fn test_folder() -> PathBuf {
+    std::env::temp_dir()
+        .join("haarness-test-data")
+        .join(std::process::id().to_string())
+}
+
 /// The variable that names the base configuration folder.
 pub const BASE_CONFIG_DIR_ENV: &str = "HAARNESS_BASE_CONFIG_DIR";
 
