@@ -120,6 +120,12 @@ def check_desktop(binary, version):
         assert len(found) == 1, (kind, sorted(p.name for p in release.iterdir()))
         return found[0]
     deb, appimage = package('deb'), package('AppImage')
+    # The AppImage's runtime starts before anything it carries, with the system's libraries alone, so each must be one
+    # every system has: electron-builder's legacy arm64 runtime asks for libz.so, which only zlib's development
+    # package installs, and 0.1.3's arm64 AppImage did not start on a stock Ubuntu.
+    runtime = set(re.findall(r'NEEDED\s+(\S+)', subprocess.check_output(['objdump', '-p', str(appimage)], text=True)))
+    unversioned = sorted(name for name in runtime if not re.search(r'\.so\.\d', name))
+    assert not unversioned, f'{appimage.name} needs {unversioned}, which only development packages provide'
     expected = digest(binary)
     field = lambda name: subprocess.check_output(['dpkg-deb', '-f', str(deb), name], text=True).strip()
     assert field('Package') == 'haarness-desktop', field('Package')
