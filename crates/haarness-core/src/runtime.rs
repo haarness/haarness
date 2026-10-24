@@ -3126,7 +3126,6 @@ impl AgentRuntime {
             &self.memory_context.read(),
             None,
         );
-        let current_attachments = crate::image_budget::turn_attachments(&items, turn_id);
         let messages = crate::side_question::settled(provider_messages(items));
         let catalog = components.tools.list();
         let prepared =
@@ -3224,11 +3223,7 @@ impl AgentRuntime {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
             }
             let mut messages = messages;
-            crate::image_budget::bound(
-                &mut messages,
-                provider.image_limits(&thread.model),
-                &current_attachments,
-            );
+            crate::image_budget::bound(&mut messages, provider.image_limits(&thread.model));
             messages.extend(reminder.map(|content| ProviderMessage::Text {
                 role: "user".into(),
                 content,
@@ -8722,9 +8717,7 @@ impl RunnerTask {
                 let mut messages = provider_messages(items);
                 let source_messages = messages.clone();
                 let image_limits = provider.image_limits(&model);
-                if let Some(cut) =
-                    crate::image_budget::bound(&mut messages, image_limits, &current_attachments)
-                {
+                if let Some(cut) = crate::image_budget::bound(&mut messages, image_limits) {
                     info!(
                         thread = %self.thread.id,
                         turn = %self.turn.id,

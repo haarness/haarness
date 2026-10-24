@@ -12,12 +12,15 @@
 //! total, and whenever that total passes a limit the oldest are dropped down
 //! to the lower mark. A new image moves the cut only when the kept images
 //! pass a limit again, not on every request, so the replaced prefix, and the
-//! provider's prompt cache with it, stays the same between cuts. The images
-//! of the turn's own messages are never replaced; when they alone pass a
-//! limit the request goes as it is, and the refusal is handled as before.
+//! provider's prompt cache with it, stays the same between cuts. A cut never
+//! takes what the person attached to the message that opened the turn it
+//! happens in; when those alone pass a limit the request goes as it is, and a
+//! refusal is handled as before. Which message that is follows from the
+//! history alone, not from the turn now running, so a new turn replays every
+//! earlier cut the same way and its first request reads the cache too.
 //! Stored messages are never changed.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use haarness_protocol::{Item, ItemData, TurnId};
 
@@ -36,8 +39,8 @@ pub(crate) struct Cut {
     pub kept: usize,
 }
 
-/// The attachments of the person's messages in `turn`: a cut never replaces
-/// them.
+/// The attachments of the person's messages in `turn`, which a refusal leaves
+/// out last.
 pub(crate) fn turn_attachments(items: &[Item], turn: Option<TurnId>) -> HashSet<String> {
     items
         .iter()
@@ -51,27 +54,21 @@ pub(crate) fn turn_attachments(items: &[Item], turn: Option<TurnId>) -> HashSet<
 }
 
 /// Replaces the oldest images of `messages` with a note once they pass
-/// `limits` (see the module documentation). `current` holds the turn's own
-/// attachments. `None` when every image stays.
-pub(crate) fn bound(
-    messages: &mut [ProviderMessage],
-    limits: ImageLimits,
-    current: &HashSet<String>,
-) -> Option<Cut> {
+/// `limits` (see the module documentation). `None` when every image stays.
+pub(crate) fn bound(messages: &mut [ProviderMessage], limits: ImageLimits) -> Option<Cut> {
     struct Image {
         message: usize,
         source: String,
         bytes: usize,
-        current: bool,
     }
     let mut images = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        let (attachments, person) = match message {
+        let attachments = match message {
             // Adapters drop developer-role messages, and their images.
             ProviderMessage::Media {
                 role, attachments, ..
-            } if role != "developer" => (attachments, true),
-            ProviderMessage::ToolResult { attachments, .. } => (attachments, false),
+            } if role != "developer" => attachments,
+            ProviderMessage::ToolResult { attachments, .. } => attachments,
             _ => continue,
         };
         for source in attachments {
@@ -80,7 +77,6 @@ pub(crate) fn bound(
                     message: index,
                     source: source.clone(),
                     bytes: crate::attachments::sent_bytes(source),
-                    current: person && current.contains(source),
                 });
             }
         }
@@ -94,23 +90,26 @@ pub(crate) fn bound(
         limits.count.map(|count| count / 5 * 3),
     );
     let mut dropped = vec![false; images.len()];
-    let mut droppable = VecDeque::new();
+    // The images still sent, oldest first.
+    let mut sent = Vec::new();
     let (mut kept, mut count) = (0_usize, 0_usize);
     for (index, image) in images.iter().enumerate() {
+        sent.push(index);
         kept = kept.saturating_add(image.bytes);
         count += 1;
-        if !image.current {
-            droppable.push_back(index);
-        }
         if !over(kept, count, limit) {
             continue;
         }
-        while over(kept, count, target) {
-            let Some(oldest) = droppable.pop_front() else {
-                break;
-            };
-            dropped[oldest] = true;
-            kept -= images[oldest].bytes;
+        let opening = person_message(messages, image.message);
+        let mut position = 0;
+        while over(kept, count, target) && position < sent.len() {
+            let oldest = &images[sent[position]];
+            if Some(oldest.message) == opening {
+                position += 1;
+                continue;
+            }
+            dropped[sent.remove(position)] = true;
+            kept -= oldest.bytes;
             count -= 1;
         }
     }
@@ -128,6 +127,29 @@ pub(crate) fn bound(
         bytes,
         kept,
     })
+}
+
+/// The message the person opened the turn at `at` with: the last user
+/// message at or before it, past the hidden context stored after it.
+fn person_message(messages: &[ProviderMessage], at: usize) -> Option<usize> {
+    let mut reminders = false;
+    for index in (0..=at).rev() {
+        match &messages[index] {
+            ProviderMessage::Text { role, content }
+                if role == "user" && crate::turn_context::is_turn_reminder(content) =>
+            {
+                reminders = true;
+            }
+            ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. }
+                if role == "user" =>
+            {
+                return Some(index);
+            }
+            _ if reminders => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Takes the first `source` out of `message`, naming it in the text instead.
@@ -242,7 +264,7 @@ mod tests {
         mut messages: Vec<ProviderMessage>,
         limits: ImageLimits,
     ) -> (Vec<ProviderMessage>, Option<Cut>) {
-        let cut = bound(&mut messages, limits, &HashSet::new());
+        let cut = bound(&mut messages, limits);
         (messages, cut)
     }
 
@@ -355,8 +377,7 @@ mod tests {
         for name in ["e", "f", "g", "h"] {
             messages.extend(shot(name, 5 * MIB));
         }
-        let current = HashSet::from([image("c", 3 * MIB), image("d", 3 * MIB)]);
-        bound(&mut messages, ImageLimits::default(), &current);
+        bound(&mut messages, ImageLimits::default());
         assert_eq!(sent(&messages), ["c", "d", "f", "g", "h"]);
 
         // A message that alone passes the limit goes as it is.
@@ -364,13 +385,46 @@ mod tests {
         let mut messages = vec![ProviderMessage::Media {
             role: "user".into(),
             content: "all of these".into(),
-            attachments: alone.clone().collect(),
+            attachments: alone.collect(),
         }];
-        assert_eq!(
-            bound(&mut messages, ImageLimits::default(), &alone.collect()),
-            None
-        );
+        assert_eq!(bound(&mut messages, ImageLimits::default()), None);
         assert_eq!(sent(&messages).len(), 5);
+    }
+
+    #[test]
+    fn a_new_turn_replays_the_cuts_before_it_and_reads_the_cache() {
+        // In the first turn the person attached a photo and the model took
+        // four screenshots. Past 25 MiB the cut kept the photo and took the
+        // older screenshots.
+        let mut first = vec![ProviderMessage::Media {
+            role: "user".into(),
+            content: "look".into(),
+            attachments: vec![image("photo", 6 * MIB)],
+        }];
+        // The hidden context stored with a turn is a message of its own.
+        first.push(ProviderMessage::Text {
+            role: "user".into(),
+            content: "<system-reminder>\nToday's date is now Saturday, 24 October 2026.\n</system-reminder>".into(),
+        });
+        for name in ["s1", "s2", "s3", "s4"] {
+            first.extend(shot(name, 6 * MIB));
+        }
+        let (sent_first, _) = bounded(first.clone(), ImageLimits::default());
+        assert_eq!(sent(&sent_first), ["photo", "s4"]);
+        // The next turn's request carries that history unchanged, though the
+        // photo is no longer the turn's own.
+        let mut next = first;
+        next.push(ProviderMessage::Text {
+            role: "assistant".into(),
+            content: "done".into(),
+        });
+        next.push(photo("new", MIB));
+        let (sent_next, _) = bounded(next, ImageLimits::default());
+        assert_eq!(sent(&sent_next), ["photo", "s4", "new"]);
+        assert_eq!(
+            serde_json::to_string(&sent_next[..sent_first.len()]).unwrap(),
+            serde_json::to_string(&sent_first).unwrap()
+        );
     }
 
     #[test]

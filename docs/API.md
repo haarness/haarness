@@ -514,10 +514,13 @@ directly, on Bedrock or through Haarness Cloud, also 100 images in a request to
 a model with a 200K-token context window and 600 to a larger one. The cut moves
 only when the images kept pass the limit again, not with each new image, so the
 requests between two cuts carry the same history and the provider's prompt
-cache holds. The images of the turn's own messages are never replaced; when
-they alone pass the limit the request is sent as it is. PDFs, audio and video
-are neither counted nor replaced. Stored messages do not change, and the
-transcript shows nothing: a cut is logged as one `INFO` line of counts.
+cache holds. A cut never takes the images the person attached to the message
+that opened the turn it happens in; when those alone pass the limit the request
+is sent as it is. That message is read from the history, not from the turn now
+running, so a new turn's first request repeats every earlier cut and reads the
+cache too. PDFs, audio and video are neither counted nor replaced. Stored
+messages do not change, and the transcript shows nothing: a cut is logged as
+one `INFO` line of counts.
 
 When a provider still refuses an image (its type, size, pixels or count, or a
 request too large because of images), the runtime appends a `media_omitted`
