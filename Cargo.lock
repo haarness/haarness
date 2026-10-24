@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-account"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-stream",
  "axum",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-extensions"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-insights"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-language"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "dunce",
  "futures",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-mcp"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-opentui"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "directories",
  "fs2",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-profiles"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-protocol"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "serde",
@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-providers"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-pty"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "dunce",
  "haarness-core",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-ripgrep"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "directories",
  "flate2",
@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-scheduler"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-store"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1854,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-tui"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1890,7 +1890,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-workflow-catalog"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "haarness-protocol",
  "serde_json",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-workflows"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "haarness-workspaces"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "fs2",
@@ -5588,7 +5588,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
