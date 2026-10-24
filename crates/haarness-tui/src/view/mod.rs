@@ -442,6 +442,7 @@ impl App {
             self.copy_panes.borrow_mut().push(frame::CopyPane {
                 rows: region_top..region_end,
                 columns: panel_start..width,
+                side: false,
             });
             for row in region_top..region_end {
                 let side_line = sidebar_rows.next().unwrap_or_else(Line::empty);
@@ -832,6 +833,7 @@ fn apply_toast(
     app.copy_panes.borrow_mut().push(frame::CopyPane {
         rows: top..(top + card.len()).min(height),
         columns: left..width,
+        side: false,
     });
     for (offset, mut row) in card.into_iter().enumerate() {
         if top + offset >= height {
@@ -962,6 +964,7 @@ fn apply_dialog(
     app.copy_panes.borrow_mut().push(frame::CopyPane {
         rows: top..top + card_height,
         columns: left..left + card_width,
+        side: false,
     });
     for (offset, card_line) in card.lines.into_iter().take(card_height).enumerate() {
         let row = top + offset;

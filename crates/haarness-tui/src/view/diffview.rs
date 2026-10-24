@@ -59,10 +59,12 @@ pub fn frame(
             panes.push(crate::view::frame::CopyPane {
                 rows: 2..2 + body_height,
                 columns: 0..tree_width,
+                side: false,
             });
             panes.push(crate::view::frame::CopyPane {
                 rows: 2..2 + body_height,
                 columns: tree_width + 1..width,
+                side: false,
             });
         }
         let patch = patch_rows(app, viewer, patch_width, body_height, &mut hits, tree_width);
@@ -433,10 +435,12 @@ fn patch_rows(
         panes.push(CopyPane {
             rows: 2 + from..2 + to,
             columns: left..left + side_width,
+            side: true,
         });
         panes.push(CopyPane {
             rows: 2 + from..2 + to,
             columns: left + side_width + 1..left + width,
+            side: true,
         });
     };
     for (offset, row) in viewer.display.iter().skip(start).take(height).enumerate() {

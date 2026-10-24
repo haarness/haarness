@@ -141,6 +141,10 @@ impl TaggedLines {
 pub struct CopyPane {
     pub rows: std::ops::Range<usize>,
     pub columns: std::ops::Range<usize>,
+    /// One of columns shown side by side, such as the review's old and new
+    /// code: a drag that starts outside them copies, on their rows, the one
+    /// the pointer is on rather than neither.
+    pub side: bool,
 }
 
 impl CopyPane {
@@ -235,7 +239,32 @@ impl CopyFrame {
                 columns.end
             };
             let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(from..to).collect();
-            for cover in above.iter().filter(|cover| cover.rows.contains(&row)) {
+            let covers = above.iter().filter(|cover| cover.rows.contains(&row));
+            // Side-by-side columns inside the pane a drag started in hand it
+            // the side the pointer is on, the left one from the rule between.
+            let sides = covers
+                .clone()
+                .filter(|cover| {
+                    cover.side
+                        && ranges.iter().any(|range| {
+                            range.start < cover.columns.end && cover.columns.start < range.end
+                        })
+                })
+                .collect::<Vec<_>>();
+            let side = sides
+                .iter()
+                .filter(|side| side.columns.start <= head.1)
+                .max_by_key(|side| side.columns.start)
+                .or_else(|| sides.first());
+            if let Some(side) = side {
+                ranges = ranges
+                    .into_iter()
+                    .map(|range| {
+                        range.start.max(side.columns.start)..range.end.min(side.columns.end)
+                    })
+                    .collect();
+            }
+            for cover in covers.filter(|cover| !(cover.side && side.is_some())) {
                 ranges = ranges
                     .into_iter()
                     .flat_map(|range| {
