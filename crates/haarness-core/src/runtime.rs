@@ -2583,9 +2583,9 @@ impl AgentRuntime {
             request.ultracode = Some(components.config.default_ultracode);
         }
         // Held until the chat is stored, so no other chat takes its folder.
-        let mut _folder_choice = None;
+        let mut folder_choice = None;
         if let Some(requested) = request.directory.take() {
-            _folder_choice = Some(self.folder_choice.lock().await);
+            folder_choice = Some(self.folder_choice.lock().await);
             request.directory = Some(self.choose_chat_folder(&requested).await?);
         } else if let Some(parent) = request.parent_id {
             // A workflow's chat and its agents work where their parent does.
@@ -2600,6 +2600,7 @@ impl AgentRuntime {
             (Err(CoreError::Conflict(_)), Some(id)) => return self.repository.get_thread(id).await,
             (result, _) => result?,
         };
+        drop(folder_choice);
         self.publish_created_thread(&thread).await;
         if thread.schedule.is_some() {
             self.run_stances.scheduled.insert(thread.id, ());
