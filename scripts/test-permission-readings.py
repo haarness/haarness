@@ -150,7 +150,8 @@ def case_backslash():
     _, env = environment('backslash')
     denied = project('backslash', {'permission': {'bash': {'rm *': 'deny'}}})
     for command in ['true\n\\rm -rf victim', 'true\n\\\nrm -rf victim', 'r\\\nm -rf victim',
-                    "bash <<'EOF'\n\\rm -rf victim\nEOF"]:
+                    "bash <<'EOF'\n\\rm -rf victim\nEOF", 'echo "<<rm"\n\\rm -rf victim',
+                    'true # <<rm\n\\rm -rf victim', 'true \\\r\nrm -rf victim', 'rm\\\n -rf victim']:
         (denied / 'victim').mkdir(exist_ok=True)
         try:
             output = bash(env, denied, command)
@@ -158,8 +159,9 @@ def case_backslash():
             stop(env, denied)
         assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
         assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
-    passed('an rm deny refuses rm on a backslash line, after a lone backslash, joined inside a word, '
-           'and on the first line of a here-document fed to bash')
+    passed('an rm deny refuses rm on a backslash line (also after a `<<` in a string or a comment), after a lone '
+           'backslash, after a backslash and CR LF, joined across a continuation, and on the first line of a '
+           'here-document fed to bash')
     asked = project('backslash-ask', {'permission': {'bash': {'*': 'ask', 'echo *': 'allow'}}})
     (asked / 'victim').mkdir()
     try:
@@ -179,9 +181,12 @@ def case_backquotes():
     denied = project('backquotes', {'permission': {'bash': {'rm *': 'deny'}}})
     (denied / 'victim').mkdir()
     try:
-        output = bash(env, denied, 'cat > n.md <<EOF\n`rm -rf victim`\nEOF')
-        assert "is denied by permission rule 'bash:rm *'" in output, output
-        assert (denied / 'victim').is_dir(), 'the backquoted rm ran'
+        for command in ['cat > n.md <<EOF\n`rm -rf victim`\nEOF',
+                        'while read -r l; do echo "$l"; done <<EOF\n`rm -rf victim`\nEOF',
+                        'cat > n.md <<EOF\n${X:-`rm -rf victim`}\nEOF']:
+            output = bash(env, denied, command)
+            assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
+            assert (denied / 'victim').is_dir(), f'the backquoted rm ran: {command!r}'
         output = bash(env, denied, "cat > q.md <<'EOF'\n`rm -rf victim`\nEOF", code=0)
         assert (denied / 'q.md').read_text() == '`rm -rf victim`\n', output
     finally:
@@ -192,8 +197,8 @@ def case_backquotes():
         assert (asked / 'notes.md').read_text() == 'Run hi first.\n'
     finally:
         stop(env, asked)
-    passed('an rm deny refuses rm in backquotes of an unquoted here-document; a quoted one and an '
-           'allowed cat with backquotes run as before')
+    passed('an rm deny refuses rm in backquotes of an unquoted here-document (also of a loop, and in a ${…}); '
+           'a quoted one and an allowed cat with backquotes run as before')
 
 
 def case_dev():
