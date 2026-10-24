@@ -9,7 +9,8 @@ root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-permissions-attach-')).res
 workspace = root/'server-project'; workspace.mkdir()
 local = root/'client-project'; local.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
-(state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash = { "printf blocked*" = "deny", "printf review*" = "ask" }\n')
+# Chats start in Auto; the approvals here wait for a person, so ask for Review.
+(state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash = { "printf blocked*" = "deny", "printf review*" = "ask" }\n')
 legacy = state/'data/sandbox.json'; legacy.write_text('{"profile":"offline","allowedHosts":[]}')
 (workspace/'.env').write_text('TEST_ONLY=read-approval-proof')
 (workspace/'service.env').write_text('TEST_ONLY=named-env-proof')

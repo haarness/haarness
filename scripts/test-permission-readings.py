@@ -38,6 +38,8 @@ holder = None if keep else tempfile.TemporaryDirectory(prefix='haarness-permissi
 root = Path(keep or holder.name).resolve()
 root.mkdir(parents=True, exist_ok=True)
 checks = []
+# Chats start in Auto, where the reviewer answers an ask: a case about a person's prompt asks for Review.
+REVIEW = {'defaults': {'approval_mode': 'review'}}
 
 
 def environment(name):
@@ -112,7 +114,7 @@ def case_toml_order():
 def case_cd_link():
     """A cd the shell takes out of the project by name asks before the line runs."""
     _, env = environment('cd-link')
-    folder = project('cd-link')
+    folder = project('cd-link', REVIEW)
     (folder / 'deep' / 'er' / 'x').mkdir(parents=True)
     (folder / 'a').mkdir()
     (folder / 'a' / 'l').symlink_to('../deep/er/x')
@@ -162,7 +164,7 @@ def case_backslash():
     passed('an rm deny refuses rm on a backslash line (also after a `<<` in a string or a comment), after a lone '
            'backslash, after a backslash and CR LF, joined across a continuation, and on the first line of a '
            'here-document fed to bash')
-    asked = project('backslash-ask', {'permission': {'bash': {'*': 'ask', 'echo *': 'allow'}}})
+    asked = project('backslash-ask', {**REVIEW, 'permission': {'bash': {'*': 'ask', 'echo *': 'allow'}}})
     (asked / 'victim').mkdir()
     try:
         output = bash(env, asked, 'echo hi\n\\rm -rf victim', code=1)
@@ -191,7 +193,7 @@ def case_backquotes():
         assert (denied / 'q.md').read_text() == '`rm -rf victim`\n', output
     finally:
         stop(env, denied)
-    asked = project('backquotes-ask', {'permission': {'bash': {'*': 'ask', 'cat *': 'allow'}}})
+    asked = project('backquotes-ask', {**REVIEW, 'permission': {'bash': {'*': 'ask', 'cat *': 'allow'}}})
     try:
         bash(env, asked, 'cat > notes.md <<EOF\nRun `echo hi` first.\nEOF', code=0)
         assert (asked / 'notes.md').read_text() == 'Run hi first.\n'
@@ -204,7 +206,7 @@ def case_backquotes():
 def case_dev():
     """Only stream devices skip the outside-folder check of a redirect."""
     _, env = environment('dev')
-    folder = project('dev')
+    folder = project('dev', REVIEW)
     try:
         output = bash(env, folder, 'echo x > /dev/shm/haarness-e2e-probe', code=1)
         assert 'Stopped:' in output and '/dev/shm' in output, output
