@@ -281,8 +281,8 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// `\rm -rf x` reads as one `true` command, and the first line of a
 /// here-document that starts with a backslash as words of the line that
 /// opens it). The shell ends the command at that line feed. Only these
-/// shapes change, each where the line feed is not itself escaped and the
-/// parser reads it inside one command:
+/// shapes change, each where the backslash is not itself escaped and the
+/// parser reads the line feed (or the backslash) inside one command:
 ///
 /// - a line that starts with `\` and a name character (`\rm`, `\r\m`,
 ///   `\./run.sh`): the backslash only stops an alias, and becomes a space;
@@ -295,9 +295,12 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// The text keeps its length, so every node's range is a range of the line
 /// as written, which every text is read from: patterns, words and
 /// here-documents stay as written. Any other backslash form is read as
-/// before, and so is a line that starts with a here-document's delimiter, a
-/// line the parser already starts a command at (after `&&`, `|`, `;` or a
-/// comment line) and one inside quotes or a here-document's text.
+/// before, and so is a line that is a here-document's delimiter once its
+/// backslash is gone (the parser's own delimiters, leading tabs dropped for
+/// `<<-`), a line the parser already starts a command at (after `&&`, `|`,
+/// `;` or a comment line) and one inside quotes or a here-document's text.
+/// It takes one parse and a pass over the line: no shape costs more than its
+/// length.
 fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
     if !command.contains("\n\\") {
         return std::borrow::Cow::Borrowed(command);
@@ -312,89 +315,176 @@ fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
     let Some(tree) = parser.parse(command, None) else {
         return std::borrow::Cow::Borrowed(command);
     };
-    // Whether the parser reads byte `at` as part of one command, where the
-    // shell ends the command at the line feed there.
-    let inside = |at: usize| {
-        tree.root_node()
-            .descendant_for_byte_range(at, at + 1)
-            .is_some_and(|node| {
-                matches!(
-                    node.kind(),
-                    "word"
-                        | "command_name"
-                        | "concatenation"
-                        | "command"
-                        | "declaration_command"
-                        | "unset_command"
-                        | "variable_assignment"
-                        | "variable_assignments"
-                        | "file_redirect"
-                        | "heredoc_redirect"
-                        | "herestring_redirect"
-                        | "redirected_statement"
-                )
-            })
-    };
     let name = |byte: u8| byte.is_ascii_alphanumeric() || b"_./:@%+,-".contains(&byte);
-    // Whether the byte at `at` is quoted by the backslashes right before it.
-    let escaped = |bytes: &[u8], at: usize| {
-        bytes[..at]
-            .iter()
-            .rev()
-            .take_while(|byte| **byte == b'\\')
-            .count()
-            % 2
-            == 1
-    };
-    let delimiters = delimiters(command);
-    let mut bytes = command.as_bytes().to_vec();
-    let mut changed = false;
-    for at in 0..bytes.len() {
-        if bytes[at] == b'\n' && !escaped(&bytes, at) && bytes.get(at + 1) == Some(&b'\\') {
-            let line = &command[at + 2..];
-            let line = &line[..line.find('\n').unwrap_or(line.len())];
-            let closes = delimiters
-                .iter()
-                .any(|word| line.starts_with(word.as_str()));
-            if (line.is_empty() || (line.bytes().next().is_some_and(name) && !closes)) && inside(at)
-            {
-                bytes[at + 1] = b' ';
-                changed = true;
-            }
-        } else if bytes[at] == b'\\'
-            && !escaped(&bytes, at)
+    let bytes = command.as_bytes();
+    // What could change, read as if every change before it were made: the
+    // backslash to turn into a space, and the byte the parser must read
+    // inside one command for it (the line feed before it, or itself).
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    let mut run = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = run % 2 == 1;
+        if bytes[at] == b'\n'
+            && !escaped
+            && bytes.get(at + 1) == Some(&b'\\')
+            && bytes
+                .get(at + 2)
+                .is_none_or(|byte| *byte == b'\n' || name(*byte))
+        {
+            candidates.push((at + 1, at));
+            // As a space, the backslash quotes nothing after it.
+            run = 0;
+            at += 2;
+            continue;
+        }
+        if bytes[at] == b'\\'
+            && !escaped
             && bytes[at + 1..].starts_with(b"\r\n\\")
             && bytes.get(at + 4).copied().is_some_and(name)
-            && inside(at)
         {
-            bytes[at] = b' ';
-            changed = true;
+            candidates.push((at, at));
+            run = 0;
+            at += 1;
+            continue;
         }
+        run = if bytes[at] == b'\\' { run + 1 } else { 0 };
+        at += 1;
     }
-    if !changed {
+    if candidates.is_empty() {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    let inside = inside_one_command(tree.root_node(), candidates.iter().map(|(_, at)| *at));
+    let (exact, indented) = delimiters(tree.root_node(), command);
+    // The changes made, in order, each only where what is before it in the
+    // text as changed so far still leaves its backslash unquoted.
+    let mut changed = bytes.to_vec();
+    let mut any = false;
+    let mut run = 0;
+    // Whether the byte before `at` is a line feed a backslash quotes.
+    let mut quoted_feed = false;
+    let mut next = candidates.iter().zip(inside).peekable();
+    for at in 0..changed.len() {
+        while next
+            .peek()
+            .is_some_and(|((backslash, _), _)| *backslash < at)
+        {
+            next.next();
+        }
+        if let Some(&(&(backslash, check), true)) = next.peek()
+            && backslash == at
+        {
+            let applies = if check + 1 == at {
+                // A body line that would become its here-document's
+                // delimiter stays as it is.
+                let line = &command[at + 1..];
+                let line = line[..line.find('\n').unwrap_or(line.len())].trim_end_matches('\r');
+                !quoted_feed
+                    && !exact.contains(line)
+                    && !indented.contains(line.trim_start_matches('\t'))
+            } else {
+                run % 2 == 0
+            };
+            if applies {
+                changed[at] = b' ';
+                any = true;
+                run = 0;
+                quoted_feed = false;
+                continue;
+            }
+        }
+        quoted_feed = changed[at] == b'\n' && run % 2 == 1;
+        run = if changed[at] == b'\\' { run + 1 } else { 0 };
+    }
+    if !any {
         return std::borrow::Cow::Borrowed(command);
     }
     // Only ASCII backslashes became spaces: the text is still UTF-8.
-    std::borrow::Cow::Owned(String::from_utf8(bytes).unwrap_or_else(|_| command.to_owned()))
+    std::borrow::Cow::Owned(String::from_utf8(changed).unwrap_or_else(|_| command.to_owned()))
 }
 
-/// The words after each `<<` in `command`, the delimiters of the
-/// here-documents it may open: a body line written `\EOF` must not become
-/// one the parser takes for the end.
-fn delimiters(command: &str) -> Vec<String> {
-    let mut words: Vec<String> = Vec::new();
-    for (at, _) in command.match_indices("<<") {
-        let word: String = command[at + 2..]
-            .trim_start_matches(['-', ' ', '\t'])
-            .trim_start_matches(['\'', '"', '\\'])
-            .chars()
-            .take_while(|c| !c.is_whitespace() && !"'\"\\;|&<>()".contains(*c))
-            .collect();
-        if !word.is_empty() && !words.contains(&word) {
-            words.push(word);
+/// For each of `positions` (in order), whether the parser reads the byte
+/// there inside one command: the smallest node that holds it is a command, a
+/// word of one or a redirect, not a list, a pipeline, the program or quoted
+/// text. One walk down the tree, into the nodes that hold a position only,
+/// so a command of a million words costs one look at each of them.
+fn inside_one_command(
+    root: tree_sitter::Node<'_>,
+    positions: impl Iterator<Item = usize>,
+) -> Vec<bool> {
+    let positions: Vec<usize> = positions.collect();
+    let mut inside = vec![false; positions.len()];
+    let within = |node: tree_sitter::Node<'_>| {
+        matches!(
+            node.kind(),
+            "word"
+                | "command_name"
+                | "concatenation"
+                | "command"
+                | "declaration_command"
+                | "unset_command"
+                | "variable_assignment"
+                | "variable_assignments"
+                | "file_redirect"
+                | "heredoc_redirect"
+                | "herestring_redirect"
+                | "redirected_statement"
+        )
+    };
+    // Each node with the range of `positions` it holds.
+    let mut stack = vec![(root, 0, positions.len())];
+    while let Some((node, low, high)) = stack.pop() {
+        let mut index = low;
+        for child in node.children(&mut node.walk()) {
+            if index >= high {
+                break;
+            }
+            // Positions before this child, between its siblings: the node's.
+            while index < high && positions[index] < child.start_byte() {
+                inside[index] = within(node);
+                index += 1;
+            }
+            let end = index + positions[index..high].partition_point(|at| *at < child.end_byte());
+            if end > index {
+                stack.push((child, index, end));
+                index = end;
+            }
+        }
+        for slot in &mut inside[index..high] {
+            *slot = within(node);
         }
     }
-    words
+    inside
+}
+
+/// The delimiters of the here-documents the parser finds in `command`, as
+/// the shell compares a line with them (quotes and backslashes gone): those
+/// of `<<` and, apart, those of `<<-`, which leading tabs do not hide.
+fn delimiters(root: tree_sitter::Node<'_>, command: &str) -> (HashSet<String>, HashSet<String>) {
+    let (mut exact, mut indented) = (HashSet::new(), HashSet::new());
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "heredoc_redirect" {
+            let parts = children(node);
+            let dash = parts
+                .iter()
+                .any(|part| !part.is_named() && node_text(*part, command) == "<<-");
+            if let Some(start) = parts.iter().find(|part| part.kind() == "heredoc_start") {
+                let word: String = node_text(*start, command)
+                    .trim_start_matches("$'")
+                    .chars()
+                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                    .collect();
+                if dash {
+                    indented.insert(word);
+                } else {
+                    exact.insert(word);
+                }
+            }
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    (exact, indented)
 }
 
 /// The text of a command with its line continuations inside words joined,
@@ -6243,6 +6333,85 @@ mod backslash_lines {
         }
         assert!(readings("cargo test \\\n  -p haarness-core").is_empty());
         assert!(!is_obviously_read_only("l\\\ns"));
+    }
+
+    #[test]
+    fn a_here_document_delimiter_is_the_parser_s_own() {
+        // `<<` in a string, a comment or an arithmetic expansion opens no
+        // here-document.
+        for command in [
+            "echo \"<<rm\"\n\\rm -rf victim",
+            "echo '<<rm'\n\\rm -rf victim",
+            "true # <<r\n\\rm -rf victim",
+            "git log --oneline -5 # see <<rm\n\\rm -rf victim",
+            "echo $((1<<2))\n\\rm -rf victim",
+            // Closed by `rm`, the here-document is over before the line.
+            "cat <<rm\nhello\nrm\n\\rm -rf victim",
+        ] {
+            let patterns = analyze(command, &std::env::current_dir().unwrap()).patterns;
+            assert!(
+                patterns.contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {patterns:?}"
+            );
+        }
+        // A body line that is the delimiter once its backslash is gone
+        // stays, for `<<-` with leading tabs too.
+        for command in [
+            "cat <<'EOF'\n\\EOF\nrm -rf victim\nEOF",
+            "cat <<-EOF\n\\\tEOF\nEOF",
+        ] {
+            assert_eq!(shell_reading(command), command, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn the_shell_reading_costs_no_more_than_the_line_s_length() {
+        // `<<` thirty thousand times in a string, then as many backslash
+        // lines: with every `<<` taken for a delimiter, or the tree searched
+        // from its root for each line, this took seconds where one parse of
+        // the line takes milliseconds.
+        let mut line = String::from("echo '");
+        for word in 0..30_000 {
+            line.push_str(&format!("<<w{word} "));
+        }
+        line.push('\'');
+        let plain = line.clone();
+        for word in 0..30_000 {
+            line.push_str(&format!("\n\\x{word}"));
+        }
+        let started = std::time::Instant::now();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        parser.parse(&line, None).unwrap();
+        let parse = started.elapsed();
+        let started = std::time::Instant::now();
+        let reading = shell_reading(&line);
+        let read = started.elapsed();
+        assert!(matches!(reading, std::borrow::Cow::Owned(_)));
+        assert!(
+            read < parse * 10 + std::time::Duration::from_millis(500),
+            "{read:?} for a line one parse of which takes {parse:?}"
+        );
+        // And the whole reading of the line costs what it costs without the
+        // backslashes.
+        let mut without = plain;
+        for word in 0..30_000 {
+            without.push_str(&format!("\nx{word}"));
+        }
+        let workspace = std::env::current_dir().unwrap();
+        let started = std::time::Instant::now();
+        let baseline = analyze(&without, &workspace);
+        let base = started.elapsed();
+        let started = std::time::Instant::now();
+        let analysis = analyze(&line, &workspace);
+        let whole = started.elapsed();
+        assert_eq!(analysis.written.len(), baseline.written.len());
+        assert!(
+            whole < base * 3 + std::time::Duration::from_secs(1),
+            "{whole:?} against {base:?} for the same line without backslashes"
+        );
     }
 }
 
