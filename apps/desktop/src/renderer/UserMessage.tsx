@@ -93,7 +93,10 @@ export function UserMessageBody(props: {
   pendingPromptLines?: number;
   children?: JSX.Element;
 }) {
-  const shown = () => props.commandLine || props.text;
+  // By its text: the transcript hands the message on anew whenever an item
+  // comes in, and new parts would draw the bubble again, empty until its
+  // Markdown is drawn, so the list would shrink and grow back.
+  const shown = createMemo(() => props.commandLine || props.text);
   const parts = createMemo(() => sentParts(shown()));
   const prompt = createMemo(() =>
     props.commandLine ? commandPrompt(props.commandLine, props.text) : undefined,

@@ -96,7 +96,16 @@ import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
+import { quietClosedSocketReads } from "./closed-socket-read";
 
+// A connection that went away never interrupts with Electron's error dialog
+// (see closed-socket-read.ts); any other uncaught error still shows it.
+quietClosedSocketReads(process, (error) =>
+  console.warn(
+    "Haarness ignored a read that reached a connection already closed; nothing was lost, and later ones are not logged.\n" +
+      error.stack,
+  ),
+);
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
 app.setName("Haarness");
@@ -122,15 +131,22 @@ app.on("will-quit", () => {
 });
 // The last saves (open browser tabs, the window size) start as the app quits;
 // let them reach the disk before the process exits, for two seconds at most.
+// The streams end in a setImmediate of before-quit's, which with no window
+// open comes in the same call as this: wait for that turn first, so they end
+// and what their ending saves is written too.
 let saved = false;
 app.on("will-quit", (event) => {
   if (saved) return;
   saved = true;
   event.preventDefault();
-  void Promise.race([
-    written(),
-    new Promise((resolve) => setTimeout(resolve, 2000)),
-  ]).then(() => app.exit());
+  void new Promise((resolve) => setImmediate(resolve))
+    .then(() =>
+      Promise.race([
+        written(),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]),
+    )
+    .then(() => app.exit());
 });
 app.on("quit", () => {
   quitting = true;
@@ -2231,12 +2247,18 @@ else {
   });
   app.on("before-quit", () => {
     stopBillingWatch();
-    browserHost.dispose();
     notifications.dispose();
-    for (const watch of notificationWatches.values()) watch.stop();
     voice.stop();
-    for (const item of subscriptions.values()) item.client.close();
-    terminals.closeAll();
     for (const child of commands.values()) stopCommand(child);
+    // The streams end in a callback of their own: app.quit() may run inside
+    // a read of one of them (an inspector's evaluate, as Playwright quits the
+    // app), and a socket ended in its own read makes Node throw (see
+    // closed-socket-read.ts).
+    setImmediate(() => {
+      browserHost.dispose();
+      for (const watch of notificationWatches.values()) watch.stop();
+      for (const item of subscriptions.values()) item.client.close();
+      terminals.closeAll();
+    });
   });
 }
