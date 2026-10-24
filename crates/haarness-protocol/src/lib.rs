@@ -22,6 +22,7 @@ pub use cloud::*;
 pub use goal::*;
 pub use home::{
     BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, base_config_dir_problem, home_dir,
+    test_binary, test_binary_path, test_folder,
 };
 pub use input::*;
 pub use management::*;

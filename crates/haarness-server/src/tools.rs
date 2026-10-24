@@ -4823,19 +4823,9 @@ fn output_preview(text: &str) -> String {
 }
 
 pub(crate) fn tool_output_dir() -> PathBuf {
-    if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
-        return PathBuf::from(root).join("data/tool-output");
-    }
-    // HAARNESS_HOME keeps everything under one folder.
-    if let Some(root) = std::env::var_os("HAARNESS_HOME")
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute())
-    {
-        return root.join("data/tool-output");
-    }
-    directories::ProjectDirs::from("dev", "haarness", "haarness").map_or_else(
+    crate::data_folder().map_or_else(
         || std::env::temp_dir().join("haarness/tool-output"),
-        |project| project.data_local_dir().join("tool-output"),
+        |folder| folder.join("tool-output"),
     )
 }
 fn tool_error(error: impl std::fmt::Display) -> CoreError {

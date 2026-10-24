@@ -5,10 +5,11 @@ Pass --real-plugins to also install and customize Anthropic's public plugin-dev.
 """
 import json, os, pathlib, subprocess, tempfile, urllib.request, urllib.error, sys
 import e2e_scratch
+from e2e_env import clean_env
 repo=pathlib.Path(__file__).resolve().parents[1]
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-claude-compat-'))
 workspace=root/'workspace';workspace.mkdir();state=root/'state';home=root/'home';home.mkdir()
-env={k:v for k,v in os.environ.items() if not k.startswith('HAARNESS_')}
+env=clean_env()
 env.update(HAARNESS_DATA_DIR=str(state),HAARNESS_HOME=str(home),HOME=str(home),HAARNESS_TEST_PROVIDER='1',HAARNESS_DEFAULT_PROVIDER='echo',HAARNESS_DEFAULT_MODEL='echo-1')
 binary=os.environ.get('HAARNESS_BIN',str(repo/'target/debug/haarness'))
 results={};connection={}

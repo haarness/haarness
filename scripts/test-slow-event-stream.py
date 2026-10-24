@@ -31,6 +31,7 @@ import urllib.request
 import uuid
 
 import e2e_scratch
+from e2e_env import ISOLATED
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve()
@@ -122,7 +123,7 @@ root = Path(keep or tempfile.mkdtemp(prefix='haarness-slow-stream-')).resolve()
 root.mkdir(parents=True, exist_ok=True)
 home, workspace, data = root / 'home', root / 'workspace', root / 'data'
 session = 'haarness-slow-' + str(uuid.uuid4())[:8]
-env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
+env = {**ISOLATED, 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
        'HAARNESS_DATA_DIR': str(data), 'USER': os.environ.get('USER', 'fixture'), 'LANG': 'en_US.UTF-8',
        'ANTHROPIC_API_KEY': 'fixture-key', 'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{service.server_port}/v1'}
 args = [str(BINARY), '--workspace', str(workspace), '--trust-project']

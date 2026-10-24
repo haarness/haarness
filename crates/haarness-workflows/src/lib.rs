@@ -8,6 +8,7 @@
 mod coordinator;
 pub use coordinator::{
     WorkflowAgentDefaults, WorkflowCoordinator, WorkflowModelResolution, WorkflowRuntimeHost,
+    use_cache_folder,
 };
 
 use std::{

@@ -32,6 +32,8 @@ for argument in "$@"; do
     *) echo "Unknown option: $argument" >&2; usage >&2; exit 1;;
   esac
 done
+# A user name would move the host: curl sends `http://localhost:@example.com` to example.com.
+case "$base" in *@*|*\\*) echo 'Release URL cannot hold a user name, a password or a backslash.' >&2; exit 1;; esac
 case "$base" in https://*|http://127.0.0.1:*|http://localhost:*) ;; *) echo 'Release URL requires HTTPS (HTTP is allowed only on loopback).' >&2; exit 1;; esac
 case "$channel" in stable|preview) ;; *) echo 'Invalid release channel' >&2; exit 1;; esac
 case "$version" in *[!a-zA-Z0-9._+-]*|'') echo 'Invalid release version' >&2; exit 1;; esac

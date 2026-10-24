@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stopChatHome } from "./fixtures/chat-home";
+import { isolatedEnv } from "./fixtures/isolated-env";
 
 // The hook editor's matcher, and a question a PreToolUse hook answers, in a
 // real Desktop against a real server with the echo provider.
@@ -61,9 +62,7 @@ test.beforeAll(async () => {
     join(workspace, "haarness.json"),
     JSON.stringify({ hooks: { PreToolUse: command("question"), SessionEnd: command("clear") } }, null, 1),
   );
-  env = Object.fromEntries(
-    Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("HAARNESS_")),
-  ) as Record<string, string>;
+  env = isolatedEnv();
   Object.assign(env, {
     HAARNESS_BIN: binary,
     HAARNESS_HOME: join(root, "home"),
