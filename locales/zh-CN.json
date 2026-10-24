@@ -2539,6 +2539,8 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "提供商拒绝了 {name}，从现在起本聊天将略过它。",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "提供商拒绝了一张图片但未说明是哪张，因此从现在起本聊天将略过最新的图片 {name}。",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "提供商拒绝了一张图片但未说明是哪张，因此从现在起本聊天将略过最新的几张图片：{names}。",
+  "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.": "请求中的图片超出了提供商的上限，因此从现在起本聊天将略过最早的图片 {name}。",
+  "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.": "请求中的图片超出了提供商的上限，因此从现在起本聊天将略过最早的 {count} 张图片。",
   "{name} is not an image Haarness can read.": "{name} 不是 Haarness 能读取的图片。",
   "This link could not be opened.": "无法打开此链接。",
   "Open a project to open links to its files.": "请先打开项目，再打开指向其文件的链接。",

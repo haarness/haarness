@@ -522,15 +522,20 @@ of counts.
 When a provider still refuses an image (its type, size, pixels or count, or a
 request too large because of images), the runtime appends a `media_omitted`
 item to the thread with the SHA-256 `fingerprints` of the refused attachment
-sources, their display `names`, the provider's `reason` and `guessed`. Every
-later request of that thread, after restarts and in forks, sends a short note
-in place of those images, so the prompt stays stable for caching; the original
-attachments stay in their messages. When the provider names the image by its
-place in the request (Anthropic's `messages.N.content.M`) only that image is
-left out; otherwise the newest images are (`guessed: true`). A refusal before
-anything streamed is retried once per turn; a second refusal in the same turn
-fails it, and the next turn sends without the images. TUI and Desktop show the
-item as a notice.
+sources, their display `names`, the provider's `reason`, `guessed` and
+`oldest`. Every later request of that thread, after restarts and in forks,
+sends a short note in place of those images, so the prompt stays stable for
+caching; the original attachments stay in their messages. When the provider
+names the image by its place in the request (Anthropic's
+`messages.N.content.M`) only that image is left out. A refusal of the request
+for how many images it carries or how large they make it ("too many images",
+HTTP 413) leaves out the oldest of them, half by number and by size
+(`oldest: true`), and the newest images then reach the model; the turn's own
+images go only when no others are left. Any other refusal that names no image
+leaves out the newest images (`guessed: true`): what the last request added is
+the likeliest cause. A refusal before anything streamed is retried once per
+turn; a second refusal in the same turn fails it, and the next turn sends
+without the images. TUI and Desktop show the item as a notice.
 
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and

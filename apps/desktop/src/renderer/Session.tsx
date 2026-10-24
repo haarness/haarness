@@ -3122,8 +3122,12 @@ function Timestamp(props: { value: string }) {
   );
 }
 /** What the person reads when a provider refused images that later requests leave out. */
-function mediaOmittedNotice(names: string[], guessed: boolean) {
+function mediaOmittedNotice(names: string[], guessed: boolean, oldest: boolean) {
   const list = names.join(", ");
+  if (oldest)
+    return names.length === 1
+      ? t("The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.", { name: list })
+      : t("The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.", { count: names.length });
   if (!guessed)
     return t("The provider refused {name}, so it is left out of this chat from now on.", { name: list });
   return names.length === 1
@@ -3382,7 +3386,7 @@ function Message(props: {
                 <div class="notice-inline media-omitted" role="status">
                   <Icon name="alert" size="sm" />
                   <span>
-                    {mediaOmittedNotice(omitted().names, !!omitted().guessed)}
+                    {mediaOmittedNotice(omitted().names, !!omitted().guessed, !!omitted().oldest)}
                     <Show when={omitted().reason}>
                       <small class="notice-detail">{omitted().reason}</small>
                     </Show>
