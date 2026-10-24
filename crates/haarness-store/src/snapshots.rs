@@ -954,8 +954,8 @@ pub struct PruneReport {
 }
 
 impl SqliteSnapshotStore {
-    /// Run `work` on the blocking pool: a capture reads the whole tree,
-    /// which must never stall an async worker.
+    /// Run `work` on the blocking pool: captures and diffs read the whole
+    /// tree or its manifests, which must never stall an async worker.
     async fn blocking<T: Send + 'static>(
         &self,
         work: impl FnOnce(&Self) -> CoreResult<T> + Send + 'static,
@@ -1292,9 +1292,13 @@ impl SnapshotStore for SqliteSnapshotStore {
     }
 
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<FileDiff>> {
-        let before = self.load_manifest(snapshot_id)?;
-        let after = self.scan_manifest()?;
-        self.diff_manifests(&before, &after, true, false, None)
+        let snapshot_id = snapshot_id.to_owned();
+        self.blocking(move |store| {
+            let before = store.load_manifest(&snapshot_id)?;
+            let after = store.scan_manifest()?;
+            store.diff_manifests(&before, &after, true, false, None)
+        })
+        .await
     }
 
     async fn diff_snapshots(
@@ -1302,9 +1306,13 @@ impl SnapshotStore for SqliteSnapshotStore {
         before_snapshot_id: &str,
         after_snapshot_id: &str,
     ) -> CoreResult<Vec<FileDiff>> {
-        let before = self.load_manifest(before_snapshot_id)?;
-        let after = self.load_manifest(after_snapshot_id)?;
-        self.diff_manifests(&before, &after, false, false, None)
+        let (before, after) = (before_snapshot_id.to_owned(), after_snapshot_id.to_owned());
+        self.blocking(move |store| {
+            let before = store.load_manifest(&before)?;
+            let after = store.load_manifest(&after)?;
+            store.diff_manifests(&before, &after, false, false, None)
+        })
+        .await
     }
 
     /// Manifests only: no blob is read to learn that nothing changed.
@@ -1313,7 +1321,11 @@ impl SnapshotStore for SqliteSnapshotStore {
         before_snapshot_id: &str,
         after_snapshot_id: &str,
     ) -> CoreResult<bool> {
-        Ok(self.load_manifest(before_snapshot_id)? != self.load_manifest(after_snapshot_id)?)
+        let (before, after) = (before_snapshot_id.to_owned(), after_snapshot_id.to_owned());
+        self.blocking(
+            move |store| Ok(store.load_manifest(&before)? != store.load_manifest(&after)?),
+        )
+        .await
     }
 
     async fn diff_review(
@@ -1323,13 +1335,19 @@ impl SnapshotStore for SqliteSnapshotStore {
         summary: bool,
         path: Option<&str>,
     ) -> CoreResult<Vec<FileDiff>> {
-        let before = self.load_manifest(before)?;
-        let live = after.is_none();
-        let after = match after {
-            Some(id) => self.load_manifest(id)?,
-            None => self.scan_manifest()?,
-        };
-        self.diff_manifests(&before, &after, live, summary, path)
+        let before = before.to_owned();
+        let after = after.map(str::to_owned);
+        let path = path.map(str::to_owned);
+        self.blocking(move |store| {
+            let before = store.load_manifest(&before)?;
+            let live = after.is_none();
+            let after = match after {
+                Some(id) => store.load_manifest(&id)?,
+                None => store.scan_manifest()?,
+            };
+            store.diff_manifests(&before, &after, live, summary, path.as_deref())
+        })
+        .await
     }
 }
 
@@ -2857,5 +2875,43 @@ mod tests {
             i64::MAX
         ));
         assert!(!started_before("not an id", i64::MAX));
+    }
+
+    /// A diff reads the whole tree: the executor that awaits it keeps
+    /// running other tasks meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn diffs_run_off_the_async_executor() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for index in 0..2_000 {
+            fs::write(workspace.join(format!("f{index:04}")), format!("{index}\n")).unwrap();
+        }
+        let snapshot = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("f0001"), "edited\n").unwrap();
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let ran = Arc::clone(&ran);
+            async move {
+                loop {
+                    ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        for review in [false, true] {
+            let before = ran.load(std::sync::atomic::Ordering::Relaxed);
+            let files = if review {
+                store.diff_review(&snapshot.id, None, true, None).await
+            } else {
+                store.diff_live(&snapshot.id).await
+            }
+            .unwrap();
+            assert_eq!(files.len(), 1);
+            assert!(
+                ran.load(std::sync::atomic::Ordering::Relaxed) > before,
+                "review: {review}"
+            );
+        }
+        ticker.abort();
     }
 }
