@@ -3636,6 +3636,25 @@ test("new chats select concrete models, honor configuration and remember availab
     await page
       .locator(".composer")
       .screenshot({ path: "test-results/concrete-model-composer.png" });
+    // Picked again in a chat, the model shown is still remembered for new
+    // chats: here it takes over from one picked in a new chat meanwhile.
+    await selectValue(model, "smart-model/smart-preferred");
+    await page.evaluate(
+      async ({ connection, id }) =>
+        window.haarness.api(connection, "updateThread", [id, { title: "Remembered model chat" }]),
+      { connection, id: (threads[0] as unknown as { id: string }).id },
+    );
+    await page
+      .locator(".project-list")
+      .getByRole("button", { name: "Remembered model chat", exact: true })
+      .click();
+    await expect(model).toHaveAttribute("data-value", "smart-model/smart-other");
+    await selectValue(model, "smart-model/smart-other");
+    await open("remembered-again", catalog);
+    await expect(model).toHaveAttribute(
+      "data-value",
+      "smart-model/smart-other",
+    );
     await page
       .getByRole("region", { name: "Project workspace", exact: true })
       .getByRole("button", { name: "workspace", exact: true })

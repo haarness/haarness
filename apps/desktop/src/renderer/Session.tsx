@@ -353,13 +353,15 @@ export function Session() {
     setChoices((items) => ({ ...items, [id]: { ...items[id], ...value } }));
   };
   /** Apply an agent the way the composer's picker does. The agent already
-   * shown, picked again, changes nothing: a new chat keeps the model chosen
-   * for it, and a chat is not rewritten (and marked as just active). */
+   * shown, picked again, is chosen for a new chat without dropping the model
+   * chosen for it, and a chat that has that agent is not rewritten (and
+   * marked as just active). */
   function chooseAgent(id: string) {
-    if (id === selectedAgent()) return;
+    const same = id === selectedAgent();
+    if (same && thread()) return;
     void app.run(async () => {
       if (!thread()) {
-        setChoice({ agent: id, provider: undefined, model: undefined });
+        setChoice(same ? { agent: id } : { agent: id, provider: undefined, model: undefined });
         return;
       }
       await app.api("updateThread", state.selected, { agent: id });
@@ -2113,7 +2115,12 @@ export function Session() {
     if (!key || !connection) return;
     const selected = state.selected;
     const project = draftProject();
-    if (selected) {
+    const chat = thread();
+    // A chat that already has this model is not rewritten (and marked as
+    // just active) when the model shown is picked again; one shown a
+    // fallback for a model gone from the catalog is given it. Either way the
+    // pick is remembered for new chats.
+    if (selected && (chat?.provider !== key.provider || chat?.model !== key.model)) {
       await window.haarness.api(connection, "updateThread", [selected, key]);
       if (state.connection?.id === connection) await app.refresh();
     }
