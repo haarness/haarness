@@ -540,15 +540,15 @@ for how many images it carries ("too many images") or how large they make it
 (HTTP 413, Gemini's "Request payload size exceeds the limit", recorded with
 `too_large: true`) leaves out the oldest half of them by that measure
 (`oldest: true`), so the newest images then reach the model. The turn's own
-images and those of the last message carrying any stay, and so does a file
-read again among them: the record leaves a source out everywhere. When the turn's own
-images hold more than half the request or pass the provider's limits, leaving
-out the others would not help, so the newest go instead and the older ones are
-kept. Any other refusal that names no image leaves out the newest images
-(`guessed: true`): what the last request added is the likeliest cause. A
-refusal before anything streamed is retried once per turn; a second refusal in
-the same turn fails it, and the next turn sends without the images. TUI and
-Desktop show the item as a notice.
+images and those of the last message carrying any stay, and so does a file read
+again among them: the record leaves a source out everywhere. When the turn's
+own images hold more than half the request, or they and the last message's
+images together pass the provider's limits, leaving out the others would not
+help, so the newest go instead and the older ones are kept. Any other refusal
+that names no image leaves out the newest images (`guessed: true`): what the
+last request added is the likeliest cause. A refusal before anything streamed
+is retried once per turn; a second refusal in the same turn fails it, and the
+next turn sends without the images. TUI and Desktop show the item as a notice.
 
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and
