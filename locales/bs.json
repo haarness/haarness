@@ -2869,5 +2869,6 @@
   "{count} tool calls": "Pozivi alata: {count}",
   "less than a day left at this pace": "ovim tempom ostaje manje od jednog dana",
   "about 1 day left at this pace": "ovim tempom ostaje oko 1 dan",
-  "about {count} days left at this pace": "Preostali dani ovim tempom: oko {count}"
+  "about {count} days left at this pace": "Preostali dani ovim tempom: oko {count}",
+  "Can't reach the server · still waiting": "Server nije dostupan · i dalje čeka"
 }

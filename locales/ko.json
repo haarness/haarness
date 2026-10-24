@@ -2869,5 +2869,6 @@
   "{count} tool calls": "도구 호출 {count}회",
   "less than a day left at this pace": "이 속도라면 하루도 남지 않음",
   "about 1 day left at this pace": "이 속도라면 약 1일 남음",
-  "about {count} days left at this pace": "이 속도라면 약 {count}일 남음"
+  "about {count} days left at this pace": "이 속도라면 약 {count}일 남음",
+  "Can't reach the server · still waiting": "서버에 연결할 수 없음 · 계속 기다리는 중"
 }

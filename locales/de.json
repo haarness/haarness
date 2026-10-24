@@ -2869,5 +2869,6 @@
   "{count} tool calls": "{count} Tool-Aufrufe",
   "less than a day left at this pace": "bei diesem Tempo weniger als ein Tag übrig",
   "about 1 day left at this pace": "bei diesem Tempo noch etwa 1 Tag",
-  "about {count} days left at this pace": "bei diesem Tempo noch etwa {count} Tage"
+  "about {count} days left at this pace": "bei diesem Tempo noch etwa {count} Tage",
+  "Can't reach the server · still waiting": "Server nicht erreichbar · wartet weiter"
 }

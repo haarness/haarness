@@ -2869,5 +2869,6 @@
   "{count} tool calls": "{count} 次工具调用",
   "less than a day left at this pace": "按此速度剩余不到一天",
   "about 1 day left at this pace": "按此速度约剩 1 天",
-  "about {count} days left at this pace": "按此速度约剩 {count} 天"
+  "about {count} days left at this pace": "按此速度约剩 {count} 天",
+  "Can't reach the server · still waiting": "无法连接服务器 · 仍在等待"
 }

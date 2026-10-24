@@ -2869,5 +2869,6 @@
   "{count} tool calls": "เรียกใช้เครื่องมือ {count} ครั้ง",
   "less than a day left at this pace": "เหลือไม่ถึงหนึ่งวันในอัตรานี้",
   "about 1 day left at this pace": "เหลือประมาณ 1 วันในอัตรานี้",
-  "about {count} days left at this pace": "เหลือประมาณ {count} วันในอัตรานี้"
+  "about {count} days left at this pace": "เหลือประมาณ {count} วันในอัตรานี้",
+  "Can't reach the server · still waiting": "ติดต่อเซิร์ฟเวอร์ไม่ได้ · ยังรออยู่"
 }

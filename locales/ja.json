@@ -2869,5 +2869,6 @@
   "{count} tool calls": "ツール呼び出し {count} 回",
   "less than a day left at this pace": "このペースでは残り 1 日未満",
   "about 1 day left at this pace": "このペースでは残り約 1 日",
-  "about {count} days left at this pace": "このペースでは残り約 {count} 日"
+  "about {count} days left at this pace": "このペースでは残り約 {count} 日",
+  "Can't reach the server · still waiting": "サーバーに接続できません · 引き続き待機中"
 }
