@@ -695,9 +695,20 @@ fn media_omitted_notice(
     names: &[String],
     guessed: bool,
     oldest: bool,
+    too_large: bool,
 ) -> String {
     let list = names.join(", ");
-    if oldest && names.len() == 1 {
+    if oldest && too_large && names.len() == 1 {
+        language.format(
+            "The request was too large for the provider, so the oldest one, {name}, is left out of this chat from now on.",
+            &[("name", &list)],
+        )
+    } else if oldest && too_large {
+        language.format(
+            "The request was too large for the provider, so the oldest {count} are left out of this chat from now on.",
+            &[("count", &names.len().to_string())],
+        )
+    } else if oldest && names.len() == 1 {
         language.format(
             "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.",
             &[("name", &list)],
@@ -758,24 +769,25 @@ mod workflow_tests {
                 .map(|&name| name.to_owned())
                 .collect::<Vec<_>>()
         };
-        let notice = |list: &[&str], guessed, oldest| {
+        let notice = |list: &[&str], guessed, oldest, too_large| {
             super::media_omitted_notice(
                 crate::locale::Language::English,
                 &names(list),
                 guessed,
                 oldest,
+                too_large,
             )
         };
         assert_eq!(
-            notice(&["a.png"], false, true),
+            notice(&["a.png"], false, true, false),
             "The request had too many images for the provider, so the oldest one, a.png, is left out of this chat from now on."
         );
         assert_eq!(
-            notice(&["a.png", "b.png", "c.png"], false, true),
+            notice(&["a.png", "b.png", "c.png"], false, true, false),
             "The request had too many images for the provider, so the oldest 3 are left out of this chat from now on."
         );
         assert_eq!(
-            notice(&["d.png"], true, false),
+            notice(&["d.png"], true, false, false),
             "The provider refused an image without saying which, so the newest one, d.png, is left out of this chat from now on."
         );
         assert_eq!(
@@ -783,9 +795,35 @@ mod workflow_tests {
                 crate::locale::Language::German,
                 &names(&["a.png", "b.png"]),
                 false,
-                true
+                true,
+                false
             ),
             "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleiben die ältesten 2 in diesem Chat ab jetzt außen vor."
+        );
+    }
+
+    #[test]
+    fn a_request_too_large_says_so_and_names_the_oldest_left_out() {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let notice = |language, list: &[&str]| {
+            super::media_omitted_notice(language, &names(list), false, true, true)
+        };
+        assert_eq!(
+            notice(crate::locale::Language::English, &["a.png"]),
+            "The request was too large for the provider, so the oldest one, a.png, is left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(crate::locale::Language::English, &["a.png", "b.png"]),
+            "The request was too large for the provider, so the oldest 2 are left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(crate::locale::Language::German, &["a.png", "b.png"]),
+            "Die Anfrage war zu groß für den Anbieter. Daher bleiben die ältesten 2 in diesem Chat ab jetzt außen vor."
         );
     }
 
@@ -2384,9 +2422,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 reason,
                 guessed,
                 oldest,
+                too_large,
                 ..
             } => {
-                let notice = media_omitted_notice(app.language, names, *guessed, *oldest);
+                let notice =
+                    media_omitted_notice(app.language, names, *guessed, *oldest, *too_large);
                 for (index, wrapped) in textwrap::wrap(&notice, width.saturating_sub(4).max(10))
                     .into_iter()
                     .enumerate()
