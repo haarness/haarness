@@ -445,7 +445,14 @@ Provider environment variables override stored credentials: `OPENAI_API_KEY` and
 
 The `read` tool returns UTF-8 text normally and exposes PDF, image, audio, and
 video files as provider-visible attachments instead of decoding binary bytes as
-text. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
+text. Text is read a line at a time, so a file of any size, or one with a line
+that never ends (a minified bundle, a JSON dump), holds only what is shown: a
+line longer than 2000 characters shows its first 2000 and ends in
+`… (line truncated to 2000 characters)`, and a read stops at 2000 lines or 50 KB
+with `(stopped at 50 KB; read on with offset=N)`. Text that is not UTF-8 (a
+Latin-1 file) shows `�` for what does not decode; a file with a NUL byte in its
+first 8 KiB is binary data and is shown only when it is UTF-8 throughout the
+part read. A folder, pipe or device is refused instead of waited on. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
 its 10 MiB aggregate adapter budget for inline request overhead. OpenAI,
 Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV
