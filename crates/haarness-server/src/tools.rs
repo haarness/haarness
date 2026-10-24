@@ -3473,7 +3473,8 @@ impl SecretFilter {
                 workspace.to_path_buf(),
             ],
             root: root.to_path_buf(),
-            named_root: workspace.join(requested),
+            // `~/notes` names the home folder, as the tools read it.
+            named_root: workspace.join(haarness_core::expand_home(requested).as_ref()),
             rules,
         }
     }
