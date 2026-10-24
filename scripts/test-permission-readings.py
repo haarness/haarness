@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-binary proof of the October 24 permission-reading fixes, with the echo provider.
+r"""Real-binary proof of the October 24 permission-reading fixes, with the echo provider.
 
 1. toml_order: `[permissions]` rules in `config.toml` apply in the order written, kept as TOML and
    once migrated to `haarness.json`: a deny written after a broader allow refuses.
@@ -7,10 +7,14 @@
    (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
    read tool refuses `mcp_resource_read`.
+4. backslash: a line that starts with a backslash is a command of its own (an `rm *` deny refuses
+   `true` followed by `\rm -rf victim`, and an allowed `echo *` under `"*": "ask"` does not open
+   `echo hi` followed by one), and a line continuation inside a word is joined (`r\` + `m -rf`).
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias). No model is called; nothing outside the fixture is touched.
+toml_order, cd_link, resource_alias, backslash). No model is called; nothing outside the fixture is
+touched.
 """
 import json
 import os
@@ -128,7 +132,36 @@ def case_resource_alias():
     passed('a deny under the upstream resource read name refuses the read; the listing still runs')
 
 
-CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias}
+def case_backslash():
+    """Backslash lines meet the rules for the commands the shell runs."""
+    _, env = environment('backslash')
+    denied = project('backslash', {'permission': {'bash': {'rm *': 'deny'}}})
+    for command in ['true\n\\rm -rf victim', 'true\n\\\nrm -rf victim', 'r\\\nm -rf victim',
+                    "bash <<'EOF'\n\\rm -rf victim\nEOF"]:
+        (denied / 'victim').mkdir(exist_ok=True)
+        try:
+            output = bash(env, denied, command)
+        finally:
+            stop(env, denied)
+        assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
+        assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
+    passed('an rm deny refuses rm on a backslash line, after a lone backslash, joined inside a word, '
+           'and on the first line of a here-document fed to bash')
+    asked = project('backslash-ask', {'permission': {'bash': {'*': 'ask', 'echo *': 'allow'}}})
+    (asked / 'victim').mkdir()
+    try:
+        output = bash(env, asked, 'echo hi\n\\rm -rf victim', code=1)
+        assert 'Stopped:' in output and 'rm -rf victim' in output, output
+        assert (asked / 'victim').is_dir(), 'the allowed echo opened the rm after it'
+        output = bash(env, asked, 'echo hi\necho there', code=0)
+        assert 'there' in output, output
+    finally:
+        stop(env, asked)
+    passed('an allowed echo does not open a backslash line after it; plain echo lines still run')
+
+
+CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
+         'backslash': case_backslash}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

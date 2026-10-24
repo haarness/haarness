@@ -273,6 +273,171 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
     analysis
 }
 
+/// What the parser is given for a shell line: the line itself, except for
+/// the backslash shapes tree-sitter-bash reads otherwise than the shell does,
+/// where one backslash is written as a space. The parser takes a line feed
+/// directly followed by a backslash as part of the next word, so the line
+/// after it becomes more words of the command before (`true` then a line
+/// `\rm -rf x` reads as one `true` command, and the first line of a
+/// here-document that starts with a backslash as words of the line that
+/// opens it). The shell ends the command at that line feed. Only these
+/// shapes change, each where the line feed is not itself escaped and the
+/// parser reads it inside one command:
+///
+/// - a line that starts with `\` and a name character (`\rm`, `\r\m`,
+///   `\./run.sh`): the backslash only stops an alias, and becomes a space;
+/// - a line that is only `\` (it joins the line after it to it): the
+///   backslash becomes a space, an empty line;
+/// - `\`, a carriage return and a line feed before such a line: the
+///   backslash quotes the carriage return, so the line feed still ends the
+///   command, and the backslash becomes a space.
+///
+/// The text keeps its length, so every node's range is a range of the line
+/// as written, which every text is read from: patterns, words and
+/// here-documents stay as written. Any other backslash form is read as
+/// before, and so is a line that starts with a here-document's delimiter, a
+/// line the parser already starts a command at (after `&&`, `|`, `;` or a
+/// comment line) and one inside quotes or a here-document's text.
+fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
+    if !command.contains("\n\\") {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    let Some(tree) = parser.parse(command, None) else {
+        return std::borrow::Cow::Borrowed(command);
+    };
+    // Whether the parser reads byte `at` as part of one command, where the
+    // shell ends the command at the line feed there.
+    let inside = |at: usize| {
+        tree.root_node()
+            .descendant_for_byte_range(at, at + 1)
+            .is_some_and(|node| {
+                matches!(
+                    node.kind(),
+                    "word"
+                        | "command_name"
+                        | "concatenation"
+                        | "command"
+                        | "declaration_command"
+                        | "unset_command"
+                        | "variable_assignment"
+                        | "variable_assignments"
+                        | "file_redirect"
+                        | "heredoc_redirect"
+                        | "herestring_redirect"
+                        | "redirected_statement"
+                )
+            })
+    };
+    let name = |byte: u8| byte.is_ascii_alphanumeric() || b"_./:@%+,-".contains(&byte);
+    // Whether the byte at `at` is quoted by the backslashes right before it.
+    let escaped = |bytes: &[u8], at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    let delimiters = delimiters(command);
+    let mut bytes = command.as_bytes().to_vec();
+    let mut changed = false;
+    for at in 0..bytes.len() {
+        if bytes[at] == b'\n' && !escaped(&bytes, at) && bytes.get(at + 1) == Some(&b'\\') {
+            let line = &command[at + 2..];
+            let line = &line[..line.find('\n').unwrap_or(line.len())];
+            let closes = delimiters
+                .iter()
+                .any(|word| line.starts_with(word.as_str()));
+            if (line.is_empty() || (line.bytes().next().is_some_and(name) && !closes)) && inside(at)
+            {
+                bytes[at + 1] = b' ';
+                changed = true;
+            }
+        } else if bytes[at] == b'\\'
+            && !escaped(&bytes, at)
+            && bytes[at + 1..].starts_with(b"\r\n\\")
+            && bytes.get(at + 4).copied().is_some_and(name)
+            && inside(at)
+        {
+            bytes[at] = b' ';
+            changed = true;
+        }
+    }
+    if !changed {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    // Only ASCII backslashes became spaces: the text is still UTF-8.
+    std::borrow::Cow::Owned(String::from_utf8(bytes).unwrap_or_else(|_| command.to_owned()))
+}
+
+/// The words after each `<<` in `command`, the delimiters of the
+/// here-documents it may open: a body line written `\EOF` must not become
+/// one the parser takes for the end.
+fn delimiters(command: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for (at, _) in command.match_indices("<<") {
+        let word: String = command[at + 2..]
+            .trim_start_matches(['-', ' ', '\t'])
+            .trim_start_matches(['\'', '"', '\\'])
+            .chars()
+            .take_while(|c| !c.is_whitespace() && !"'\"\\;|&<>()".contains(*c))
+            .collect();
+        if !word.is_empty() && !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words
+}
+
+/// The text of a command with its line continuations inside words joined,
+/// as the shell reads it, when it has one: `r\` at the end of a line and
+/// `m -rf x` on the next is `rm -rf x`, where the parser reads the words `r`
+/// and `m`. A continuation between words, inside single quotes, or at the
+/// start or end of the text changes nothing and gives `None`.
+fn joined_inside_words(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut joined = String::with_capacity(text.len());
+    let (mut single, mut double, mut found) = (false, false, false);
+    let mut last = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            b'\\' if !single => {
+                if bytes.get(at + 1) == Some(&b'\n') {
+                    let before = at.checked_sub(1).map(|index| bytes[index]);
+                    let after = bytes.get(at + 2).copied();
+                    if before.is_some_and(|byte| !byte.is_ascii_whitespace())
+                        && after.is_some_and(|byte| !byte.is_ascii_whitespace())
+                    {
+                        found = true;
+                    }
+                    joined.push_str(&text[last..at]);
+                    last = at + 2;
+                }
+                at += 2;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    if !found {
+        return None;
+    }
+    joined.push_str(&text[last.min(text.len())..]);
+    Some(joined)
+}
+
 struct Reader<'w> {
     workspace: &'w Path,
     analysis: BashAnalysis,
@@ -381,7 +546,9 @@ impl Reader<'_> {
         if parser.set_language(&language.into()).is_err() {
             return false;
         }
-        let Some(tree) = parser.parse(command, None) else {
+        // The tree comes from the shell's reading of the line; every text is
+        // read from the line itself, which has the same length.
+        let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
             return false;
         };
         // Each node with its parent: asking the tree for a node's parent
@@ -512,6 +679,7 @@ impl Reader<'_> {
             };
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
+        let continued = command.contains("\\\n");
 
         for (node, parent) in command_nodes {
             if self.overflow {
@@ -603,6 +771,12 @@ impl Reader<'_> {
                 for line in lines {
                     self.nested(line, depth);
                 }
+            }
+            // `r\<newline>m -rf x`: the shell drops a line continuation
+            // inside a word before it reads the line, where the parser reads
+            // two words, so the joined text is read again.
+            if continued && let Some(joined) = joined_inside_words(&node_text(node, command)) {
+                self.nested(&joined, depth);
             }
         }
         self.text_depth = outer_depth;
@@ -2671,7 +2845,10 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     if parser.set_language(&language.into()).is_err() {
         return false;
     }
-    let Some(tree) = parser.parse(command, None) else {
+    if joined_inside_words(command).is_some() {
+        return false;
+    }
+    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
         return false;
     };
     if tree.root_node().has_error() {
@@ -3383,7 +3560,12 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(command, None) else {
+    // A word the shell joins across lines may name another file than the
+    // tree's words do.
+    if joined_inside_words(command).is_some() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
         return Vec::new();
     };
     // A line the tree cannot read whole may hold an `&` or a `cd` where the
@@ -5693,6 +5875,218 @@ mod readings {
             decide("python3 - <<'EOF' 2>&1 | rm -rf x\nprint(1)\nEOF"),
             PermissionDecision::Deny
         );
+    }
+}
+
+/// Lines the shell reads otherwise than tree-sitter-bash: a line feed with a
+/// backslash right after it, and a line continuation inside a word.
+#[cfg(test)]
+mod backslash_lines {
+    use super::*;
+
+    /// The commands tree-sitter-bash finds in `text` as it is, each as the
+    /// words it reads.
+    fn parsed(text: &str) -> Vec<Vec<String>> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        let mut commands = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "command" {
+                commands.push((
+                    node.start_byte(),
+                    words(node, text)
+                        .into_iter()
+                        .map(|word| word.raw)
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            stack.extend(node.children(&mut node.walk()));
+        }
+        commands.sort();
+        commands.into_iter().map(|(_, words)| words).collect()
+    }
+
+    fn written(command: &str) -> Vec<String> {
+        analyze(command, &std::env::current_dir().unwrap())
+            .written
+            .into_iter()
+            .map(|written| written.pattern)
+            .collect()
+    }
+
+    fn readings(command: &str) -> Vec<String> {
+        analyze(command, &std::env::current_dir().unwrap())
+            .derived
+            .into_iter()
+            .map(|derived| derived.pattern)
+            .collect()
+    }
+
+    /// Pins tree-sitter-bash 0.25's reading, which `shell_reading` corrects:
+    /// a line feed followed by a backslash becomes the start of the next
+    /// word, so that line is read as more words of the command before.
+    /// Should a later grammar read these as the shell does, this test says
+    /// so, and the correction is no longer needed.
+    #[test]
+    fn the_parser_reads_a_line_after_a_line_feed_and_backslash_as_more_words() {
+        for (text, words) in [
+            ("true\n\\rm -rf x", vec![vec!["true", "\n\\rm", "-rf", "x"]]),
+            ("ls\n\\rm -rf x", vec![vec!["ls", "\n\\rm", "-rf", "x"]]),
+            ("true # c\n\\rm x", vec![vec!["true", "\n\\rm", "x"]]),
+            ("true\n\n\\rm x", vec![vec!["true", "\n\n\\rm", "x"]]),
+            ("true\r\n\\rm x", vec![vec!["true", "\n\\rm", "x"]]),
+            ("true \\\r\n\\rm x", vec![vec!["true", "\\rm", "x"]]),
+            ("true\n\\\nrm x", vec![vec!["true", "rm", "x"]]),
+            ("r\\\nm -rf x", vec![vec!["r", "m", "-rf", "x"]]),
+        ] {
+            let words: Vec<Vec<String>> = words
+                .into_iter()
+                .map(|words| words.into_iter().map(str::to_owned).collect())
+                .collect();
+            assert_eq!(parsed(text), words, "{text:?}");
+        }
+        // Blanks after the line feed, or an operator before it, and the
+        // parser starts a new command as the shell does.
+        for text in [
+            "true\n  \t\\rm x",
+            "true &&\n\\rm x",
+            "true;\n\\rm x",
+            "true |\n\\rm x",
+        ] {
+            assert_eq!(parsed(text).len(), 2, "{text:?}");
+        }
+        // The first line of a here-document that starts with a backslash
+        // becomes words of the line that opens it, not of its body.
+        let text = "bash <<'EOF'\n\\rm -rf x\nEOF";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        let mut stack = vec![tree.root_node()];
+        let mut bodies = Vec::new();
+        while let Some(node) = stack.pop() {
+            if node.kind() == "heredoc_body" {
+                bodies.push(node_text(node, text));
+            }
+            stack.extend(node.children(&mut node.walk()));
+        }
+        assert!(
+            bodies.iter().all(|body| !body.contains("rm -rf x")),
+            "{bodies:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_that_starts_with_a_backslash_is_a_command_of_its_own() {
+        for command in [
+            "true\n\\rm -rf victim",
+            "ls\n\\rm -rf victim",
+            "npm run build\n\\rm -rf victim",
+            "true # c\n\\rm -rf victim",
+            "true\n\n\\rm -rf victim",
+            "true\r\n\\rm -rf victim",
+            "true 2>err.txt\n\\rm -rf victim",
+            "export A=1\n\\rm -rf victim",
+            "(true\n\\rm -rf victim)",
+            "{ true\n\\rm -rf victim; }",
+            "echo $(true\n\\rm -rf victim)",
+            "cat <<EOF\n$(true\n\\rm -rf victim)\nEOF",
+            "true \\\r\n\\rm -rf victim",
+        ] {
+            assert!(
+                written(command).contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {:?}",
+                written(command)
+            );
+        }
+        // A line that is only a backslash joins the next line to it.
+        assert!(written("true\n\\\nrm -rf victim").contains(&"rm -rf victim".to_owned()));
+        // Escaped further in (`\r\m`): the shell runs `rm`.
+        assert!(readings("true\n\\r\\m -f victim").contains(&"rm -f victim".to_owned()));
+        // A shell's here-document whose first line starts with a backslash
+        // is read whole.
+        assert!(
+            readings("bash <<'EOF'\n\\rm -rf victim\nEOF").contains(&"rm -rf victim".to_owned())
+        );
+        // Nothing else reads those words as the command before's.
+        assert!(!is_obviously_read_only("ls\n\\rm -rf victim"));
+        let workspace = std::env::current_dir().unwrap();
+        let parent = workspace.parent().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            analyze("true\n\\cat ../x", &workspace).external_dirs,
+            vec![glob(&parent)]
+        );
+        assert!(
+            analyze("mkdir -p d\n\\echo ../x", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        assert!(
+            analyze("cat <<'EOF'\n\\head -1 ../x\nEOF", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn other_backslashes_read_as_before() {
+        // Inside quotes the parser reads the text whole either way, and every
+        // text is read from the line as written.
+        assert_eq!(written("echo 'a\n\\rm x'"), vec!["echo 'a\n\\rm x'"]);
+        assert_eq!(readings("echo 'a\n\\rm x'"), vec!["echo a\n\\rm x"]);
+        assert_eq!(readings("echo \"a\n\\rm x\""), vec!["echo a\\rm x"]);
+        for command in [
+            "echo 'a\n\\rm x'",
+            "echo \"a\n\\rm x\"",
+            "true &&\n\\rm x",
+            "true;\n\\rm x",
+            "true |\n\\rm x",
+            "# note\n\\rm x",
+            "cat <<'EOF'\nHi\n\\begin{x}\nEOF",
+            "true \\\nhead -1 x",
+            "cargo test \\\n  -p haarness-core",
+            "docker run --rm \\\n  -v \"$PWD\":/app \\\n  -w /app node:22 npm test",
+            "true\n\\$x",
+            "cat > win.txt <<EOF\nC:\\Users\\me\\file\nEOF",
+            "\\cp -f a b",
+        ] {
+            assert_eq!(shell_reading(command), command, "{command:?}");
+        }
+        // Here-document text keeps its backslashes.
+        let latex = "cat > paper.tex <<'EOF'\n\\documentclass{article}\n\\begin{document}\nEOF";
+        assert_eq!(written(latex), vec![latex.to_owned()]);
+        assert!(readings(latex).is_empty(), "{:?}", readings(latex));
+        // A body line that starts with the delimiter stays as it is, so the
+        // here-document does not end there.
+        let closing = "cat <<'EOF'\n\\EOF\nrm -rf victim\nEOF";
+        assert_eq!(shell_reading(closing), closing);
+        assert!(!written(closing).contains(&"rm -rf victim".to_owned()));
+    }
+
+    #[test]
+    fn a_line_continuation_inside_a_word_is_joined() {
+        assert_eq!(readings("r\\\nm -rf victim"), vec!["rm -rf victim"]);
+        assert_eq!(readings("git pu\\\nsh --force"), vec!["git push --force"]);
+        assert_eq!(
+            joined_inside_words("echo \"a\\\nb\""),
+            Some("echo \"ab\"".to_owned())
+        );
+        // Between words, inside single quotes, or none: nothing to join.
+        for text in [
+            "cargo test \\\n  -p haarness-core",
+            "echo 'a\\\nb'",
+            "git status",
+            "a \\\nb",
+        ] {
+            assert_eq!(joined_inside_words(text), None, "{text:?}");
+        }
+        assert!(readings("cargo test \\\n  -p haarness-core").is_empty());
+        assert!(!is_obviously_read_only("l\\\ns"));
     }
 }
 
