@@ -576,6 +576,7 @@ impl App {
                             thread_id: event.thread_id.unwrap_or(self.thread.id),
                             root_thread_id: event.root_thread_id,
                             turn_id: event.turn_id,
+                            call_id: event.payload["callId"].as_str().map(str::to_owned),
                             agent: event.payload["agent"].as_str().map(str::to_owned),
                             created_at: event.created_at,
                             review: serde_json::from_value(event.payload["review"].clone()).ok(),
@@ -670,6 +671,7 @@ impl App {
                         thread_id: event.thread_id.unwrap_or(self.thread.id),
                         root_thread_id: event.root_thread_id,
                         turn_id: event.turn_id,
+                        call_id: event.payload["callId"].as_str().map(str::to_owned),
                         created_at: event.created_at,
                     });
                     if was_empty {

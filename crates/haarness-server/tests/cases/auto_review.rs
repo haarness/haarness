@@ -1169,13 +1169,22 @@ async fn turning_auto_on_with_a_card_shown_says_so_and_keeps_the_note() {
     );
     let mut announced = Vec::new();
     let mut states = Vec::new();
+    // Announced again, and waiting again, it still names the call that asks.
+    let call = asked.call_id.clone().expect("the request names its call");
+    assert_eq!(listed[0].call_id.as_deref(), Some(call.as_str()));
     while let Ok(event) = events.try_recv() {
         match event.event_type.as_str() {
             "permission.requested" => {
                 assert_eq!(event.payload["permissionId"], asked.permission_id.as_str());
+                assert_eq!(event.payload["callId"], call.as_str());
                 announced.push(event.payload["review"]["status"].clone());
             }
-            "turn.status" => states.push(event.payload["state"].clone()),
+            "turn.status" => {
+                if event.payload["state"] == "waiting_permission" {
+                    assert_eq!(event.payload["callId"], call.as_str());
+                }
+                states.push(event.payload["state"].clone());
+            }
             _ => {}
         }
     }

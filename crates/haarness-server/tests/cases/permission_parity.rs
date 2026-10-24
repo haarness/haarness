@@ -918,6 +918,128 @@ async fn parity_native_and_batch_reads_run_concurrently_with_write_barriers() {
     }
 }
 
+/// A read that holds `slow` until released, so a sibling of its parallel
+/// group asks while it still runs.
+struct HeldRead {
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl Tool for HeldRead {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "read".into(),
+            description: "Read that holds until released".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+        }
+    }
+    fn side_effectful(&self) -> bool {
+        false
+    }
+    fn parallel_safe(&self, _args: &Value) -> bool {
+        true
+    }
+    async fn execute(&self, args: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        if args["path"] == "slow" {
+            self.release.notified().await;
+        }
+        Ok(ToolOutput {
+            text: "read".into(),
+            metadata: json!({}),
+        })
+    }
+}
+
+/// In a parallel group the request, its listing and the waiting status all
+/// name the call that asks, not the earlier read still running beside it;
+/// a batch's step by `<batch call id>:N`.
+#[tokio::test]
+async fn parity_a_request_names_the_call_that_asks() {
+    for batch in [false, true] {
+        let fixture = Fixture::new();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools = Arc::new(OverlayRegistry {
+            native: NativeToolRegistry::new(fixture.0.clone()),
+            tools: vec![Arc::new(HeldRead {
+                release: release.clone(),
+            })],
+        });
+        let mut config = RuntimeConfig::default();
+        config.base_rules.push(rule("read:*asks", D::Ask));
+        let runtime = runtime(&fixture.0, config, Some(tools));
+        let thread = echo_thread(&runtime).await;
+        let mut events = runtime.events().subscribe(None).receiver;
+        let calls = [json!({"path":"slow"}), json!({"path":"asks"})];
+        let script = if batch {
+            format!(
+                "!tool batch {}",
+                json!({"tool_calls":calls.iter().map(|args|json!({"tool":"read","parameters":args})).collect::<Vec<_>>()})
+            )
+        } else {
+            format!(
+                "!multi {}",
+                json!(
+                    calls
+                        .iter()
+                        .map(|args| json!({"name":"read","arguments":args}))
+                        .collect::<Vec<_>>()
+                )
+            )
+        };
+        let turn = send(&runtime, &thread, &script).await;
+        let asked = pending(&runtime).await;
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let call_ids: Vec<&str> = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let expected = if batch {
+            format!("{}:2", call_ids[0])
+        } else {
+            call_ids[1].to_owned()
+        };
+        assert_eq!(asked.call_id.as_deref(), Some(expected.as_str()), "{batch}");
+        // The slow read still runs: no call has its result yet.
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::ToolResult { .. })),
+            "{batch}"
+        );
+        let (mut requested, mut waiting) = (None, None);
+        while requested.is_none() || waiting.is_none() {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event.event_type.as_str() {
+                "permission.requested" => requested = Some(event.payload["callId"].clone()),
+                "turn.status" if event.payload["state"] == "waiting_permission" => {
+                    assert_eq!(event.payload["tool"], "read", "{batch}");
+                    waiting = Some(event.payload["callId"].clone());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(requested, Some(json!(expected)), "{batch}");
+        assert_eq!(waiting, Some(json!(expected)), "{batch}");
+        runtime
+            .reply_permission(
+                &asked.permission_id,
+                PermissionReply {
+                    decision: Reply::Once,
+                    feedback: None,
+                },
+            )
+            .await
+            .unwrap();
+        release.notify_one();
+        assert_success(&runtime, &thread, &turn).await;
+    }
+}
+
 /// A runtime whose one command (`probe`) runs `template` with `execution`.
 fn snippet_runtime(
     workspace: &Path,

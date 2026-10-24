@@ -409,6 +409,17 @@ fn paired_call<'a>(app: &'a App, result: &Item, call_id: &str) -> Option<&'a Ite
     })
 }
 
+/// The `tool_call` item a call id names; a batch's step (`<call id>:N`) is
+/// its batch's.
+fn call_item<'a>(app: &'a App, call: &str) -> Option<&'a Item> {
+    let named = |wanted: &str| {
+        app.items.iter().find(
+            |item| matches!(&item.data, ItemData::ToolCall { call_id, .. } if call_id == wanted),
+        )
+    };
+    named(call).or_else(|| crate::state::batch_parent_call(call).and_then(named))
+}
+
 fn paired_result<'a>(app: &'a App, call: &Item, call_id: &str) -> Option<&'a Item> {
     app.items.iter().find(|item| {
         item.sequence > call.sequence
@@ -1488,14 +1499,38 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             "waiting_permission" | "waiting_question"
         )
     });
-    let asks_approval = person_wait.is_some_and(|phase| phase.state == "waiting_permission");
-    // The call a person is asked about. No status names it (and the last
-    // tool status may name another call of a parallel batch), so it is the
-    // earliest call of the asking turn with no result yet; with that turn
-    // unknown, no call is marked waiting or queued.
-    let asked_call = person_wait
+    let waits_for_approval = person_wait.is_some_and(|phase| phase.state == "waiting_permission");
+    // The calls a person is asked about, as the server names them: each
+    // request and question names its call (`<call id>:N` for a batch's
+    // step), and so does the waiting status. A request not answered yet
+    // keeps its call waiting while a sibling's call runs again.
+    let waiting_call = |state: &str| {
+        person_wait
+            .filter(|phase| phase.state == state)
+            .and_then(|phase| phase.call_id.as_deref())
+    };
+    let mut approval_calls: Vec<&str> = app
+        .pending_permissions
+        .iter()
+        .filter(|pending| pending.thread_id == app.thread.id)
+        .filter_map(|pending| pending.call_id.as_deref())
+        .chain(waiting_call("waiting_permission"))
+        .collect();
+    let mut question_calls: Vec<&str> = app
+        .pending_questions
+        .iter()
+        .filter(|pending| pending.thread_id == app.thread.id)
+        .filter_map(|pending| pending.call_id.as_deref())
+        .chain(waiting_call("waiting_question"))
+        .collect();
+    // A server that names none: the earliest call of the asking turn with no
+    // result yet (in a parallel group, a read still running may be the one
+    // taken); with that turn unknown, no call is marked waiting or queued.
+    let fallback = (approval_calls.is_empty() && question_calls.is_empty())
+        .then_some(person_wait)
+        .flatten()
         .and_then(|_| {
-            if asks_approval {
+            if waits_for_approval {
                 app.pending_permissions
                     .iter()
                     .find(|pending| pending.thread_id == app.thread.id)
@@ -1520,6 +1555,30 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 _ => None,
             })
         });
+    if let Some(call) = fallback {
+        if waits_for_approval {
+            approval_calls.push(call);
+        } else {
+            question_calls.push(call);
+        }
+    }
+    // How far each turn has got: the calls that ask, and the one running.
+    // A call of that turn before one of them with no result yet runs beside
+    // it (a parallel group, whose results land in call order): never queued.
+    let reached: Vec<_> = approval_calls
+        .iter()
+        .chain(&question_calls)
+        .copied()
+        .chain(
+            app.phase
+                .as_ref()
+                .filter(|phase| matches!(phase.state.as_str(), "tool" | "reviewing"))
+                .and_then(|phase| phase.call_id.as_deref()),
+        )
+        .filter_map(|call| call_item(app, call))
+        .filter_map(|item| Some((item.turn_id?, item.sequence)))
+        .collect();
+    let asked = !approval_calls.is_empty() || !question_calls.is_empty();
     // Off screen, the sidebar leaves one row in its place: the plan's
     // progress where it last changed, which opens the sidebar.
     let plan_at = (app.plan_inline.get() && open_plan(app))
@@ -1767,11 +1826,20 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 let this_call = |active: &str| {
                     active == call_id || crate::state::batch_parent_call(active) == Some(call_id)
                 };
-                // While a request waits for a person nothing runs: the call
-                // that asked waits still, and the calls after it queue.
-                let awaiting = unfinished && asked_call.is_some_and(this_call);
+                // While a request waits for a person its call waits still,
+                // and the calls after it queue; one before it with no result
+                // yet runs beside it.
+                let asks_approval = approval_calls.iter().any(|call| this_call(call));
+                let awaiting = unfinished
+                    && (asks_approval || question_calls.iter().any(|call| this_call(call)));
+                let beside = item.turn_id.is_some_and(|turn| {
+                    reached
+                        .iter()
+                        .any(|&(at, sequence)| at == turn && item.sequence < sequence)
+                });
                 let queued = unfinished
                     && !awaiting
+                    && !beside
                     && app
                         .phase
                         .as_ref()
@@ -1780,7 +1848,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 .call_id
                                 .as_deref()
                                 .is_some_and(|active| !this_call(active)),
-                            "waiting_permission" | "waiting_question" => asked_call.is_some(),
+                            "waiting_permission" | "waiting_question" => asked,
                             _ => false,
                         });
                 let color = child_state.map_or_else(
@@ -2021,22 +2089,31 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     };
                     // The step running now: the turn's status names it as
                     // `<call id>:N`, the batch's Nth step. While the batch
-                    // is the call a person is asked about, the waiting
-                    // status names nothing, and the step is the one the last
-                    // tool status named when that was a step of this batch.
+                    // is the call a person is asked about, the steps that
+                    // ask are the ones their requests name; from a server
+                    // that names none, the one the last tool status named
+                    // when that was a step of this batch.
                     let step_of = |active: &str| {
                         active
                             .strip_prefix(call_id.as_str())
                             .and_then(|rest| rest.strip_prefix(':'))
                             .and_then(|index| index.parse::<usize>().ok())
                     };
+                    let asked_steps: Vec<usize> = approval_calls
+                        .iter()
+                        .chain(&question_calls)
+                        .filter_map(|call| step_of(call))
+                        .collect();
                     let running = if awaiting {
-                        app.last_tool_call
-                            .as_deref()
-                            .filter(|active| {
-                                crate::state::batch_parent_call(active) == Some(call_id.as_str())
-                            })
-                            .and_then(step_of)
+                        asked_steps.iter().copied().max().or_else(|| {
+                            app.last_tool_call
+                                .as_deref()
+                                .filter(|active| {
+                                    crate::state::batch_parent_call(active)
+                                        == Some(call_id.as_str())
+                                })
+                                .and_then(step_of)
+                        })
                     } else {
                         app.phase
                             .as_ref()
@@ -2056,10 +2133,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 ("●".to_owned(), theme.muted)
                             }
                             (None, Some(_)) => ("⊘".to_owned(), theme.muted),
-                            (None, None) if running == Some(step.index) && awaiting => (
-                                if asks_approval { "⚠" } else { "?" }.to_owned(),
-                                theme.accent,
-                            ),
+                            (None, None)
+                                if awaiting
+                                    && (asked_steps.contains(&step.index)
+                                        || (asked_steps.is_empty()
+                                            && running == Some(step.index))) =>
+                            {
+                                (
+                                    if asks_approval { "⚠" } else { "?" }.to_owned(),
+                                    theme.accent,
+                                )
+                            }
                             (None, None) if running == Some(step.index) => {
                                 (spinner(app.tick).to_string(), theme.accent)
                             }

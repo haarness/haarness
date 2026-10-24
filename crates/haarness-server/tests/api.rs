@@ -6411,6 +6411,25 @@ async fn parallel_child_questions_hydrate_and_resolve_independently_over_rest() 
             .is_some_and(|question| !question.custom),
         "an explicit custom=false remains authoritative"
     );
+    // Each names the `question` call of its own chat that asks it.
+    for question in &pending {
+        let asking: Vec<String> = runtime
+            .items(question.thread_id, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| match item.data {
+                haarness_protocol::ItemData::ToolCall { call_id, name, .. }
+                    if name == "question" =>
+                {
+                    Some(call_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asking.len(), 1);
+        assert_eq!(question.call_id.as_ref(), asking.first());
+    }
 
     let child_pending: Option<haarness_protocol::PendingQuestionInfo> = client
         .get(format!(

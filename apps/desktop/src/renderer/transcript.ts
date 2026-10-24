@@ -6,7 +6,12 @@
  * reasoned about and tested on their own.
  */
 import type { IconName } from "./icons";
-import type { FileDiff, Item, PermissionReview } from "@haarness/sdk";
+import type {
+  FileDiff,
+  Item,
+  PendingPermissionInfo,
+  PermissionReview,
+} from "@haarness/sdk";
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
 import { reviewReason } from "./approval-mode";
@@ -639,6 +644,29 @@ export function toolTitle(args: unknown, target: string): string {
   const text = targetText(args);
   return text.replace(/\s+/g, " ") === target ? text : target;
 }
+/**
+ * Whether a tool call waits for a person to approve a request of its chat.
+ * A request names the call that asks (`callId`; a batch's step as
+ * `<call id>:N`, for which its batch's row stands), so a read still running
+ * beside it in a parallel group does not wait. From a server that names
+ * none, every call of the asking turn is taken to wait.
+ */
+export function awaitsApproval(
+  permissions: Pick<PendingPermissionInfo, "threadId" | "turnId" | "callId">[],
+  call: { threadId: string; turnId?: string | null; callId: string },
+) {
+  return permissions.some((permission) => {
+    if (permission.threadId !== call.threadId) return false;
+    const asking = permission.callId;
+    if (!asking) return !!call.turnId && permission.turnId === call.turnId;
+    return (
+      asking === call.callId ||
+      (asking.startsWith(`${call.callId}:`) &&
+        /^\d+$/.test(asking.slice(call.callId.length + 1)))
+    );
+  });
+}
+
 // A permission detail is usually a shell command; show that line plainly and
 // keep the raw payload only when there is nothing better to say.
 export function permissionCommand(detail: unknown) {

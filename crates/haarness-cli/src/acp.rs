@@ -476,8 +476,13 @@ impl Service {
             Err(_) => operation,
         };
         let detail = payload.get("detail").cloned().unwrap_or(Value::Null);
-        let call = asked_call(calls, child.map(|child| child.id), &detail)
-            .unwrap_or_else(|| asked.id.clone());
+        let call = asked_call(
+            calls,
+            child.map(|child| child.id),
+            payload["callId"].as_str(),
+            &detail,
+        )
+        .unwrap_or_else(|| asked.id.clone());
         let options = permission_options(payload);
         let mut fields = ToolCallUpdateFields::new()
             .title(child.map_or_else(|| operation.clone(), |child| child.titled(&operation)))
@@ -822,12 +827,32 @@ impl Service {
 }
 
 /// The call a request is about, in the chat that asks (`None` for the
-/// session's own): two children can make the same call.
-fn asked_call(calls: &Calls, chat: Option<ThreadId>, detail: &Value) -> Option<String> {
-    calls
-        .iter()
-        .find(|(_, (owner, input))| *owner == chat && input == detail)
-        .map(|(call, _)| call.clone())
+/// session's own): the one the server names (`named`; a batch's step,
+/// `<call>:N`, is its batch's call here), or, from a server that names none,
+/// the call with the request's input. Two children can make the same call.
+fn asked_call(
+    calls: &Calls,
+    chat: Option<ThreadId>,
+    named: Option<&str>,
+    detail: &Value,
+) -> Option<String> {
+    let key = |call: &str| chat.map_or_else(|| call.to_owned(), |chat| format!("{call}@{chat}"));
+    let batch = named.and_then(|call| {
+        call.rsplit_once(':')
+            .filter(|(_, step)| !step.is_empty() && step.bytes().all(|byte| byte.is_ascii_digit()))
+            .map(|(batch, _)| batch)
+    });
+    [named, batch]
+        .into_iter()
+        .flatten()
+        .map(key)
+        .find(|call| calls.contains_key(call))
+        .or_else(|| {
+            calls
+                .iter()
+                .find(|(_, (owner, input))| *owner == chat && input == detail)
+                .map(|(call, _)| call.clone())
+        })
 }
 
 /// The script a shell request's command runs (`script` on the request), as
@@ -1347,13 +1372,44 @@ mod tests {
             (format!("call-1@{child}"), (Some(child), same.clone())),
         ]);
         assert_eq!(
-            asked_call(&calls, Some(child), &same),
+            asked_call(&calls, Some(child), None, &same),
             Some(format!("call-1@{child}"))
         );
-        assert_eq!(asked_call(&calls, None, &same), None);
+        assert_eq!(asked_call(&calls, None, None, &same), None);
         assert_eq!(
-            asked_call(&calls, None, &json!({"path": "own.md"})).as_deref(),
+            asked_call(&calls, None, None, &json!({"path": "own.md"})).as_deref(),
             Some("call-1")
+        );
+    }
+
+    /// A server that names the asking call is believed over a call with the
+    /// same input; a batch's step points at its batch.
+    #[test]
+    fn a_request_points_at_the_call_the_server_names() {
+        let child = ThreadId(Uuid::now_v7());
+        let same = json!({"path": "notes.md"});
+        let calls = Calls::from([
+            ("call-1".to_owned(), (None, same.clone())),
+            ("call-2".to_owned(), (None, same.clone())),
+            ("call-3".to_owned(), (None, json!({"tool_calls": []}))),
+            (format!("call-2@{child}"), (Some(child), same.clone())),
+        ]);
+        assert_eq!(
+            asked_call(&calls, None, Some("call-2"), &same).as_deref(),
+            Some("call-2")
+        );
+        assert_eq!(
+            asked_call(&calls, None, Some("call-3:2"), &same).as_deref(),
+            Some("call-3")
+        );
+        assert_eq!(
+            asked_call(&calls, Some(child), Some("call-2"), &same),
+            Some(format!("call-2@{child}"))
+        );
+        // A call this client never saw: the input decides, as before.
+        assert_eq!(
+            asked_call(&calls, Some(child), Some("call-9"), &same),
+            Some(format!("call-2@{child}"))
         );
     }
 
