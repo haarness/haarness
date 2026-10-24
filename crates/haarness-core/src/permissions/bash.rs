@@ -296,10 +296,9 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// The text keeps its length, so every node's range is a range of the line
 /// as written, which every text is read from: patterns, words and
 /// here-documents stay as written. Any other backslash form is read as
-/// before, and so is a line that starts with a here-document's delimiter
-/// once its backslash is gone (the parser's own delimiters: it ends a
-/// document at such a line, blanks before it or not), every backslash line of
-/// a line with more than [`MAX_DELIMITERS`] of them, a line the parser
+/// before, and so is a line of a here-document's text that starts with that
+/// document's delimiter once its backslash is gone (the parser ends a
+/// document at such a line, blanks before it or not), a line the parser
 /// already starts a command at (after `&&`, `|`, `;` or a comment line) and
 /// one inside quotes or a here-document's text.
 /// It takes one parse and a pass over the line: no shape costs more than its
@@ -354,7 +353,7 @@ fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(command);
     }
     let inside = inside_one_command(tree.root_node(), candidates.iter().map(|(_, at)| *at));
-    let delimiters = delimiters(tree.root_node(), command);
+    let documents = documents(tree.root_node(), command);
     // The changes made, in order, each only where what is before it in the
     // text as changed so far still leaves its backslash unquoted.
     let mut changed = bytes.to_vec();
@@ -374,16 +373,18 @@ fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
             && backslash == at
         {
             let applies = if check + 1 == at {
-                // The parser ends a here-document at a line that starts with
-                // its delimiter after blanks, so a body line that would turn
-                // into one (`\EOF`, `\EOFX`) stays as it is.
+                // The parser ends a here-document at a line of its text that
+                // starts with its delimiter after blanks, so a body line that
+                // would turn into one (`\EOF`, `\EOFX`) stays as it is.
                 let line = &command[at + 1..];
                 let line =
                     line[..line.find('\n').unwrap_or(line.len())].trim_start_matches([' ', '\t']);
-                !quoted_feed
-                    && delimiters.as_ref().is_some_and(|words| {
-                        !words.iter().any(|word| line.starts_with(word.as_str()))
-                    })
+                let document = documents.partition_point(|(start, _, _)| *start <= at);
+                let closes = document.checked_sub(1).is_some_and(|index| {
+                    let (_, end, delimiter) = &documents[index];
+                    at < *end && line.starts_with(delimiter.as_str())
+                });
+                !quoted_feed && !closes
             } else {
                 run % 2 == 0
             };
@@ -459,33 +460,48 @@ fn inside_one_command(
     inside
 }
 
-/// How many here-document delimiters one line's backslash lines are compared
-/// with: past it, every such line reads as before.
-const MAX_DELIMITERS: usize = 64;
-
-/// The delimiters of the here-documents the parser finds in `command`, as
-/// the shell compares a line with them (quotes and backslashes gone), once
-/// each, or `None` past [`MAX_DELIMITERS`].
-fn delimiters(root: tree_sitter::Node<'_>, command: &str) -> Option<Vec<String>> {
-    let mut words: Vec<String> = Vec::new();
+/// The text of each here-document the parser finds in `command`, from the
+/// line after the one that opens it (or the end of the document before it on
+/// that line) to its end, in order and apart, each with its delimiter as the
+/// shell compares a line with it (quotes and backslashes gone).
+fn documents(root: tree_sitter::Node<'_>, command: &str) -> Vec<(usize, usize, String)> {
+    let feeds: Vec<usize> = command
+        .bytes()
+        .enumerate()
+        .filter(|(_, byte)| *byte == b'\n')
+        .map(|(at, _)| at)
+        .collect();
+    let mut found: Vec<(usize, usize, String)> = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if node.kind() == "heredoc_start" {
-            let word: String = node_text(node, command)
-                .trim_start_matches("$'")
-                .chars()
-                .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-                .collect();
-            if !word.is_empty() && !words.contains(&word) {
-                if words.len() == MAX_DELIMITERS {
-                    return None;
-                }
-                words.push(word);
+        if node.kind() == "heredoc_redirect"
+            && let Some(start) = children(node)
+                .into_iter()
+                .find(|part| part.kind() == "heredoc_start")
+        {
+            let feed = feeds.partition_point(|at| *at < start.end_byte());
+            if let Some(feed) = feeds.get(feed) {
+                let word: String = node_text(start, command)
+                    .trim_start_matches("$'")
+                    .chars()
+                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                    .collect();
+                found.push((feed + 1, node.end_byte(), word));
             }
         }
         stack.extend(node.children(&mut node.walk()));
     }
-    Some(words)
+    found.sort_by_key(|(_, end, _)| *end);
+    let mut documents: Vec<(usize, usize, String)> = Vec::new();
+    for (start, end, word) in found {
+        let start = documents
+            .last()
+            .map_or(start, |(_, before, _)| start.max(*before));
+        if start < end && !word.is_empty() {
+            documents.push((start, end, word));
+        }
+    }
+    documents
 }
 
 /// The text of a command with its line continuations joined, as the shell
@@ -6388,6 +6404,9 @@ mod backslash_lines {
             // A body line left as written, since the parser would end the
             // document at ` EOFX`.
             "cat <<EOF\n\\EOFX\nEOF\n\\rm -rf victim",
+            // The delimiter counts only inside its own document's text.
+            "echo ok\n\\rm -rf victim\ncat <<$'r'\nr",
+            "true\n\\rm -rf victim\ncat <<r\nx\nr",
         ] {
             let patterns = analyze(command, &std::env::current_dir().unwrap()).patterns;
             assert!(
@@ -6404,14 +6423,18 @@ mod backslash_lines {
         ] {
             assert_eq!(shell_reading(command), command, "{command:?}");
         }
-        // Past 64 here-documents, every backslash line reads as before.
+        // However many here-documents the line holds.
         let mut many = String::new();
         for index in 0..65 {
             let _ =
                 std::fmt::Write::write_fmt(&mut many, format_args!("cat <<D{index}\nD{index}\n"));
         }
         many.push_str("true\n\\rm -rf victim");
-        assert_eq!(shell_reading(&many), many);
+        assert!(
+            analyze(&many, &std::env::current_dir().unwrap())
+                .patterns
+                .contains(&"rm -rf victim".to_owned())
+        );
     }
 
     #[test]
@@ -6444,6 +6467,21 @@ mod backslash_lines {
         assert!(
             read < parse * 10 + std::time::Duration::from_millis(500),
             "{read:?} for a line one parse of which takes {parse:?}"
+        );
+        // As many here-documents, each with a backslash line in its text.
+        let mut documents = String::new();
+        for word in 0..10_000 {
+            let _ = write!(documents, "cat <<D{word}\n\\x{word}\nD{word}\n");
+        }
+        let started = std::time::Instant::now();
+        parser.parse(&documents, None).unwrap();
+        let parse = started.elapsed();
+        let started = std::time::Instant::now();
+        shell_reading(&documents);
+        let read = started.elapsed();
+        assert!(
+            read < parse * 10 + std::time::Duration::from_millis(500),
+            "{read:?} for here-documents one parse of which takes {parse:?}"
         );
         // And the whole reading of the line costs what it costs without the
         // backslashes.
