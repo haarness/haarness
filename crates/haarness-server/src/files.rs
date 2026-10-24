@@ -161,6 +161,17 @@ fn folder(failure: Failure) -> Failure {
 }
 /// `value` as a path inside the workspace, refused when it is absolute,
 /// climbs out, or names Git metadata.
+/// Whether a path part names Git's metadata folder as a file system may read
+/// it: in any letter case (`.GIT` is `.git` on macOS and Windows) and
+/// without the trailing dots and spaces Windows drops. (Unicode
+/// normalization cannot make another name `.git`: no other characters
+/// compose or decompose to plain ASCII.)
+fn is_git(part: &std::ffi::OsStr) -> bool {
+    part.to_str().is_some_and(|name| {
+        name.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(".git")
+    })
+}
 fn relative(value: &str) -> Result<&Path, Failure> {
     let relative = Path::new(value);
     if relative.is_absolute()
@@ -170,7 +181,7 @@ fn relative(value: &str) -> Result<&Path, Failure> {
     {
         return Err(bad("Path must be relative to the workspace"));
     }
-    if relative.components().any(|part| part.as_os_str() == ".git") {
+    if relative.components().any(|part| is_git(part.as_os_str())) {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
     Ok(relative)
@@ -184,7 +195,7 @@ fn inside(root: &Path, canonical: &Path) -> Result<(), Failure> {
         .strip_prefix(root)
         .map_err(bad)?
         .components()
-        .any(|part| part.as_os_str() == ".git")
+        .any(|part| is_git(part.as_os_str()))
     {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
@@ -248,7 +259,7 @@ fn browsable_link(root: &Path, listed: &Path, link: &Path) -> bool {
         && !listed.starts_with(&target)
         && !target
             .strip_prefix(root)
-            .is_ok_and(|inside| inside.components().any(|part| part.as_os_str() == ".git"))
+            .is_ok_and(|inside| inside.components().any(|part| is_git(part.as_os_str())))
 }
 pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -283,7 +294,7 @@ pub async fn list_files(
         for entry in fs::read_dir(path).map_err(io(FOLDER_GONE))? {
             let entry = entry.map_err(bad)?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name == ".git" || (!query.hidden && name.starts_with('.')) {
+            if is_git(entry.file_name().as_os_str()) || (!query.hidden && name.starts_with('.')) {
                 continue;
             }
             let meta = match fs::symlink_metadata(entry.path()) {
@@ -592,6 +603,32 @@ mod tests {
             assert!(resolve(&root, "escape", false).is_err());
             std::os::unix::fs::symlink(root.join(".git"), root.join("metadata")).unwrap();
             assert!(resolve(&root, "metadata", false).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn git_metadata_is_refused_in_any_spelling_the_disk_reads_as_git() {
+        let root = std::env::temp_dir().join(format!("haarness-git-case-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "x").unwrap();
+        for spelling in [
+            ".git",
+            ".GIT",
+            ".Git/config",
+            ".gIt",
+            ".git.",
+            ".git ",
+            "src/.GIT/x",
+        ] {
+            assert_eq!(
+                relative(spelling).unwrap_err(),
+                bad("Git metadata is not editable in the file explorer"),
+                "{spelling}"
+            );
+            assert!(resolve(&root, spelling, true).is_err(), "{spelling}");
+        }
+        for allowed in [".github", ".gitignore", "git", "a.git"] {
+            assert!(relative(allowed).is_ok(), "{allowed}");
         }
         fs::remove_dir_all(root).unwrap();
     }
