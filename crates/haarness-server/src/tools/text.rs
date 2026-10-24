@@ -312,6 +312,24 @@ pub(super) fn grep_walk(
     Ok(found)
 }
 
+/// The `old` and `new` texts of an edit as a file with CRLF line ends spells
+/// them. `read` shows lines without their `\r`, so an `old` of several lines
+/// never occurs in such a file as written: when it does not, and most of the
+/// file's lines end in `\r\n`, both are given those ends. Otherwise, as
+/// they are.
+pub(super) fn crlf_edit<'a>(
+    text: &str,
+    old: &'a str,
+    new: &'a str,
+) -> (Cow<'a, str>, Cow<'a, str>) {
+    let crlf = text.matches("\r\n").count();
+    if !old.contains('\n') || text.contains(old) || crlf * 2 <= text.matches('\n').count() {
+        return (Cow::Borrowed(old), Cow::Borrowed(new));
+    }
+    let spell = |value: &str| value.replace("\r\n", "\n").replace('\n', "\r\n");
+    (Cow::Owned(spell(old)), Cow::Owned(spell(new)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

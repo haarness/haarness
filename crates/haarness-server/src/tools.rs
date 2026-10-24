@@ -3036,6 +3036,8 @@ impl Tool for BuiltinTool {
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
                 let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let (before, after) = text::crlf_edit(&text, before, after);
+                let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
                 if count != 1 {
                     return Err(CoreError::Tool(format!(
@@ -3078,6 +3080,8 @@ impl Tool for BuiltinTool {
                             index + 1
                         )));
                     }
+                    let (before, after) = text::crlf_edit(&updated, before, after);
+                    let (before, after) = (before.as_ref(), after.as_ref());
                     let count = updated.matches(before).count();
                     let replace_all = edit
                         .get("replaceAll")
@@ -7002,6 +7006,74 @@ export default workflow({
         let stopped = grep_in(&root, json!({"pattern":"absent"}), context).await;
         assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn edit_in(root: &Path, tool: &str, args: Value) -> CoreResult<ToolOutput> {
+        NativeToolRegistry::new(root.to_path_buf())
+            .get(tool)
+            .unwrap()
+            .execute(args, tool_context(root))
+            .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_of_several_lines_meets_a_file_with_crlf_line_ends() {
+        let (root, file) = read_fixture("main.c", b"int a() {\r\n    one();\r\n}\r\n");
+        // What read shows, without the `\r`.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"    one();\n}","new":"    two();\n    three();\n}"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    two();\r\n    three();\r\n}\r\n"
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"main.c","edits":[
+                {"old":"two();\n    three();","new":"four();"},
+                {"old":"{\n","new":"{\n    // start\n","replaceAll":true}
+            ]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    // start\r\n    four();\r\n}\r\n"
+        );
+        // Two places still refuse, as an LF file does.
+        std::fs::write(&file, b"x\r\ny\r\nx\r\ny\r\n").unwrap();
+        let ambiguous = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"x\ny","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(ambiguous.to_string().contains("found 2"), "{ambiguous}");
+        // A file mostly of LF line ends is matched as written.
+        std::fs::write(&file, b"a\nb\nc\r\nd\n").unwrap();
+        let missed = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"c\nd","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(missed.to_string().contains("found 0"), "{missed}");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"a\nb","new":"ab"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nc\r\nd\n");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
