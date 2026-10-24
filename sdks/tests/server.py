@@ -30,6 +30,9 @@ class Fixture:
             "HOME": str(self.home),
             "HAARNESS_DATA_DIR": str(self.data),
             "HAARNESS_TEST_PROVIDER": "1",
+            # A test server never reports usage statistics (a release build
+            # would send them to Haarness Cloud a minute after it starts).
+            "HAARNESS_TELEMETRY": "0",
         }
         # Use explicit echo defaults and an ask rule to test approval round-trips.
         config = self.workspace / ".haarness"

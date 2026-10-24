@@ -22,7 +22,9 @@ FIXTURE = ("HAARNESS_SERVER_TOKEN", "HAARNESS_SERVER_PASSWORD", "HAARNESS_SERVER
 def pane_command(env, args):
     """A tmux pane command that runs `args` with `env`: every HAARNESS_* variable and credential the
     pane may have from the tmux server is cleared first, then the script's own HAARNESS_* values, the
-    base variables and every value the script changed are set."""
+    base variables and every value the script changed are set. Usage statistics stay off unless `env`
+    says otherwise: a server a pane starts must not report a test run to Haarness Cloud."""
+    env = {"HAARNESS_TELEMETRY": "0", **env}
     credentials = sorted(
         name for name in set(os.environ) | set(env) if CREDENTIAL.search(name) and name not in FIXTURE
     )
