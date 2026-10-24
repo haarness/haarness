@@ -409,6 +409,57 @@ test("a read that reaches a connection already closed shows no dialog, nor does 
   }
 });
 
+test("quitting in the middle of an event stream's read ends that stream after the read, and nothing is thrown", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("quit");
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const thread = await chat(client, "Quit chat");
+    await launch();
+    let stderr = "";
+    app.process().stderr?.on("data", (chunk) => (stderr += chunk));
+    const exited = new Promise<number | null>((resolve) => app.process().once("exit", (code) => resolve(code)));
+    await addServer("Quit server", remote.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: thread.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Quit chat start");
+    // app.quit() runs inside a read of an event stream, before Node looks
+    // whether that socket is still open: where an inspector's evaluate (as
+    // Playwright closes the app) can land, since it runs between any two
+    // calls.
+    await app.evaluate(({ app: electronApp }) => {
+      const net = process.getBuiltinModule("node:net");
+      const socket = net.Socket.prototype as unknown as {
+        push(chunk: unknown, ...rest: unknown[]): boolean;
+        _unrefTimer(): void;
+      };
+      const push = socket.push;
+      const unref = socket._unrefTimer;
+      const streams = new WeakSet<object>();
+      socket.push = function (chunk, ...rest) {
+        if (Buffer.isBuffer(chunk) && /^(?:id|data): /m.test(chunk.toString("latin1"))) streams.add(this);
+        return push.call(this, chunk, ...rest);
+      };
+      let armed = true;
+      socket._unrefTimer = function () {
+        if (armed && streams.has(this) && /onStreamRead/.test(new Error().stack ?? "")) {
+          armed = false;
+          process.stderr.write("quitting inside an event stream's read\n");
+          electronApp.quit();
+        }
+        return unref.call(this);
+      };
+      process.on("uncaughtExceptionMonitor", (error) => void process.stderr.write("uncaught: " + error.stack + "\n"));
+    });
+    await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "::long 2000" });
+    expect(await exited).toBe(0);
+    expect(stderr).toContain("quitting inside an event stream's read");
+    expect(stderr).not.toContain("uncaught:");
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+  }
+});
+
 /** An Anthropic-format endpoint that lists its models in four pages of
  * 2.2 s each (inside the server's 3 s for a page and 10 s for the list), and
  * answers a message with "late hello". */
