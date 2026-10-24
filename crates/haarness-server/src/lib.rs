@@ -7,6 +7,7 @@ pub mod browser;
 pub mod browser_policy;
 mod cloud_tools;
 mod command;
+mod file_lock;
 pub mod files;
 pub mod front;
 pub mod hooks;
