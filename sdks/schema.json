@@ -116,7 +116,7 @@
         "type": "object"
       },
       "ApprovalModeSetting": {
-        "description": "What a client may ask for. `Inherit` clears this chat's own setting so it\nfollows the agent that delegated to it (Review at the top level).",
+        "description": "What a client may ask for. `Inherit` clears this chat's own setting so it\nfollows the agent that delegated to it (Auto at the top level).",
         "enum": [
           "auto",
           "review",

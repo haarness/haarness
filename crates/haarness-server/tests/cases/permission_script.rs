@@ -84,7 +84,13 @@ async fn a_shell_request_carries_the_script_its_command_runs_and_nothing_else_ch
         "printf deployed > deployed.txt\n",
     )
     .unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let turn = runtime
         .start_turn(
@@ -128,7 +134,13 @@ async fn a_command_that_runs_no_readable_script_carries_none() {
     std::fs::write(fixture.0.join("prod.env"), "TOKEN=fixture-only\n").unwrap();
     std::fs::create_dir_all(fixture.0.join("sub")).unwrap();
     std::fs::write(fixture.0.join("sub/x.sh"), "echo from-sub\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     for arguments in [
         json!({"command": "printf hi"}),
@@ -176,7 +188,13 @@ async fn a_command_that_runs_no_readable_script_carries_none() {
 async fn an_always_answer_for_a_script_remembers_the_command_as_before() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("x.sh"), "printf ran >> ran.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let turn = runtime
         .start_turn(
@@ -215,7 +233,10 @@ async fn an_always_answer_for_a_script_remembers_the_command_as_before() {
 async fn a_slash_command_shell_block_carries_its_script_too() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("context.sh"), "printf CONTEXT_FROM_SCRIPT\n").unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.commands.push(haarness_protocol::CommandInfo {
         name: "probe".into(),
         description: "Dynamic context".into(),
@@ -255,7 +276,10 @@ async fn a_script_the_chat_may_not_read_or_a_credential_file_is_not_shown() {
     std::fs::write(fixture.0.join(".envrc"), "export TOKEN=fixture-only\n").unwrap();
     std::fs::create_dir_all(fixture.0.join("keys")).unwrap();
     std::fs::write(fixture.0.join("keys/id_rsa"), "PRIVATE KEY\n").unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     for (pattern, decision) in [("read:secrets/*", D::Deny), ("read:private/*", D::Ask)] {
         config.base_rules.push(PermissionRule {
             pattern: pattern.into(),
@@ -316,7 +340,13 @@ const CHANGED: &str = "The command did not run: x.sh is not what it was when app
 async fn a_script_that_changed_after_it_was_allowed_once_does_not_run() {
     let fixture = Fixture::new();
     let script = fixture.0.join("x.sh");
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     for change in ["edit", "remove"] {
         std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
@@ -374,7 +404,13 @@ async fn an_always_answer_runs_the_script_as_it_is_since_a_retry_would_anyway() 
     let fixture = Fixture::new();
     let script = fixture.0.join("x.sh");
     std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let turn = runtime
         .start_turn(
@@ -404,7 +440,10 @@ async fn an_always_answer_runs_the_script_as_it_is_since_a_retry_would_anyway() 
 async fn a_slash_command_shell_block_whose_script_changed_does_not_run() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("context.sh"), "printf CONTEXT\n").unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.commands.push(haarness_protocol::CommandInfo {
         name: "probe".into(),
         description: "Dynamic context".into(),
@@ -478,7 +517,13 @@ async fn auto_reads_no_script_since_it_shows_no_card() {
         wanted: "reading the script a command runs for its permission prompt",
         seen: Arc::clone(&seen),
     });
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let mode = |setting| {
         let runtime = &runtime;
@@ -564,7 +609,13 @@ async fn under_the_default_rules_the_outside_folder_card_shows_the_script() {
         )
         .unwrap();
     }
-    let runtime = plain_runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = plain_runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let command = format!("cd {} && ./run.sh", outside.0.display());
     let turn = runtime
@@ -620,7 +671,10 @@ async fn a_script_in_a_folder_an_external_directory_rule_denies_is_not_shown() {
     let asked = Fixture::new();
     let denied = Fixture::new();
     std::fs::write(denied.0.join("run.sh"), "echo hidden\n").unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: format!("external_directory:{}/*", denied.0.display()),
         decision: D::Deny,
@@ -654,7 +708,13 @@ async fn a_direct_shell_call_shows_its_script_and_does_not_run_one_that_changed(
     let fixture = Fixture::new();
     let script = fixture.0.join("x.sh");
     std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let call = || {
         runtime.run_workflow_tool(
@@ -698,7 +758,13 @@ async fn a_script_the_command_writes_before_it_runs_it_is_named_not_shown() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("gen.sh"), "printf old > old.txt\n").unwrap();
     std::fs::write(fixture.0.join("new.sh"), "printf copied > copied.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     for (command, ran) in [
         (
@@ -764,7 +830,13 @@ async fn a_script_the_command_writes_before_it_runs_it_is_named_not_shown() {
 async fn a_script_after_a_step_that_may_change_it_is_named_not_shown() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("run.sh"), "printf old > old.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     for command in [
         "bash -c 'printf \"printf new > new.txt\" > run.sh' && sh run.sh",
@@ -806,7 +878,13 @@ async fn a_backgrounded_cd_names_the_script_where_the_shell_stays() {
     std::fs::create_dir_all(fixture.0.join("sub")).unwrap();
     std::fs::write(fixture.0.join("run.sh"), "printf top > top.txt\n").unwrap();
     std::fs::write(fixture.0.join("sub/run.sh"), "printf sub > sub.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     for command in ["cd sub & sh run.sh; wait", "cd sub &\nsh run.sh\nwait"] {
         let turn = runtime
@@ -862,7 +940,13 @@ async fn in_auto_a_card_the_reviewer_leaves_to_a_person_shows_the_script_and_onc
     let fixture = Fixture::new();
     let script = fixture.0.join("x.sh");
     std::fs::write(&script, "printf shown > shown.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     set_mode(
         &runtime,
@@ -918,7 +1002,10 @@ async fn in_auto_a_card_the_reviewer_leaves_to_a_person_shows_the_script_and_onc
 async fn in_auto_an_ask_a_person_configured_shows_the_script() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("x.sh"), "printf mine > mine.txt\n").unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:sh x*".into(),
         decision: D::Ask,
@@ -966,7 +1053,13 @@ async fn in_auto_a_reviewer_approval_reads_no_script_and_runs_what_is_there() {
         wanted: "reading the script a command runs for its permission prompt",
         seen: Arc::clone(&seen),
     });
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     set_mode(
         &runtime,
@@ -1004,7 +1097,13 @@ async fn in_auto_a_reviewer_approval_reads_no_script_and_runs_what_is_there() {
 async fn a_card_announced_again_when_auto_turns_on_keeps_its_script() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     let turn = runtime
         .start_turn(
@@ -1061,7 +1160,13 @@ async fn in_auto_a_card_is_listed_with_its_script_from_the_first() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
     // The reviewer leaves it to the person.
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     set_mode(
         &runtime,
@@ -1087,7 +1192,10 @@ async fn in_auto_a_card_is_listed_with_its_script_from_the_first() {
         wait_done(&runtime, &turn).await;
     }
     // An ask a person configured.
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:sh x*".into(),
         decision: D::Ask,
@@ -1124,7 +1232,13 @@ async fn a_card_reads_what_its_command_runs_once() {
         wanted: "reading the script a command runs for its permission prompt",
         seen: Arc::clone(&seen),
     });
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     tracing::callsite::rebuild_interest_cache();
     // In Review, a command with no script and one with a script: each card
@@ -1181,7 +1295,13 @@ async fn in_auto_a_workflows_card_shows_the_script_and_a_persons_own_command_rea
         wanted: "reading the script a command runs for its permission prompt",
         seen: Arc::clone(&seen),
     });
-    let runtime = Arc::new(runtime(&fixture.0, RuntimeConfig::default()));
+    let runtime = Arc::new(runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    ));
     let thread = echo_thread(&runtime).await;
     set_mode(
         &runtime,
@@ -1235,7 +1355,13 @@ async fn in_auto_a_workflows_card_shows_the_script_and_a_persons_own_command_rea
 async fn auto_turned_off_mid_review_shows_the_card_with_its_script() {
     let fixture = Fixture::new();
     std::fs::write(fixture.0.join("x.sh"), "printf shown > shown.txt\n").unwrap();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default());
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
     let thread = echo_thread(&runtime).await;
     set_mode(
         &runtime,

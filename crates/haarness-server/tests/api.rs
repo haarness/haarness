@@ -1247,7 +1247,10 @@ async fn undo_rejects_an_active_text_turn_without_cancelling_it() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = RuntimeConfig::default();
+            let mut config = RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "write:*".into(),
                 decision: haarness_core::PermissionDecision::Allow,
@@ -1374,7 +1377,10 @@ async fn undo_rejects_an_active_mutation_until_explicitly_stopped() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = RuntimeConfig::default();
+            let mut config = RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "blocking_write:*".into(),
                 decision: haarness_core::PermissionDecision::Allow,
@@ -1754,7 +1760,10 @@ async fn a_shutdown_leaves_a_background_task_to_be_reported_on_the_next_start() 
             EventBus::new(512),
             std::env::temp_dir(),
             String::new(),
-            RuntimeConfig::default(),
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
         )
     };
     let first = runtime(HangingChild::default());
@@ -1891,7 +1900,10 @@ async fn a_result_still_waiting_for_its_chat_at_a_shutdown_is_recorded_on_the_ne
             workspace.clone(),
             String::new(),
             {
-                let mut config = RuntimeConfig::default();
+                let mut config = RuntimeConfig {
+                    approval_mode: haarness_protocol::ApprovalMode::Review,
+                    ..RuntimeConfig::default()
+                };
                 config.base_rules.push(haarness_core::PermissionRule {
                     pattern: "blocking_write:*".into(),
                     decision: haarness_core::PermissionDecision::Allow,
@@ -2263,6 +2275,7 @@ async fn explicit_tool_round_guard_requests_a_tool_free_final_response() {
         workspace.clone(),
         String::new(),
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             max_rounds: Some(2),
             ..RuntimeConfig::default()
         },
@@ -2690,7 +2703,10 @@ return {{ workflow: "{name}", input: args.input }}
     let providers = Arc::new(StaticProviderRegistry::new(vec![
         Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
     ]));
-    let mut config = haarness_core::RuntimeConfig::default();
+    let mut config = haarness_core::RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..haarness_core::RuntimeConfig::default()
+    };
     config.commands.push(haarness_protocol::CommandInfo {
         execution: haarness_protocol::DefinitionExecution::default(),
         name: "DeMo".into(),
@@ -3418,7 +3434,10 @@ async fn binary_read_attachment_is_persisted_and_replayed_to_the_provider() {
         EventBus::new(64),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -3991,7 +4010,10 @@ async fn todo_tools_obey_permission_policy() {
         let providers = Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(provider) as Arc<dyn ModelProvider>
         ]));
-        let mut config = haarness_core::RuntimeConfig::default();
+        let mut config = haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        };
         config.base_rules.push(haarness_core::PermissionRule {
             pattern: policy.into(),
             decision: haarness_core::PermissionDecision::Deny,
@@ -4066,7 +4088,10 @@ fn workspace_runtime(workspace: &std::path::Path) -> (Arc<SqliteStore>, AgentRun
         {
             // These fixtures exercise the approval flow; parity defaults
             // auto-run mutations, so tighten via config like a user would.
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             for pattern in ["write:*", "edit:*", "apply_patch:*", "bash:*"] {
                 config.base_rules.push(haarness_core::PermissionRule {
                     pattern: pattern.into(),
@@ -4114,7 +4139,10 @@ async fn every_batch_step_keeps_its_number_after_a_step_refused_before_it_runs()
         EventBus::new(128),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let thread = echo_thread(&runtime).await;
     let calls = json!({"tool_calls":[
@@ -4161,7 +4189,10 @@ async fn provider_namespaces_resolve_before_batch_planning_and_permission_checks
     tokio::fs::write(workspace.join("sample.txt"), "namespace proof")
         .await
         .unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.tool_availability.insert("write".into(), false);
     let runtime = AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
@@ -5076,6 +5107,7 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             compaction: haarness_core::CompactionSettings {
                 enabled: true,
                 threshold: 0.75,
@@ -5216,6 +5248,7 @@ async fn manual_llm_compaction_rejects_a_turn_completed_during_summarization() {
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             compaction: haarness_core::CompactionSettings {
                 enabled: false,
                 ..Default::default()
@@ -5297,6 +5330,7 @@ async fn direct_tool_writer_during_llm_summary_invalidates_the_stale_compaction(
         workspace,
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             compaction: haarness_core::CompactionSettings {
                 enabled: false,
                 ..Default::default()
@@ -5366,6 +5400,7 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             compaction: haarness_core::CompactionSettings {
                 enabled: false,
                 ..Default::default()
@@ -5585,7 +5620,10 @@ async fn revert_restores_files_and_unrevert_redoes() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             // Auto-approve writes so the fixture needs no permission dance.
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "write:*".into(),
@@ -5749,7 +5787,10 @@ fn undo_fixture_runtime(root: &std::path::Path, workspace: &std::path::Path) -> 
         workspace.to_path_buf(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "write:*".into(),
                 decision: haarness_core::PermissionDecision::Allow,
@@ -5992,7 +6033,10 @@ async fn next_turn_after_revert_soft_deletes_undone_items() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "write:*".into(),
                 decision: haarness_core::PermissionDecision::Allow,
@@ -6107,7 +6151,10 @@ async fn direct_tool_after_undo_commits_the_boundary_before_mutating() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "write:*".into(),
                 decision: haarness_core::PermissionDecision::Allow,
@@ -6384,7 +6431,10 @@ fn p0_runtime(workspace: &std::path::Path, allow_bash: bool) -> (AgentRuntime, C
         workspace.to_path_buf(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             if !allow_bash {
                 // Parity defaults auto-run bash; these tests exercise the
                 // prompt flow, so tighten it back via config.
@@ -6850,7 +6900,10 @@ async fn workspace_tools_match_haarness_and_do_not_serialize_across_threads() {
         EventBus::new(2048),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let runtime = Arc::new(runtime.with_snapshots(snapshots));
 
@@ -7042,6 +7095,7 @@ async fn child_provider_schema_hides_recursive_and_categorically_denied_tools() 
         workspace,
         String::new(),
         RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             base_rules: vec![haarness_core::PermissionRule {
                 pattern: "webfetch:*".into(),
                 decision: haarness_core::PermissionDecision::Deny,
@@ -8603,7 +8657,10 @@ export default workflow({
 #[tokio::test]
 async fn a_forked_command_moved_to_the_background_delivers_its_result() {
     let workspace = std::env::temp_dir();
-    let mut config = haarness_core::RuntimeConfig::default();
+    let mut config = haarness_core::RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..haarness_core::RuntimeConfig::default()
+    };
     config.commands.push(haarness_protocol::CommandInfo {
         execution: haarness_protocol::DefinitionExecution {
             fork: true,
@@ -9384,7 +9441,10 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
         EventBus::new(256),
         workspace,
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -9993,7 +10053,10 @@ async fn child_agents_cannot_escalate_past_a_parent_deny() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "bash:git push*".into(),
                 decision: haarness_core::PermissionDecision::Deny,
@@ -10049,7 +10112,10 @@ async fn yolo_auto_approves_everything_and_records_rules() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "bash:*".into(),
                 decision: haarness_core::PermissionDecision::Ask,
@@ -10100,7 +10166,10 @@ async fn one_turns_auto_approval_never_approves_other_chats() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.base_rules.push(haarness_core::PermissionRule {
                 pattern: "bash:*".into(),
                 decision: haarness_core::PermissionDecision::Ask,
@@ -10164,7 +10233,10 @@ async fn custom_command_expands_server_side_and_switches_agent() {
         workspace.clone(),
         String::new(),
         {
-            let mut config = haarness_core::RuntimeConfig::default();
+            let mut config = haarness_core::RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..haarness_core::RuntimeConfig::default()
+            };
             config.commands.push(haarness_protocol::CommandInfo {
                 execution: haarness_protocol::DefinitionExecution::default(),
                 name: "review".into(),
@@ -10395,7 +10467,10 @@ async fn a_running_agent_keeps_its_definition_when_its_file_changes() {
             workspace.clone(),
             String::new(),
             {
-                let mut config = RuntimeConfig::default();
+                let mut config = RuntimeConfig {
+                    approval_mode: haarness_protocol::ApprovalMode::Review,
+                    ..RuntimeConfig::default()
+                };
                 config.custom_agents.push(reviewer("reviewer", true));
                 config
             },
@@ -10497,7 +10572,10 @@ async fn goals_persist_and_precede_the_real_user_prompt() {
         events.clone(),
         workspace.clone(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -10623,6 +10701,7 @@ async fn provider_only_sees_goal_tools_while_a_goal_is_active() {
         workspace,
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(0),
             ..Default::default()
         },
@@ -10696,6 +10775,7 @@ async fn ordinary_goal_tool_followup_keeps_current_doctrine() {
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(1),
             ..Default::default()
         },
@@ -10771,6 +10851,7 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(1),
             ..Default::default()
         },
@@ -10871,6 +10952,7 @@ async fn autonomous_goal_continuation_tool_followup_reinserts_doctrine_at_bounda
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(1),
             ..Default::default()
         },
@@ -10946,7 +11028,10 @@ async fn answered_goal_question_does_not_start_an_unbounded_criteria_loop() {
         events.clone(),
         std::env::temp_dir(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -11080,7 +11165,10 @@ async fn goal_pauses_after_repeated_get_goal_only_turns() {
         EventBus::new(64),
         std::env::temp_dir(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -11141,6 +11229,7 @@ async fn productive_get_goal_turns_with_different_text_do_not_false_pause() {
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(2),
             ..Default::default()
         },
@@ -11198,7 +11287,10 @@ async fn repeated_failed_tool_calls_do_not_evade_goal_loop_breaker() {
         EventBus::new(64),
         std::env::temp_dir(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -11253,7 +11345,10 @@ async fn ordinary_input_does_not_resume_manual_budget_or_synthetic_goal_pauses()
         EventBus::new(64),
         std::env::temp_dir(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
 
     let manual = runtime
@@ -11450,6 +11545,7 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
         std::env::temp_dir(),
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(1),
             ..Default::default()
         },
@@ -11538,6 +11634,7 @@ async fn goal_tools_negotiate_criteria_complete_and_report_canonical_state() {
         workspace,
         String::new(),
         haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
             goal_max_turns: Some(1),
             ..Default::default()
         },
@@ -11673,7 +11770,10 @@ async fn loop_config_persists_and_expires() {
         EventBus::new(64),
         workspace.clone(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
@@ -11728,7 +11828,10 @@ async fn pre_tool_use_hook_blocks_and_post_tool_use_annotates() {
         EventBus::new(256),
         workspace.clone(),
         String::new(),
-        haarness_core::RuntimeConfig::default(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
     )
     .with_hooks(Arc::new(hooks));
     let thread = runtime
@@ -13516,7 +13619,10 @@ async fn preview_tool_and_prompt_are_opt_in_for_graphical_turns() {
         EventBus::new(64),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let thread = echo_thread(&runtime).await;
     for preview in [None, Some(true), Some(false)] {
@@ -13567,7 +13673,10 @@ async fn a_chat_keeps_its_preview_setting_when_a_client_does_not_say() {
         EventBus::new(64),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let thread = echo_thread(&runtime).await;
     // Desktop says yes, a phone says nothing, the terminal says no, then the
@@ -13606,7 +13715,10 @@ fn effort_runtime(workspace: &std::path::Path) -> (AgentRuntime, Capturing) {
         EventBus::new(256),
         workspace.to_path_buf(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     (runtime, provider)
 }
@@ -13672,6 +13784,42 @@ async fn queued_and_deferred_turns_keep_the_chats_reasoning_effort() {
     runtime.queue_input(thread.id, deferred).await.unwrap();
     wait_drained(&runtime, thread.id).await;
     assert_eq!(last_effort().as_deref(), Some("high"));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn a_chat_with_no_setting_is_in_auto_unless_configured_otherwise() {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-approval-default-{}",
+        uuid::Uuid::now_v7()
+    ));
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let runtime = |approval_mode| {
+        AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+            ])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            EventBus::new(64),
+            workspace.clone(),
+            String::new(),
+            haarness_core::RuntimeConfig {
+                approval_mode,
+                ..haarness_core::RuntimeConfig::default()
+            },
+        )
+    };
+    let auto = runtime(haarness_core::RuntimeConfig::default().approval_mode);
+    let thread = echo_thread(&auto).await;
+    let info = auto.approval_mode(thread.id).await.unwrap();
+    assert_eq!(info.mode, haarness_protocol::ApprovalMode::Auto);
+    assert!(!info.explicit);
+    let review = runtime(haarness_protocol::ApprovalMode::Review);
+    let thread = echo_thread(&review).await;
+    let info = review.approval_mode(thread.id).await.unwrap();
+    assert_eq!(info.mode, haarness_protocol::ApprovalMode::Review);
+    assert!(!info.explicit);
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -13783,7 +13931,10 @@ async fn a_configuration_file_edit_waits_for_a_person_even_in_auto() {
         Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
     ]));
     // A person who allows every edit, as `"edit": "allow"` does.
-    let mut config = haarness_core::RuntimeConfig::default();
+    let mut config = haarness_core::RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..haarness_core::RuntimeConfig::default()
+    };
     config.base_rules.push(haarness_core::PermissionRule {
         pattern: "edit:*".into(),
         decision: haarness_core::PermissionDecision::Allow,

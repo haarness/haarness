@@ -108,7 +108,10 @@ fn unattended() -> Unattended {
     let workspace = Workspace::new();
     let executions = Arc::new(AtomicUsize::new(0));
     let hold = Arc::new(tokio::sync::Notify::new());
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: D::Ask,

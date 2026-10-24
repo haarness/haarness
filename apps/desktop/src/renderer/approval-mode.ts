@@ -43,6 +43,11 @@ export function autoApproval(
   }
   return rules["*"] ?? false;
 }
+/** The mode chosen here for new chats on a server that keeps modes:
+ * Auto unless Review was picked, as the server's own default. */
+export function newChatAuto(modes: ApprovalModes, connection: string): boolean {
+  return modes[connection]?.["*"] ?? true;
+}
 /** Whether this client may answer a request for the user. An explicit
  * request (a site in the user's own Chrome) always waits for a person. */
 export function canAutoApprove(

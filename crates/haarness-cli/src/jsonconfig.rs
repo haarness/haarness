@@ -2083,6 +2083,18 @@ pub fn migrate_toml(config_toml: &Path, notices: &mut Vec<String>) -> Result<()>
         if let Some(agent) = defaults.get("agent").and_then(toml::Value::as_str) {
             json.insert("default_agent".into(), Value::String(agent.into()));
         }
+        // The rest (approval_mode, reasoning_effort, ...) keeps its
+        // `defaults` section, which the JSON layer reads as TOML's.
+        let rest: serde_json::Map<String, Value> = defaults
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(key.as_str(), "provider" | "model" | "small_model" | "agent")
+            })
+            .filter_map(|(key, value)| Some((key.clone(), serde_json::to_value(value).ok()?)))
+            .collect();
+        if !rest.is_empty() {
+            json.insert("defaults".into(), Value::Object(rest));
+        }
     }
     // A config.toml that does not load (an action that is no action, a
     // table where a pattern's action belongs) stays as it is, so it keeps
@@ -2355,6 +2367,64 @@ mod tests {
             }
         }
         files
+    }
+
+    #[test]
+    fn approval_mode_survives_migration_and_a_project_cannot_loosen_review() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-approval-mode-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        let mode = |layers: &JsonLayers| {
+            layers
+                .native
+                .defaults
+                .as_ref()
+                .and_then(|defaults| defaults.approval_mode)
+        };
+        assert_eq!(
+            mode(&load_layers_with_base(
+                &config,
+                None,
+                None,
+                &workspace,
+                true,
+                &[]
+            )),
+            None
+        );
+        fs::write(
+            config.join("config.toml"),
+            "[defaults]\nagent = \"build\"\napproval_mode = \"review\"\nreasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        migrate_toml(&config.join("config.toml"), &mut Vec::new()).unwrap();
+        assert!(!config.join("config.toml").exists());
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
+        let defaults = layers.native.defaults.as_ref().unwrap();
+        assert_eq!(defaults.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(defaults.agent.as_deref(), Some("build"));
+        // A project may keep Review, never turn it into Auto.
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"defaults": {"approval_mode": "auto"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
+        // With no choice of the person's, a project can ask for Review.
+        fs::write(config.join("haarness.json"), "{}").unwrap();
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"defaults": {"approval_mode": "review"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
