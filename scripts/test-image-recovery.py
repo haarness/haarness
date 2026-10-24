@@ -325,7 +325,11 @@ try:
         names = [encoded.get(data, '?') for data in image_data(sent[0])]
         assert names[-1] == shot.name, (index, names)
         assert names == sorted(names) and len(set(names)) == len(names), names
-        noted = json.dumps(sent[0]['messages']).count('omitted: the oldest images are left out')
+        noted = json.dumps(sent[0]['messages']).count("omitted to keep the request within the provider's limits")
+        if noted:
+            # A screenshot file is named by its path, with how to see it again.
+            assert f'[Image {shots}/big-01.png omitted' in json.dumps(sent[0]['messages']), index
+            assert 'read the file again' in json.dumps(sent[0]['messages']), index
         assert noted == index - len(names), (index, noted, names)
         kept_counts.append(len(names))
         # Between two cuts each request carries the history of the one before

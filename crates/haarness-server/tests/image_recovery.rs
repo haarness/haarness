@@ -383,7 +383,7 @@ async fn past_the_providers_image_count_the_oldest_are_noted_and_the_newest_sent
     };
     assert_eq!(
         content,
-        "Look 1\n[Image shot-01.png omitted: the oldest images are left out to keep the request within the provider's limits]"
+        "Look 1\n[Image shot-01.png omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and ask the person to attach it again if it is needed.]"
     );
     let noted = serde_json::to_string(&requests[0].messages[..36]).unwrap();
 

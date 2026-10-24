@@ -502,22 +502,22 @@ An attachment or tool image whose file is deleted later is named in the message
 
 A long chat can hold more images than a provider takes in one request. Before
 each request the runtime counts the images it would send, as the base64 the
-provider receives: once they pass the provider's limit, the oldest are
-replaced by a one-line note naming each one ("[Image shot.png omitted: the
-oldest images are left out to keep the request within the provider's
-limits]") until the rest fit in three fifths of it, so the newest images
-always reach the model. The limit is 25 MiB of images (Anthropic and Haarness
+provider receives: once they pass the provider's limit, the oldest are replaced
+by a one-line note until the rest fit in three fifths of it, so the newest
+images always reach the model. The note names the image (a file by its path),
+says it is no longer visible and must not be described from memory, and says to
+read the file again, or for an attached image to ask the person to attach it
+again, if it is needed. The limit is 25 MiB of images (Anthropic and Haarness
 Cloud take 32 MB in a request; OpenAI, the Gemini API and Gemini on Vertex AI
 take more), 15 MiB on Bedrock, which takes 20 MB, and for Claude models,
-directly, on Bedrock or through Haarness Cloud, also 100 images in a request
-to a model with a 200K-token context window and 600 to a larger one.
-The cut moves only when the images kept pass the limit again, not with each new
-image, so the requests between two cuts carry the same history and the
-provider's prompt cache holds. The images of the turn's own messages are never
-replaced; when they alone pass the limit the request is sent as it is. PDFs,
-audio and video are neither counted nor replaced. Stored messages do not
-change, and the transcript shows nothing: a cut is logged as one `INFO` line
-of counts.
+directly, on Bedrock or through Haarness Cloud, also 100 images in a request to
+a model with a 200K-token context window and 600 to a larger one. The cut moves
+only when the images kept pass the limit again, not with each new image, so the
+requests between two cuts carry the same history and the provider's prompt
+cache holds. The images of the turn's own messages are never replaced; when
+they alone pass the limit the request is sent as it is. PDFs, audio and video
+are neither counted nor replaced. Stored messages do not change, and the
+transcript shows nothing: a cut is logged as one `INFO` line of counts.
 
 When a provider still refuses an image (its type, size, pixels or count, or a
 request too large because of images), the runtime appends a `media_omitted`
