@@ -871,3 +871,94 @@ async fn a_call_auto_review_blocked_shows_its_reason_live_from_a_subagent_and_on
     assert!(status.success(), "Haarness ACP process failed");
     daemon_guard.stop().await;
 }
+
+/// A prompt for a session whose turn another window started is refused with
+/// the server's sentence as an invalid request, not an internal error; that
+/// turn runs on, and the session takes prompts again once it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prompt_for_a_session_busy_elsewhere_is_refused_with_the_servers_reason() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, session) =
+        acp_session(&directory).await;
+    // Another window's turn on the same chat waits for its approval.
+    let api = daemon_api(&data);
+    let write = json!({"path":"elsewhere.txt", "content":"ELSEWHERE"});
+    let held = daemon(
+        &api,
+        reqwest::Method::POST,
+        &format!("/threads/{session}/turns"),
+        Some(json!({"requestId":Uuid::new_v4(), "text":format!("!tool write {write}")})),
+    )
+    .await;
+    let permission = timeout(Duration::from_secs(20), async {
+        loop {
+            let pending = daemon(&api, reqwest::Method::GET, "/permissions", None).await;
+            if let Some(id) = pending[0]["permissionId"].as_str() {
+                break id.to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the other window's turn asks");
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[{"type":"text", "text":"hello"}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["error"]["code"], -32600, "{response:?}");
+    assert_eq!(
+        response["error"]["message"],
+        "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.",
+        "{response:?}"
+    );
+    let turn = daemon(
+        &api,
+        reqwest::Method::GET,
+        &format!("/turns/{}", held["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(turn["status"], "running", "the other turn runs on");
+
+    // Once that turn ends, the session takes a prompt again.
+    daemon(
+        &api,
+        reqwest::Method::POST,
+        &format!("/permissions/{permission}"),
+        Some(json!({"decision":"once"})),
+    )
+    .await;
+    timeout(Duration::from_secs(20), async {
+        while daemon(&api, reqwest::Method::GET, "/turns/active", None)
+            .await
+            .as_array()
+            .is_some_and(|active| !active.is_empty())
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the other window's turn ends");
+    assert!(workspace.join("elsewhere.txt").exists());
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":4, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[{"type":"text", "text":"hello again"}]}}),
+    )
+    .await;
+    let response = receive_response(&mut lines, &mut stdin, 4, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response:?}");
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}

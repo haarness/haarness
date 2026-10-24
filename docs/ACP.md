@@ -37,7 +37,9 @@ version 1.
 - **Prompts.** Text blocks become the message; image and audio blocks, and embedded PDF, image, audio
   or video resources, become attachments; an embedded text resource and a resource link are added to
   the text with their URI. Other blocks are refused. A turn that completes ends with `end_turn`, a
-  stopped one with `cancelled`, and a failed one as an error.
+  stopped one with `cancelled`, and a failed one as an error. A prompt the server refuses (the chat
+  already has a turn running, started in another window or run; a hook blocks the prompt) is an
+  invalid request (`-32600`) whose message is the server's own sentence; that other turn runs on.
 - **MCP servers** the editor passes are added to the server as `acp-<chat id prefix>-<name>`; a stdio
   server's command must be an absolute path.
 - **Approvals** offer *Allow once*, *Allow while Haarness is running* (only when the request allows
