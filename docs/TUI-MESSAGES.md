@@ -1,6 +1,8 @@
 # Browse conversation messages in the TUI
 
-> **User guide:** [Find messages and ask side questions](https://haarness.ai/docs/tui/messages). This page has the engineering detail.
+How the terminal UI's message browser (Alt+M, `/messages`), message-to-message movement (Alt+Up/Down) and its cards and status line behave, in detail. It is for contributors changing the TUI and for anyone testing it.
+
+> **User guides:** [Find messages and ask side questions](https://haarness.ai/docs/tui/messages), [Keyboard shortcuts](https://haarness.ai/docs/tui/keyboard-shortcuts).
 
 Press **Alt+M** or run **`/messages`** to browse the current conversation's
 prompts and assistant replies. You can also start with a search:

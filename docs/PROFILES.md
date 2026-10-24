@@ -1,6 +1,8 @@
 # Portable configuration profiles
 
-> **User guide:** [Save and restore your setup](https://haarness.ai/docs/cli/configuration#save-and-restore-your-setup). This page has the engineering detail.
+What a configuration profile archive holds and leaves out, how save and restore check it, the self-hosted profile catalog and its API. For developers working on profiles and for operators running a catalog server.
+
+> **User guide:** [Save and restore your setup](https://haarness.ai/docs/cli/configuration#save-and-restore-your-setup).
 
 Profiles move Haarness configuration between installations and projects. Each
 ZIP archive has a versioned manifest and SHA-256 checksums for every file.
@@ -30,10 +32,22 @@ file it would create or overwrite. The usage-statistics choice (`telemetry` in
 the global `haarness.json`) belongs to each computer: save leaves it out and
 restore keeps the target's own.
 
+Desktop's Settings → **Profiles** runs the same commands: **Save profile** asks
+for a name and scope, **Restore profile** picks an archive, previews it with
+`--dry-run` and lists the files it would replace before you confirm, and
+**Manage catalog** reaches a catalog server (below). In the TUI, `/profiles`
+(or `/profile`) works with the profile catalog of the server it is attached to
+(`<data>/profiles`): **Save profile** captures a name and scope into it, and
+each saved profile shows its files with **Restore profile** (listing the files
+it will replace before **Replace configuration files**) and **Delete profile**.
+
 ## Included content and portability
 
-- Global TOML/JSON/JSONC configuration, instructions, custom agents, commands,
-  hooks, workflows, output styles, themes, and skills.
+- Global TOML/JSON/JSONC configuration (`config.toml`, `haarness.json{,c}`,
+  `opencode.json{,c}`, `extensions.json`, `tui.json{,c}`, Claude-style
+  `settings.json`), `AGENTS.md`, custom agents, commands, hooks, workflows,
+  output styles, themes, extensions and skills (the `CONFIG_FILES` and
+  `CONFIG_DIRS` lists in `crates/haarness-profiles/src/lib.rs`).
 - Global data-directory skills and local plugin bundles.
 - Haarness-installed plugins, copied as standalone local bundles with their
   enabled/disabled state preserved. Machine-specific cache/marketplace
@@ -47,7 +61,10 @@ Profiles exclude credential stores (`auth.json`, MCP OAuth state), `.env`
 files, PEM/key files, Git metadata, dependencies, conversations, databases,
 logs, runtime discovery, workspace registrations, and scheduler state.
 Restoring never registers scheduled jobs. External home configuration owned
-by other applications is not captured.
+by other applications is not captured. Anything else in the configuration
+folder is left out too, notably [prompt files](PROMPT-FILES.md) (`prompts/`),
+the terminal UI's own state and history (`tui-state.toml` and the others) and
+the switches Settings keeps in `capabilities.json`.
 
 **Configuration and scripts can contain inline secrets.** Archives retain
 their contents, including literal environment/header values, and are neither
@@ -65,8 +82,9 @@ stages replacements, and rolls back applied replacements if an operation fails.
 It rejects symlinks, traversal, unexpected files, duplicate/case-colliding paths,
 checksum failures, unsupported versions, and non-regular entries. On Unix,
 archives and restored files are owner-only; scripts retain owner execute
-permission. Limits: 32 MiB ZIP, 64 MiB expanded, 4,096 files. Rollback handles
-operation failures, not a machine crash during a multi-file restore.
+permission. Limits: 32 MiB ZIP, 64 MiB expanded, 2 MiB manifest; there is no
+separate cap on the number of files. Rollback handles operation failures, not
+a machine crash during a multi-file restore.
 
 Running servers use normal idle-time configuration reload. Project configuration loads by default and can be excluded with
 `--disable-project-config` or `HAARNESS_DISABLE_PROJECT_CONFIG=1`. Restore archives you trust:

@@ -1,7 +1,11 @@
 # Haarness TypeScript SDK
 
-Unpublished, typed Node.js 22+ client for all 116 Haarness server operations and 146 Cloud HTTP operations,
-SSE events, PTY WebSockets, attachments and explicitly owned local servers.
+Unpublished, typed Node.js 22+ client for every Haarness server and Cloud HTTP operation, SSE
+events, PTY WebSockets, attachments and explicitly owned local servers. This README is for
+TypeScript developers using the package; the repository's `sdks/README.md` has the
+full guide and how the SDKs are generated and tested.
+
+> **User guide:** [TypeScript and Python SDKs](https://haarness.ai/docs/server/sdks).
 
 ```sh
 npm ci
@@ -44,6 +48,12 @@ or event stream does not cancel server work. Use interruptTurn or
 interruptThreadTree explicitly. Handle approvals/questions concurrently through
 listPermissions/replyPermission and listQuestions/replyQuestion; no approvals
 are automatic.
+
+`btwStream(id, {question})` asks a side question and yields its answer as it is
+written (`delta`, `text`, then `done` or `error`), failing after
+`idleTimeoutMs` (default 45000) of silence; `btw()` answers in one piece.
+`workspace(id)` returns a client bound to one project behind a host gateway
+(`hostProjects()` lists them).
 
 `connectPty(id, {cursor})` returns an async-iterable socket with send/close,
 `ping(timeoutMs)` (false, and the socket closed, when the server does not

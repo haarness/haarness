@@ -1,6 +1,10 @@
 # Server API v1
 
-> **User guides:** [Your first API call](https://haarness.ai/docs/server/api), [Connect safely](https://haarness.ai/docs/server/authentication). This page has the engineering detail.
+The HTTP, SSE and WebSocket API of a Haarness server (`haarness serve`, and the server the TUI and Desktop
+start for each folder): authentication, every resource group, events, capabilities and the contracts behind
+them. It is for developers building clients or integrations and for contributors changing the server.
+
+> **User guides:** [Your first API call](https://haarness.ai/docs/server/api), [Connect safely](https://haarness.ai/docs/server/authentication), [TypeScript and Python SDKs](https://haarness.ai/docs/server/sdks).
 
 The unpublished [TypeScript and Python SDKs](../sdks/README.md) expose all
 registered API operations. Their [complete operation inventory](../sdks/OPERATIONS.md)
@@ -16,7 +20,9 @@ report; `GET /v1/insights` returns a text summary and standalone HTML. Both acce
 `days`, `project`, `currentProject` and `limit`, cover the server's shared data root,
 and publish schemas in OpenAPI. See [Insights](INSIGHTS.md) for accounting rules.
 
-The server binds loopback by default. Explicit `haarness serve` accepts anonymous
+The server binds loopback by default: `haarness serve` listens on `127.0.0.1:4096`
+(a free port while another program holds 4096; `--port 0` always picks one).
+Explicit `haarness serve` accepts anonymous
 requests unless a password or legacy token is configured. On a network address
 (`--host 0.0.0.0`) it refuses to start without a password or token unless
 `--anonymous` says that unauthenticated access is intended. Password servers use
@@ -24,8 +30,12 @@ requests unless a password or legacy token is configured. On a network address
 default username `haarness`. All protected routes, event streams, management APIs,
 remote project gateway requests and terminal upgrades use the same authentication
 policy. Failed password authentication returns `401` and a Basic challenge.
-Managed local daemons and existing integrations retain `Authorization: Bearer <token>`;
-their private runtime token also lets a password-protected host route internally.
+A token (`--token` or `HAARNESS_SERVER_TOKEN`) makes the server require
+`Authorization: Bearer <token>`. The folder servers the TUI, Desktop and
+`haarness run` start for themselves (on a free loopback port) get a random
+private token, kept in the folder's private runtime discovery record where
+local clients find it; that token also lets a password-protected host route
+internally.
 
 A `haarness serve` started while the folder's server runs is a front for it: it
 judges Host, Origin and credentials for its own address, then forwards `/v1` requests
@@ -56,18 +66,16 @@ break `haarness attach` to a LAN host by name; use a password on network listene
 when connecting Desktop to a remote host. Passwords are optional configuration,
 not a login/account service, and the server never accepts a password as a bearer token.
 
-Deferred prompts use `delivery: "queue"` on `/input`, with revisioned `GET|POST /v1/threads/{id}/input/queue` controls. See [Steer and Queue](INPUT-QUEUE.md#api-and-sdks) for delivery, retries, events, and SDK usage.
-
 Primary resources:
 
-- CLI-hosted daemons also expose authenticated remote project discovery and routing: `GET /v1/host/projects`, `GET /v1/host/directories?path=...`, `POST /v1/host/open`, `DELETE /v1/host/projects/{workspaceId}` (closes a project for remote access), and `/v1/host/workspaces/{workspaceId}/v1/...`. Both take the catalog's workspace id (`workspaces[].id`), not `projects[].id`. These optional host routes are separate from the directory SDK/OpenAPI contract; the routed directory API uses the normal SDK with a project base URL. See [remote host architecture](DESKTOP-PROJECT-MODEL.md#remote-hosts-with-multiple-projects).
+- CLI-hosted daemons also expose authenticated remote project discovery and routing: `GET /v1/host/projects`, `GET /v1/host/directories?path=...`, `POST /v1/host/open`, `DELETE /v1/host/projects/{workspaceId}` (closes a project for remote access), and `/v1/host/workspaces/{workspaceId}/v1/...`. Both take the catalog's workspace id (`workspaces[].id`), not `projects[].id`. `GET /v1/host/directories` takes `path`, `prefix`, `hidden`, `limit` and `after`. The four host routes are in the SDKs and the generated OpenAPI (`hostProjects`, `hostDirectories`, `hostOpen`, `hostClose`); the forwarded `/v1/host/workspaces/{workspaceId}/…` API is the ordinary project API, which the SDKs' `workspace(id)` helper binds every method to. A request forwarded to a project whose running server is busy and would have to be replaced (another Haarness build, or the other project-configuration setting) is answered `409` with code `project_busy`; plain reads still reach a server of another build that speaks this API. See [remote host architecture](DESKTOP-PROJECT-MODEL.md#remote-hosts-with-multiple-projects).
 
 - `POST /v1/providers/refresh` refreshes connected model catalogs (same response as `GET /v1/providers`; `providers.refresh.v1` capability). See [Model catalogs](MODELS.md).
-- `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/plugins`, `/v1/mcp`, `/v1/tools[?threadId=...]`; a `/v1/mcp` server of the [base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` (absent otherwise)
+- `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/skills/{name}` (a skill's instructions), `/v1/plugins`, `/v1/mcp[?threadId=...&agent=...]`, `/v1/tools[?threadId=...]`; a `/v1/mcp` server of the [base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` (absent otherwise). Each `/v1/tools` entry carries its functional `group` and `groupTitle` (`core`, `agents`, `planning`, `memory`, `goals`, `cloud`, `sessions`, `automation`, `web`, `media` or `extensions`), its `source` (`native`, `extension:<name>` or `mcp:<server>`), and whether it is `enabled`, `essential`, `advertised` on the next round and `loaded`, with token estimates for the list; Desktop's Settings → Tools groups by source from these
 - `GET /v1/lsp` for configured server lifecycle/availability and `GET /v1/formatter` for configured formatter availability (`lsp.v1` and `formatter.v1` capabilities)
 - `POST /v1/tools/{name}` with `{enabled:true|false|null}` for a durable workspace override; `POST /v1/tools/lazy` with `{mode:"off"|"auto"|"always"|null}` (null or omitted resets to configured/default mode)
 - `GET /v1/projects`; `GET|POST /v1/workspaces`; `GET /v1/workspaces/refs`; `POST /v1/workspaces/resolve-ref`; `GET|DELETE /v1/workspaces/{reference}`; `POST /v1/workspaces/{reference}/open`, `/reset`, and `/cleanup`
-- `GET|POST /v1/threads`, `GET|PATCH /v1/threads/{id}`
+- `GET|POST /v1/threads` (`?archived=true` lists archived chats), `GET|PATCH /v1/threads/{id}`
   Thread responses include `isSubagent` (default `false` for older payloads). Delegated child creation sets it; forks preserve `parentId` lineage with `isSubagent: false`. List APIs continue returning all threads; clients can filter sidebar presentations without losing child access.
   Untitled root conversations generate a title asynchronously from the first real user message after prompt hooks accept it. A `thread.updated` event publishes the persisted title while the main turn may still be running or waiting for permission. Titling is independent of turn completion and never overwrites a manual rename.
   Until then a chat is titled `New chat`. Servers before 2026-10 stored `New thread`; such rows are returned as `New chat` and still get a generated title, and a create request whose title is either placeholder or only spaces gets `New chat`. A fork without a `title` is named `Fork of <source title>`, or `Fork of New chat` when the source has none.
@@ -75,11 +83,21 @@ Primary resources:
 - `GET|POST /v1/ptys`; `GET|PATCH|DELETE /v1/ptys/{id}`; WebSocket `GET /v1/ptys/{id}/connect?cursor=N`
 - `POST /v1/threads/{id}/fork`, `/turns`, `/commands`, `/compact`
   A turn needs text or an attachment: `/turns` refuses text that is empty or only whitespace with neither an attachment nor a `command` (`400`, "text or an attachment is required"), as queued input always did, and the `task` tool refuses a blank `prompt`. Claude refuses whitespace-only text, and a blank message kept in the chat would fail every later turn. For the same reason, a reply that is only whitespace (the line breaks a model can stream before a tool call) is kept in the chat but never sent back to a model, and the Anthropic and Bedrock adapters leave out blank text next to an image or a document (Bedrock, which needs text beside a document, gets `(document attached)`, and an empty tool result reads `(no output)`). A chat that already runs a turn refuses `/turns` with `409 conflict` and the message "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped." (`haarness run --session` and editors over ACP show it as it is); `/input` steers a message into the running turn instead.
+- `POST /v1/threads/{id}/input` steers a message into the running turn, or with `delivery: "queue"` keeps it for after; revisioned `GET|POST /v1/threads/{id}/input/queue` lists and changes what is queued (`input-queue.v1`; see [Steer and Queue](INPUT-QUEUE.md#api-and-sdks) for delivery, retries, events and SDK usage)
+- `POST /v1/threads/{id}/btw` asks a side question about the chat without adding to it; `POST /v1/threads/{id}/btw/stream` streams its answer as SSE (`btw.stream.v1`; see [side questions](SIDE-QUESTIONS.md#api))
+- `GET|POST /v1/threads/{id}/loop`: `{prompt, intervalSeconds}` (default 300, kept between 30 and 86,400) starts a recurring prompt in the chat, which expires after 7 days; `{stop: true}` ends it
+- `POST /v1/threads/{id}/shell` with `{command}` runs one shell command through the `bash` tool and its permission path, recorded in the chat without a model turn (`409` while a turn runs)
+- `GET /v1/threads/{id}/usage`: token and cost totals for the chat and, under `descendants`, its subagents, `latestInputTokens`, and `context` (`tokens`, `reportedTokens`, `estimatedTokens`, `window`, `compactAt`), the one context figure every client shows
 - `GET /v1/threads/{id}/items`, `/todos`, `/active`, `/background`, `/pending-question`, `/goal`
 - `GET /v1/threads/{id}/activity` → `{"activeTurn": Turn | null, "background": N, "lastTurn": Turn | null}` (all keys always present; `404` for an unknown chat): the turn running in the chat, how many background results it is still owed, and its newest turn by creation whatever its status (null for a chat without turns). `lastTurn` is read after the other two, so a consumer holding an earlier turn can tell a chat that went quiet with that turn as its newest (it was stopped while idle) from one where a follow-up turn started and ended between two reads. Work a chat started in the background (child agents launched with `background: true` or moved there, workflow runs started without waiting) delivers its result into that chat when it ends, starting a new turn when the chat is idle; work a stop cancelled owes nothing. A chat is quiet, and its last root turn is where it stopped, only with no active turn and `background` 0. A published chat's scope may read it for every chat in its tree. A background workflow run that is paused owes nothing until it is resumed. Servers before 2026-10-17 answer `404`; fall back to `/active` there.
 - `GET /v1/threads/{id}/diff` for the last completed turn that changed files and is not undone; `POST /v1/threads/{id}/revert` and `/unrevert` for stepwise undo/redo
 - `GET /v1/vcs/diff?mode=working|branch[&context=N][&summary=true][&path=FILE]` for bounded Git review, metadata-only listings, or one literal file. Entries are `ReviewFile` (a `FileDiff` plus optional `truncation` and `omittedFiles`); bounds are 1000 files, 512 KiB per patch and 8 MiB per response — see [large-diff review](LARGE-DIFF-REVIEW.md)
 - `GET /v1/threads/{id}/diff/review[?summary=true|path=FILE]` for deferred last-turn review; see [large-diff review](LARGE-DIFF-REVIEW.md)
+- Project files, every path resolved inside the project: `GET /v1/files/list?path=…[&hidden=true]`; `GET /v1/files/content?path=…` (`content`, `encoding`, `mime`, `revision`, `size`; at most 10 MiB) and `PUT` with `{path, content, revision, encoding?}` (`utf8` or `base64`; a new file uses the empty content's SHA-256 as its revision, and a stale revision is `409`); `POST /v1/files/action` with `mkdir`, `rename` (`target`) or `delete` (`confirm`). Changes publish `files.updated`. `GET /v1/files/search?q=…[&limit=N]` (default 8, at most 50) is the `@` mention search
+- `GET /v1/files/preview`, `/v1/files/preview/current` and `POST /v1/files/preview/restore` serve the saved versions of [canvas previews](CANVAS-PREVIEW.md) (`files.preview.v1`)
+- Browser hosts: `GET /v1/browser/hosts`, the host sockets `GET /v1/threads/{id}/browser/host`, `/v1/browser/drafts/{id}/host` and `/v1/browser/extension/host`, `POST /v1/threads/{id}/browser/tool`, the `…/tunnel/{action}` routes and `POST /v1/browser/drafts/{id}/adopt` (`browser.v1`, `browser-drafts.v1`, `browser-extension.v1`); see [Browser](BROWSER.md) and [Haarness for Chrome](CHROME-EXTENSION.md)
+- `POST /v1/cloud/agents`, `/v1/cloud/sessions`, `/v1/cloud/chats` and `/v1/cloud/schedules` act on Haarness Cloud with this computer's signed-in account, through the same intents as the model's Cloud tools
+
 Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler sets this durable origin on each new run; thread responses, live events, reloads and session archives retain it independently of the editable title. The schedule ID, rather than its name, is the grouping identity. Forks omit it. Sanitized archives redact the schedule name while retaining its ID. Existing threads without this additive field are unchanged.
 
 Thread creation also accepts an optional client-chosen `id` (a UUID), so a create that is retried after a lost response cannot make a second chat. When a chat with that `id` already exists, `POST /v1/threads` returns it unchanged with the same `201` response, ignores the rest of the request, and publishes no second `thread.created`. Concurrent creates with one new `id` make one chat. Haarness Cloud uses this to deliver a session's first prompt into the chat it named in advance. Servers advertise it as `thread-create-id.v1` in `/v1/info.capabilities`; older servers ignore `id` and choose their own, so check the capability or compare the returned `id`.
@@ -87,8 +105,9 @@ Thread creation also accepts an optional client-chosen `id` (a UUID), so a creat
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
 - `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md))
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions
-- `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt`, `GET /wait`
-- `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`
+- `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt` (`?resume=true` as above), `GET /wait?timeout_ms=N` (default 30 s, at most 300 s; a turn still running then answers `409`)
+- `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`.
+  A pending permission names its `permission` category, `patterns`, the `alwaysPatterns` an Always would remember, `threadId`/`rootThreadId`/`turnId`, and `callId`, the tool call that asks (a batch's step as `<batch call id>:N`; older servers send none); `explicit: true` means only a person may answer it. A request a shell command raises carries `script` (the file the command runs, as read when it asked, or why its text is withheld), and one Auto's reviewer left to a person carries `review`. A question names its `callId` the same way. A permission reply is `{decision, feedback?}` with `once`, `always`, `always_workspace`, `always_repository`, `reject` or `refuse` (for unattended runners); a question reply is `{answer}`. See [Permissions and execution settings](PERMISSIONS-AND-EXECUTION.md) and [automatic approvals](AUTO-APPROVALS.md)
 - `GET`/`PUT /v1/threads/{id}/approval-mode` for the chat's Auto/Review setting, which the server applies for every client (see [automatic approvals](AUTO-APPROVALS.md))
 - `POST /v1/mcp/{name}`, `/reconnect`, `/disconnect`, and MCP tool list/call routes
 - `POST /v1/plugins` for install/enable/disable/remove/marketplace actions
@@ -96,6 +115,7 @@ Thread creation also accepts an optional client-chosen `id` (a UUID), so a creat
 - `POST /v1/workflows/run`, `/v1/workflows/runs/{id}/cancel`, `/pause`, and `/resume`; `GET /wait`; `DELETE /v1/workflows/runs/{id}`
 - `GET /v1/events`
 - `POST /v1/shutdown` for authenticated, explicit server-wide shutdown
+- Public, without credentials: `GET /healthz`, `GET /openapi.json` and the shared-chat page `GET /s/{token}`
 
 `GET /v1/info` includes optional `defaultProvider` and `defaultModel` preferences
 from the active workspace configuration. Clients can combine these with the
@@ -201,7 +221,7 @@ leaves it running while a terminal is open (see
 [Desktop project model](DESKTOP-PROJECT-MODEL.md)). `pty.v1` advertises this
 contract.
 
-SSE envelopes include `schemaVersion`, `serverInstanceId`, monotonic `eventId`, type, relevant domain IDs, payload, and timestamp. A `turn.finished` payload is the finished `Turn` plus `background`: the background results its chat was still owed at that moment (the same count `/v1/threads/{id}/activity` reports), left out when 0 and never stored with the turn. A root turn that completed or failed with `background` > 0 is not where the chat stopped: the turn its last result starts is. Desktop, the terminal UI and the Cloud connector announce a chat as finished only then. `GET /v1/info` exposes `eventCursor`: snapshot-first clients capture it before REST hydration and connect with that value as `Last-Event-ID`, closing the snapshot/delta race. The stream sends a keepalive comment every 15 seconds, so a client may count one silent for longer (the SDKs' `idleTimeoutMs` / `idle_timeout`; Desktop and the TUI use 45 seconds) as a connection that died without closing, and reconnect from its cursor. Reconnects continue from the last applied event. A changed server instance or `resync_required` means clients must replace items, todos, the process-wide `/v1/turns/active` snapshot, pending requests, and thread snapshots from REST. Each connection takes its events from the server as they are published and keeps those its client has not read yet in a queue of its own, up to 16 MiB of event text besides the largest waiting event, so a client that reads more slowly than a model writes (a busy terminal UI, a phone through the relay) keeps its place, and one event larger than that (a message with several large screenshots) still goes out. One that falls further behind than that, or that the server's own buffer of recent events dropped events for, is sent `resync_required` and its response ends: what it missed is gone, and it reconnects from its cursor as after any ended stream (the terminal UI does so quietly, as it is refreshing already). A replay that does not fit in the queue (a reconnect from a cursor with more than 16 MiB of events after it, or a connection without a cursor while the server's buffer holds that much) never ends the response: it is answered as a cursor older than the buffer is, with `resync_required`, and the stream goes on with the events published from then on. While they wait there, text and reasoning deltas (`turn.text_delta`, `turn.reasoning_delta`) of one turn join into one delta (up to 64 KiB of text) carrying the last joined event's `eventId`, so a slow client reads fewer, longer events, replaying after a reconnect included; other events are never joined or reordered, and a published chat's stream leaves out other chats' events before they could break a run. So `eventId`s increase but can skip. With several chats streaming at once on one connection their deltas alternate and few join, so such a client fills its queue sooner. The reply carries `X-Accel-Buffering: no`, so nginx and proxies that follow it pass events on as they are written. SSE connections are observers: disconnecting, switching threads, or creating a new thread never cancels execution. Pending questions are root-scoped structured records (question, child thread, root thread, turn, choices, and creation time); `question.requested` adds one and `question.resolved` removes exactly that ID, so parallel child questions never overwrite each other. A question must be answerable: the `question` tool rejects a call that turns free-form answers off (`custom: false`) without offering a choice.
+SSE envelopes include `schemaVersion`, `serverInstanceId`, monotonic `eventId`, type, relevant domain IDs, payload, and timestamp. A `turn.finished` payload is the finished `Turn` plus `background`: the background results its chat was still owed at that moment (the same count `/v1/threads/{id}/activity` reports), left out when 0 and never stored with the turn. A root turn that completed or failed with `background` > 0 is not where the chat stopped: the turn its last result starts is. Desktop, the terminal UI and the Cloud connector announce a chat as finished only then. `GET /v1/info` exposes `eventCursor`: snapshot-first clients capture it before REST hydration and connect with that value as `Last-Event-ID`, closing the snapshot/delta race. The stream sends a keepalive comment every 15 seconds, so a client may count one silent for longer (the SDKs' `idleTimeoutMs` / `idle_timeout`; Desktop and the TUI use 45 seconds) as a connection that died without closing, and reconnect from its cursor. Reconnects continue from the last applied event. A changed server instance or `resync_required` means clients must replace items, todos, the process-wide `/v1/turns/active` snapshot, pending requests, and thread snapshots from REST. Each connection takes its events from the server as they are published and keeps those its client has not read yet in a queue of its own, up to 16 MiB of event text besides the largest waiting event, so a client that reads more slowly than a model writes (a busy terminal UI, a phone through the relay) keeps its place, and one event larger than that (a message with several large screenshots) still goes out. One that falls further behind than that, or that the server's own buffer of recent events (the latest 2,048) dropped events for, is sent `resync_required` and its response ends: what it missed is gone, and it reconnects from its cursor as after any ended stream (the terminal UI does so quietly, as it is refreshing already). A replay that does not fit in the queue (a reconnect from a cursor with more than 16 MiB of events after it, or a connection without a cursor while the server's buffer holds that much) never ends the response: it is answered as a cursor older than the buffer is, with `resync_required`, and the stream goes on with the events published from then on. While they wait there, text and reasoning deltas (`turn.text_delta`, `turn.reasoning_delta`) of one turn join into one delta (up to 64 KiB of text) carrying the last joined event's `eventId`, so a slow client reads fewer, longer events, replaying after a reconnect included; other events are never joined or reordered, and a published chat's stream leaves out other chats' events before they could break a run. So `eventId`s increase but can skip. With several chats streaming at once on one connection their deltas alternate and few join, so such a client fills its queue sooner. The reply carries `X-Accel-Buffering: no`, so nginx and proxies that follow it pass events on as they are written, and `X-Content-Type-Options: nosniff` and a `connected` comment at once, so a client that buffers until it can sniff the type (Apple's URL loading) does not hold the first events back. SSE connections are observers: disconnecting, switching threads, or creating a new thread never cancels execution. Pending questions are root-scoped structured records (question, child thread, root thread, turn, choices, and creation time); `question.requested` adds one and `question.resolved` removes exactly that ID, so parallel child questions never overwrite each other. A question must be answerable: the `question` tool rejects a call that turns free-form answers off (`custom: false`) without offering a choice.
 
 Runtime-source changes publish `configuration.reload_queued` when an active
 turn delays application, `configuration.reloaded` after the complete new
@@ -349,6 +369,19 @@ response) to the end of the reasoning. It therefore includes the wait for
 the first reasoning token, and each request after a tool round starts its
 own count. Clients read it as "Thought for 12s"; records made before it was
 measured have none.
+
+A `usage` item records one model request: `input_tokens`, `output_tokens`,
+`cache_read_tokens`, `cache_write_tokens`, `cost_usd` (null when unpriced),
+`estimated` when the provider reported no usage and the counts are Haarness's
+estimate, and, for a request that finished cleanly after streaming something,
+`first_token_ms` (from sending it to its first text, reasoning or tool call,
+a tool call counting from when it starts streaming, not when its arguments
+are whole), `stream_ms` (the span the output streamed across) and
+`stream_tokens` (the tokens that streamed). A stopped or failed request
+records none of the three, and a retry runs its own clock. Output speed is `stream_tokens /
+stream_ms`, not `output_tokens`, which also counts reasoning that never
+streamed. Desktop's Context panel and the TUI's `/usage` and sidebar show
+them; records from before requests were timed have none.
 
 MCP configuration accepts stdio, Streamable HTTP, and legacy SSE transports.
 Remote entries may set `oauth`, `oauthClientId`, and `oauthScopes`; bearer and
@@ -499,24 +532,62 @@ beginning. `workflow.updated`, `workflow.log`, and `workflow.deleted` are live
 SSE event types. See [WORKFLOWS.md](WORKFLOWS.md) for source formats and the
 security boundary.
 
+## Capabilities
+
+`GET /v1/info` lists `capabilities`, the contract a client can rely on. A
+client checks a versioned name before it offers what depends on it, and
+treats a missing one as an older server.
+
+| Capability | What it promises |
+| --- | --- |
+| `approval-mode.v1` | The server keeps each chat's Auto or Review mode (`/approval-mode`) and answers eligible requests itself; clients never reply automatically |
+| `approval-review.v1` | Auto asks a reviewer model (`auto_review.enabled`, on by default): a request it leaves to a person carries `review` |
+| `btw.v1`, `btw.stream.v1` | Side questions; the second adds the side chat's earlier questions and the streamed `/btw/stream` |
+| `configuration-hot-reload.v1` | Configuration edits apply without a restart, with the reload events above |
+| `input-queue.v1` | `delivery: "queue"` and the revisioned `/input/queue` routes |
+| `lsp.v1`, `formatter.v1` | `GET /v1/lsp` and `GET /v1/formatter` |
+| `mcp-resource-mentions.v1` | `resources` on `/turns`, `/input` and `/commands` (left out for a published chat) |
+| `projects.v1`, `workspaces.v1`, `workspace-cleanup.v1` | The project and worktree routes, and the separate stale-registration `/cleanup` |
+| `providers.refresh.v1` | `POST /v1/providers/refresh` |
+| `pty.v1` | Terminals (`/v1/ptys`); `ifNone` and `created` came later, so a `pty.v1` server may ignore the one and leave out the other |
+| `remote-chat-scope.v1` | The server confines a published chat's requests to its chat tree; the Cloud connector does not serve through a server without it |
+| `session-archive.v1` | Portable session archives |
+| `thread-create-id.v1` | A client-chosen `id` on `POST /v1/threads` |
+| `workspace-history.v1` | Git review and undo/redo; the CLI and TUI use a running folder server only when it has this and `pty.v1` |
+| `browser.v1`, `browser-drafts.v1` | The browser host routes (servers with a browser broker) |
+| `browser-extension.v1` | Haarness for Chrome: the extension host route and its settings |
+| `input-settings.v1`, `browser-settings.v1`, `usage-statistics.v1` | The management resources of those names |
+
+`rest`, `sse`, `network.attach`, `attachments.inline-upload`, `files.base64-write.v1`,
+`files.preview.v1`, `mcp`, `skills`, `subagents`, `workflows`, `workflows.read`,
+`goals`, `ultracode`, `opentui`, `tool-catalog.v1` and `lazy-tools.v1` name
+features every current server has; no client in this repository branches on them.
+
 ## Interactive configuration and sharing
 
 `POST /v1/manage/{resource}` accepts an authenticated JSON action and returns a
-`ManagementView` (`title`, `lines`, `fields`, `entries`, optional `submit`).
-Resources are `providers`, `mcp`, `schedules`, `hooks`, `memory`, `profiles`,
-and `sharing`. Begin with `{"action":"view"}`; sharing also requires
-`threadId`. Render fields, preserve the returned submit/revision metadata, merge
+`ManagementView` (`title`, `lines`, `fields`, `entries`, optional `submit`
+and `data`). The form resources are `providers`, `mcp`, `schedules`, `hooks`,
+`memory`, `profiles`, `sharing`, `remote-control` (see
+[remote access](REMOTE-ACCESS.md)), `marketplace-ui` and `capabilities-ui`.
+Begin with `{"action":"view"}`; `sharing` and `remote-control` also require
+`threadId`. `input-settings`, `browser-settings` and `usage-statistics` answer
+a view whose `data` holds their settings (advertised as `input-settings.v1`,
+`browser-settings.v1` and `usage-statistics.v1`), and `capabilities` and
+`marketplace` answer plain JSON (the SDKs' `capabilities()` and
+`marketplace()`). Render fields, preserve the returned submit/revision metadata, merge
 edited values into that submit object, and send it to the same resource. An
 entry's `confirm` text requires explicit user confirmation before its request is
 submitted. `secret` fields must use masked input and never be copied to logs.
 
-TypeScript exposes `manageResource(resource, body)`; Python exposes
-`manage_resource(resource, body)`. These are user-management APIs, separate from
+TypeScript exposes `manageResource(resource, body)` (and `managementView()`,
+typed as a `ManagementView`); Python exposes `manage_resource(resource, body)`. These are user-management APIs, separate from
 model tool execution. Errors leave the client draft intact.
 
 `POST /v1/manage/assets` serves the structured definition editors. Send `kind`
 (`agent`, `command`, or `skill`) and `action` (`list`, `get`, `create`, `edit`,
-`customize`, or `delete`). It returns definition rows/details or a mutation result,
+`customize`, or `delete`; a skill also takes `import` with the `path` of a
+skill folder or `SKILL.md`). It returns definition rows/details or a mutation result,
 rather than a `ManagementView`. Writes use the connected server's configuration;
 `scope` is `global` or `local`. A listed row from the
 [base folder](CONFIGURATION-SCOPES.md#base-folder) has `scope: "base"` and is

@@ -1,6 +1,12 @@
 # Haarness developer SDKs
 
 Unpublished TypeScript and Python clients for the complete Haarness server and Cloud APIs.
+This page is for developers scripting Haarness or building on it, and for contributors who
+change the server's routes and regenerate the clients: installation, connection, streaming,
+approvals, local servers, Cloud, and how the SDKs are generated and tested.
+
+> **User guides:** [TypeScript and Python SDKs](https://haarness.ai/docs/server/sdks), [Automate with the CLI and SDKs](https://haarness.ai/docs/cloud/cli-and-sdk).
+
 The TypeScript package is private and has a publish guard. Python wheels carry
 `Private :: Do Not Upload`, which public PyPI rejects. No publishing workflow is
 included. Both packages can be built, packed and installed locally.
@@ -9,10 +15,13 @@ included. Both packages can be built, packed and installed locally.
   AbortSignal cancellation, SSE async iterators, authenticated PTY WebSockets.
 - **Python:** Python 3.10+, synchronous `Haarness` and asynchronous
   `AsyncHaarness`, generated TypedDicts/unions, HTTPX, SSE iterators, PTYs.
-- **Every registered native operation:** chats/turns, commands, goals, loops,
-  background work, permissions/questions, MCP, plugins, skills,
-  workspaces, Git review, PTYs, workflows, profile archives, analytics and shutdown.
-- Explicit owned local-server helpers, remote-safe attachments, and `chat()`.
+- **Every registered native operation:** chats/turns, steering and the queue,
+  side questions, commands, goals, loops, background work, permissions/questions,
+  MCP, plugins, skills, workspaces, Git review, project files and previews, PTYs,
+  workflows, browser hosts, remote host routes, profile archives, analytics and shutdown.
+- Explicit owned local-server helpers, remote-safe attachments, `chat()`, a
+  streamed side question (`btwStream` / `btw_stream`) and `workspace(id)` for a
+  project behind a host gateway.
 
 [Every operation and method name](OPERATIONS.md) · [API schema](openapi.json)
 
@@ -40,10 +49,17 @@ a client never starts or replaces a daemon.
 
 ## Connect and chat
 
-Start the server with `haarness serve --port 4096` and obtain its bearer token
-from your private runtime discovery file, or set `HAARNESS_SERVER_TOKEN` before
-starting it. The URL is the server root, not `/v1`. A reverse-proxy base path is
-supported. Network servers should use a private network or an HTTPS tunnel.
+Start a server with `haarness serve` (it listens on `http://127.0.0.1:4096`).
+On loopback it accepts requests without credentials unless you start it with a
+token (`--token` or `HAARNESS_SERVER_TOKEN`, then sent as a bearer token) or a
+password (`--password` or `HAARNESS_SERVER_PASSWORD`). The clients send
+`HAARNESS_SERVER_TOKEN` from the environment when no token is given; for a
+password server pass `password` (and `username`, default `haarness`), and to
+ignore an ambient token pass `auth: {type: "none"}` in TypeScript or
+`password=""` in Python. The URL is
+the server root, not `/v1`. A reverse-proxy base path is supported. Network
+servers should use a password on a private network or an HTTPS tunnel; see
+[the server API](../docs/API.md) for the authentication rules.
 
 ```ts
 import { Haarness } from "@haarness/sdk";
@@ -126,15 +142,20 @@ with closing(client.events(after=before["eventCursor"], reconnect=True)) as even
 ```
 
 Async Python uses `async for` and `contextlib.aclosing`. Cancel its task to abort
-an in-flight request or stream. TypeScript accepts `{signal, timeoutMs}` as the
+an in-flight request or stream. TypeScript accepts `{signal, timeoutMs, headers}` as the
 last argument of every endpoint method. Python accepts
-`options={"timeout": seconds}`. Default HTTP timeout is 30 seconds; `chat()`
+`options={"timeout": seconds, "headers": {...}}`. Default HTTP timeout is 30 seconds; `chat()`
 allows about five minutes by default. For longer waits or workspace operations,
 set a larger transport timeout explicitly. `wait_turn`'s **query** field is
 `timeout_ms`; workflow wait uses `timeoutMs`, matching the server.
 
 SSE is one connection unless `reconnect` is enabled. Reconnection sends the last
-delivered event ID and suppresses duplicate event IDs. A `resync_required` marker
+delivered event ID and suppresses duplicate event IDs. The server sends a
+keepalive every 15 seconds, so `idleTimeoutMs: 45_000` (Python
+`idle_timeout=45`) makes a connection that died without closing (a laptop that
+slept, a network that changed) count as lost: it reconnects from its cursor
+with `reconnect`, and otherwise ends with `TransportError`. Time your code
+spends with an event does not count. A `resync_required` marker
 or changed server instance ends iteration: capture a new `info().eventCursor`,
 reload REST snapshots, and open a new stream with that cursor. Events cover the
 whole server; filter by `threadId`/`rootThreadId`/`turnId` in your consumer.
@@ -174,6 +195,12 @@ run = client.start_workflow({"name": "audit", "threadId": thread["id"]})
 finished = client.wait_workflow_run(run["id"], {"timeoutMs": 120_000},
                                     options={"timeout": 125})
 ```
+
+A side question streams its answer: `for await (const event of client.btwStream(thread.id, {question}))`
+in TypeScript, `client.btw_stream(thread["id"], {"question": ...})` in Python;
+`delta` extends the answer, `text` replaces it, and the stream ends with
+`done` or `error` (servers with `btw.stream.v1`; `btw()` answers in one piece).
+See [side questions](../docs/SIDE-QUESTIONS.md#api).
 
 Names in these examples must exist in your `commands()`/`workflows()` catalog.
 Command results are tagged as `turn`, `workflow_run` or `text`. Server-executable
@@ -217,8 +244,14 @@ Python: `with client.connect_pty(id) as socket`, then `socket.send`,
 Save the last consumed cursor control frame's `end` value, then reconnect with
 that cursor (`{cursor}` in TypeScript, `cursor=...` in Python). A truncated
 replay marker means older output is no longer available. `socket.cursor`
-reports the latest consumed acknowledgement. Closing a socket detaches;
-`deletePty`/`delete_pty` terminates the process. PTYs do not survive server restart.
+reports the latest consumed acknowledgement. `ping(timeout)` (default 10
+seconds) says whether the socket still reaches its server and closes one that
+does not answer, so a reader can reconnect from its cursor; Python sockets also
+ping every 20 seconds by themselves. Closing a socket detaches;
+`deletePty`/`delete_pty` terminates the process. PTYs do not survive server
+restart. `createPty({ifNone: true, …})` hands back the project's oldest
+running terminal instead of starting a second shell; `created` says which
+happened.
 
 ## Own a local server explicitly
 
@@ -478,7 +511,8 @@ cargo build -p haarness-cli
 python3 sdks/tests/server.py
 python3 sdks/generate.py
 
-# Full reproducible gate: installs locked SDK development dependencies locally.
+# Full reproducible gate: installs locked SDK development dependencies locally
+# (needs Node.js 22+ and uv). Set HAARNESS_BIN to test an existing build.
 ./scripts/test-sdks.sh
 ```
 
@@ -504,8 +538,11 @@ The provider is Haarness's deterministic echo adapter and MCP uses a stdio
 fixture; these tests do not contact paid model services.
 
 Cloud generation imports the versioned sibling `haarness-cloud/docs/openapi.json`
-and includes every operation without a route allowlist. Copy the updated document
-to `sdks/cloud-openapi.json` before regeneration; the check catches sibling drift.
+(or `$HAARNESS_CLOUD_REPO/docs/openapi.json`) and includes every operation
+without a route allowlist. Copy the updated document to `sdks/cloud-openapi.json`
+before regeneration; `generate.py` refuses to run while the two differ. To check
+the native SDK alone against a sibling that has moved on, point
+`HAARNESS_CLOUD_REPO` at a folder without one.
 Contract tests cover every Cloud HTTP operation in TypeScript and Python sync/async,
 including form encoding, manual redirects and binary responses. Live fixture
 journeys in `sdks/tests/cloud_e2e.py` (sync/async) and `cloud_ts_e2e.mjs` exercise
@@ -529,7 +566,7 @@ Expired or revoked keys fail; SDKs never implicitly replace them with OAuth cred
 
 ### Releases and inference
 
-`HaarnessCloud` now includes current/product manifests, release history, artifact and
+`HaarnessCloud` includes current/product manifests, release history, artifact and
 platform downloads, and the installer scripts. Download methods return bytes; verify
 SHA-256 against the manifest before running them. Operator-only upload, publish,
 promote and withdraw methods require `x-haarness-internal-token` in request options.
