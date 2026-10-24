@@ -1,4 +1,4 @@
-import { marked, type TokensList } from "marked";
+import { marked, type Token, type TokensList } from "marked";
 
 export type MarkdownBlock = { raw: string; html: string };
 export type MarkdownProjection = {
@@ -9,12 +9,83 @@ export type MarkdownProjection = {
   references: boolean;
   breaks: boolean;
 };
+
+/**
+ * HTML elements that show their content where they stand, which a reply may
+ * write bare (`<kbd>`, `<br>`, `<ul>` in a table cell) and keep as markup.
+ */
+const SHOWN = new Set([
+  "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "big", "blockquote", "br", "caption",
+  "center", "cite", "code", "col", "colgroup", "data", "dd", "del", "details", "dfn", "div", "dl", "dt",
+  "em", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
+  "i", "img", "ins", "kbd", "li", "main", "mark", "nav", "ol", "p", "pre", "q", "rp", "rt", "ruby", "s",
+  "samp", "section", "small", "span", "strike", "strong", "sub", "summary", "sup", "table", "tbody", "td",
+  "tfoot", "th", "thead", "time", "tr", "tt", "u", "ul", "var", "wbr",
+]);
+const BARE_TAG = /^<(\/?)([A-Za-z][\w:-]*)\s*(\/?)>$/;
+
+/**
+ * Inside a paragraph, a bare tag that is not such an element is a word of the
+ * reply, as the TUI shows it: `<path>`, `<file>`, `<svg>`, `<title>`. Read as
+ * markup, the sanitizer drops it, and with `<path>` or `<text>` everything
+ * after it in the block (an SVG name outside an svg is removed whole); `<svg>`
+ * and `<title>` hide what follows. Its closing tag in the same run of text
+ * goes with it. A tag with attributes is markup and stays, so an inline SVG
+ * drawing still draws.
+ */
+function literalTags(tokens: Token[]) {
+  const open: string[] = [];
+  tokens.forEach((token, index) => {
+    if (token.type !== "html" || token.block) return;
+    const tag = BARE_TAG.exec(token.text);
+    const name = tag?.[2].toLowerCase();
+    if (!tag || !name || SHOWN.has(name)) return;
+    if (tag[1]) {
+      const at = open.lastIndexOf(name);
+      if (at < 0) return;
+      open.splice(at, 1);
+    } else if (!tag[3]) open.push(name);
+    tokens[index] = { type: "text", raw: token.raw, text: token.text, escaped: false };
+  });
+}
+
+/** A label's tokens with every link in them, at any depth, replaced by its own tokens. */
+const linkless = (tokens: Token[]): Token[] =>
+  tokens.flatMap((token): Token[] =>
+    token.type === "link"
+      ? linkless(token.tokens ?? [])
+      : "tokens" in token && token.tokens
+        ? [{ ...token, tokens: linkless(token.tokens) } as Token]
+        : [token],
+  );
+
+/**
+ * Runs on every token before it is drawn (see `prepare`). A link inside a
+ * link's label (`[<dev@example.com>](url)`, `[[a](x)](y)`) keeps only its
+ * text: an anchor inside an anchor is split by the HTML parser into an empty
+ * link to the label's address and a visible one to the inner address.
+ */
+function replyToken(token: Token) {
+  if (token.type === "link" && token.tokens) token.tokens = linkless(token.tokens);
+  if (token.type === "table") {
+    for (const cell of [...token.header, ...token.rows.flat()]) literalTags(cell.tokens);
+    return;
+  }
+  if ("tokens" in token && token.tokens) literalTags(token.tokens);
+}
+
 /**
  * Replies keep the model's single line breaks, as the TUI does: agent output
  * often relies on its line structure. A Markdown file keeps standard
  * paragraphs, where a lone newline is a space.
  */
-export const markdownOptions = (breaks: boolean) => ({ gfm: true, breaks });
+export const markdownOptions = (breaks: boolean) => ({ gfm: true, breaks, walkTokens: replyToken });
+
+/** What `marked.parse` does with `walkTokens` between lexing and drawing. */
+function prepare<T extends Token[]>(tokens: T) {
+  marked.walkTokens(tokens, replyToken);
+  return tokens;
+}
 
 // Shared by all messages in the worker, including live-to-history remounts.
 // Bound bytes as well as entries: one enormous answer must not pin memory.
@@ -30,7 +101,7 @@ function render(raw: string, tokens: TokensList, references: boolean, breaks: bo
     cache.set(key, html);
     return html;
   }
-  const html = marked.parser(tokens, markdownOptions(breaks));
+  const html = marked.parser(prepare(tokens), markdownOptions(breaks));
   const size = (key.length + html.length) * 2;
   if (!references && size <= limit) {
     cache.set(key, html);

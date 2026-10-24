@@ -23,6 +23,7 @@ const examples = [
   "one\r\n\r\ntwo\r\n\r\nthree\r",
   "one  \nline break\n\n---\n\nDone 😊 日本語 العربية\n",
   "- [x] checked\n- [ ] open\n\nhttps://example.test\n",
+  "Replace <path> with the file, then <text>x</text> stays.\n\n[<dev@example.com>](https://example.test) and [[a](/x)](/y)\n",
 ];
 
 for (const [index, source] of examples.entries()) {
@@ -51,6 +52,46 @@ test("a reply keeps single line breaks; a Markdown file, lists and code keep the
   assert.equal(html("```\na\nb\n```"), "<pre><code>a\nb\n</code></pre>\n");
   // A cached block never leaks between the two modes.
   assert.notEqual(html("same\ntext"), html("same\ntext", false));
+});
+
+// Read as markup, `<path>` (an SVG name outside an svg) was removed by the
+// sanitizer with everything after it in its paragraph, `<title>` and `<svg>`
+// hid what followed, and `<file>` vanished; the TUI shows them as written.
+test("a bare tag in a reply's prose is a word of it; markup and drawings stay markup", () => {
+  const html = (text: string, breaks = true) => projectMarkdown(undefined, text, false, breaks).blocks.map((block) => block.html).join("");
+  assert.equal(
+    html("Replace <path> with the file, then run <App />."),
+    "<p>Replace &lt;path&gt; with the file, then run &lt;App /&gt;.</p>\n",
+  );
+  assert.equal(html("Set its <title>, use an <svg> or <file>"), "<p>Set its &lt;title&gt;, use an &lt;svg&gt; or &lt;file&gt;</p>\n");
+  // A closing tag goes with the opening one shown as text, never on its own.
+  assert.equal(html("<text>label</text> and </div>"), "<p>&lt;text&gt;label&lt;/text&gt; and </div></p>\n");
+  assert.equal(html("- see <path>\n"), "<ul>\n<li>see &lt;path&gt;</li>\n</ul>\n");
+  assert.equal(html("| a |\n| - |\n| <path> |"), "<table>\n<thead>\n<tr>\n<th>a</th>\n</tr>\n</thead>\n<tbody><tr>\n<td>&lt;path&gt;</td>\n</tr>\n</tbody></table>\n");
+  assert.equal(html("Edit <path> in a file", false), "<p>Edit &lt;path&gt; in a file</p>\n");
+  // Elements that show their text, tags with attributes and block HTML are markup.
+  assert.equal(html("Press <kbd>K</kbd><br><img src=x> <sub>2</sub>"), "<p>Press <kbd>K</kbd><br><img src=x> <sub>2</sub></p>\n");
+  assert.equal(html("| a |\n| - |\n| <ul><li>x</li></ul> |"), "<table>\n<thead>\n<tr>\n<th>a</th>\n</tr>\n</thead>\n<tbody><tr>\n<td><ul><li>x</li></ul></td>\n</tr>\n</tbody></table>\n");
+  assert.equal(
+    html('An icon <svg viewBox="0 0 8 8"><path d="M0 0h8v8z"/></svg> inline'),
+    '<p>An icon <svg viewBox="0 0 8 8"><path d="M0 0h8v8z"/></svg> inline</p>\n',
+  );
+  assert.equal(html("<details>\n<summary>More</summary>\n\nbody\n</details>"), "<details>\n<summary>More</summary>\n\n<p>body</p>\n</details>");
+  assert.equal(html("`<path>` and\n\n```\n<path>\n```"), "<p><code>&lt;path&gt;</code> and</p>\n<pre><code>&lt;path&gt;\n</code></pre>\n");
+});
+
+// An anchor inside an anchor is split by the HTML parser: the label went to
+// the inner address and an empty link to the label's own address was left.
+test("a link inside a link's label keeps only its text, so the label goes where its link points", () => {
+  const html = (text: string) => projectMarkdown(undefined, text, false).blocks.map((block) => block.html).join("");
+  assert.equal(html("[<dev@example.com>](https://example.com)"), '<p><a href="https://example.com">dev@example.com</a></p>\n');
+  assert.equal(html("[[inner](https://a.example)](https://example.com)"), '<p><a href="https://example.com">inner</a></p>\n');
+  assert.equal(
+    html("[**<dev@example.com>** ![logo](x.png)](https://example.com)"),
+    '<p><a href="https://example.com"><strong>dev@example.com</strong> <img src="x.png" alt="logo"></a></p>\n',
+  );
+  // Links outside a label are untouched.
+  assert.equal(html("<dev@example.com> and [a](/b)"), '<p><a href="mailto:dev@example.com">dev@example.com</a> and <a href="/b">a</a></p>\n');
 });
 
 test("append keeps completed blocks and lexes only the last block; replacement resets", () => {
