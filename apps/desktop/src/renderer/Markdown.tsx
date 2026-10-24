@@ -31,7 +31,9 @@ import { watchOpenImages } from "./ImageViewer";
  * What is read in the transcript's view: the first text that starts inside
  * it, under its middle. Starting inside the view, it holds nothing above it,
  * so an image growing there moves it whole; an image or a placeholder, which
- * may be the one about to come in, is passed over. When no text starts
+ * may be the one about to come in, is passed over, and so is what holds one
+ * (the paragraph beside a narrow placeholder), which would grow under its own
+ * top instead of moving. When no text starts
  * inside it (a tall picture or code block fills it), the end of the row under
  * its centre, which any growth above the view moves as well.
  */
@@ -40,7 +42,12 @@ function readingAnchor(list: HTMLElement, view: DOMRect): { element: HTMLElement
   for (let y = view.top + 1; y < view.bottom; y += 12) {
     const point = document.elementFromPoint(x, y);
     if (!(point instanceof HTMLElement) || point === list || !list.contains(point)) continue;
-    if (point instanceof HTMLImageElement || point.closest(".project-image, .remote-image")) continue;
+    if (
+      point instanceof HTMLImageElement ||
+      point.closest(".project-image, .remote-image") ||
+      point.querySelector("img, .project-image, .remote-image")
+    )
+      continue;
     if (point.getBoundingClientRect().top >= view.top) return { element: point, edge: "top" };
   }
   const row = document.elementFromPoint(x, view.top + view.height / 2)?.closest<HTMLElement>("[data-index]");
@@ -112,6 +119,10 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   measured.observe(host);
   requestAnimationFrame(() => requestAnimationFrame(done));
 }
+
+/** Text up to this long is drawn on this thread (about 3 ms here); longer
+ * text is drawn by the worker. */
+const DRAWN_HERE = 64 * 1024;
 
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
@@ -259,6 +270,12 @@ export function Markdown(props: {
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  // A message of the conversation is drawn here as it comes in, so its row
+  // has its full height from its first frame: from the worker it would come
+  // in empty and grow a frame later, moving what is read twice, and a saved
+  // reply taking the place of the live one would leave the list short for
+  // that frame. Text being written, and very long text, go to the worker.
+  const here = conversation && !props.live && props.text.length <= DRAWN_HERE;
   const client = createMarkdownClient((update, live) => {
     if (disposed) return;
     (patch ??= createMarkdownDOM(host, {
@@ -304,7 +321,7 @@ export function Markdown(props: {
     }
     host.dataset.markdownReady = "true";
     host.dispatchEvent(new CustomEvent("markdown-ready", { bubbles: true }));
-  });
+  }, here);
   createEffect(() => {
     host.dataset.markdownReady = "false";
     client.update(props.text, !!props.live, !props.document);

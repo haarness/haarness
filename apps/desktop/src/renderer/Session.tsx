@@ -745,20 +745,26 @@ export function Session() {
     if (!follow() || scrollFrame || toggled) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
-      // User input can arrive after a stream delta scheduled this frame.
-      if (!follow() || !scrolling) return;
-      // A running step just opened holds the view until more is written.
-      if (quietUntil) {
-        if (
-          scrolling.scrollHeight <= quietUntil.height + 1 &&
-          Math.abs(scrolling.clientHeight - quietUntil.view) < 1
-        )
-          return;
-        quietUntil = undefined;
-      }
-      scrolling.scrollTop = scrolling.scrollHeight;
-      lastTop = scrolling.scrollTop;
+      keepLatest();
     });
+  }
+  /** Following, the view goes to the end now. Called where a change of size
+   * is first known, after layout and before the frame is painted, so no frame
+   * shows the list short of its end, or past it and pulled back. */
+  function keepLatest() {
+    // User input can arrive after a stream delta scheduled this frame.
+    if (!follow() || !scrolling || toggled) return;
+    // A running step just opened holds the view until more is written.
+    if (quietUntil) {
+      if (
+        scrolling.scrollHeight <= quietUntil.height + 1 &&
+        Math.abs(scrolling.clientHeight - quietUntil.view) < 1
+      )
+        return;
+      quietUntil = undefined;
+    }
+    scrolling.scrollTop = scrolling.scrollHeight;
+    lastTop = scrolling.scrollTop;
   }
   function onScroll() {
     trackOutline();
@@ -785,7 +791,7 @@ export function Session() {
   onMount(() => {
     // Markdown, images, virtual rows and panel resizing can change height
     // without a new token. Only follow these reflows while following output.
-    const resize = new ResizeObserver(followLatest);
+    const resize = new ResizeObserver(keepLatest);
     const observe = () => {
       resize.disconnect();
       resize.observe(scrolling);
@@ -1246,6 +1252,7 @@ export function Session() {
             item.id),
     ),
   );
+  let listSize = 0;
   const virtual = createVirtualizer({
     get count() {
       return rows().length;
@@ -1254,12 +1261,27 @@ export function Session() {
     estimateSize: () => 130,
     overscan: 8,
     getItemKey: (index) => rows()[index]?.id ?? index,
+    // A row measured anew (its Markdown drawn, an image in) changes the
+    // list's height inside the virtualizer's own observer, after the
+    // transcript's has run for this frame: following keeps the end there.
+    onChange: (instance) => {
+      const size = instance.getTotalSize();
+      if (size === listSize) return;
+      listSize = size;
+      keepLatest();
+    },
   });
   // A row wholly above the view that grows keeps what is read in place, also
   // while scrolling up (measure-row.ts). The view moves down before the list's
   // height has grown, which near its end would cut the move short, so the
-  // list is made that tall first.
+  // list is made that tall first. Following, the end is kept instead, in the
+  // same callback (onChange above): a move from here would start from where
+  // the view was before the end was last kept, and take it back up. A running
+  // step just opened holds the view, and the end is not kept meanwhile, so a
+  // row above still keeps its place then; one that grows ends the hold, and
+  // the end is kept again in the same callback.
   virtual.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    if (follow() && !toggled && !quietUntil) return false;
     if (!keepsRowsAbove(item, instance)) return false;
     const body = instance.scrollElement?.querySelector<HTMLElement>(":scope > .transcript-body");
     if (body && delta > 0) body.style.height = `${instance.getTotalSize() + delta}px`;
