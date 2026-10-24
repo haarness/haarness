@@ -3395,13 +3395,29 @@ fn fold(path: &Path) -> String {
 
 /// Whether `folder` ignores letter case: another letter case of a name in
 /// it leads to that entry. Each folder is asked, so a case-sensitive disk
-/// mounted inside one that is not counts as what it is. When it cannot
-/// tell (no name with a letter), it says no, and a patch takes names
-/// exactly as written, as it always did.
+/// mounted inside one that is not counts as what it is; a folder with no
+/// name to try asks the folder holding it, on the same disk. When it cannot
+/// tell, it says no, and a patch takes names exactly as written, as it
+/// always did.
 fn folds_case(folder: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return false;
-    };
+    let mut folder = folder.to_path_buf();
+    loop {
+        if let Some(folds) = names_fold_case(&folder) {
+            return folds;
+        }
+        let Some(parent) = folder.parent().map(Path::to_path_buf) else {
+            return false;
+        };
+        if !same_disk(&folder, &parent) {
+            return false;
+        }
+        folder = parent;
+    }
+}
+
+/// What the first name with a letter in `folder` says, if it has one.
+fn names_fold_case(folder: &Path) -> Option<bool> {
+    let entries = std::fs::read_dir(folder).ok()?;
     for entry in entries.flatten().take(64) {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -3422,11 +3438,28 @@ fn folds_case(folder: &Path) -> bool {
         }
         let (named, other) = (folder.join(name), folder.join(swapped));
         #[cfg(unix)]
-        return same_link(&named, &other);
+        return Some(same_link(&named, &other));
         #[cfg(not(unix))]
-        return same_file(&named, &other);
+        return Some(same_file(&named, &other));
     }
-    false
+    None
+}
+
+/// Whether two folders are on one disk (a mount point is not on its
+/// parent's).
+fn same_disk(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        matches!(
+            (std::fs::metadata(left), std::fs::metadata(right)),
+            (Ok(left), Ok(right)) if left.dev() == right.dev()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        left.components().next() == right.components().next()
+    }
 }
 
 /// The one write a patch operation makes.
@@ -6529,14 +6562,22 @@ export default workflow({
         // On a disk that ignores letter case, a file the patch adds is found
         // by another case, as it was when each operation wrote at once.
         if workspace.join("README.MD").exists() {
+            // In an empty folder too, which asks the folder holding it.
+            std::fs::create_dir(workspace.join("empty")).unwrap();
             run(concat!(
                 "*** Begin Patch\n*** Add File: Foo.txt\n+one\n",
                 "*** Update File: foo.txt\n@@\n-one\n+two\n",
-                "*** Add File: Gone.txt\n+x\n*** Delete File: gone.txt\n*** End Patch\n"
+                "*** Add File: Gone.txt\n+x\n*** Delete File: gone.txt\n",
+                "*** Add File: empty/Bar.txt\n+one\n",
+                "*** Update File: empty/bar.txt\n@@\n-one\n+two\n*** End Patch\n"
             ))
             .await
             .unwrap();
-            assert_eq!(names(), ["Foo.txt", "readme.md"]);
+            assert_eq!(names(), ["Foo.txt", "empty", "readme.md"]);
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("empty/Bar.txt")).unwrap(),
+                "two\n"
+            );
             assert_eq!(
                 std::fs::read_to_string(workspace.join("Foo.txt")).unwrap(),
                 "two\n"
@@ -6553,7 +6594,11 @@ export default workflow({
         let folder = std::env::temp_dir().join(format!("haarness-fold-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("Probe.txt"), "").unwrap();
-        assert_eq!(folds_case(&folder), folder.join("PROBE.TXT").exists());
+        std::fs::create_dir(folder.join("1")).unwrap();
+        let folds = folder.join("PROBE.TXT").exists();
+        assert_eq!(folds_case(&folder), folds);
+        // An empty folder answers through the folder holding it.
+        assert_eq!(folds_case(&folder.join("1")), folds);
         std::fs::remove_dir_all(folder).unwrap();
         let Some(sensitive) = std::env::var_os("HAARNESS_TEST_CASE_SENSITIVE_DIR") else {
             return;
@@ -6562,6 +6607,7 @@ export default workflow({
         let sensitive = PathBuf::from(sensitive).canonicalize().unwrap();
         let digits = sensitive.join(std::process::id().to_string());
         std::fs::create_dir(&digits).unwrap();
+        assert!(!folds_case(&digits));
         std::fs::write(digits.join("Probe.txt"), "").unwrap();
         assert!(!folds_case(&sensitive));
         assert!(!folds_case(&digits));
