@@ -6451,6 +6451,95 @@ async fn task_updates_feed_live_child_rows() {
     );
 }
 
+/// One call is "1 tool" (the sidebar and the row under the delegation) and
+/// "1 tool call" (/tasks), in every language; a child that ended without
+/// calls says how it ended, never "no tools yet".
+#[tokio::test]
+async fn child_rows_count_one_call_and_end_without_calls() {
+    let thread = fixture_thread();
+    let child_thread = ThreadId::new();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "call-1".into(),
+            name: "task".into(),
+            arguments: serde_json::json!({"prompt": "audit the API", "agent": "general"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let client = offline_client();
+    let update = |state: &str, calls: u64| {
+        fixture_event(
+            "task.updated",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "callId": "call-1",
+                "childThreadId": child_thread,
+                "childTurnId": haarness_protocol::TurnId::new(),
+                "state": state,
+                "toolCalls": calls,
+                "lastTool": "grep",
+                "startedAt": Utc::now(),
+            }),
+        )
+    };
+    app.reduce(update("running", 1), &client).await.unwrap();
+    let sidebar = |app: &App| -> String {
+        crate::view::sidebar::sidebar_lines(app, 38, 40)
+            .lines
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect()
+    };
+    let tasks = |app: &mut App| {
+        app.open_tasks_overlay();
+        let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+            panic!("child picker did not open");
+        };
+        let description = entries[0].description.clone();
+        app.close_overlay();
+        description
+    };
+    assert!(
+        sidebar(&app).contains("general · grep · 1 tool ·"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(frame_text(&app, (100, 30)).contains("↳ grep · 1 tool"));
+    assert!(tasks(&mut app).contains("· 1 tool call ·"));
+
+    app.language = crate::locale::Language::German;
+    assert!(
+        sidebar(&app).contains("general · grep · 1 Tool ·"),
+        "{}",
+        sidebar(&app)
+    );
+    assert!(tasks(&mut app).contains("· 1 Tool-Aufruf ·"));
+    app.reduce(update("running", 3), &client).await.unwrap();
+    assert!(tasks(&mut app).contains("· 3 Tool-Aufrufe ·"));
+    app.language = crate::locale::Language::English;
+
+    for (state, row) in [
+        ("done", "└ completed"),
+        ("failed", "└ failed"),
+        ("cancelled", "└ cancelled"),
+    ] {
+        app.reduce(update(state, 0), &client).await.unwrap();
+        let text = frame_text(&app, (100, 30));
+        assert!(text.contains(row), "{state}: {text}");
+        assert!(
+            !text.contains("no tools yet") && !text.contains("tools ·"),
+            "{state}: {text}"
+        );
+    }
+    app.reduce(update("failed", 1), &client).await.unwrap();
+    assert!(frame_text(&app, (100, 30)).contains("└ failed · 1 tool"));
+}
+
 #[tokio::test]
 async fn task_updates_cannot_create_phantom_agent_rows() {
     let thread = fixture_thread();
@@ -19729,7 +19818,8 @@ async fn batch_children_are_live_rows_under_the_batch_call() {
         "rows do not repeat the status-line hint: {text}"
     );
     assert!(text.contains("task Audit server attack surface"), "{text}");
-    assert!(text.contains("└ no tools yet"), "{text}");
+    assert!(text.contains("└ completed"), "{text}");
+    assert!(!text.contains("no tools yet"), "a finished child: {text}");
     assert!(text.contains("task Audit execution and files"), "{text}");
     assert!(text.contains("↳ grep · 7 tools"), "{text}");
     let targets: Vec<String> = app

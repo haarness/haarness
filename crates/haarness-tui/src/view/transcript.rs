@@ -336,37 +336,58 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
 /// The line under a delegation row: `↳` what the child is doing while it
 /// runs, `└` what it did once it stopped. The status line already says how
 /// to open child views, so the row does not repeat it.
-fn delegation_detail_line(task: &ChildTask, theme: &Theme) -> Line {
-    let tools = match task.tool_calls {
-        0 => "no tools yet".to_owned(),
-        1 => "1 tool".to_owned(),
-        count => format!("{count} tools"),
-    };
+fn delegation_detail_line(
+    task: &ChildTask,
+    theme: &Theme,
+    language: crate::locale::Language,
+) -> Line {
+    let tools =
+        (task.tool_calls > 0).then(|| language.count(task.tool_calls, "1 tool", "{count} tools"));
     let (text, tone) = if task.is_active() {
+        let tools = tools.unwrap_or_else(|| language.text("no tools yet").to_owned());
         let doing = task
             .last_tool
-            .as_deref()
-            .map_or_else(|| "starting".to_owned(), str::to_owned);
+            .clone()
+            .unwrap_or_else(|| language.text("starting").to_owned());
         let elapsed = task
             .elapsed_seconds()
             .map_or_else(String::new, |seconds| format!(" · {seconds}s"));
         match task.state.as_str() {
             "waiting_permission" => (
-                format!("↳ waiting for approval · {tools}{elapsed}"),
+                format!(
+                    "↳ {} · {tools}{elapsed}",
+                    language.text("waiting for approval")
+                ),
                 theme.accent,
             ),
             "background" => (
-                format!("↳ running in background · {doing} · {tools}{elapsed}"),
+                format!(
+                    "↳ {} · {doing} · {tools}{elapsed}",
+                    language.text("running in background")
+                ),
                 theme.muted,
             ),
             _ => (format!("↳ {doing} · {tools}{elapsed}"), theme.muted),
         }
     } else {
-        match task.state.as_str() {
-            "done" => (format!("└ {tools}"), theme.muted),
-            "failed" => (format!("└ failed · {tools}"), theme.danger),
-            _ => (format!("└ cancelled · {tools}"), theme.muted),
-        }
+        // How it ended, then what it did; a child that made no calls says
+        // only how it ended.
+        let (ended, tone) = match task.state.as_str() {
+            "done" => (None, theme.muted),
+            "failed" => (Some(language.text("failed")), theme.danger),
+            _ => (Some(language.text("cancelled")), theme.muted),
+        };
+        let parts = ended
+            .map(str::to_owned)
+            .into_iter()
+            .chain(tools)
+            .collect::<Vec<_>>();
+        let summary = if parts.is_empty() {
+            language.text("completed").to_owned()
+        } else {
+            parts.join(" · ")
+        };
+        (format!("└ {summary}"), tone)
     };
     Line::new(vec![Span::new("    ", tone), Span::new(text, tone)])
 }
@@ -2046,7 +2067,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 {
                     block.push_tagged(row, HitTarget::TaskOpen(call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme),
+                        delegation_detail_line(task, theme, app.language),
                         HitTarget::TaskOpen(call_id.clone()),
                     );
                 } else if name == "workflow"
@@ -2221,7 +2242,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ]);
                     block.push_tagged(child_row, HitTarget::TaskOpen(child_call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme),
+                        delegation_detail_line(task, theme, app.language),
                         HitTarget::TaskOpen(child_call_id.clone()),
                     );
                 }

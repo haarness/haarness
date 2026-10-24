@@ -2861,5 +2861,13 @@
   "Choose a folder": "选择文件夹",
   "Search folders": "搜索文件夹",
   "Opening This computer…": "正在打开这台电脑…",
-  "Couldn’t open This computer": "无法打开这台电脑"
+  "Couldn’t open This computer": "无法打开这台电脑",
+  "no tools yet": "尚未调用工具",
+  "starting": "正在启动",
+  "running in background": "在后台运行",
+  "1 tool call": "1 次工具调用",
+  "{count} tool calls": "{count} 次工具调用",
+  "less than a day left at this pace": "按此速度剩余不到一天",
+  "about 1 day left at this pace": "按此速度约剩 1 天",
+  "about {count} days left at this pace": "按此速度约剩 {count} 天"
 }

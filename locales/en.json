@@ -2861,5 +2861,13 @@
   "Choose a folder": "Choose a folder",
   "Search folders": "Search folders",
   "Opening This computer…": "Opening This computer…",
-  "Couldn’t open This computer": "Couldn’t open This computer"
+  "Couldn’t open This computer": "Couldn’t open This computer",
+  "no tools yet": "no tools yet",
+  "starting": "starting",
+  "running in background": "running in background",
+  "1 tool call": "1 tool call",
+  "{count} tool calls": "{count} tool calls",
+  "less than a day left at this pace": "less than a day left at this pace",
+  "about 1 day left at this pace": "about 1 day left at this pace",
+  "about {count} days left at this pace": "about {count} days left at this pace"
 }

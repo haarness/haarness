@@ -138,13 +138,18 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
                         format!("last {tool}")
                     });
                 }
-                activity.push(format!("{} tools", task.tool_calls));
+                activity.push(
+                    app.language
+                        .count(task.tool_calls, "1 tool", "{count} tools"),
+                );
                 match task.state.as_str() {
                     "waiting_permission" => {
                         activity.push(app.language.text("approval needed").into())
                     }
                     "running" => activity.push(app.language.text("running").into()),
-                    "background" => activity.push("running in background".into()),
+                    "background" => {
+                        activity.push(app.language.text("running in background").into())
+                    }
                     "done" => activity.push(app.language.text("completed").into()),
                     "failed" => activity.push(app.language.text("failed").into()),
                     "cancelled" | "interrupted" => {

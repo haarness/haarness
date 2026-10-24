@@ -138,6 +138,16 @@ impl Language {
         filled
     }
 
+    /// A count and its noun: `one` for exactly one, else `many` with
+    /// `{count}` filled in ("1 tool", "3 tools").
+    pub fn count(self, count: u64, one: &str, many: &str) -> String {
+        if count == 1 {
+            self.text(one).to_owned()
+        } else {
+            self.format(many, &[("count", &count.to_string())])
+        }
+    }
+
     /// Languages written right to left. The terminal grid itself stays left
     /// to right; a bidi-aware terminal reorders the text inside each row.
     ///

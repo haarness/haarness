@@ -2861,5 +2861,13 @@
   "Choose a folder": "選擇資料夾",
   "Search folders": "搜尋資料夾",
   "Opening This computer…": "正在開啟這台電腦…",
-  "Couldn’t open This computer": "無法開啟這台電腦"
+  "Couldn’t open This computer": "無法開啟這台電腦",
+  "no tools yet": "尚未呼叫工具",
+  "starting": "正在啟動",
+  "running in background": "在背景執行",
+  "1 tool call": "1 次工具呼叫",
+  "{count} tool calls": "{count} 次工具呼叫",
+  "less than a day left at this pace": "依此速度剩不到一天",
+  "about 1 day left at this pace": "依此速度約剩 1 天",
+  "about {count} days left at this pace": "依此速度約剩 {count} 天"
 }

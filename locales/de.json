@@ -2861,5 +2861,13 @@
   "Choose a folder": "Ordner wählen",
   "Search folders": "Ordner suchen",
   "Opening This computer…": "Dieser Computer wird geöffnet…",
-  "Couldn’t open This computer": "Dieser Computer konnte nicht geöffnet werden"
+  "Couldn’t open This computer": "Dieser Computer konnte nicht geöffnet werden",
+  "no tools yet": "noch keine Tools",
+  "starting": "startet",
+  "running in background": "läuft im Hintergrund",
+  "1 tool call": "1 Tool-Aufruf",
+  "{count} tool calls": "{count} Tool-Aufrufe",
+  "less than a day left at this pace": "bei diesem Tempo weniger als ein Tag übrig",
+  "about 1 day left at this pace": "bei diesem Tempo noch etwa 1 Tag",
+  "about {count} days left at this pace": "bei diesem Tempo noch etwa {count} Tage"
 }
