@@ -560,6 +560,7 @@ impl WorkflowRuntimeAdapter {
                     provider: Some(provider.clone()),
                     model: Some(model.clone()),
                     ultracode: Some(ultracode),
+                    directory: None,
                 })
                 .await
                 .map_err(host_error)?
@@ -614,6 +615,16 @@ fn workflow_agent_tools(configured: Option<&HashMap<String, bool>>) -> HashMap<S
 
 #[async_trait]
 impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
+    async fn chat_folder(&self, thread: ThreadId) -> Option<std::path::PathBuf> {
+        // A folder a link stands in for gives the chat no workflows of its own.
+        self.runtime()
+            .ok()?
+            .chat_folder(thread)
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn create_run_thread(
         &self,
         parent: Option<ThreadId>,
@@ -634,6 +645,7 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
                 provider: inherited.as_ref().map(|thread| thread.provider.clone()),
                 model: inherited.as_ref().map(|thread| thread.model.clone()),
                 ultracode: inherited.as_ref().map(|thread| thread.ultracode),
+                directory: None,
             })
             .await
             .map(|thread| thread.id)
@@ -2485,6 +2497,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2636,6 +2649,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2749,6 +2763,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2762,6 +2777,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2837,6 +2853,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();

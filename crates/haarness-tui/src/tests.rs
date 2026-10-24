@@ -115,6 +115,7 @@ fn fixture_thread() -> Thread {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         revert: None,
+        directory: None,
     }
 }
 
@@ -140,6 +141,7 @@ fn fixture_workspace_catalog() -> haarness_protocol::WorkspaceListResponse {
         created_at: now,
         last_opened_at: now,
         exists: true,
+        chat_home: false,
     };
     let managed = haarness_protocol::WorkspaceInfo {
         id: "workspace-review".into(),
@@ -154,6 +156,7 @@ fn fixture_workspace_catalog() -> haarness_protocol::WorkspaceListResponse {
         created_at: now,
         last_opened_at: now,
         exists: true,
+        chat_home: false,
     };
     let missing = haarness_protocol::WorkspaceInfo {
         id: "workspace-missing".into(),
@@ -168,6 +171,7 @@ fn fixture_workspace_catalog() -> haarness_protocol::WorkspaceListResponse {
         created_at: now,
         last_opened_at: now,
         exists: false,
+        chat_home: false,
     };
     haarness_protocol::WorkspaceListResponse {
         projects: vec![project],
@@ -20406,6 +20410,7 @@ async fn ctrl_five_detaches_the_terminal_view() {
             cols: 80,
             rows: 24,
             created: false,
+            directory: None,
         },
     ]));
     crate::input::handle_key(
@@ -20432,6 +20437,7 @@ fn a_new_terminal_tab_can_take_focus() {
         cols: 20,
         rows: 4,
         created: false,
+        directory: None,
     };
     let (first, second, third) = (info("first"), info("second"), info("third"));
     let mut terminal =

@@ -805,6 +805,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             haarness_protocol::INPUT_QUEUE_CAPABILITY.into(),
             haarness_protocol::APPROVAL_MODE_CAPABILITY.into(),
             haarness_protocol::THREAD_CREATE_ID_CAPABILITY.into(),
+            haarness_protocol::THREAD_DIRECTORY_CAPABILITY.into(),
             haarness_protocol::RESOURCE_MENTIONS_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
@@ -1070,8 +1071,24 @@ async fn agents(State(state): State<ServerState>) -> Json<Vec<AgentProfile>> {
 }
 /// Authoritative, deduplicated slash-command registry. Resolution is
 /// case-insensitive: reserved built-ins, configured prompts, then workflows.
-async fn commands(State(state): State<ServerState>) -> Json<Vec<haarness_protocol::CommandInfo>> {
-    Json(crate::command::registry(&state))
+async fn commands(
+    State(state): State<ServerState>,
+    Query(query): Query<ChatListQuery>,
+) -> ApiResult<Json<Vec<haarness_protocol::CommandInfo>>> {
+    let folder = match query.thread_id {
+        Some(thread) => crate::command::chat_folder_of(&state, thread).await?,
+        None => None,
+    };
+    Ok(Json(crate::command::registry(&state, folder.as_deref())))
+}
+
+/// Lists that also show what one chat's own folder holds (its workflows).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatListQuery {
+    /// The chat the list is for: one with a folder of its own also gets that
+    /// folder's workflows.
+    thread_id: Option<ThreadId>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1110,7 +1127,19 @@ async fn update_lazy_tools(
 /// Discover workflow definitions without importing or executing their source.
 async fn workflows(
     State(state): State<ServerState>,
+    Query(query): Query<ChatListQuery>,
 ) -> ApiResult<Json<haarness_protocol::WorkflowListResponse>> {
+    if let Some(thread) = query.thread_id {
+        let folder = crate::command::chat_folder_of(&state, thread).await?;
+        if folder.is_some() {
+            let state = state.clone();
+            return tokio::task::spawn_blocking(move || {
+                Json(crate::command::workflow_list(&state, folder.as_deref()))
+            })
+            .await
+            .map_err(|error| CoreError::Storage(error.to_string()).into());
+        }
+    }
     if let Some(coordinator) = &state.workflows {
         return Ok(Json(coordinator.catalog().list()));
     }

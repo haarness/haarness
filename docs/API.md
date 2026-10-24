@@ -84,6 +84,8 @@ Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler
 
 Thread creation also accepts an optional client-chosen `id` (a UUID), so a create that is retried after a lost response cannot make a second chat. When a chat with that `id` already exists, `POST /v1/threads` returns it unchanged with the same `201` response, ignores the rest of the request, and publishes no second `thread.created`. Concurrent creates with one new `id` make one chat. Haarness Cloud uses this to deliver a session's first prompt into the chat it named in advance. Servers advertise it as `thread-create-id.v1` in `/v1/info.capabilities`; older servers ignore `id` and choose their own, so check the capability or compare the returned `id`.
 
+A chat can also be created with a folder of its own: `directory`, as `<date>/<name>` relative to the server's project folder (`YYYY-MM-DD`, then a name of at most 255 bytes with no `\`, `:`, control character or space at either end, not starting with `-` or `.`). The server makes it one part at a time, never through a link, and answers `400 invalid_request` with a plain message when the name has another shape, would lead out of the project folder, or a link stands in for a part. When another chat (archived ones too) already works in it, or a file or link has its name, the server takes `<name>-2`, `-3`, … instead; a folder that exists but no chat uses is taken as it is. Given instead as the absolute folder another chat reports, `directory` shares that folder as it is (a schedule's runs work in the chat it was made in this way). The chat's `Thread` then carries `directory`, the folder canonical and absolute, in every answer and event; chats without one leave it out. Its tools work there, with the folder as their project (see [Permissions and execution](PERMISSIONS-AND-EXECUTION.md#a-chats-own-folder)), so the paths of its tool calls, diffs and last-turn review are relative to it. Chats created under it (`parentId` without a `directory`: workflow chats and their agents, task subagents) and its forks carry the same folder. Session archives carry none: an imported chat works in the importing server's project folder, or in the chat home in a new folder of its own. On the chat home's server every chat has a folder: a create that names none and has no parent (from any client, a workflow started on its own, `haarness run`, ACP, the terminal UI) gets `<today>/chat-<last four characters of its id>`, and a chat stored without one gets one the first time it is used (a turn, a tool call, a review, a side question; its parent's folder when that has one), with `thread.updated`. `GET /v1/commands` and `GET /v1/workflows` take `?threadId=` to list what that chat can run too: a chat with a folder of its own also gets the workflows in its folder's `.haarness/workflows` (a `400` when a link stands in for that folder; a published chat may ask only for chats of its own tree). Servers advertise it as `thread-directory.v1`; older ones ignore `directory` and create an ordinary chat.
+
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
 - `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md))
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions
@@ -162,13 +164,24 @@ while the target workspace owns an active server lease, and never resets or
 removes an unmanaged/local checkout. Each workspace server exposes only that
 workspace's sessions because its SQLite database, discovery record, token, and
 lease are namespaced by durable workspace ID. `projects.v1` and `workspaces.v1`
-in `/v1/info.capabilities` advertise this contract.
+in `/v1/info.capabilities` advertise this contract. The chat home
+(`haarness --chat-home`, the folder of chats without a project) is no project:
+`GET /v1/projects`, `GET /v1/workspaces` and the host catalog leave it and its
+own project out (`currentWorkspaceId` still names it on its own server), and
+its `WorkspaceInfo`, where one is read, has `chatHome: true`; other workspaces
+leave the field out.
 
 Interactive PTYs are process-local resources owned by one workspace server.
 Create accepts optional `title`, `command`, `args`, and workspace-contained
 `cwd`, plus positive `cols` and `rows`; omitting the command starts the user's
-shell. With `ifNone: true` it starts one only when the project has no running
-terminal and otherwise answers with its oldest running one (still `201`), so
+shell. Instead of `cwd` (never with it) it accepts a chat's folder as
+`directory`, `<date>/<name>` relative to the project folder or the absolute
+folder its thread reports; it must be that chat folder, existing and no link, the shell starts there, and
+the terminal says so in `directory` (canonical and absolute) in every answer
+and event, so a client can show each chat its own terminals. With `ifNone: true` it starts one only when the project has no running
+terminal (with `directory`: that folder has none; without it, terminals
+opened for a chat's folder do not count) and otherwise answers with its oldest
+running one (still `201`), so
 several windows that each open a first terminal at once, as after the server
 was replaced, share one shell: Desktop's terminal panel asks this way when it
 finds none, and so does the terminal UI's first `/terminal`. Every terminal

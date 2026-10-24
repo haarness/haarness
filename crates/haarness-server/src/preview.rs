@@ -182,20 +182,29 @@ impl Tool for PreviewTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _: ToolContext,
+        context: ToolContext,
     ) -> CoreResult<ToolOutput> {
         self.validate_arguments(&arguments)?;
+        // The file API and the saved versions are the project folder's; a
+        // chat with a folder of its own previews files in that folder, named
+        // from the project folder as the file panel opens them.
         let root = self
             .0
             .canonicalize()
             .map_err(|e| CoreError::Tool(e.to_string()))?;
+        let folder = context
+            .workspace
+            .canonicalize()
+            .map_err(|e| CoreError::Tool(e.to_string()))?;
         tokio::task::spawn_blocking(move || {
             let requested = Path::new(arguments["filePath"].as_str().unwrap());
-            let relative = if requested.is_absolute() { requested.strip_prefix(&root).map_err(|_| bad("Preview must be inside the workspace"))? } else { requested };
-            let path = relative.to_string_lossy().replace('\\', "/");
+            let relative = if requested.is_absolute() { requested.strip_prefix(&folder).map_err(|_| bad("Preview must be inside the workspace"))? } else { requested };
+            let within = folder.strip_prefix(&root).map_err(|_| bad("Preview must be inside the workspace"))?;
+            let path = within.join(relative).to_string_lossy().replace('\\', "/");
             // The model may have named a file that never existed.
             let missing = |error: Failure| if error.0 == StatusCode::NOT_FOUND { bad(format!("File not found: {path}")) } else { error };
             let target = files::resolve_for_read(&root, &path).map_err(missing)?;
+            if !target.starts_with(&folder) { return Err(bad("Preview must be inside the workspace")); }
             let kind = kind(&path).ok_or_else(|| bad("Preview supports HTML, Markdown, SVG and images"))?;
             let data = files::bytes(&target).map_err(missing)?;
             if kind != "image" && !std::str::from_utf8(&data).is_ok_and(|text| !text.contains('\0')) { return Err(bad("Preview requires UTF-8 text")); }

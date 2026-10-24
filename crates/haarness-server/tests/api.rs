@@ -12790,6 +12790,9 @@ mod auto_review;
 #[path = "cases/permission_script.rs"]
 mod permission_script;
 
+#[path = "cases/chat_folders.rs"]
+mod chat_folders;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =

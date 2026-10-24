@@ -5,6 +5,7 @@ mod approval_mode;
 pub mod attachments;
 pub mod auto_review;
 mod background;
+pub mod chat_folders;
 mod config;
 pub mod definitions;
 mod events;

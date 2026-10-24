@@ -89,6 +89,21 @@ impl PtyManager {
     }
 
     pub fn create(&self, request: PtyCreateRequest) -> CoreResult<PtyInfo> {
+        if request.cwd.is_some() && request.directory.is_some() {
+            return Err(CoreError::Invalid(
+                "Give a terminal a cwd or a chat folder (directory), not both.".into(),
+            ));
+        }
+        // A chat's folder: the shell starts there, and it is that chat's
+        // terminal for `ifNone`.
+        let directory = request
+            .directory
+            .as_deref()
+            .map(|directory| {
+                haarness_core::chat_folders::existing_inside(&self.inner.workspace, directory)
+            })
+            .transpose()?;
+        let folder = directory.as_ref().map(|path| path.display().to_string());
         let mut sessions = self.inner.sessions.lock();
         // Checked under the same lock a create holds, so concurrent requests
         // for "a terminal" start one.
@@ -96,7 +111,7 @@ impl PtyManager {
             && let Some(oldest) = sessions
                 .values()
                 .map(|session| session.info.lock().clone())
-                .filter(|info| info.status == PtyStatus::Running)
+                .filter(|info| info.status == PtyStatus::Running && info.directory == folder)
                 .min_by_key(|info| info.id.0)
         {
             return Ok(oldest);
@@ -106,7 +121,10 @@ impl PtyManager {
         }
         let cols = request.cols;
         let rows = request.rows;
-        let cwd = self.resolve_cwd(request.cwd.as_deref())?;
+        let cwd = match directory {
+            Some(directory) => directory,
+            None => self.resolve_cwd(request.cwd.as_deref())?,
+        };
         let requested_title = request.title.map(|title| title.trim().to_owned());
         if requested_title
             .as_ref()
@@ -179,6 +197,7 @@ impl PtyManager {
             cols,
             rows,
             created: false,
+            directory: folder,
         };
         let (output, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
         let session = Arc::new(Session {
@@ -781,6 +800,64 @@ mod tests {
         for info in manager.list() {
             manager.delete(info.id).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_folder_s_terminal_starts_there_and_is_that_chat_s_alone() {
+        let root = std::env::temp_dir().join(format!("haarness-pty-folder-{}", PtyId::new()));
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("2026-10-24/first")).unwrap();
+        std::fs::create_dir_all(project.join("2026-10-24/second")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), project.join("out")).unwrap();
+        let manager = PtyManager::new(project.clone(), EventBus::new(64));
+        let shell = |directory: Option<String>| PtyCreateRequest {
+            command: Some("/bin/sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            if_none: true,
+            directory,
+            ..PtyCreateRequest::default()
+        };
+        let first = project.canonicalize().unwrap().join("2026-10-24/first");
+        let opened = manager
+            .create(shell(Some("2026-10-24/first".into())))
+            .unwrap();
+        assert_eq!(opened.cwd, first.display().to_string());
+        assert_eq!(opened.directory.as_deref(), Some(first.to_str().unwrap()));
+        // The absolute folder a thread reports names the same terminal.
+        let again = manager
+            .create(shell(Some(first.display().to_string())))
+            .unwrap();
+        assert_eq!((again.id, again.created), (opened.id, false));
+        // Another chat, and the project itself, each get their own.
+        let second = manager
+            .create(shell(Some("2026-10-24/second".into())))
+            .unwrap();
+        assert!(second.created);
+        let project_terminal = manager.create(shell(None)).unwrap();
+        assert!(project_terminal.created);
+        assert_eq!(project_terminal.directory, None);
+        assert_eq!(manager.list().len(), 3);
+        // Folders outside the project, missing ones, and cwd beside directory are refused.
+        for refused in ["out", "../outside", "2026-10-24/missing", "/tmp"] {
+            assert!(
+                manager.create(shell(Some(refused.into()))).is_err(),
+                "{refused}"
+            );
+        }
+        assert!(
+            manager
+                .create(PtyCreateRequest {
+                    cwd: Some("day".into()),
+                    ..shell(Some("2026-10-24/first".into()))
+                })
+                .is_err()
+        );
+        for info in manager.list() {
+            manager.delete(info.id).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

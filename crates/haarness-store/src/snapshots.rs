@@ -180,39 +180,19 @@ pub struct SqliteSnapshotStore {
 
 impl SqliteSnapshotStore {
     pub fn open(database: impl AsRef<Path>, workspace: PathBuf) -> CoreResult<Self> {
-        let workspace = workspace.canonicalize().map_err(|error| {
-            CoreError::Storage(format!(
-                "cannot canonicalize snapshot workspace {}: {error}",
-                workspace.display()
-            ))
-        })?;
-        if !workspace.is_dir() {
-            return Err(CoreError::Invalid(format!(
-                "snapshot workspace is not a directory: {}",
-                workspace.display()
-            )));
-        }
-        let configured_homes = [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
-            .into_iter()
-            .flatten();
-        if matches_configured_home(&workspace, configured_homes) {
-            return Err(CoreError::Invalid(format!(
-                "refusing to snapshot the operating-system home directory: {}",
-                workspace.display()
-            )));
-        }
-        let connection = Connection::open(database).map_err(storage)?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(storage)?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(storage)?;
+        let workspace = snapshot_root(workspace)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(Mutex::new(open_connection(database)?)),
             workspace,
             warned: Arc::default(),
         })
+    }
+
+    /// The stores of chats' own folders, on this store's connection.
+    #[must_use]
+    pub fn folders(&self) -> SqliteSnapshotFolders {
+        // Already open, so no database path is needed to open it.
+        SqliteSnapshotFolders::with_connection(PathBuf::new(), Some(Arc::clone(&self.connection)))
     }
 
     /// Walk the complete managed tree. `hidden(false)` means "do not filter
@@ -641,94 +621,219 @@ impl SqliteSnapshotStore {
         retention: chrono::Duration,
         keep_per_thread: usize,
     ) -> CoreResult<PruneReport> {
-        let cutoff = Utc::now() - retention;
-        let connection = self.connection.lock();
-        let mut protected: BTreeSet<String> = BTreeSet::new();
-        // A pending undo is live state, never garbage, whatever its age.
-        let mut pending = connection
-            .prepare(
-                "SELECT revert_snapshot, revert_base_snapshot FROM threads \
-                 WHERE revert_snapshot IS NOT NULL OR revert_base_snapshot IS NOT NULL",
-            )
-            .map_err(storage)?;
-        let rows = pending
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
-            .map_err(storage)?;
-        for row in rows {
-            let (backup, base) = row.map_err(storage)?;
-            protected.extend(backup);
-            protected.extend(base);
-        }
-        drop(pending);
+        prune(&self.connection, retention, keep_per_thread)
+    }
+}
 
-        let mut all = connection
-            .prepare(
-                "SELECT id, thread_id, created_at FROM snapshots ORDER BY created_at DESC, id DESC",
-            )
-            .map_err(storage)?;
-        let rows = all
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(storage)?;
-        let mut kept_per_thread: BTreeMap<String, usize> = BTreeMap::new();
-        let mut doomed: Vec<String> = Vec::new();
-        for row in rows {
-            let (id, thread, created_at) = row.map_err(storage)?;
-            if protected.contains(&id) {
-                continue;
-            }
-            let kept = kept_per_thread.entry(thread).or_default();
-            if *kept < keep_per_thread {
-                *kept += 1;
-                continue;
-            }
-            // An unparseable timestamp is treated as recent: refusing to
-            // delete is always the safer side of this decision.
-            let recent = chrono::DateTime::parse_from_rfc3339(&created_at)
-                .map(|created| created.with_timezone(&Utc) >= cutoff)
-                .unwrap_or(true);
-            if recent {
-                continue;
-            }
-            doomed.push(id);
-        }
-        drop(all);
-        if doomed.is_empty() {
-            return Ok(PruneReport::default());
-        }
-
-        let transaction = connection.unchecked_transaction().map_err(storage)?;
-        for id in &doomed {
-            transaction
-                .execute("DELETE FROM snapshot_files WHERE snapshot_id=?1", [id])
-                .map_err(storage)?;
-            transaction
-                .execute("DELETE FROM snapshots WHERE id=?1", [id])
-                .map_err(storage)?;
-        }
-        // Blobs are content-addressed and shared, so they only go once the
-        // last manifest that named them is gone.
-        let blobs = transaction
-            .execute(
-                "DELETE FROM snapshot_blobs WHERE hash NOT IN (SELECT hash FROM snapshot_files)",
-                [],
-            )
-            .map_err(storage)?;
-        transaction.commit().map_err(storage)?;
-        Ok(PruneReport {
-            snapshots: doomed.len(),
-            blobs,
+fn prune(
+    connection: &Mutex<Connection>,
+    retention: chrono::Duration,
+    keep_per_thread: usize,
+) -> CoreResult<PruneReport> {
+    let cutoff = Utc::now() - retention;
+    let connection = connection.lock();
+    let mut protected: BTreeSet<String> = BTreeSet::new();
+    // A pending undo is live state, never garbage, whatever its age.
+    let mut pending = connection
+        .prepare(
+            "SELECT revert_snapshot, revert_base_snapshot FROM threads \
+             WHERE revert_snapshot IS NOT NULL OR revert_base_snapshot IS NOT NULL",
+        )
+        .map_err(storage)?;
+    let rows = pending
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
         })
+        .map_err(storage)?;
+    for row in rows {
+        let (backup, base) = row.map_err(storage)?;
+        protected.extend(backup);
+        protected.extend(base);
+    }
+    drop(pending);
+
+    let mut all = connection
+        .prepare(
+            "SELECT id, thread_id, created_at FROM snapshots ORDER BY created_at DESC, id DESC",
+        )
+        .map_err(storage)?;
+    let rows = all
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(storage)?;
+    let mut kept_per_thread: BTreeMap<String, usize> = BTreeMap::new();
+    let mut doomed: Vec<String> = Vec::new();
+    for row in rows {
+        let (id, thread, created_at) = row.map_err(storage)?;
+        if protected.contains(&id) {
+            continue;
+        }
+        let kept = kept_per_thread.entry(thread).or_default();
+        if *kept < keep_per_thread {
+            *kept += 1;
+            continue;
+        }
+        // An unparseable timestamp is treated as recent: refusing to
+        // delete is always the safer side of this decision.
+        let recent = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .map(|created| created.with_timezone(&Utc) >= cutoff)
+            .unwrap_or(true);
+        if recent {
+            continue;
+        }
+        doomed.push(id);
+    }
+    drop(all);
+    if doomed.is_empty() {
+        return Ok(PruneReport::default());
+    }
+
+    let transaction = connection.unchecked_transaction().map_err(storage)?;
+    for id in &doomed {
+        transaction
+            .execute("DELETE FROM snapshot_files WHERE snapshot_id=?1", [id])
+            .map_err(storage)?;
+        transaction
+            .execute("DELETE FROM snapshots WHERE id=?1", [id])
+            .map_err(storage)?;
+    }
+    // Blobs are content-addressed and shared, so they only go once the
+    // last manifest that named them is gone.
+    let blobs = transaction
+        .execute(
+            "DELETE FROM snapshot_blobs WHERE hash NOT IN (SELECT hash FROM snapshot_files)",
+            [],
+        )
+        .map_err(storage)?;
+    transaction.commit().map_err(storage)?;
+    Ok(PruneReport {
+        snapshots: doomed.len(),
+        blobs,
+    })
+}
+
+fn open_connection(database: impl AsRef<Path>) -> CoreResult<Connection> {
+    let connection = Connection::open(database).map_err(storage)?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(storage)?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(storage)?;
+    Ok(connection)
+}
+
+/// The canonical folder a store manages: a folder, and never the
+/// operating-system home folder.
+fn snapshot_root(workspace: PathBuf) -> CoreResult<PathBuf> {
+    let workspace = workspace.canonicalize().map_err(|error| {
+        CoreError::Storage(format!(
+            "cannot canonicalize snapshot workspace {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    if !workspace.is_dir() {
+        return Err(CoreError::Invalid(format!(
+            "snapshot workspace is not a directory: {}",
+            workspace.display()
+        )));
+    }
+    let configured_homes = [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
+        .into_iter()
+        .flatten();
+    if matches_configured_home(&workspace, configured_homes) {
+        return Err(CoreError::Invalid(format!(
+            "refusing to snapshot the operating-system home directory: {}",
+            workspace.display()
+        )));
+    }
+    Ok(workspace)
+}
+
+/// The snapshot stores of chats that work in a folder of their own, all on
+/// one connection to the session database: each store captures and restores
+/// only inside its folder. A server none of whose chats has a folder never
+/// opens that connection: it is opened when the first folder is.
+#[derive(Clone)]
+pub struct SqliteSnapshotFolders {
+    inner: Arc<FolderStores>,
+}
+
+struct FolderStores {
+    database: PathBuf,
+    connection: Mutex<Option<Arc<Mutex<Connection>>>>,
+    /// One store per folder, so a folder's unreadable paths are warned
+    /// about once and it is looked up once.
+    stores: Mutex<BTreeMap<PathBuf, Arc<SqliteSnapshotStore>>>,
+}
+
+impl SqliteSnapshotFolders {
+    /// For a server whose project folder itself is not checkpointed: the
+    /// database is opened when a chat's folder first is.
+    #[must_use]
+    pub fn open(database: impl AsRef<Path>) -> Self {
+        Self::with_connection(database.as_ref().to_path_buf(), None)
+    }
+
+    fn with_connection(database: PathBuf, connection: Option<Arc<Mutex<Connection>>>) -> Self {
+        Self {
+            inner: Arc::new(FolderStores {
+                database,
+                connection: Mutex::new(connection),
+                stores: Mutex::default(),
+            }),
+        }
+    }
+
+    fn connection(&self) -> CoreResult<Arc<Mutex<Connection>>> {
+        let mut connection = self.inner.connection.lock();
+        if let Some(open) = connection.as_ref() {
+            return Ok(Arc::clone(open));
+        }
+        let opened = Arc::new(Mutex::new(open_connection(&self.inner.database)?));
+        *connection = Some(Arc::clone(&opened));
+        Ok(opened)
+    }
+
+    /// The database's retention pass (see [`SqliteSnapshotStore::prune`]):
+    /// every checkpoint of the database, whichever folder it holds. Nothing
+    /// to do while no folder has been opened.
+    pub fn prune(
+        &self,
+        retention: chrono::Duration,
+        keep_per_thread: usize,
+    ) -> CoreResult<PruneReport> {
+        let connection = self.inner.connection.lock().clone();
+        match connection {
+            Some(connection) => prune(&connection, retention, keep_per_thread),
+            None => Ok(PruneReport::default()),
+        }
+    }
+}
+
+impl haarness_core::SnapshotFolders for SqliteSnapshotFolders {
+    fn open(&self, folder: &Path) -> CoreResult<Arc<dyn SnapshotStore>> {
+        if let Some(store) = self.inner.stores.lock().get(folder) {
+            return Ok(Arc::clone(store) as Arc<dyn SnapshotStore>);
+        }
+        let store = Arc::new(SqliteSnapshotStore {
+            connection: self.connection()?,
+            workspace: snapshot_root(folder.to_path_buf())?,
+            warned: Arc::default(),
+        });
+        self.inner
+            .stores
+            .lock()
+            .insert(folder.to_path_buf(), Arc::clone(&store));
+        Ok(store)
     }
 }
 
