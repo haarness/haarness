@@ -1997,10 +1997,28 @@ async fn vcs_diff(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FileSearchQuery {
     q: String,
     limit: Option<usize>,
+    /// Search a chat's own folder: results are relative to it.
+    thread_id: Option<ThreadId>,
 }
+/// Dependency and build folders file search leaves out of a folder outside
+/// Git unless the query names them (`node_modules/react`); a listing still
+/// shows them. In a Git work tree, `.gitignore` says what to leave out, as
+/// files committed under such names (`cmd/dist/main.go`) are a project's.
+const SEARCH_SKIPS: [&str; 8] = [
+    "node_modules",
+    ".venv",
+    "venv",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    ".next",
+];
+
 /// Fuzzy workspace file search for @-mention completion: ignore-aware walk,
 /// subsequence scoring, best matches first.
 async fn search_files(
@@ -2009,16 +2027,49 @@ async fn search_files(
 ) -> ApiResult<Json<Vec<String>>> {
     let limit = query.limit.unwrap_or(8).min(50);
     let raw_query = query.q;
-    let workspace = state.workspace.clone();
+    // A chat with a folder of its own searches that folder alone.
+    let workspace = match query.thread_id {
+        Some(thread) => state
+            .runtime
+            .chat_folder(thread)
+            .await?
+            .unwrap_or_else(|| state.workspace.clone()),
+        None => state.workspace.clone(),
+    };
     let results = tokio::task::spawn_blocking(move || {
         if let Some(results) = explicit_path_suggestions(&workspace, &raw_query, limit) {
             return results;
         }
         let needle = raw_query.to_ascii_lowercase();
         let mut scored: Vec<(i64, String)> = Vec::new();
+        // `.gitignore` and `.ignore` apply in a folder outside Git too, and
+        // there a dependency or build folder is not searched unless the
+        // query names it, so a big one cannot use up the walk before the
+        // files a person means.
+        let named = needle.clone();
+        let top = workspace.clone();
+        let in_git = workspace
+            .ancestors()
+            .any(|folder| folder.join(".git").exists());
         let walker = ignore::WalkBuilder::new(&workspace)
             .hidden(true)
+            .require_git(false)
             .max_depth(Some(12))
+            .filter_entry(move |entry| {
+                !(!in_git
+                    && entry.depth() > 0
+                    && entry.file_type().is_some_and(|kind| kind.is_dir())
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        SEARCH_SKIPS.contains(&name) && !named.contains(&name.to_ascii_lowercase())
+                    })
+                    // Nor in a repository inside the searched folder.
+                    && !entry
+                        .path()
+                        .ancestors()
+                        .skip(1)
+                        .take_while(|folder| *folder != top)
+                        .any(|folder| folder.join(".git").exists()))
+            })
             .build();
         for entry in walker.flatten().take(50_000) {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {

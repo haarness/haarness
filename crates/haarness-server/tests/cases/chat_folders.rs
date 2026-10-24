@@ -1051,3 +1051,547 @@ async fn a_shared_folder_someone_deleted_is_made_again() {
         assert!(!refused.exists());
     }
 }
+
+/// A server over the fixture's project folder, and its address.
+async fn served(
+    fixture: &Fixture,
+    runtime: AgentRuntime,
+) -> (String, haarness_server::ServerHandle) {
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "fixture-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: Arc::new(runtime),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: fixture.workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    (format!("http://{}", handle.address), handle)
+}
+
+#[tokio::test]
+async fn the_file_apis_work_in_a_chat_s_own_folder_when_asked_for_that_chat() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.chat_home();
+    let a = chat(&runtime, Some("2026-10-24/a")).await.unwrap();
+    let b = chat(&runtime, Some("2026-10-24/b")).await.unwrap();
+    let plain = runtime
+        .create_thread(CreateThreadRequest {
+            parent_id: Some(a.id),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    std::fs::create_dir_all(folder(&a).join("docs")).unwrap();
+    std::fs::write(folder(&a).join("docs/target-notes.md"), "mine").unwrap();
+    for index in 0..60 {
+        std::fs::write(folder(&b).join(format!("target-{index}.md")), "theirs").unwrap();
+    }
+    std::fs::write(folder(&b).join("secret.txt"), "B").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(folder(&b).join("secret.txt"), folder(&a).join("peek.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(folder(&b), folder(&a).join("sibling")).unwrap();
+    }
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let get = |path: String| {
+        client
+            .get(format!("{base}/v1{path}"))
+            .bearer_auth("fixture-token")
+            .send()
+    };
+
+    // Search: the chat's own file, relative to its folder, whatever its
+    // siblings hold.
+    let found: Vec<String> = get(format!("/files/search?q=target&limit=50&threadId={}", a.id))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found, ["docs/target-notes.md"]);
+    // `./` completion starts at the chat's folder too.
+    let completed: Vec<String> = get(format!("/files/search?q=./do&threadId={}", a.id))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(completed, ["./docs/"]);
+    // Without it, as before: the whole chat home, named from it.
+    let everywhere: Vec<String> = get("/files/search?q=target&limit=50".into())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        everywhere
+            .iter()
+            .all(|path| path.starts_with("2026-10-24/")),
+        "{everywhere:?}"
+    );
+
+    // Listing and reading: relative paths, and the folder they are relative to.
+    let listed: Value = get(format!("/files/list?path=docs&threadId={}", a.id))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["entries"][0]["path"], "docs/target-notes.md");
+    assert_eq!(listed["directory"], json!(a.directory));
+    let read: Value = get(format!(
+        "/files/content?path=docs/target-notes.md&threadId={}",
+        a.id
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        (read["content"].as_str(), read["path"].as_str()),
+        (Some("mine"), Some("docs/target-notes.md"))
+    );
+    assert_eq!(read["directory"], json!(a.directory));
+    let unscoped: Value = get("/files/list?path=2026-10-24/a/docs".into())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        unscoped["entries"][0]["path"],
+        "2026-10-24/a/docs/target-notes.md"
+    );
+    assert!(unscoped.get("directory").is_none());
+
+    // A link inside the chat's folder to another chat's is refused like an
+    // outside path, and is no folder to open.
+    #[cfg(unix)]
+    {
+        for path in ["peek.txt", "sibling/secret.txt"] {
+            let refused = get(format!("/files/content?path={path}&threadId={}", a.id))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST, "{path}");
+        }
+        let refused = get(format!("/files/list?path=sibling&threadId={}", a.id))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+        let top: Value = get(format!("/files/list?threadId={}", a.id))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let sibling = top["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "sibling")
+            .unwrap();
+        assert_eq!(sibling["directory"], false);
+        let write = client
+            .put(format!("{base}/v1/files/content?threadId={}", a.id))
+            .bearer_auth("fixture-token")
+            .json(&json!({"path": "sibling/planted.txt", "content": "x", "revision": hash("")}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(write.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(!folder(&b).join("planted.txt").exists());
+    }
+
+    // Writing, making, renaming and deleting happen in the chat's folder.
+    let written = client
+        .put(format!("{base}/v1/files/content?threadId={}", a.id))
+        .bearer_auth("fixture-token")
+        .json(&json!({"path": "new.txt", "content": "hello", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert!(written.status().is_success());
+    assert_eq!(
+        std::fs::read_to_string(folder(&a).join("new.txt")).unwrap(),
+        "hello"
+    );
+    let action = |body: Value| {
+        client
+            .post(format!("{base}/v1/files/action?threadId={}", a.id))
+            .bearer_auth("fixture-token")
+            .json(&body)
+            .send()
+    };
+    assert!(
+        action(json!({"action": "mkdir", "path": "made"}))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert!(folder(&a).join("made").is_dir());
+    assert!(
+        action(json!({"action": "rename", "path": "new.txt", "target": "made/renamed.txt"}))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert!(folder(&a).join("made/renamed.txt").is_file());
+    assert!(
+        action(json!({"action": "delete", "path": "made/renamed.txt", "confirm": true}))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert!(!folder(&a).join("made/renamed.txt").exists());
+    assert_eq!(
+        action(json!({"action": "rename", "path": "made", "target": "../b/made"}))
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // A chat made under another lists its parent's folder.
+    let child_listed: Value = get(format!("/files/list?threadId={}", plain.id))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        child_listed["directory"],
+        json!(a.directory),
+        "a child shares its parent's folder"
+    );
+
+    // An unknown chat is 404, a malformed id 400.
+    assert_eq!(
+        get(format!("/files/list?threadId={}", ThreadId::new()))
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get("/files/search?q=x&threadId=not-an-id".into())
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    // A published chat may ask only for chats of its own tree.
+    let scoped = |path: String| {
+        client
+            .get(format!("{base}/v1{path}"))
+            .bearer_auth("fixture-token")
+            .header("x-haarness-remote-thread", a.id.to_string())
+            .send()
+    };
+    assert!(
+        scoped(format!("/files/list?threadId={}", a.id))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    for path in [
+        format!("/files/list?threadId={}", b.id),
+        format!("/files/content?path=secret.txt&threadId={}", b.id),
+        format!("/files/search?q=target&threadId={}", b.id),
+    ] {
+        assert_eq!(
+            scoped(path.clone()).await.unwrap().status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let planted = client
+        .put(format!("{base}/v1/files/content?threadId={}", b.id))
+        .bearer_auth("fixture-token")
+        .header("x-haarness-remote-thread", a.id.to_string())
+        .json(&json!({"path": "planted.txt", "content": "x", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(planted.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(!folder(&b).join("planted.txt").exists());
+    // A chat folder someone deleted is not made again by the file APIs.
+    std::fs::remove_dir_all(folder(&b)).unwrap();
+    for path in [
+        format!("/files/list?threadId={}", b.id),
+        format!("/files/content?path=secret.txt&threadId={}", b.id),
+    ] {
+        assert_eq!(
+            get(path.clone()).await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let written = client
+        .put(format!("{base}/v1/files/content?threadId={}", b.id))
+        .bearer_auth("fixture-token")
+        .json(&json!({"path": "new.txt", "content": "x", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(written.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(!folder(&b).exists());
+}
+
+/// A file's revision as the file API computes it.
+fn hash(content: &str) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(content.as_bytes()))
+}
+
+#[tokio::test]
+async fn the_file_apis_of_a_project_chat_are_the_project_folder_s_as_before() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let thread = chat(&runtime, None).await.unwrap();
+    std::fs::create_dir_all(fixture.workspace.join("src")).unwrap();
+    std::fs::write(fixture.workspace.join("src/main.rs"), "fn main() {}").unwrap();
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    for query in [String::new(), format!("&threadId={}", thread.id)] {
+        let listed: Value = client
+            .get(format!("{base}/v1/files/list?path=src{query}"))
+            .bearer_auth("fixture-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed["entries"][0]["path"], "src/main.rs", "{query}");
+        assert!(listed.get("directory").is_none(), "{query}");
+        let found: Vec<String> = client
+            .get(format!("{base}/v1/files/search?q=main{query}"))
+            .bearer_auth("fixture-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(found, ["src/main.rs"], "{query}");
+    }
+}
+
+#[tokio::test]
+async fn search_finds_a_chat_s_files_past_a_big_dependency_folder_and_honours_ignore_files() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.chat_home();
+    let thread = chat(&runtime, Some("2026-10-24/deps")).await.unwrap();
+    let root = folder(&thread);
+    // More entries than a search walks, in a folder that is no repository.
+    for package in 0..300 {
+        let directory = root.join(format!("node_modules/pkg{package:03}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in 0..200 {
+            std::fs::File::create(directory.join(format!("f{file}.js"))).unwrap();
+        }
+    }
+    std::fs::create_dir_all(root.join("zz-src")).unwrap();
+    std::fs::write(root.join("zz-src/app.ts"), "x").unwrap();
+    std::fs::create_dir_all(root.join("generated")).unwrap();
+    std::fs::write(root.join("generated/app.ts"), "x").unwrap();
+    std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+    // A build folder outside Git is left out, one in a repository cloned
+    // into the folder is the project's.
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    std::fs::write(root.join("dist/bundle.js"), "x").unwrap();
+    std::fs::create_dir_all(root.join("cloned/dist")).unwrap();
+    git_fixture_command(&root.join("cloned"), ["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("cloned/dist/index.js"), "x").unwrap();
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let search = |query: &str| {
+        let url = format!(
+            "{base}/v1/files/search?q={query}&limit=50&threadId={}",
+            thread.id
+        );
+        let client = client.clone();
+        async move {
+            client
+                .get(url)
+                .bearer_auth("fixture-token")
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<String>>()
+                .await
+                .unwrap()
+        }
+    };
+    let started = std::time::Instant::now();
+    assert_eq!(
+        search("app.ts").await,
+        ["zz-src/app.ts"],
+        "the ignored copy is left out"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // Named, the dependency folder is searched.
+    assert!(
+        search("node_modules/pkg007/f19")
+            .await
+            .contains(&"node_modules/pkg007/f19.js".to_owned())
+    );
+    assert!(search("bundle.js").await.is_empty());
+    assert_eq!(search("dist/bundle").await, ["dist/bundle.js"]);
+    assert_eq!(search("index.js").await, ["cloned/dist/index.js"]);
+    // `.ignore` counts as `.gitignore` does.
+    std::fs::remove_file(root.join(".gitignore")).unwrap();
+    std::fs::write(root.join(".ignore"), "generated/\n").unwrap();
+    assert_eq!(search("app.ts").await, ["zz-src/app.ts"]);
+}
+
+#[tokio::test]
+async fn search_in_a_git_project_finds_files_committed_under_build_folder_names() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let root = fixture.workspace.clone();
+    let committed = [
+        "dist/index.js",
+        "build/package/Dockerfile",
+        "target/thumbv7em/memory.x",
+        "cmd/dist/main.go",
+        "pkg/venv/activate.go",
+    ];
+    git_fixture_command(&root, ["init", "-q", "-b", "main"]);
+    for path in committed {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+    // What the project ignores stays out.
+    std::fs::create_dir_all(root.join("out")).unwrap();
+    std::fs::write(root.join("out/index.js"), "x").unwrap();
+    std::fs::write(root.join(".gitignore"), "out/\n").unwrap();
+    git_fixture_command(&root, ["add", "-A"]);
+    git_fixture_command(
+        &root,
+        [
+            "-c",
+            "user.email=api@example.invalid",
+            "-c",
+            "user.name=Haarness API Test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+    );
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let search = |query: &str| {
+        let url = format!("{base}/v1/files/search?q={query}&limit=50");
+        let client = client.clone();
+        async move {
+            client
+                .get(url)
+                .bearer_auth("fixture-token")
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<String>>()
+                .await
+                .unwrap()
+        }
+    };
+    for (query, path) in [
+        ("index.js", "dist/index.js"),
+        ("Dockerfile", "build/package/Dockerfile"),
+        ("memory.x", "target/thumbv7em/memory.x"),
+        ("main.go", "cmd/dist/main.go"),
+        ("activate.go", "pkg/venv/activate.go"),
+    ] {
+        assert_eq!(search(query).await, [path], "{query}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_can_be_written_into_a_folder_one_may_write_in_but_not_read() {
+    use std::os::unix::fs::PermissionsExt as _;
+    /// Gives the folder its reading back, also when an assertion fails.
+    struct Readable(PathBuf);
+    impl Drop for Readable {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let drop_box = fixture.workspace.join("drop");
+    std::fs::create_dir_all(&drop_box).unwrap();
+    std::fs::set_permissions(&drop_box, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let readable = Readable(drop_box.clone());
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let written = client
+        .put(format!("{base}/v1/files/content"))
+        .bearer_auth("fixture-token")
+        .json(&json!({"path": "drop/note.txt", "content": "dropped", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        written.status().is_success(),
+        "{}",
+        written.text().await.unwrap()
+    );
+    let action = |body: Value| {
+        client
+            .post(format!("{base}/v1/files/action"))
+            .bearer_auth("fixture-token")
+            .json(&body)
+            .send()
+    };
+    for body in [
+        json!({"action": "mkdir", "path": "drop/inner"}),
+        json!({"action": "rename", "path": "drop/note.txt", "target": "drop/renamed.txt"}),
+    ] {
+        let answer = action(body.clone()).await.unwrap();
+        assert!(
+            answer.status().is_success(),
+            "{body}: {}",
+            answer.text().await.unwrap()
+        );
+    }
+    drop(readable);
+    assert_eq!(
+        std::fs::read_to_string(drop_box.join("renamed.txt")).unwrap(),
+        "dropped"
+    );
+    assert!(drop_box.join("inner").is_dir());
+    assert!(!drop_box.join("note.txt").exists());
+}
