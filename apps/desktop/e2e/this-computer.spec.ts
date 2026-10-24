@@ -227,6 +227,28 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await composer().fill("/folderflow");
   await expect(page.locator("#slash-commands")).toHaveCount(0);
   await composer().fill("");
+  // Unsaved edits in one chat's files wait for it while another chat is
+  // open, with no question asked.
+  await rows().filter({ hasText: "pwd" }).click();
+  const show = page.getByRole("button", { name: "Show side panel", exact: true });
+  if (await show.isVisible()) await show.click();
+  await tree.getByRole("button", { name: "notes.txt", exact: true }).click();
+  const editor = page.locator(".file-preview .cm-content");
+  await editor.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" and an unsaved line");
+  const tab = page.locator(".file-tabs").getByRole("button", { name: /^notes\.txt/ });
+  await expect(tab).toHaveText("notes.txt •");
+  await rows().filter({ hasText: "Lisbon" }).click();
+  await expect(page.locator(".file-tabs")).toHaveCount(0);
+  await expect(tree.getByRole("button", { name: "notes.txt", exact: true })).toHaveCount(0);
+  await rows().filter({ hasText: "pwd" }).click();
+  await expect(tab).toHaveText("notes.txt •");
+  await expect(editor).toContainText("written without a project and an unsaved line");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => readFile(join(first, "notes.txt"), "utf8")).toBe("written without a project and an unsaved line");
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
   // A chat whose folder a link stands in for (here, to the first chat's)
   // offers no workflows of its own, and says nothing about it.
   await rows().filter({ hasText: "pwd" }).click();

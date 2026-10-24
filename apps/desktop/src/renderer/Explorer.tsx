@@ -1,7 +1,7 @@
 import { Preview } from "./preview";
 import { PreviewContent } from "./PreviewContent";
 import { t } from "./i18n";
-import { For, Show, batch, createMemo, createSignal, createEffect, onCleanup } from "solid-js";
+import { For, Show, batch, createMemo, createSignal, createEffect, on, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { FileContent, FileEntry } from "../shared";
 import { useApp } from "./state";
@@ -161,7 +161,11 @@ export function Explorer() {
   const dirty = (path: string) =>
     edits()[path] !== undefined &&
     edits()[path] !== tabs().find((item) => item.path === path)?.content;
-  const hasEdits = () => tabs().some((item) => dirty(item.path));
+  const hasEdits = () =>
+    tabs().some((item) => dirty(item.path)) ||
+    [...kept.values()].some((other) =>
+      other.tabs.some((item) => other.edits[item.path] !== undefined && other.edits[item.path] !== item.content),
+    );
   app.onLeaveWorkspace(
     async () =>
       !hasEdits() ||
@@ -179,20 +183,41 @@ export function Explorer() {
   };
   window.addEventListener("beforeunload", beforeUnload);
   onCleanup(() => window.removeEventListener("beforeunload", beforeUnload));
-  createEffect(() => {
-    app.state.connection?.id;
-    root();
-    workspaceGeneration++;
-    selectionGeneration++;
-    pendingOpens.clear();
-    setQuery("");
-    setResults([]);
-    setTabs([]);
-    setSelected("");
-    setEdits({});
-    setExpanded(new Set<string>());
-    setVersion((v) => v + 1);
-  });
+  /**
+   * What the panel holds for the other chat folders of This computer: open
+   * files, unsaved edits and folders open in the tree, kept while another
+   * chat's folder shows and given back when its chat does. Another
+   * connection starts afresh (leaving one with unsaved edits asks first).
+   */
+  const kept = new Map<string, { tabs: OpenFile[]; selected: string; edits: Record<string, string>; expanded: ReadonlySet<string> }>();
+  let place = { connection: "", folder: "" };
+  createEffect(
+    on(
+      () => [app.state.connection?.id ?? "", root()] as const,
+      ([connection, folder]) => {
+        const before = place;
+        if (before.connection === connection && before.folder === folder) return;
+        place = { connection, folder };
+        if (before.connection !== connection) kept.clear();
+        else if (before.folder !== folder && tabs().length)
+          kept.set(before.folder, { tabs: tabs(), selected: selected(), edits: edits(), expanded: expanded() });
+        const back = kept.get(folder);
+        kept.delete(folder);
+        workspaceGeneration++;
+        selectionGeneration++;
+        pendingOpens.clear();
+        batch(() => {
+          setQuery("");
+          setResults([]);
+          setTabs(back?.tabs ?? []);
+          setSelected(back?.selected ?? "");
+          setEdits(back?.edits ?? {});
+          setExpanded(back?.expanded ?? new Set<string>());
+          setVersion((v) => v + 1);
+        });
+      },
+    ),
+  );
   createEffect(() => {
     app.state.selected;
     selectionGeneration++;
