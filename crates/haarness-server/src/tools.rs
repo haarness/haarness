@@ -58,7 +58,7 @@ pub trait ManagementRegistry: Send + Sync {
     ) -> CoreResult<ToolOutput>;
 }
 
-const READ_DESCRIPTION: &str = "Read a text, image, PDF, audio, or video file when you already know its path. Binary document/media results are returned as provider-visible attachments instead of base64 text. The path may be workspace-relative or absolute; external paths still require permission. For text, this returns up to 2000 lines from the start by default. offset is a zero-based line offset and limit is the maximum number of lines (capped at 20000); call read again with a larger offset for later sections. Use grep to locate specific text and glob when the filename is unknown. Use list for directories. Prefer a useful context window over many tiny repeated reads.";
+const READ_DESCRIPTION: &str = "Read a text, image, PDF, audio, or video file when you already know its path. Binary document/media results are returned as provider-visible attachments instead of base64 text. The path may be workspace-relative or absolute; external paths still require permission. For text, this returns up to 2000 lines from the start by default; one read returns at most 2000 lines or 50 KB, cuts lines longer than 2000 characters, and ends with the offset to read on from when the file goes on. offset is a zero-based line offset and limit is the maximum number of lines; call read again with that offset for later sections. Use grep to locate specific text and glob when the filename is unknown. Use list for directories. Prefer a useful context window over many tiny repeated reads.";
 const IMAGE_GENERATE_DESCRIPTION: &str = "Generate exactly one image only when the user explicitly requests an image asset as a deliverable. The optional backend uses HAARNESS_IMAGE_GENERATE_URL, or the OpenAI Images endpoint when OPENAI_API_KEY is configured. Output is saved under .haarness-chat-attachments and returned as provider-visible media. Do not use this for ordinary analysis, diagrams expressible as code, or screenshot inspection.";
 const VIDEO_GENERATE_DESCRIPTION: &str = "Generate exactly one video only when the user explicitly requests a video or animation as the deliverable. This optional backend uses HAARNESS_VIDEO_GENERATE_URL and requires a synchronous JSON response containing base64 media. Output is saved under .haarness-chat-attachments and returned as provider-visible media. Never infer video intent from a visual discussion or attachment.";
 const MAX_GENERATION_RESPONSE_BYTES: usize = 72 * 1024 * 1024;
@@ -2543,7 +2543,7 @@ impl Tool for BuiltinTool {
                 json!({
                     "path":{"type":"string","description":"Workspace-relative or absolute path to the text, image, PDF, audio, or video file to read."},
                     "offset":{"type":"integer","minimum":0,"description":"Zero-based line offset. Defaults to 0."},
-                    "limit":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum lines to return. Defaults to 2000 and is capped at 20000."}
+                    "limit":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum lines to return. Defaults to 2000; one read returns at most 2000 lines or 50 KB."}
                 }),
                 vec!["path"],
             ),
@@ -2849,7 +2849,7 @@ impl Tool for BuiltinTool {
                     });
                 }
                 let offset = usize_value(&args, "offset").unwrap_or(0);
-                let limit = usize_value(&args, "limit").unwrap_or(2000).min(20_000);
+                let limit = usize_value(&args, "limit").map(|limit| limit.min(20_000));
                 // A line at a time, off the async workers: a file of any size,
                 // or one long line, holds only what is shown.
                 let file = path.clone();
@@ -6875,6 +6875,35 @@ export default workflow({
             .await
             .unwrap();
         assert_eq!(next.text, body.lines().nth(count).unwrap());
+        // The default limit ending before the file does says where to go on;
+        // a limit the call gives does not.
+        let short = (0..2_500)
+            .map(|line| format!("{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("short.txt"), &short).unwrap();
+        let default = read_text_of(&root, json!({"path":"short.txt"}))
+            .await
+            .unwrap();
+        assert!(
+            default
+                .text
+                .ends_with("1999\n\n(more lines follow; read on with offset=2000)"),
+            "{}",
+            &default.text[default.text.len() - 80..]
+        );
+        let given = read_text_of(&root, json!({"path":"short.txt","limit":2000}))
+            .await
+            .unwrap();
+        assert!(
+            given.text.ends_with("\n1999"),
+            "{}",
+            &given.text[given.text.len() - 40..]
+        );
+        let rest = read_text_of(&root, json!({"path":"short.txt","offset":2000}))
+            .await
+            .unwrap();
+        assert!(rest.text.ends_with("\n2499") && !rest.text.contains("more lines"));
         // A limit inside the budget reads as it always did, without a note.
         let small = read_text_of(&root, json!({"path":"long.txt","offset":10,"limit":5}))
             .await

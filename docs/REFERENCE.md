@@ -448,13 +448,16 @@ video files as provider-visible attachments instead of decoding binary bytes as
 text. Text is read a line at a time, so a file of any size, or one with a line
 that never ends (a minified bundle, a JSON dump), holds only what is shown: a
 line longer than 2000 characters shows its first 2000 and ends in
-`… (line truncated to 2000 characters)`, and a read stops at 2000 lines or 50 KB
-with `(stopped at 50 KB; read on with offset=N)`. Text that is not UTF-8 (a
+`… (line truncated to 2000 characters)`. One read returns at most 2000 lines or
+50 KB, whatever `limit` asks, and then ends with `(stopped at 50 KB; read on
+with offset=N)` (or `2000 lines`); a read without a `limit` whose 2000 lines
+end before the file does ends with `(more lines follow; read on with
+offset=2000)`. Text that is not UTF-8 (a
 Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
-refuse it as not UTF-8 text); a file with a NUL byte in its
-first 8 KiB is binary data and is shown only when it is UTF-8 throughout the
-part read. A folder, pipe or device is refused instead of waited on. Since
+refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
+as binary data: its lines are shown only when they are UTF-8, and a read that
+meets one that is not is refused (`… holds binary data, not text`). A folder, pipe or device is refused instead of waited on. Since
 `read` shows lines without their `\r`, `edit` and `multiedit` give `old` and
 `new` CRLF line ends in a file whose lines mostly end in CRLF, so an `old` of
 several lines matches and the lines `new` adds end like the rest (an `old` of
