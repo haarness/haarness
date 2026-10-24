@@ -139,7 +139,11 @@ impl ModelProvider for BedrockProvider {
     }
 
     /// Bedrock takes 20 MB in a request; its images get 15 MiB of it. A
-    /// Claude model takes as many images as it does from Anthropic.
+    /// Claude model takes as many images as it does from Anthropic, named by
+    /// its id or an ARN holding it (a foundation model or a cross-region
+    /// inference profile). An application inference profile's ARN names no
+    /// model, and finding it would take a request to Bedrock, so it gets the
+    /// byte limit alone.
     fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
         let count = model
             .contains("anthropic.claude")
@@ -678,6 +682,20 @@ mod tests {
             }
         );
         assert_eq!(provider.image_limits("amazon.nova-pro-v1:0").count, None);
+        for arn in [
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+        ] {
+            assert_eq!(provider.image_limits(arn).count, Some(100), "{arn}");
+        }
+        assert_eq!(
+            provider
+                .image_limits(
+                    "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3"
+                )
+                .count,
+            None
+        );
     }
 
     #[test]
