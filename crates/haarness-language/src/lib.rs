@@ -453,7 +453,8 @@ impl LanguageService {
         let root = self
             .root(root)
             .ok_or_else(|| "the folder is not inside the project".to_owned())?;
-        let chat_folder = self.canonical_workspace() != root;
+        let project = self.canonical_workspace();
+        let chat_folder = project != root;
         let matches = Self::matching_servers(&state, file);
         if matches.is_empty() {
             return Err("no configured language server handles this file".into());
@@ -528,7 +529,7 @@ impl LanguageService {
             {
                 Ok(mut value) => {
                     if chat_folder {
-                        keep_places_inside(&mut value, &root);
+                        keep_places_of(&mut value, &root, &project);
                     }
                     results.push(json!({"server": id, "result": value}));
                 }
@@ -803,28 +804,35 @@ fn inside(root: &Path, path: &Path) -> bool {
     path.canonicalize().is_ok_and(|path| path.starts_with(root))
 }
 
-/// Leave out of a language server's answer every place (a location, a
-/// link's target, a symbol, a call-hierarchy item) in a file outside `root`.
-fn keep_places_inside(value: &mut Value, root: &Path) {
+/// Leave out of the answer a language server started for the chat folder
+/// `root` gives every place (a location, a link's target, a symbol, a
+/// call-hierarchy item) in another part of `project`: another chat's
+/// files. Places outside the project (the standard library, a dependency
+/// cache) stay.
+fn keep_places_of(value: &mut Value, root: &Path, project: &Path) {
     match value {
         Value::Array(items) => {
-            items.retain(|item| !item.as_object().is_some_and(|place| outside(place, root)));
+            items.retain(|item| {
+                !item
+                    .as_object()
+                    .is_some_and(|place| elsewhere(place, root, project))
+            });
             for item in items {
-                keep_places_inside(item, root);
+                keep_places_of(item, root, project);
             }
         }
-        Value::Object(place) if outside(place, root) => *value = Value::Null,
+        Value::Object(place) if elsewhere(place, root, project) => *value = Value::Null,
         Value::Object(place) => {
             for item in place.values_mut() {
-                keep_places_inside(item, root);
+                keep_places_of(item, root, project);
             }
         }
         _ => {}
     }
 }
 
-/// Whether `place` names a file outside `root`.
-fn outside(place: &serde_json::Map<String, Value>, root: &Path) -> bool {
+/// Whether `place` names a file of `project` outside `root`.
+fn elsewhere(place: &serde_json::Map<String, Value>, root: &Path, project: &Path) -> bool {
     let nested = |key: &str| place.get(key).and_then(|value| value.get("uri"));
     place
         .get("uri")
@@ -833,16 +841,11 @@ fn outside(place: &serde_json::Map<String, Value>, root: &Path) -> bool {
         .or_else(|| nested("from"))
         .or_else(|| nested("to"))
         .and_then(Value::as_str)
-        .is_some_and(|uri| {
-            url::Url::parse(uri)
-                .ok()
-                .and_then(|url| url.to_file_path().ok())
-                .is_none_or(|path| {
-                    !path
-                        .canonicalize()
-                        .unwrap_or_else(|_| path.clone())
-                        .starts_with(root)
-                })
+        .and_then(|uri| url::Url::parse(uri).ok())
+        .and_then(|url| url.to_file_path().ok())
+        .is_some_and(|path| {
+            let path = path.canonicalize().unwrap_or(path);
+            path.starts_with(project) && !path.starts_with(root)
         })
 }
 
@@ -1573,36 +1576,42 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_folder_s_answers_keep_only_places_inside_it() {
-        let root = std::env::temp_dir().join(format!("haarness-places-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
-        let inside = url::Url::from_file_path(root.join("a.rs"))
-            .unwrap()
-            .to_string();
-        let outside = "file:///elsewhere/b.rs";
+    fn a_chat_folder_s_answers_leave_out_other_chats_places_only() {
+        let base = std::env::temp_dir().join(format!("haarness-places-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(base.join("home/2026-10-24/a")).unwrap();
+        std::fs::create_dir_all(base.join("home/2026-10-24/b")).unwrap();
+        let project = base.join("home").canonicalize().unwrap();
+        let root = project.join("2026-10-24/a");
+        let uri = |path: PathBuf| url::Url::from_file_path(path).unwrap().to_string();
+        let mine = uri(root.join("a.rs"));
+        let sibling = uri(project.join("2026-10-24/b/b.rs"));
+        let home_file = uri(project.join("notes.rs"));
+        let library = "file:///usr/lib/rustlib/src/core/lib.rs";
         let mut value = json!([
-            {"uri": inside, "range": {}},
-            {"uri": outside, "range": {}},
-            {"targetUri": outside},
-            {"name": "symbol", "location": {"uri": outside}},
-            {"from": {"uri": outside}, "fromRanges": []},
-            {"to": {"uri": inside}, "fromRanges": []},
+            {"uri": mine, "range": {}},
+            {"uri": sibling, "range": {}},
+            {"uri": home_file, "range": {}},
+            {"uri": library, "range": {}},
+            {"targetUri": sibling},
+            {"name": "symbol", "location": {"uri": sibling}},
+            {"from": {"uri": sibling}, "fromRanges": []},
+            {"to": {"uri": library}, "fromRanges": []},
             {"name": "local", "kind": 12},
         ]);
-        keep_places_inside(&mut value, &root);
+        keep_places_of(&mut value, &root, &project);
         assert_eq!(
             value,
             json!([
-                {"uri": inside, "range": {}},
-                {"to": {"uri": inside}, "fromRanges": []},
+                {"uri": mine, "range": {}},
+                {"uri": library, "range": {}},
+                {"to": {"uri": library}, "fromRanges": []},
                 {"name": "local", "kind": 12},
             ])
         );
-        let mut single = json!({"uri": outside, "range": {}});
-        keep_places_inside(&mut single, &root);
+        let mut single = json!({"uri": sibling, "range": {}});
+        keep_places_of(&mut single, &root, &project);
         assert!(single.is_null());
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

@@ -47,8 +47,9 @@ export class Api extends Transport {
     return this.request("GET", `/v1/agents`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/commands */
-  commands(options: RequestOptions = {}): Promise<Array<T.CommandInfo>> {
-    return this.request("GET", `/v1/commands`, { binaryBody: false, binaryResponse: false, ...options });
+  commands(query: Exclusive<T.ChatListQuery, RequestOptions> = {}, options: RequestOptions = {}): Promise<Array<T.CommandInfo>> {
+    [query, options] = splitQuery(query, options);
+    return this.request("GET", `/v1/commands`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/lsp */
   lspStatus(options: RequestOptions = {}): Promise<Array<T.LanguageStatus>> {
@@ -131,8 +132,9 @@ export class Api extends Transport {
     return this.request("DELETE", `/v1/ptys/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/workflows */
-  workflows(options: RequestOptions = {}): Promise<T.WorkflowListResponse> {
-    return this.request("GET", `/v1/workflows`, { binaryBody: false, binaryResponse: false, ...options });
+  workflows(query: Exclusive<T.ChatListQuery, RequestOptions> = {}, options: RequestOptions = {}): Promise<T.WorkflowListResponse> {
+    [query, options] = splitQuery(query, options);
+    return this.request("GET", `/v1/workflows`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/workflows/{invocation}/source */
   workflowSource(invocation: string, options: RequestOptions = {}): Promise<T.WorkflowSourceResponse> {

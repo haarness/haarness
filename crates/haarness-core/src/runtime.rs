@@ -1622,7 +1622,7 @@ impl AgentRuntime {
         id: ThreadId,
         access: FolderAccess,
     ) -> CoreResult<Arc<dyn crate::SnapshotStore>> {
-        let thread = self.repository.get_thread(id).await?;
+        let thread = self.reading_thread(id).await?;
         let workspace = self.thread_workspace(&thread, access).await?;
         self.snapshots_at(&thread, &workspace)
             .await?
@@ -1637,8 +1637,7 @@ impl AgentRuntime {
     async fn chat_folder_for(&self, requested: &str) -> CoreResult<String> {
         if Path::new(requested).is_absolute() {
             let (root, requested) = (self.workspace.clone(), requested.to_owned());
-            let folder =
-                blocking(move || crate::chat_folders::existing_inside(&root, &requested)).await?;
+            let folder = blocking(move || crate::chat_folders::shared(&root, &requested)).await?;
             return folder_text(&folder);
         }
         let [date, name] = crate::chat_folders::client_parts(requested)?;
@@ -1679,33 +1678,67 @@ impl AgentRuntime {
         )))
     }
 
-    /// `thread`, given a folder of its own first when this is the chat home
-    /// and it has none (a chat stored before chats had folders), so it never
-    /// works in the chat home itself.
+    /// `thread`, given a folder first when this is the chat home and it has
+    /// none (a chat stored before chats had folders), so it never works in
+    /// the chat home itself: the folder of the nearest chat above it that
+    /// has one, else a new one for its whole line of chats, which shares it.
     async fn with_chat_folder(&self, thread: Thread) -> CoreResult<Thread> {
         if !self.chat_home || thread.directory.is_some() {
             return Ok(thread);
         }
         let _choice = self.folder_choice.lock().await;
-        let current = self.repository.get_thread(thread.id).await?;
-        if current.directory.is_some() {
-            return Ok(current);
+        let mut lineage = vec![self.repository.get_thread(thread.id).await?];
+        let mut folder = lineage[0].directory.clone();
+        while folder.is_none() && lineage.len() < MAX_LINEAGE {
+            let Some(parent) = lineage[lineage.len() - 1].parent_id else {
+                break;
+            };
+            match self.repository.get_thread(parent).await {
+                Ok(parent) => {
+                    folder.clone_from(&parent.directory);
+                    lineage.push(parent);
+                }
+                Err(CoreError::NotFound(_)) => break,
+                Err(error) => return Err(error),
+            }
         }
-        let folder = self.fresh_chat_folder(thread.id).await?;
-        let thread = self
-            .repository
-            .assign_thread_directory(thread.id, &folder)
-            .await?;
-        let root = self.resolve_root(&thread).await;
-        self.events.publish_scoped(
-            "thread.updated",
-            Some(thread.id),
-            Some(root),
-            None,
-            None,
-            json!(thread),
-        );
-        Ok(thread)
+        let folder = match folder {
+            Some(folder) => folder,
+            None => {
+                self.fresh_chat_folder(lineage[lineage.len() - 1].id)
+                    .await?
+            }
+        };
+        let mut given = None;
+        for chat in lineage.iter().filter(|chat| chat.directory.is_none()) {
+            let chat = self
+                .repository
+                .assign_thread_directory(chat.id, &folder)
+                .await?;
+            let root = self.resolve_root(&chat).await;
+            self.events.publish_scoped(
+                "thread.updated",
+                Some(chat.id),
+                Some(root),
+                None,
+                None,
+                json!(chat),
+            );
+            if chat.id == thread.id {
+                given = Some(chat);
+            }
+        }
+        match given {
+            Some(chat) => Ok(chat),
+            None => self.repository.get_thread(thread.id).await,
+        }
+    }
+
+    /// `thread` for work that only reads where it works: in the chat home a
+    /// chat without a folder is given one first.
+    async fn reading_thread(&self, id: ThreadId) -> CoreResult<Thread> {
+        self.with_chat_folder(self.repository.get_thread(id).await?)
+            .await
     }
 
     /// Attach lifecycle hooks (PreToolUse/PostToolUse/UserPromptSubmit/Stop).
@@ -1800,7 +1833,7 @@ impl AgentRuntime {
     ) -> CoreResult<ResourceMentionPolicy> {
         let components = self.components();
         let thread = match thread_id {
-            Some(id) => Some(self.repository.get_thread(id).await?),
+            Some(id) => Some(self.reading_thread(id).await?),
             None => None,
         };
         // Where the chat works decides which spelling of a path its rules meet.
@@ -2439,10 +2472,7 @@ impl AgentRuntime {
         if !request.attachments.is_empty() {
             // A relative attachment is read from where the chat works.
             let workspace = self
-                .thread_workspace(
-                    &self.repository.get_thread(thread_id).await?,
-                    FolderAccess::Read,
-                )
+                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
                 .await?;
             request.attachments = crate::attachments::admit_off_executor(
                 std::mem::take(&mut request.attachments),
@@ -2932,7 +2962,7 @@ impl AgentRuntime {
     ) -> CoreResult<BtwResponse> {
         self.check_btw(thread_id, &request).await?;
         let components = self.components();
-        let thread = self.repository.get_thread(thread_id).await?;
+        let thread = self.reading_thread(thread_id).await?;
         let mut items = self.repository.list_items(thread_id, None).await?;
         if let Some(revert) = &thread.revert {
             items.retain(|item| item.sequence <= revert.sequence);
@@ -5717,10 +5747,7 @@ impl AgentRuntime {
         if !request.attachments.is_empty() {
             // A relative attachment is read from where the chat works.
             let workspace = self
-                .thread_workspace(
-                    &self.repository.get_thread(thread_id).await?,
-                    FolderAccess::Read,
-                )
+                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
                 .await?;
             request.attachments = crate::attachments::admit_off_executor(
                 std::mem::take(&mut request.attachments),
@@ -12235,6 +12262,9 @@ fn thread_is_git_repository(thread: &Thread, workspace: &Path) -> bool {
         workspace_is_git_repository(workspace)
     }
 }
+
+/// How far up a chat's parents the chat home looks for a folder to share.
+const MAX_LINEAGE: usize = 64;
 
 /// How many numbered folders a new chat may try (`<path>`, `<path>-2`, …).
 const CHAT_FOLDER_CHOICES: usize = 1000;
