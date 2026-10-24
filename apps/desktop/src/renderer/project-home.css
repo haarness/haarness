@@ -95,6 +95,13 @@
   /* A quick chat switch never flashes the mark: it waits, then fades in. */
   animation: chat-loading-appear 0.2s ease-out 0.35s both;
 }
+/* Over the transcript of another chat of the project while its history
+   loads: the message box below stays as it was. */
+.transcript-frame > .chat-loading {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
 @keyframes chat-loading-appear {
   from {
     opacity: 0;
