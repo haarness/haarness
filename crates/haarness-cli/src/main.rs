@@ -8912,7 +8912,8 @@ fn mcp_config_for_display(
             value["url"] = serde_json::Value::String(redact::url(url).into_owned());
         }
         if !entry.args.is_empty() {
-            value["args"] = serde_json::json!(redact::args(&entry.args));
+            value["args"] =
+                serde_json::json!(redact::command_args(entry.command.as_deref(), &entry.args));
         }
     }
     Ok(value)
