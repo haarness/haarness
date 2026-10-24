@@ -7887,7 +7887,11 @@ async fn application_at(
         .project_for_workspace(&registered_workspace.id)?
         .git;
     let mut folders = None;
-    if automatic_snapshots_enabled(file_config.snapshots.as_ref(), project_is_git) {
+    // In the chat home nothing works in the root itself: only chats' folders
+    // are checkpointed there.
+    if !registered_workspace.chat_home
+        && automatic_snapshots_enabled(file_config.snapshots.as_ref(), project_is_git)
+    {
         match haarness_store::SqliteSnapshotStore::open(&paths.database, workspace.to_path_buf()) {
             Ok(snapshots) => {
                 let snapshots = Arc::new(snapshots);

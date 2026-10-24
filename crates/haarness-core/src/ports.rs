@@ -129,8 +129,6 @@ pub trait ThreadRepository: Send + Sync {
     /// canonical absolute path (the runtime resolves the requested one).
     async fn create_thread(&self, request: CreateThreadRequest) -> CoreResult<Thread>;
     async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>>;
-    /// Whether a chat, archived or not, works in the folder `directory`
-    /// (canonical and absolute, as [`Thread::directory`] holds it).
     /// Give chat `id`, which has no folder, the folder `directory` (canonical
     /// and absolute), and return it as stored.
     async fn assign_thread_directory(&self, _id: ThreadId, _directory: &str) -> CoreResult<Thread> {
@@ -138,6 +136,8 @@ pub trait ThreadRepository: Send + Sync {
             "giving a chat a folder is unavailable".into(),
         ))
     }
+    /// Whether a chat, archived or not, works in the folder `directory`
+    /// (canonical and absolute, as [`Thread::directory`] holds it).
     async fn directory_in_use(&self, directory: &str) -> CoreResult<bool> {
         Ok(self
             .list_threads(true)
