@@ -24,7 +24,7 @@ const examples = [
   "one  \nline break\n\n---\n\nDone 😊 日本語 العربية\n",
   "- [x] checked\n- [ ] open\n\nhttps://example.test\n",
   "Replace <path> with the file, then <text>x</text> stays.\n\n[<dev@example.com>](https://example.test) and [[a](/x)](/y)\n",
-  "1. <path>\n2. <file>\n\n<title> is required\n\n<file>\nline two\n",
+  "1. <path>\n2. <file>\n\n<title> is required\n\n<file>\nline two\n\n<svg>\n<path d=\"M0\"/>\n</svg>\n\n<math><mi>x</mi></math>\n",
 ];
 
 for (const [index, source] of examples.entries()) {
@@ -98,6 +98,18 @@ test("a block that starts with a bare tag is a paragraph of the reply; block HTM
   assert.equal(html("<table>\n<tr><td>x</td></tr>\n</table>"), "<table>\n<tr><td>x</td></tr>\n</table>");
   assert.equal(html("<!-- note -->\ntext"), "<!-- note -->\n<p>text</p>\n");
   assert.equal(html('<img src="a.png" alt="a">'), '<img src="a.png" alt="a">');
+});
+
+// Written without attributes around elements of their own, an svg or a
+// formula is a drawing, as it was; around words only, it is a word.
+test("a bare svg or math wrapping elements still draws", () => {
+  const html = (text: string) => projectMarkdown(undefined, text, false).blocks.map((block) => block.html).join("");
+  assert.equal(html('An icon <svg><path d="M0 0h8v8z"/></svg> here'), '<p>An icon <svg><path d="M0 0h8v8z"/></svg> here</p>\n');
+  assert.equal(html("x is <math><mi>x</mi><mo>+</mo><mn>1</mn></math>"), "<p>x is <math><mi>x</mi><mo>+</mo><mn>1</mn></math></p>\n");
+  assert.equal(html('<svg>\n<path d="M0 0h8v8z"/>\n</svg>'), '<svg>\n<path d="M0 0h8v8z"/>\n</svg>');
+  assert.equal(html("Use an <svg> here, then </svg>"), "<p>Use an &lt;svg&gt; here, then &lt;/svg&gt;</p>\n");
+  assert.equal(html("An <svg> holds a <path>"), "<p>An &lt;svg&gt; holds a &lt;path&gt;</p>\n");
+  assert.equal(html("<svg>\nwords only\n</svg>"), "<p>&lt;svg&gt;<br>words only<br>&lt;/svg&gt;</p>\n");
 });
 
 // An anchor inside an anchor is split by the HTML parser: the label went to
