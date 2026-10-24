@@ -48,8 +48,10 @@ const BATCH: BatchLimits = BatchLimits {
 /// How long a capture's manifest rows may stand without the `snapshots` row
 /// that completes them before retention takes them for a crashed capture's.
 /// Measured from the time in the capture's v7 id, so a retention pass in
-/// another process sharing the database agrees on it.
-const ABANDONED_AFTER_MS: i64 = 60 * 60 * 1000;
+/// another process sharing the database agrees on it; a day, so a capture
+/// across a laptop's sleep or a clock jump is not taken. This process's own
+/// captures are never taken (see `CAPTURING`).
+const ABANDONED_AFTER_MS: i64 = 24 * 60 * 60 * 1000;
 const BLOB_STORED: &str = "SELECT EXISTS(SELECT 1 FROM snapshot_blobs WHERE hash=?1)";
 
 #[derive(Debug, Clone, Copy)]
@@ -675,10 +677,31 @@ impl SqliteSnapshotStore {
     }
 }
 
+/// The captures this process is writing. A retention pass of this process
+/// never takes one for abandoned, however long it runs (across a laptop's
+/// sleep, or a clock that jumped forward).
+static CAPTURING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
 /// The databases in which a capture of this process failed and left blobs
 /// no manifest row names: the next retention pass there removes them,
 /// though it has nothing else to remove.
 static ORPHANED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Capture `id` is being written, until this is dropped.
+struct Capturing(String);
+
+impl Capturing {
+    fn start(id: &str) -> Self {
+        CAPTURING.lock().insert(id.to_owned());
+        Self(id.to_owned())
+    }
+}
+
+impl Drop for Capturing {
+    fn drop(&mut self) {
+        CAPTURING.lock().remove(&self.0);
+    }
+}
 
 fn database_key(connection: &Connection) -> Option<String> {
     connection
@@ -840,9 +863,10 @@ fn reclaim_rows(
     })
 }
 
-/// Captures that wrote manifest rows but no `snapshots` row, and started
-/// more than [`ABANDONED_AFTER_MS`] ago: a crash or a failure stopped them.
-/// A capture still being written is younger, and any other id is kept.
+/// Captures that wrote manifest rows but no `snapshots` row, that this
+/// process is not writing, and that started more than
+/// [`ABANDONED_AFTER_MS`] ago: a crash or a failure stopped them. Any id
+/// that is not a v7 UUID is kept.
 fn abandoned_captures(connection: &Connection) -> CoreResult<Vec<String>> {
     let cutoff = Utc::now().timestamp_millis() - ABANDONED_AFTER_MS;
     // One seek per manifest, rather than a scan of every manifest row.
@@ -863,6 +887,7 @@ fn abandoned_captures(connection: &Connection) -> CoreResult<Vec<String>> {
         .map_err(storage)?
     {
         if started_before(&id, cutoff)
+            && !CAPTURING.lock().contains(&id)
             && !published
                 .query_row([&id], |row| row.get::<_, bool>(0))
                 .map_err(storage)?
@@ -1040,16 +1065,29 @@ impl SqliteSnapshotStore {
 
     fn capture_sync(&self, thread: ThreadId) -> CoreResult<SnapshotInfo> {
         let id = uuid::Uuid::now_v7().to_string();
+        self.capture_as(&id, thread, BATCH, |_| Ok(()))
+    }
+
+    /// Capture the tree as snapshot `id`. What a failed capture wrote is
+    /// removed again.
+    fn capture_as(
+        &self,
+        id: &str,
+        thread: ThreadId,
+        limits: BatchLimits,
+        step: impl FnMut(CaptureStep) -> CoreResult<()>,
+    ) -> CoreResult<SnapshotInfo> {
+        let _capturing = Capturing::start(id);
         let published = self
-            .write_manifest(&id, BATCH, |_| Ok(()))
-            .and_then(|written| self.publish(&id, thread, written).map(|()| written));
+            .write_manifest(id, limits, step)
+            .and_then(|written| self.publish(id, thread, written).map(|()| written));
         match published {
             Ok(written) => Ok(SnapshotInfo {
-                id,
+                id: id.to_owned(),
                 file_count: written.files,
             }),
             Err(error) => {
-                self.discard(&id);
+                self.discard(id);
                 Err(error)
             }
         }
@@ -1067,7 +1105,10 @@ impl SqliteSnapshotStore {
     ) -> CoreResult<Written> {
         let sources = self.source_paths()?;
         let mut written = Written::default();
-        let mut batch = Vec::new();
+        // The capture's first row: the rows of a capture are only ever
+        // removed together, so while it stands, all of them do.
+        let mut first = None;
+        let mut batch: Vec<ScannedEntry> = Vec::new();
         let mut bytes = 0_usize;
         for source in &sources {
             let Some(scanned) = self.capture_entry(source, true) else {
@@ -1076,21 +1117,25 @@ impl SqliteSnapshotStore {
             bytes += scanned.data.as_ref().map_or(0, Vec::len);
             batch.push(scanned);
             if batch.len() >= limits.entries || bytes >= limits.bytes {
-                self.write_batch(id, &batch, &mut written, &mut step)?;
+                self.write_batch(id, &batch, first.as_deref(), &mut written, &mut step)?;
+                first.get_or_insert_with(|| batch[0].manifest.path.clone());
                 batch.clear();
                 bytes = 0;
             }
         }
         if !batch.is_empty() {
-            self.write_batch(id, &batch, &mut written, &mut step)?;
+            self.write_batch(id, &batch, first.as_deref(), &mut written, &mut step)?;
         }
         Ok(written)
     }
 
+    /// `first` is the path of the capture's first row, once a batch was
+    /// written.
     fn write_batch(
         &self,
         id: &str,
         batch: &[ScannedEntry],
+        first: Option<&str>,
         written: &mut Written,
         step: &mut impl FnMut(CaptureStep) -> CoreResult<()>,
     ) -> CoreResult<()> {
@@ -1132,6 +1177,19 @@ impl SqliteSnapshotStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
+        // Another process's retention pass took the capture for abandoned
+        // and removed its rows: it stops now rather than at its last write.
+        if let Some(first) = first
+            && !tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM snapshot_files WHERE snapshot_id=?1 AND path=?2)",
+                    params![id, first],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage)?
+        {
+            return Err(removed_while_written());
+        }
         {
             let mut exists = tx.prepare_cached(BLOB_STORED).map_err(storage)?;
             let mut insert_blob = tx
@@ -1203,9 +1261,7 @@ impl SqliteSnapshotStore {
             )
             .map_err(storage)?;
         if u64::try_from(rows).ok() != Some(written.files) {
-            return Err(CoreError::Storage(format!(
-                "snapshot {id} lost manifest entries while it was captured"
-            )));
+            return Err(removed_while_written());
         }
         tx.execute(
             "INSERT INTO snapshots(id,thread_id,created_at,file_count) VALUES(?1,?2,?3,?4)",
@@ -1248,6 +1304,17 @@ impl SqliteSnapshotStore {
             }
         }
     }
+}
+
+/// Why a capture fails whose rows a retention pass of another process
+/// removed, taking it for abandoned. It may reach the person as the error
+/// of the tool call that needed the checkpoint.
+fn removed_while_written() -> CoreError {
+    CoreError::Storage(
+        "could not save the undo checkpoint: another Haarness process sharing this data \
+         removed it as unfinished while it was being written; try again"
+            .into(),
+    )
 }
 
 fn compress(data: &[u8]) -> CoreResult<Vec<u8>> {
@@ -2881,7 +2948,7 @@ mod tests {
                 })
                 .unwrap_err();
         };
-        let crashed = started_hours_ago(2);
+        let crashed = started_hours_ago(25);
         stopped(&crashed);
         // One that started just now looks like this while it runs, in this
         // process or another.
@@ -2918,7 +2985,7 @@ mod tests {
         );
 
         // A capture whose rows a pass took for abandoned cannot complete.
-        let slow = started_hours_ago(2);
+        let slow = started_hours_ago(25);
         let written = store.write_manifest(&slow, BATCH, |_| Ok(())).unwrap();
         assert_eq!(
             store
@@ -2929,13 +2996,13 @@ mod tests {
         );
         let error = store.publish(&slow, ThreadId::new(), written).unwrap_err();
         assert!(
-            error.to_string().contains("lost manifest entries"),
+            error.to_string().contains("removed it as unfinished"),
             "{error}"
         );
         assert_eq!(count(&store, "snapshots"), 0);
 
         // A completed one is never abandoned, however old its id.
-        let done = started_hours_ago(2);
+        let done = started_hours_ago(25);
         let written = store.write_manifest(&done, BATCH, |_| Ok(())).unwrap();
         store.publish(&done, ThreadId::new(), written).unwrap();
         assert_eq!(
@@ -2949,7 +3016,11 @@ mod tests {
     fn only_old_v7_ids_count_as_started_before_a_cutoff() {
         let now = Utc::now().timestamp_millis();
         assert!(started_before(
-            &started_hours_ago(2),
+            &started_hours_ago(25),
+            now - ABANDONED_AFTER_MS
+        ));
+        assert!(!started_before(
+            &started_hours_ago(23),
             now - ABANDONED_AFTER_MS
         ));
         assert!(!started_before(
@@ -2962,6 +3033,61 @@ mod tests {
             i64::MAX
         ));
         assert!(!started_before("not an id", i64::MAX));
+    }
+
+    #[test]
+    fn a_capture_of_this_process_is_never_taken_for_abandoned() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c"] {
+            fs::write(workspace.join(name), format!("{name}\n")).unwrap();
+        }
+        // Its id is over a day old, as after a laptop slept through it; the
+        // pass runs on another connection of this process.
+        let id = started_hours_ago(25);
+        let elsewhere =
+            SqliteSnapshotStore::open(guard.0.join("test.db"), workspace.clone()).unwrap();
+        let mut swept = Vec::new();
+        let info = store
+            .capture_as(&id, ThreadId::new(), batches_of(1), |step| {
+                if step == CaptureStep::Written {
+                    swept.push(elsewhere.sweep()?);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(swept, vec![PruneReport::default(); 3]);
+        assert_eq!(info.file_count, 3);
+        assert_eq!(store.load_manifest(&id).unwrap().len(), 3);
+        assert!(
+            !CAPTURING.lock().contains(&id),
+            "done, it is no longer in flight"
+        );
+    }
+
+    #[test]
+    fn a_capture_whose_rows_another_process_removed_stops_at_its_next_batch() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c"] {
+            fs::write(workspace.join(name), format!("{name}\n")).unwrap();
+        }
+        // Another process's capture, a day old: this process's pass may take
+        // it for abandoned.
+        let id = started_hours_ago(25);
+        let mut written = 0;
+        let error = store
+            .write_manifest(&id, batches_of(1), |step| {
+                if step == CaptureStep::Written {
+                    written += 1;
+                    assert_eq!(store.sweep()?.abandoned, 1);
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(written, 1, "the next batch stops");
+        assert!(error.to_string().contains("try again"), "{error}");
+        assert_eq!(count(&store, "snapshot_files"), 0);
     }
 
     #[test]
