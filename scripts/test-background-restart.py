@@ -32,6 +32,7 @@ import urllib.request
 import uuid
 
 import e2e_scratch
+from e2e_env import ISOLATED
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).resolve()
@@ -42,7 +43,7 @@ home.mkdir()
 (workspace / ".haarness").mkdir(parents=True)
 (workspace / ".haarness/config.toml").write_text(
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="allow"\n[lsp]\nenabled=false\n')
-env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
+env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
        "HAARNESS_DATA_DIR": str(root / "data"), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
        "HAARNESS_TEST_PROVIDER": "1"}
 args = [str(BINARY), "--workspace", str(workspace), "--trust-project"]

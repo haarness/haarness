@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 
 import e2e_scratch
+from e2e_env import ISOLATED
 
 repo = Path(__file__).resolve().parents[1]
 binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
@@ -71,7 +72,7 @@ service = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Anthropic)
 threading.Thread(target=service.serve_forever, daemon=True).start()
 home, project, data, team = root / "home", root / "project", root / "data", root / "team"
 config = data / "config"
-env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
+env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
        "HAARNESS_DATA_DIR": str(data), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
        "ANTHROPIC_API_KEY": "fixture-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{service.server_port}/v1"}
 connection = None

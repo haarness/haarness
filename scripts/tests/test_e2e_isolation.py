@@ -47,25 +47,40 @@ class UsageStatisticsTests(unittest.TestCase):
         # Dropping every HAARNESS_* variable also drops HAARNESS_TELEMETRY=0 and a closed
         # HAARNESS_CLOUD_API_URL, so a script uses e2e_env.clean_env (a spec, isolated-env.ts) instead.
         drop = re.compile(
+            # A filter or a loop that leaves out every HAARNESS_* variable.
             r"not\s+\w+\.startswith\(\s*\(?\s*['\"]HAARNESS_"
-            r"|startswith\(\s*['\"]HAARNESS_['\"]\s*\)\s+and\s+\w+\s+not\s+in"
+            r"|startswith\(\s*\(?\s*['\"]HAARNESS_['\"].*(?:\bdel\b|\.pop\(|\bnot\s+in\b)"
+            # Taking the isolation values out again.
+            r"|(?:\bdel\s+\w+\[|\.pop\()\s*['\"]HAARNESS_(?:TELEMETRY|CLOUD_API_URL)['\"]"
         )
-        allowlist = re.compile(r"os\.environ\.items\(\)\s+if\s+\w+\s+in\s+\(")
+        # An environment built from scratch: an allowlist of the caller's, or a literal.
+        scratch = re.compile(
+            r"os\.environ\.items\(\)\s+if\s+\w+\s+in\s+\(|\benv\s*=\s*\{\s*(?:\*\*\w+\s*,\s*)?['\"]PATH['\"]"
+        )
         python = sorted([*(ROOT / "scripts").glob("*.py"), *(ROOT / "sdks/tests").glob("*.py")])
         self.assertGreater(len(python), 50)
         for path in python:
             text = path.read_text()
             self.assertIsNone(drop.search(text), path.name)
-            if "clean_env(" in text and path.name != "e2e_env.py":
-                imports = [node for node in ast.walk(ast.parse(text)) if isinstance(node, ast.ImportFrom)]
-                self.assertTrue(any(node.module == "e2e_env" for node in imports), path.name)
-            if allowlist.search(text):
+            if ("clean_env(" in text or "ISOLATED" in text) and path.name != "e2e_env.py":
+                tree = ast.parse(text)
+                imported = any(
+                    (isinstance(node, ast.ImportFrom) and node.module == "e2e_env")
+                    or (isinstance(node, ast.Import) and any(alias.name == "e2e_env" for alias in node.names))
+                    for node in ast.walk(tree)
+                )
+                self.assertTrue(imported, path.name)
+            if scratch.search(text):
                 self.assertTrue("ISOLATED" in text or "HAARNESS_TELEMETRY" in text, path.name)
         specs = sorted((ROOT / "apps/desktop/e2e").rglob("*.ts"))
         self.assertGreater(len(specs), 30)
+        ts_drop = re.compile(
+            r"startsWith\(\s*['\"]HAARNESS_['\"]\s*\)"
+            r"|delete\s+\w+(?:\.HAARNESS_(?:TELEMETRY|CLOUD_API_URL)|\[\s*['\"]HAARNESS_(?:TELEMETRY|CLOUD_API_URL))"
+        )
         for path in specs:
             if path.name != "isolated-env.ts":
-                self.assertNotIn('startsWith("HAARNESS_")', path.read_text(), path.name)
+                self.assertIsNone(ts_drop.search(path.read_text()), path.name)
         for path, line in [
             ("apps/desktop/playwright.config.ts", 'process.env.HAARNESS_TELEMETRY ??= "0";'),
             ("scripts/test-all.sh", 'export HAARNESS_TELEMETRY="${HAARNESS_TELEMETRY:-0}"'),
