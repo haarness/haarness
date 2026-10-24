@@ -2004,8 +2004,10 @@ struct FileSearchQuery {
     /// Search a chat's own folder: results are relative to it.
     thread_id: Option<ThreadId>,
 }
-/// Dependency and build folders file search leaves out unless the query
-/// names them (`node_modules/react`); a listing still shows them.
+/// Dependency and build folders file search leaves out of a folder outside
+/// Git unless the query names them (`node_modules/react`); a listing still
+/// shows them. In a Git work tree, `.gitignore` says what to leave out, as
+/// files committed under such names (`cmd/dist/main.go`) are a project's.
 const SEARCH_SKIPS: [&str; 8] = [
     "node_modules",
     ".venv",
@@ -2041,20 +2043,32 @@ async fn search_files(
         let needle = raw_query.to_ascii_lowercase();
         let mut scored: Vec<(i64, String)> = Vec::new();
         // `.gitignore` and `.ignore` apply in a folder outside Git too, and
-        // a dependency or build folder is not searched unless the query
-        // names it, so a big one cannot use up the walk before the files a
-        // person means.
+        // there a dependency or build folder is not searched unless the
+        // query names it, so a big one cannot use up the walk before the
+        // files a person means.
         let named = needle.clone();
+        let top = workspace.clone();
+        let in_git = workspace
+            .ancestors()
+            .any(|folder| folder.join(".git").exists());
         let walker = ignore::WalkBuilder::new(&workspace)
             .hidden(true)
             .require_git(false)
             .max_depth(Some(12))
             .filter_entry(move |entry| {
-                !(entry.depth() > 0
+                !(!in_git
+                    && entry.depth() > 0
                     && entry.file_type().is_some_and(|kind| kind.is_dir())
                     && entry.file_name().to_str().is_some_and(|name| {
                         SEARCH_SKIPS.contains(&name) && !named.contains(&name.to_ascii_lowercase())
-                    }))
+                    })
+                    // Nor in a repository inside the searched folder.
+                    && !entry
+                        .path()
+                        .ancestors()
+                        .skip(1)
+                        .take_while(|folder| *folder != top)
+                        .any(|folder| folder.join(".git").exists()))
             })
             .build();
         for entry in walker.flatten().take(50_000) {
