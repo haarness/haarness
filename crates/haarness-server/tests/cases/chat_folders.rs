@@ -3,6 +3,7 @@
 //! permissions and undo work there; children and forks work there too. An
 //! ordinary chat keeps working in the project folder.
 use super::*;
+use base64::Engine as _;
 use haarness_protocol::{ItemData, PermissionReply, PermissionReplyDecision, ThreadId};
 use serde_json::json;
 use std::path::PathBuf;
@@ -433,7 +434,6 @@ async fn a_relative_attachment_is_read_from_the_chat_folder() {
             _ => None,
         })
         .unwrap();
-    use base64::Engine as _;
     let encoded = attached[0].rsplit_once(',').unwrap().1;
     assert_eq!(
         base64::engine::general_purpose::STANDARD
