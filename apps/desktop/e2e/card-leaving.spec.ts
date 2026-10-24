@@ -278,9 +278,11 @@ test("a question card leaving moves the view once with the row of its answer", a
 });
 
 test("the running step it let through, opened, stays where it was clicked as a row above the view shrinks", async () => {
-  // A long reply wholly above the view once the step is in.
-  for (let reply = 0; reply < 2; reply++) {
-    await send("::long 40");
+  // Long replies, one of them drawn wholly above the view once the step is in
+  // (the nearest may still reach into the view, and the farthest may be out
+  // of the list's drawn rows).
+  for (let reply = 0; reply < 3; reply++) {
+    await send("::long 30");
     await idle();
   }
   await settle();
@@ -297,17 +299,17 @@ test("the running step it let through, opened, stays where it was clicked as a r
   await settle();
   const at = () => summary.evaluate((element) => element.getBoundingClientRect().top);
   const before = await at();
-  // A row wholly above the view drawn 200px shorter, as one measured anew
-  // smaller is (a wider window, an image's placeholder settling).
+  // The nearest drawn row wholly above the view made shorter, as one measured
+  // anew smaller is (a wider window, an image's placeholder settling).
   const shrunk = await page.evaluate(() => {
     const list = document.querySelector<HTMLElement>(".transcript")!;
     const view = list.getBoundingClientRect();
-    const row = [...list.querySelectorAll<HTMLElement>(".transcript-body > [data-index]")].find(
-      (row) => row.getBoundingClientRect().bottom < view.top - 50 && row.offsetHeight > 400,
-    );
+    const row = [...list.querySelectorAll<HTMLElement>(".transcript-body > [data-index]")]
+      .filter((row) => row.getBoundingClientRect().bottom < view.top - 50 && row.offsetHeight > 300)
+      .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
     const text = row?.querySelector<HTMLElement>(".markdown");
     if (!text) return false;
-    text.style.height = text.offsetHeight - 200 + "px";
+    text.style.height = text.offsetHeight - Math.min(200, text.offsetHeight - 100) + "px";
     text.style.overflow = "hidden";
     return true;
   });
