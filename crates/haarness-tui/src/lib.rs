@@ -144,14 +144,65 @@ fn editor_command(editor: &str, file: &std::path::Path) -> std::process::Command
     command
 }
 
+/// The folder the `$EDITOR` draft lives in while it is edited: made new in
+/// the temporary folder under a name no one can guess, for this user only
+/// (`/tmp` is shared on Linux), and removed with the draft.
+struct DraftFolder(PathBuf);
+
+impl DraftFolder {
+    fn new() -> std::io::Result<Self> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        let path = std::env::temp_dir().join(format!(
+            "haarness-compose-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        // Never one that is already there, a link included.
+        builder.create(&path)?;
+        Ok(Self(path))
+    }
+
+    /// The draft `text` in a new file of the folder, readable by this user
+    /// only.
+    fn write(&self, text: &str) -> std::io::Result<PathBuf> {
+        use std::io::Write as _;
+        let file = self.0.join("draft.md");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&file)?.write_all(text.as_bytes())?;
+        Ok(file)
+    }
+}
+
+impl Drop for DraftFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// $EDITOR round-trip: leave the alternate screen, run the user's editor on
 /// the composer text, and rebuild the renderer when they return.
 fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".into());
-    let file = std::env::temp_dir().join(format!("haarness-compose-{}.md", std::process::id()));
-    let _ = std::fs::write(&file, app.composer.expanded_text());
+    let folder = match DraftFolder::new() {
+        Ok(folder) => folder,
+        Err(error) => {
+            app.notice = format!("Could not open the editor: {error}");
+            return;
+        }
+    };
+    let file = match folder.write(&app.composer.expanded_text()) {
+        Ok(file) => file,
+        Err(error) => {
+            app.notice = format!("Could not open the editor: {error}");
+            return;
+        }
+    };
     crate::terminal::restore_terminal();
     let status = editor_command(&editor, &file).status();
     // Re-enter raw mode + alternate screen; the original guard still owns
@@ -169,7 +220,6 @@ fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
         }
         _ => app.notice = "Editor cancelled".into(),
     }
-    let _ = std::fs::remove_file(&file);
 }
 
 fn suspend_terminal(renderer: &mut Renderer, last_title: &mut String) -> Result<()> {
