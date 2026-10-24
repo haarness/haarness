@@ -1276,9 +1276,12 @@ export function Session() {
   // height has grown, which near its end would cut the move short, so the
   // list is made that tall first. Following, the end is kept instead, in the
   // same callback (onChange above): a move from here would start from where
-  // the view was before the end was last kept, and take it back up.
+  // the view was before the end was last kept, and take it back up. A running
+  // step just opened holds the view, and the end is not kept meanwhile, so a
+  // row above still keeps its place then; one that grows ends the hold, and
+  // the end is kept again in the same callback.
   virtual.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
-    if (follow() && !toggled) return false;
+    if (follow() && !toggled && !quietUntil) return false;
     if (!keepsRowsAbove(item, instance)) return false;
     const body = instance.scrollElement?.querySelector<HTMLElement>(":scope > .transcript-body");
     if (body && delta > 0) body.style.height = `${instance.getTotalSize() + delta}px`;
