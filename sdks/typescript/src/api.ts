@@ -450,12 +450,14 @@ export class Api extends Transport {
     return this.request("GET", `/v1/files/content`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** PUT /v1/files/content */
-  writeFile(body: T.FileWrite, options: RequestOptions = {}): Promise<T.FileContent> {
-    return this.request("PUT", `/v1/files/content`, { body, binaryBody: false, binaryResponse: false, ...options });
+  writeFile(body: T.FileWrite, query: Exclusive<T.FileScope, RequestOptions> = {}, options: RequestOptions = {}): Promise<T.FileContent> {
+    [query, options] = splitQuery(query, options);
+    return this.request("PUT", `/v1/files/content`, { body, query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/files/action */
-  mutateFile(body: T.FileAction, options: RequestOptions = {}): Promise<T.JsonValue> {
-    return this.request("POST", `/v1/files/action`, { body, binaryBody: false, binaryResponse: false, ...options });
+  mutateFile(body: T.FileAction, query: Exclusive<T.FileScope, RequestOptions> = {}, options: RequestOptions = {}): Promise<T.JsonValue> {
+    [query, options] = splitQuery(query, options);
+    return this.request("POST", `/v1/files/action`, { body, query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/files/preview */
   previewVersion(query: T.PreviewVersionQuery, options: RequestOptions = {}): Promise<T.FileContent> {

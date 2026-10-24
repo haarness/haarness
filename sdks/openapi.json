@@ -1695,6 +1695,13 @@
           "content": {
             "type": "string"
           },
+          "directory": {
+            "description": "The chat folder (canonical and absolute) `path` is relative to, when\nthe request named a chat with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "encoding": {
             "type": "string"
           },
@@ -1814,6 +1821,13 @@
       },
       "FileListing": {
         "properties": {
+          "directory": {
+            "description": "The chat folder (canonical and absolute) the entries' paths are\nrelative to, when the listing was asked for a chat with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "entries": {
             "items": {
               "$ref": "#/components/schemas/FileEntry"
@@ -1837,6 +1851,18 @@
           },
           "path": {
             "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "FileScope": {
+        "properties": {
+          "threadId": {
+            "type": "string"
           }
         },
         "required": [],
@@ -1848,6 +1874,9 @@
             "type": "integer"
           },
           "q": {
+            "type": "string"
+          },
+          "threadId": {
             "type": "string"
           }
         },
@@ -7924,7 +7953,16 @@
     "/v1/files/action": {
       "post": {
         "operationId": "mutate_file",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7974,6 +8012,14 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -7999,7 +8045,16 @@
       },
       "put": {
         "operationId": "write_file",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8050,6 +8105,14 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -8137,6 +8200,14 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8215,6 +8286,14 @@
             "required": false,
             "schema": {
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
