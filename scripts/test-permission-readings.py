@@ -15,10 +15,12 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    allowed `cat *` with `"*": "ask"` runs without a question, as before.
 6. dev: a redirect into `/dev/shm` asks for the folder like any path outside the project, while
    `/dev/null`, `/dev/stderr` and the other stream devices ask nothing.
+7. action_case: `"Deny"` in haarness.json denies, and a value that is no action is ignored with one
+   warning in the log that names the file and the key.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash, backquotes, dev). No model is called; nothing outside the fixture is
+toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case). No model is called; nothing outside the fixture is
 touched.
 """
 import json
@@ -202,8 +204,27 @@ def case_dev():
     passed('a redirect into /dev/shm asks; /dev/null and /dev/stderr do not')
 
 
+def case_action_case():
+    """A permission action in any letter case applies; another value is named in the log."""
+    _, env = environment('action-case')
+    folder = project('action-case', {'permission': {'bash': {'echo hello*': 'Deny', 'echo bye*': 'dney'}}})
+    try:
+        output = bash(env, folder, 'echo hello there')
+        assert "is denied by permission rule 'bash:echo hello*'" in output, output
+        output = bash(env, folder, 'echo bye now', code=0)
+        assert 'bye now' in output, output
+    finally:
+        stop(env, folder)
+    logs = '\n'.join(path.read_text() for path in (root / 'action-case' / 'data').rglob('haarness.log*'))
+    warning = (f'config: ignored "permission.bash.echo bye*" in {folder / "haarness.json"}: '
+               '"dney" is not allow, ask or deny')
+    assert logs.count(warning) == 1, logs[-2000:]
+    passed('"Deny" denies; "dney" is ignored and the log names the file and the key')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
-         'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev}
+         'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
+         'action_case': case_action_case}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

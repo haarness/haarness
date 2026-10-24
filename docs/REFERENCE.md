@@ -524,7 +524,7 @@ refresh_ms = 2000
 timeout_ms = 5000
 
 [permissions]
-# Decisions are allow|ask|deny; later rules override earlier ones, in the
+# Decisions are allow|ask|deny (any letter case); later rules override earlier ones, in the
 # order written (tool-wide entries first, then the [permissions.<tool>] tables).
 # The defaults allow tools, while external directories, secret
 # `.env` reads, agent switches, generated media, repeated identical

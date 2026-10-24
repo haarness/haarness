@@ -1060,7 +1060,7 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
         super::apply_json_goal_config(&mut layers.native, &current);
     }
     if let Some(permission) = value.get("permission") {
-        compile_permission(&mut layers.rules, permission);
+        compile_permission(&mut layers.rules, permission, path, "permission");
     }
     if let Some(hooks) = value.get("hooks") {
         layers.hook_sources.push(HookSource {
@@ -1154,6 +1154,8 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
                     tools: agent_tools(entry.get("tools")),
                     permissions: agent_permissions(
                         entry.get("permission").or_else(|| entry.get("permissions")),
+                        path,
+                        &format!("agent.{name}.permission"),
                     ),
                     hidden: entry
                         .get("hidden")
@@ -1217,15 +1219,21 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
 }
 
 /// `permission` configuration: a bare action, or a map of
-/// tool → action | { pattern → action }, declaration order preserved.
-fn compile_permission(rules: &mut Vec<PermissionRule>, permission: &Value) {
-    let push = |rules: &mut Vec<PermissionRule>, pattern: String, action: &str| {
-        if let Some(decision) = decision(action) {
-            rules.push(PermissionRule { pattern, decision });
-        }
-    };
+/// tool → action | { pattern → action }, declaration order preserved. An
+/// action is `allow`, `ask` or `deny` in any letter case (`"Deny"` is what
+/// was meant); any other value leaves its rule out, with a warning in the log
+/// naming `file` and the key (`key` is where the block sits: `permission`,
+/// `agent.review.permission`).
+fn compile_permission(rules: &mut Vec<PermissionRule>, permission: &Value, file: &Path, key: &str) {
+    let push =
+        |rules: &mut Vec<PermissionRule>, pattern: String, action: &Value, at: &str| match action
+            .as_str()
+            .and_then(decision)
+        {
+            Some(decision) => rules.push(PermissionRule { pattern, decision }),
+            None => ignored_action(file, at, action),
+        };
     match permission {
-        Value::String(action) => push(rules, "*".into(), action),
         Value::Object(map) => {
             for (tool, entry) in map {
                 let tool_pattern = |pattern: &str| {
@@ -1238,24 +1246,45 @@ fn compile_permission(rules: &mut Vec<PermissionRule>, permission: &Value) {
                     }
                 };
                 match entry {
-                    Value::String(action) => push(rules, tool_pattern("*"), action),
                     Value::Object(patterns) => {
                         for (pattern, action) in patterns {
-                            if let Some(action) = action.as_str() {
-                                push(rules, tool_pattern(pattern), action);
-                            }
+                            push(
+                                rules,
+                                tool_pattern(pattern),
+                                action,
+                                &format!("{key}.{tool}.{pattern}"),
+                            );
                         }
                     }
-                    _ => {}
+                    action => push(rules, tool_pattern("*"), action, &format!("{key}.{tool}")),
                 }
             }
         }
-        _ => {}
+        action => push(rules, "*".into(), action, key),
+    }
+}
+
+/// A permission action [`compile_permission`] cannot read, logged once per
+/// file, key and value for the process (configuration loads again on every
+/// reload).
+fn ignored_action(file: &Path, key: &str, action: &Value) {
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let message = format!(
+        "config: ignored \"{key}\" in {}: {action} is not allow, ask or deny",
+        file.display()
+    );
+    if SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(message.clone())
+    {
+        tracing::warn!("{message}");
     }
 }
 
 fn decision(action: &str) -> Option<PermissionDecision> {
-    match action {
+    match action.to_ascii_lowercase().as_str() {
         "allow" => Some(PermissionDecision::Allow),
         "ask" => Some(PermissionDecision::Ask),
         "deny" => Some(PermissionDecision::Deny),
@@ -1277,7 +1306,7 @@ fn agent_tools(value: Option<&Value>) -> HashMap<String, bool> {
         .unwrap_or_default()
 }
 
-fn agent_permissions(value: Option<&Value>) -> Vec<PermissionRule> {
+fn agent_permissions(value: Option<&Value>, file: &Path, key: &str) -> Vec<PermissionRule> {
     let Some(value) = value else {
         return Vec::new();
     };
@@ -1285,7 +1314,7 @@ fn agent_permissions(value: Option<&Value>) -> Vec<PermissionRule> {
         return rules;
     }
     let mut rules = Vec::new();
-    compile_permission(&mut rules, value);
+    compile_permission(&mut rules, value, file, key);
     rules
 }
 
@@ -1920,7 +1949,9 @@ fn discover_agents_with(
                     .get("permission")
                     .or_else(|| front.get("permissions"))
                     .and_then(|raw| serde_json::from_str(raw).ok())
-                    .map_or_else(Vec::new, |value| agent_permissions(Some(&value))),
+                    .map_or_else(Vec::new, |value| {
+                        agent_permissions(Some(&value), &path, "permission")
+                    }),
                 hidden: front.get("hidden").is_some_and(|value| value == "true"),
                 color: front.get("color").map(String::as_str).and_then(agent_color),
                 steps: front
@@ -3727,10 +3758,75 @@ mod tests {
                 "bash": {"*": "ask", "git status *": "allow"},
                 "edit": "allow",
             }),
+            Path::new("haarness.json"),
+            "permission",
         );
         let patterns: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
         assert_eq!(patterns, vec!["bash:*", "bash:git status *", "edit:*"]);
         assert_eq!(rules[1].decision, PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn a_permission_action_reads_in_any_letter_case_and_another_value_is_logged() {
+        #[derive(Clone, Default)]
+        struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Log::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let file = Path::new("/project/haarness.json");
+        let mut rules = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                rules.clear();
+                compile_permission(
+                    &mut rules,
+                    &serde_json::json!({
+                        "bash": {"rm *": "Deny", "git push *": "ASK", "git status *": "dney"},
+                        "edit": "Allow",
+                        "webfetch": true,
+                    }),
+                    file,
+                    "permission",
+                );
+            }
+        });
+        let compiled: Vec<(&str, PermissionDecision)> = rules
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.decision))
+            .collect();
+        assert_eq!(
+            compiled,
+            vec![
+                ("bash:rm *", PermissionDecision::Deny),
+                ("bash:git push *", PermissionDecision::Ask),
+                ("edit:*", PermissionDecision::Allow),
+            ]
+        );
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        // One line for each value nobody can read, however often it loads.
+        assert_eq!(
+            text.matches("config: ignored \"permission.bash.git status *\" in /project/haarness.json: \"dney\" is not allow, ask or deny").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("config: ignored \"permission.webfetch\" in /project/haarness.json: true is not allow, ask or deny").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 2, "{text}");
     }
 
     #[test]
@@ -3749,7 +3845,12 @@ mod tests {
         let migrated: Value =
             serde_json::from_str(&fs::read_to_string(root.join("haarness.json")).unwrap()).unwrap();
         let mut rules = Vec::new();
-        compile_permission(&mut rules, &migrated["permission"]);
+        compile_permission(
+            &mut rules,
+            &migrated["permission"],
+            &root.join("haarness.json"),
+            "permission",
+        );
         let patterns: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
         assert_eq!(
             patterns,
