@@ -12936,10 +12936,26 @@ fn provider_messages_with_origins(
     let mut deferred_queued =
         HashMap::<ItemId, (ProviderMessage, crate::image_budget::Origin)>::new();
     let mut deferred_order = Vec::new();
+    // A forked chat's copied items carry no turn: each message the person
+    // wrote there (not a steer they queued) opens a group of its own, as its
+    // turn did in the parent.
+    let mut group = None;
     for item in provider_visible_items(&items) {
         let item_id = item.id;
+        if item.turn_id.is_none()
+            && matches!(
+                item.data,
+                ItemData::UserMessage {
+                    queued: false,
+                    synthetic: false,
+                    ..
+                }
+            )
+        {
+            group = Some(TurnId(item.id.0));
+        }
         let mut origin = crate::image_budget::Origin {
-            turn: item.turn_id,
+            turn: item.turn_id.or(group),
             person: matches!(
                 item.data,
                 ItemData::UserMessage {
@@ -16492,6 +16508,78 @@ mod tests {
             .map(|image| crate::attachments::display_name(&image.source))
             .collect();
         (names, choice)
+    }
+
+    #[test]
+    fn a_forked_chat_keeps_the_same_images_through_a_cut_as_its_parent() {
+        const MIB: usize = 1024 * 1024;
+        let image = |name: &str, bytes| {
+            format!(
+                "data:image/png;name={name}.png;base64,{}",
+                "A".repeat(bytes)
+            )
+        };
+        // The parent's items carry their turn; a fork's copies carry none.
+        let chat = |turn: Option<TurnId>| {
+            let at = |sequence, data| Item {
+                turn_id: turn,
+                ..item(sequence, data)
+            };
+            let mut items = vec![
+                at(
+                    1,
+                    ItemData::UserMessage {
+                        text: "match this design".into(),
+                        attachments: vec![image("design", 8 * MIB)],
+                        queued: false,
+                        synthetic: false,
+                        command_line: None,
+                    },
+                ),
+                at(
+                    2,
+                    ItemData::UserMessage {
+                        text:
+                            "<system-reminder>\nToday's date is now Saturday.\n</system-reminder>"
+                                .into(),
+                        attachments: Vec::new(),
+                        queued: false,
+                        synthetic: true,
+                        command_line: None,
+                    },
+                ),
+            ];
+            for index in 1..=5_u64 {
+                let call = format!("s{index}");
+                items.push(at(
+                    2 * index + 1,
+                    ItemData::ToolCall {
+                        call_id: call.clone(),
+                        name: "screenshot".into(),
+                        arguments: json!({}),
+                        provider_metadata: serde_json::Value::Null,
+                    },
+                ));
+                items.push(at(
+                    2 * index + 2,
+                    ItemData::ToolResult {
+                        call_id: call.clone(),
+                        name: "screenshot".into(),
+                        output: "Screenshot taken".into(),
+                        is_error: false,
+                        metadata: json!({"attachments": [image(&call, 4 * MIB)]}),
+                    },
+                ));
+            }
+            let (mut messages, origins) = super::provider_messages_with_origins(items);
+            crate::image_budget::bound(&mut messages, &origins, crate::ImageLimits::default());
+            super::sent_images(&messages)
+                .iter()
+                .map(|image| crate::attachments::display_name(&image.source))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chat(Some(TurnId::new())), ["design.png", "s5.png"]);
+        assert_eq!(chat(None), ["design.png", "s5.png"]);
     }
 
     #[test]
