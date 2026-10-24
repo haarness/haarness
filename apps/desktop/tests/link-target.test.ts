@@ -98,3 +98,25 @@ test("Windows projects compare paths without case", () => {
   assert.deepEqual(linkTarget("file:///C:/Users/Me/app/a.ts", windows), file("a.ts"));
   assert.deepEqual(linkTarget("D:\\app\\a.ts", windows), refused("outside"));
 });
+
+test("in a chat without a project, links start from the chat's own folder and never leave it", () => {
+  const home = { root: "/data/Chat folders", within: "2026-10-24/trip" };
+  for (const [href, target] of [
+    ["notes.md", file("2026-10-24/trip/notes.md")],
+    ["./plan/day1.md:3", file("2026-10-24/trip/plan/day1.md", 3)],
+    ["/data/Chat folders/2026-10-24/trip/notes.md", file("2026-10-24/trip/notes.md")],
+    ["file:///data/Chat%20folders/2026-10-24/trip/a.png", file("2026-10-24/trip/a.png")],
+    // Another chat's folder, the day above and the chat home are outside.
+    ["../other/secret.md", refused("outside")],
+    ["/data/Chat folders/2026-10-24/other/secret.md", refused("outside")],
+    ["..", refused("outside")],
+    ["/data/Chat folders/notes.md", refused("outside")],
+    ["/etc/hosts", refused("outside")],
+  ] as const)
+    assert.deepEqual(linkTarget(href, home), target, href);
+  // A file preview's own folder still sets where relative links start.
+  assert.deepEqual(
+    linkTarget("b.md", { ...home, base: "2026-10-24/trip/docs" }),
+    file("2026-10-24/trip/docs/b.md"),
+  );
+});
