@@ -528,10 +528,14 @@ sends a short note in place of those images, so the prompt stays stable for
 caching; the original attachments stay in their messages. When the provider
 names the image by its place in the request (Anthropic's
 `messages.N.content.M`) only that image is left out. A refusal of the request
-for how many images it carries or how large they make it ("too many images",
-HTTP 413) leaves out the oldest of them, half by number and by size
-(`oldest: true`), and the newest images then reach the model; the turn's own
-images go only when no others are left. Any other refusal that names no image
+for how many images it carries ("too many images") or how large they make it
+(HTTP 413, Gemini's "Request payload size exceeds the limit") leaves out the
+oldest half of them by that measure (`oldest: true`), so the newest images then
+reach the model. The turn's own images and those of the last message carrying
+any stay, and so does a file read again among them: the record leaves a source
+out everywhere. When the turn's own images hold more than half the request or
+pass the provider's limits, leaving out the others would not help, so the
+newest go instead and the older ones are kept. Any other refusal that names no image
 leaves out the newest images (`guessed: true`): what the last request added is
 the likeliest cause. A refusal before anything streamed is retried once per
 turn; a second refusal in the same turn fails it, and the next turn sends
