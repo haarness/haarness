@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 mod content_filter;
 #[path = "support/reliability.rs"]
 mod reliability;
+#[path = "support/subagent_results.rs"]
+mod subagent_results;
 
 fn git_fixture_command<'a>(directory: &std::path::Path, args: impl IntoIterator<Item = &'a str>) {
     let output = std::process::Command::new("git")

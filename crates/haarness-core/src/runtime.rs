@@ -898,6 +898,8 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         "too many tokens",
         "prompt is too long",
         "input is too long",
+        // Ollama: "prompt too long; exceeded max context length by 1520 tokens".
+        "prompt too long; exceeded",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -1039,6 +1041,20 @@ fn refused_image<'a>(message: &str, sent: &'a [SentImage]) -> Option<&'a SentIma
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
     describe_error(error, None)
+}
+
+/// How a turn whose prompt a `UserPromptSubmit` hook blocked fails:
+/// `prompt blocked by a hook: <reason>`.
+pub const PROMPT_BLOCKED: &str = "prompt blocked by a hook: ";
+
+/// The refusal a failed turn's stored error holds when a `UserPromptSubmit`
+/// hook blocked its prompt (`prompt blocked by a hook: <reason>`), without
+/// the error's category: what an editor shows as the prompt's refusal.
+#[must_use]
+pub fn prompt_blocked(turn_error: &str) -> Option<&str> {
+    turn_error
+        .strip_prefix("invalid request: ")
+        .filter(|refusal| refusal.starts_with(PROMPT_BLOCKED))
 }
 
 /// Why a chat refused input, as a notice quotes it: the refusal's own words,
@@ -5857,11 +5873,7 @@ impl AgentRuntime {
             if active_request_id == request.request_id {
                 return self.repository.get_turn(active_turn_id).await;
             }
-            // Read by people: `haarness run --session` or an editor over
-            // ACP sending to a chat busy elsewhere.
-            return Err(CoreError::Conflict(
-                "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.".into(),
-            ));
+            return Err(CoreError::Conflict(crate::CHAT_BUSY.into()));
         }
         let thread = self
             .with_chat_folder(self.repository.get_thread(thread_id).await?)
@@ -6112,6 +6124,7 @@ impl AgentRuntime {
             inherited_ceilings,
             output_schema,
             progress: Mutex::new(TaskProgress::default()),
+            last_round: Mutex::new(None),
             status: Mutex::new(StatusState::default()),
             project_context: components.project_context.clone(),
             memory_context: self.memory_context.clone(),
@@ -6537,6 +6550,8 @@ struct RunnerTask {
     output_schema: Option<serde_json::Value>,
     /// Child-side liveness counters feeding `task.updated` events.
     progress: Mutex<TaskProgress>,
+    /// How the latest provider round of this turn ended.
+    last_round: Mutex<Option<LastRound>>,
     /// Deduplicated `turn.status` state machine.
     status: Mutex<StatusState>,
     project_context: Arc<String>,
@@ -6707,6 +6722,17 @@ struct TaskProgress {
     tool_calls: u64,
     last_tool: Option<String>,
     started_at: DateTime<Utc>,
+}
+
+/// How a turn's latest provider round ended: what a subagent's parent is
+/// told when the child stopped without a reply (see `subagent_reply`).
+#[derive(Debug, Clone, Default)]
+struct LastRound {
+    /// The finish reason as the provider sent it (`max_tokens`, `length`).
+    reason: String,
+    output_tokens: Option<u64>,
+    /// The round streamed text that is more than whitespace.
+    wrote_text: bool,
 }
 
 struct GoalRunAccounting {
@@ -8269,9 +8295,7 @@ impl RunnerTask {
                         decision = hooks.user_prompt_submit(self.thread.id, &self.request.text) => decision,
                     };
                     if let Some(reason) = decision.block {
-                        return Err(CoreError::Invalid(format!(
-                            "prompt blocked by a hook: {reason}"
-                        )));
+                        return Err(CoreError::Invalid(format!("{PROMPT_BLOCKED}{reason}")));
                     }
                     prompt_context = decision.context;
                 }
@@ -8889,6 +8913,10 @@ impl RunnerTask {
                 let mut structured_output = None;
                 let mut blocked = None;
                 let mut finished = false;
+                let mut finish_reason = String::new();
+                // Text that is more than whitespace streamed in this round,
+                // whatever reasoning flushed it into an item meanwhile.
+                let mut wrote_text = false;
                 let mut saw_provider_event = false;
                 loop {
                     let event = tokio::select! {
@@ -8985,6 +9013,7 @@ impl RunnerTask {
                                 .await?;
                             // Reasoning after this text begins where it ends.
                             thought_from = std::time::Instant::now();
+                            wrote_text |= !delta.trim().is_empty();
                             streamed.push_str(&delta);
                             text.push_str(&delta);
                             self.set_status("responding", None);
@@ -9104,6 +9133,7 @@ impl RunnerTask {
                                     blocked = Some(error);
                                 }
                             }
+                            finish_reason = reason;
                         }
                     }
                 }
@@ -9220,6 +9250,11 @@ impl RunnerTask {
                     },
                 ))
                 .await?;
+                *self.last_round.lock() = Some(LastRound {
+                    reason: finish_reason,
+                    output_tokens: usage.map(|(_, output_tokens, _, _)| output_tokens),
+                    wrote_text,
+                });
                 if let Some(error) = blocked {
                     for (call_id, name, _) in calls {
                         self.publish_item(ItemData::ToolResult {
@@ -11681,6 +11716,7 @@ impl RunnerTask {
             inherited_ceilings: parent_boundary,
             output_schema: None,
             progress: Mutex::new(TaskProgress::default()),
+            last_round: Mutex::new(None),
             status: Mutex::new(StatusState::default()),
             project_context: self.project_context.clone(),
             memory_context: self.memory_context.clone(),
@@ -11762,19 +11798,15 @@ impl RunnerTask {
         // The child's turn is part of the parent's `task` tool call trace.
         tokio::spawn(async move {
             let _permit = permit;
+            let child_turn = child_task.turn.id;
             let result = match Arc::clone(&child_task).run_with_cleanup().await {
                 Ok(()) => {
                     child_task.publish_task_update("done");
-                    repository.list_items(child.id, None).await.map(|items| {
-                        items
-                            .into_iter()
-                            .rev()
-                            .find_map(|item| match item.data {
-                                ItemData::AssistantMessage { text } => Some(text),
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| "Subagent completed without a text response".into())
-                    })
+                    let last = child_task.last_round.lock().clone();
+                    repository
+                        .list_items(child.id, None)
+                        .await
+                        .map(|items| subagent_reply(&items, child_turn, last.as_ref()))
                 }
                 Err(error) => {
                     child_task.publish_task_update(if matches!(error, CoreError::Cancelled) {
@@ -11782,7 +11814,19 @@ impl RunnerTask {
                     } else {
                         "failed"
                     });
-                    Err(error)
+                    match error {
+                        // The person-facing wording ("send a follow-up") reads
+                        // to a parent agent as a cue to send the same again.
+                        CoreError::ProviderBlocked(reason) => {
+                            let items = repository.list_items(child.id, None).await;
+                            let partial = items
+                                .as_deref()
+                                .ok()
+                                .and_then(|items| last_reply(items, child_turn));
+                            Err(CoreError::Tool(subagent_blocked(&reason, partial)))
+                        }
+                        error => Err(error),
+                    }
                 }
             };
             let state = match &result {
@@ -12066,15 +12110,29 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             "completed",
             task.reply
                 .clone()
-                .unwrap_or_else(|| "Subagent completed without a text response".into()),
+                .unwrap_or_else(|| ended_without_reply(None)),
         ),
-        "failed" => (
-            "error",
-            format!(
-                "{}\nHaarness restarted before this background task's result was delivered.",
-                task.error.as_deref().unwrap_or("The subagent failed.")
-            ),
-        ),
+        "failed" => {
+            // A child the provider's safety check stopped stored the wording
+            // written for a person; its parent is told as a live one is.
+            let error = match task
+                .error
+                .as_deref()
+                .and_then(CoreError::provider_blocked_reason)
+            {
+                Some(reason) => subagent_blocked(reason, task.reply.as_deref()),
+                None => task
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The subagent failed.".into()),
+            };
+            (
+                "error",
+                format!(
+                    "{error}\nHaarness restarted before this background task's result was delivered."
+                ),
+            )
+        }
         _ => (
             "error",
             format!(
@@ -12109,6 +12167,90 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             retryable: false,
         },
     ]
+}
+
+/// The last reply of `turn` that is more than whitespace.
+fn last_reply(items: &[Item], turn: TurnId) -> Option<&str> {
+    items
+        .iter()
+        .rev()
+        .filter(|item| item.turn_id == Some(turn))
+        .find_map(|item| match &item.data {
+            ItemData::AssistantMessage { text } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+}
+
+/// A round that ended at the output limit: Anthropic, Bedrock and Gemini say
+/// `max_tokens`, Chat Completions `length`, Responses `max_output_tokens`.
+fn output_limit(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "max_tokens" | "length" | "max_output_tokens"
+    )
+}
+
+/// What a parent reads as the result of a subagent's run `turn`: its last
+/// reply in that run. A run that stopped at its output limit says so, one
+/// whose last step wrote nothing says so before the text an earlier step
+/// wrote, and one that wrote no text at all says why: a blank result, or
+/// text passed off as the run's answer, would tell the parent nothing or
+/// something untrue.
+fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> String {
+    let reply = last_reply(items, turn);
+    let limit = last.filter(|round| output_limit(&round.reason));
+    let tokens = limit
+        .and_then(|round| round.output_tokens)
+        .map(|tokens| format!(" ({tokens} output tokens)"))
+        .unwrap_or_default();
+    match (reply, limit) {
+        // Often the answer, written beside a last tool call (a todo update)
+        // before an empty last step; sometimes narration. Which, only the
+        // model knows: say what happened, and hand the text on.
+        (Some(reply), None) if last.is_some_and(|round| !round.wrote_text) => format!(
+            "The subagent's last step wrote no text{}. The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\n{reply}",
+            finish_note(last)
+        ),
+        (Some(reply), None) => reply.to_owned(),
+        (Some(reply), Some(_)) => format!(
+            "The subagent stopped at its output limit{tokens} before it finished. Its last text:\n\n{reply}"
+        ),
+        (None, Some(_)) => format!(
+            "The subagent stopped at its output limit{tokens} before writing a reply. Give it a smaller task, or split the task."
+        ),
+        (None, None) => ended_without_reply(last),
+    }
+}
+
+/// "The subagent ended without writing a reply", with the provider's finish
+/// reason when `last` names one.
+fn ended_without_reply(last: Option<&LastRound>) -> String {
+    format!(
+        "The subagent ended without writing a reply{}.",
+        finish_note(last)
+    )
+}
+
+/// " (finish reason: stop)", when `last` names one.
+fn finish_note(last: Option<&LastRound>) -> String {
+    last.map(|round| round.reason.as_str())
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!(" (finish reason: {reason})"))
+        .unwrap_or_default()
+}
+
+/// What a parent reads when the provider's safety check stopped its
+/// subagent. The child's history still holds what was blocked, so resuming
+/// it or resending the task would most likely be blocked again.
+fn subagent_blocked(reason: &str, partial: Option<&str>) -> String {
+    let mut text = format!(
+        "The provider's safety check stopped this subagent ({reason}). Its history still holds what the blocked request sent, so resuming it or sending the same task again is likely to be blocked too: do not retry it as is. Start a new subagent with the task rephrased or split, do the work directly, or tell the user."
+    );
+    if let Some(partial) = partial {
+        text.push_str("\n\nPartial reply before the stop:\n");
+        text.push_str(partial);
+    }
+    text
 }
 
 fn task_envelope_for(child: ThreadId, description: &str, state: &str, text: &str) -> String {
@@ -14958,6 +15100,166 @@ mod tests {
         assert_eq!(other(CoreError::Storage("x".into())), ("other", "unknown"));
     }
 
+    /// A hook's block is read back from the error a failed turn stores, as
+    /// the runtime words it; other invalid requests are not.
+    #[test]
+    fn a_turn_a_prompt_hook_blocked_says_so_in_its_stored_error() {
+        let stored = super::user_facing_error(&CoreError::Invalid(format!(
+            "{}secrets in the prompt",
+            super::PROMPT_BLOCKED
+        )));
+        assert_eq!(
+            super::prompt_blocked(&stored),
+            Some("prompt blocked by a hook: secrets in the prompt")
+        );
+        let other = super::user_facing_error(&CoreError::Invalid("Unknown agent: nope".into()));
+        assert_eq!(super::prompt_blocked(&other), None);
+        assert_eq!(
+            super::prompt_blocked("prompt blocked by a hook: not stored this way"),
+            None
+        );
+    }
+
+    /// Every provider's way of saying the output limit ended a round, and
+    /// the normal finishes that do not.
+    #[test]
+    fn a_subagent_stopped_at_any_providers_output_limit_says_so() {
+        let turn = TurnId::new();
+        let reply = |reason: &str| {
+            super::subagent_reply(
+                &[],
+                turn,
+                Some(&super::LastRound {
+                    reason: reason.into(),
+                    output_tokens: None,
+                    wrote_text: false,
+                }),
+            )
+        };
+        for reason in ["max_tokens", "MAX_TOKENS", "length", "max_output_tokens"] {
+            assert_eq!(
+                reply(reason),
+                "The subagent stopped at its output limit before writing a reply. Give it a smaller task, or split the task.",
+                "{reason}"
+            );
+        }
+        for reason in ["stop", "end_turn", "STOP", "completed"] {
+            assert_eq!(
+                reply(reason),
+                format!("The subagent ended without writing a reply (finish reason: {reason}).")
+            );
+        }
+        assert_eq!(
+            super::subagent_reply(&[], turn, None),
+            "The subagent ended without writing a reply."
+        );
+    }
+
+    /// After a restart, a background subagent's result reads as a live one
+    /// would: a safety-check stop says not to retry it as is, with its
+    /// partial reply, and a run without a reply says so.
+    #[test]
+    fn a_stranded_subagent_reads_as_a_live_one_would() {
+        let task = |state: &str, reply: Option<&str>, error: Option<String>| crate::StrandedTask {
+            parent_thread_id: ThreadId::new(),
+            parent_turn_id: Some(TurnId::new()),
+            call_id: "call".into(),
+            child_thread_id: ThreadId::new(),
+            child_turn_id: TurnId::new(),
+            state: state.into(),
+            description: "Audit".into(),
+            reply: reply.map(str::to_owned),
+            error,
+        };
+        let envelope = |task: &crate::StrandedTask| match &super::stranded_report(task)[0] {
+            ItemData::UserMessage { text, .. } => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        let blocked = envelope(&task(
+            "failed",
+            Some("partial words"),
+            Some(CoreError::ProviderBlocked("refusal".into()).to_string()),
+        ));
+        assert!(
+            blocked.contains("The provider's safety check stopped this subagent (refusal).")
+                && blocked.contains("do not retry it as is")
+                && blocked.contains("Partial reply before the stop:\npartial words")
+                && blocked.contains(
+                    "Haarness restarted before this background task's result was delivered."
+                ),
+            "{blocked}"
+        );
+        assert!(!blocked.contains("Send a follow-up message"), "{blocked}");
+        let failed = envelope(&task(
+            "failed",
+            None,
+            Some("provider error: HTTP 500".into()),
+        ));
+        assert!(
+            failed.contains("provider error: HTTP 500\nHaarness restarted"),
+            "{failed}"
+        );
+        let silent = envelope(&task("done", None, None));
+        assert!(
+            silent.contains(
+                "<task_result>\nThe subagent ended without writing a reply.\n</task_result>"
+            ),
+            "{silent}"
+        );
+        let answered = envelope(&task("done", Some("the answer"), None));
+        assert!(
+            answered.contains("<task_result>\nthe answer\n</task_result>"),
+            "{answered}"
+        );
+    }
+
+    /// What the safety check's error says is read back to its reason, and
+    /// nothing else is.
+    #[test]
+    fn a_stored_safety_check_error_gives_back_its_reason() {
+        for reason in ["refusal", "content_filter", "SAFETY"] {
+            let stored = CoreError::ProviderBlocked(reason.into()).to_string();
+            assert_eq!(CoreError::provider_blocked_reason(&stored), Some(reason));
+        }
+        assert_eq!(
+            CoreError::provider_blocked_reason("The provider's safety check stopped this response"),
+            None
+        );
+        assert_eq!(
+            CoreError::provider_blocked_reason("provider error: refusal"),
+            None
+        );
+    }
+
+    /// A reply is the run's answer only when the run's last round wrote it.
+    #[test]
+    fn a_subagent_reply_from_an_earlier_round_is_marked_as_such() {
+        let turn = TurnId::new();
+        let items = [Item {
+            id: ItemId::new(),
+            thread_id: ThreadId::new(),
+            turn_id: Some(turn),
+            sequence: 1,
+            data: ItemData::AssistantMessage {
+                text: "Let me look.".into(),
+            },
+            created_at: Utc::now(),
+        }];
+        let round = |wrote_text| super::LastRound {
+            reason: "stop".into(),
+            output_tokens: Some(12),
+            wrote_text,
+        };
+        assert_eq!(
+            super::subagent_reply(&items, turn, Some(&round(true))),
+            "Let me look."
+        );
+        assert_eq!(
+            super::subagent_reply(&items, turn, Some(&round(false))),
+            "The subagent's last step wrote no text (finish reason: stop). The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\nLet me look."
+        );
+    }
+
     #[test]
     fn a_hooks_answers_must_fit_the_question() {
         let single = json!({"prompt": "Which suite?", "choices": ["Unit tests", "Full suite"]});
@@ -15940,10 +16242,16 @@ mod tests {
             "[upstream_400] model_context_window_exceeded",
             "HTTP 413 Request Entity Too Large",
             "the request exceeds the available context size, try increasing it",
+            "prompt too long; exceeded max context length by 1520 tokens",
+            "prompt too long; exceeded context length by 12 tokens",
+            "Prompt contains 140000 tokens and 0 draft tokens, too large for model with 131072 maximum context length",
+            r#"HTTP 400: {"error":{"message":"model_context_window_exceeded","type":"invalid_request_error"}}"#,
         ] {
             assert!(overflow(message), "{message}");
         }
         for message in [
+            // A limit on images, not on the context: compacting cannot help.
+            "Image too large for model with 20 maximum images",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
             "Too many requests",

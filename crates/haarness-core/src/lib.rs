@@ -53,8 +53,8 @@ pub use permissions::{
 pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
-    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, ResourceMentionPolicy,
-    StaticProviderRegistry, refusal_reason, shorten_title,
+    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, PROMPT_BLOCKED,
+    ResourceMentionPolicy, StaticProviderRegistry, prompt_blocked, refusal_reason, shorten_title,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,
@@ -70,6 +70,11 @@ pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 /// traces. Other log lines stay in the local log files: their fields can carry
 /// provider error bodies, approval prompts, paths and client addresses.
 pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
+
+/// Why a chat refuses a new turn while one is running: read by people, from
+/// `haarness run --session` or an editor over ACP sending to a chat busy
+/// elsewhere.
+pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
 
 /// The variable that names the chat an agent's shell command runs for. The
 /// shell tool sets it for each command the agent runs (see

@@ -54,6 +54,18 @@ pub enum CoreError {
 }
 
 impl CoreError {
+    /// The reason in what [`CoreError::ProviderBlocked`] says, read back from
+    /// a failed turn's stored error: `refusal` from "The provider's safety
+    /// check stopped this response (refusal). Send a follow-up message …".
+    #[must_use]
+    pub fn provider_blocked_reason(message: &str) -> Option<&str> {
+        let (reason, rest) = message
+            .strip_prefix("The provider's safety check stopped this response (")?
+            .split_once(')')?;
+        rest.starts_with(". Send a follow-up message")
+            .then_some(reason)
+    }
+
     /// A short, stable category for telemetry (`error.type` on spans). Never the
     /// message: provider and tool messages can carry response bodies and paths.
     #[must_use]
