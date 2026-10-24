@@ -21,6 +21,8 @@ pub(super) const LINE_CUT: &str = "… (line truncated to 2000 characters)";
 const READ_LINE_BYTES: usize = LINE_CHARS * 4;
 /// Where a NUL byte marks a file as binary data rather than text.
 const BINARY_PROBE_BYTES: usize = 8 * 1024;
+/// The lines a `read` that gives no limit returns.
+const READ_DEFAULT_LINES: usize = 2_000;
 /// What one `read` returns at most: as much as any tool's output shows.
 const READ_MAX_LINES: usize = super::TOOL_OUTPUT_MAX_LINES;
 const READ_MAX_BYTES: usize = super::TOOL_OUTPUT_MAX_BYTES;
@@ -156,15 +158,19 @@ pub(super) fn open_text(path: &Path) -> CoreResult<(impl BufRead, bool)> {
     Ok((BufReader::new(io::Cursor::new(head).chain(file)), binary))
 }
 
-/// What `read` shows of a text file: `limit` lines from line `offset`
-/// (zero-based), each cut at [`LINE_CHARS`] characters, joined by `\n`. It
-/// stops early at 2,000 lines or 50 KB and then says where to go on.
+/// What `read` shows of a text file: `limit` lines (2000 when none is
+/// given) from line `offset` (zero-based), each cut at [`LINE_CHARS`]
+/// characters, joined by `\n`. It stops early at 2,000 lines or 50 KB, and
+/// then, or when the default limit ends before the file does, says where to
+/// go on.
 pub(super) fn read_text(
     path: &Path,
     offset: usize,
-    limit: usize,
+    limit: Option<usize>,
     cancel: &CancellationToken,
 ) -> CoreResult<String> {
+    let given = limit.is_some();
+    let limit = limit.unwrap_or(READ_DEFAULT_LINES);
     let (reader, binary) = open_text(path)?;
     let mut lines = Lines::new(reader, READ_LINE_BYTES);
     let mut shown_lines = Vec::new();
@@ -198,6 +204,10 @@ pub(super) fn read_text(
         bytes += size;
         shown_lines.push(text);
     }
+    let more = stop.is_none()
+        && !given
+        && shown_lines.len() == limit
+        && lines.next_line(cancel)?.is_some();
     let mut notes = Vec::new();
     // Said so the model does not write the file back from what it was shown.
     if replaced {
@@ -206,9 +216,11 @@ pub(super) fn read_text(
                 .to_owned(),
         );
     }
+    let next = offset + shown_lines.len();
     if let Some(stop) = stop {
-        let next = offset + shown_lines.len();
         notes.push(format!("(stopped at {stop}; read on with offset={next})"));
+    } else if more {
+        notes.push(format!("(more lines follow; read on with offset={next})"));
     }
     let text = shown_lines.join("\n");
     Ok(match (text.is_empty(), notes.is_empty()) {
