@@ -140,6 +140,20 @@ async fn a_chat_folder_is_made_inside_numbered_when_taken_and_refused_outside() 
     assert_eq!(folder(&kept), fixture.workspace.join("2026-10-24/kept"));
     // A chat without one has none.
     assert_eq!(chat(&runtime, None).await.unwrap().directory, None);
+    // Two asking for one folder at once get two.
+    let (left, right) = tokio::join!(
+        chat(&runtime, Some("2026-10-24/race")),
+        chat(&runtime, Some("2026-10-24/race"))
+    );
+    let mut raced = [folder(&left.unwrap()), folder(&right.unwrap())];
+    raced.sort();
+    assert_eq!(
+        raced,
+        [
+            fixture.workspace.join("2026-10-24/race"),
+            fixture.workspace.join("2026-10-24/race-2")
+        ]
+    );
 
     // Named outside the project, absolute, empty or odd: refused, plainly.
     std::fs::create_dir_all(fixture.root.join("outside")).unwrap();
@@ -319,6 +333,22 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
         "from a"
     );
     assert!(!fixture.workspace.join("note.txt").exists());
+    // A preview is named from the project folder, as the file panel opens it.
+    std::fs::write(folder(&a).join("page.html"), "<h1>A</h1>").unwrap();
+    let preview = runtime
+        .run_direct_tool(
+            a.id,
+            "preview",
+            json!({"filePath": "page.html"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!preview.is_error, "{}", preview.output.text);
+    assert_eq!(
+        preview.output.metadata["preview"]["path"],
+        "day/a/page.html"
+    );
     turn(&runtime, b.id, r#"!tool list {"path":"."}"#).await;
     assert_eq!(last_result(&runtime, b.id, "list").await, "");
     turn(&runtime, a.id, r#"!tool glob {"pattern":"*.txt"}"#).await;
@@ -378,6 +408,39 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
         .unwrap();
     wait_done(&runtime, &started).await;
     assert!(!sibling.exists());
+}
+
+#[tokio::test]
+async fn a_relative_attachment_is_read_from_the_chat_folder() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let thread = chat(&runtime, Some("day/attach")).await.unwrap();
+    std::fs::write(folder(&thread).join("notes.txt"), "the chat's notes").unwrap();
+    std::fs::write(fixture.workspace.join("notes.txt"), "the home's notes").unwrap();
+    let mut request = turn_request("read this");
+    request.attachments = vec!["notes.txt".into()];
+    let started = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &started).await;
+    let attached = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            ItemData::UserMessage { attachments, .. } if !attachments.is_empty() => {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .unwrap();
+    use base64::Engine as _;
+    let encoded = attached[0].rsplit_once(',').unwrap().1;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
+        b"the chat's notes"
+    );
 }
 
 #[tokio::test]
