@@ -11,9 +11,11 @@ const test = base.extend<{ desktop: Fixture }>({
   desktop: async ({}, use, info) => {
     const temp = await realpath(await mkdtemp(join(tmpdir(), "haarness-regressions-")));
     const a = join(temp, "project-a"), b = join(temp, "project-b");
+    // Chats start in Auto, where the reviewer answers an ask: these tests walk
+    // the card a person answers, so they ask for Review.
     for (const directory of [a, b]) {
       await mkdir(join(directory, ".haarness"), { recursive: true });
-      await writeFile(join(directory, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n');
+      await writeFile(join(directory, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n');
     }
     for (const name of ["alpha", "beta", "gamma", "delta", "epsilon", "slow", "fast"])
       await writeFile(join(a, name + ".txt"), "Original " + name);
