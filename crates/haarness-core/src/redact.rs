@@ -414,7 +414,8 @@ fn urls_in_text(text: &str) -> Cow<'_, str> {
 /// credential flag (`--api-key VALUE`), a header flag (`-H VALUE`) or a
 /// `user:password` flag (`-u VALUE`), the value of `--token=VALUE` and
 /// `API_KEY=VALUE`, and any argument that is itself a bearer token, a JWT,
-/// a private key or a URL carrying credentials.
+/// a private key, a URL carrying credentials or a `user:password@host`
+/// written without a scheme.
 #[must_use]
 pub fn args(args: &[String]) -> Vec<String> {
     args.iter()
@@ -478,7 +479,10 @@ fn arg_value(arg: &str) -> Cow<'_, str> {
     if bearer_or_jwt(arg) {
         return Cow::Borrowed(REDACTED);
     }
-    urls_in(arg)
+    match urls_in(arg) {
+        Cow::Borrowed(_) => bare_userinfo(arg, REDACTED),
+        Cow::Owned(shown) => Cow::Owned(bare_userinfo(&shown, REDACTED).into_owned()),
+    }
 }
 
 /// A bearer token of some length, or a JSON Web Token.
@@ -502,8 +506,9 @@ fn bearer_or_jwt(text: &str) -> bool {
 /// Replaces obvious credential shapes in free text with `[redacted]`:
 /// credential headers, `Bearer`/`Basic` values, curl user flags,
 /// `key=value`, `key: value` and `--key value` pairs whose key names a
-/// credential, URL user info, JWTs, well-known token prefixes and long opaque
-/// runs. Over-redaction is fine; this is for log lines and messages, not data.
+/// credential, URL user info and a `user:password@host` written without a
+/// scheme, JWTs, well-known token prefixes and long opaque runs.
+/// Over-redaction is fine; this is for log lines and messages, not data.
 #[must_use]
 pub fn text(text: &str) -> String {
     const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
@@ -562,7 +567,7 @@ pub fn text(text: &str) -> String {
         ]
         .map(|pattern| Regex::new(&pattern).expect("static redaction pattern"))
     });
-    let mut text = userinfo(text).into_owned();
+    let mut text = bare_userinfo(&userinfo(text), "[redacted]").into_owned();
     for (pattern, replacement) in RULES.iter() {
         if pattern.is_match(&text) {
             text = pattern.replace_all(&text, *replacement).into_owned();
@@ -731,6 +736,156 @@ fn user_credential(scheme: Option<&str>, name: &str) -> bool {
         }) && !name.contains([
             '"', '\'', '<', '>', ',', ';', '(', ')', '[', ']', '{', '}', '|', '`', '\\',
         ]))
+}
+
+/// `text` with the user name and password of each `user:password@host`
+/// written without a scheme replaced by `mark`, as a proxy or `CONNECT`
+/// target (`curl -x user:pw@proxy:3128`, `https_proxy=user:pw@proxy:3128`)
+/// or a database address (`root:pw@tcp(db:3306)/app`) reads. As for a URL,
+/// everything up to the last `@` goes, so a raw `@` in the password does too.
+///
+/// The user name is a word with no `:` that starts the text or follows a
+/// space, a quote, a bracket, `|`, `` ` ``, `=`, `,`, `;`, `/`, `?`, `#`,
+/// `@` or `\`; the password and host run to a space (not a
+/// backslash-escaped one), `"`, `/`, `?`, `#` or `\`, so a Windows path is
+/// never read as one and the text is read in linear time. A password never
+/// starts with `@`, `/`, `:` or a space, so `npm:@scope/pkg`, `host:/path`,
+/// `crate::path@0x10` and `name: me@example.com` stay. What follows the last `@` may also pin an
+/// image or a package rather than name a host (`alpine:3.19@sha256:…`,
+/// `node:20@v1.2.3`), a time is no user name (`10:15@home`), and an `npm:`
+/// or `jsr:` spec (`npm:pkg@1.0`) or an address after `mailto:`, `sip:`,
+/// `xmpp:` or `acct:` holds no password unless a second `:` says so: those
+/// stay too.
+fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
+    // What may stand before a user name.
+    fn head(byte: u8) -> bool {
+        byte.is_ascii_whitespace()
+            || matches!(
+                byte,
+                b'"' | b'\''
+                    | b'('
+                    | b'<'
+                    | b'>'
+                    | b'['
+                    | b']'
+                    | b'{'
+                    | b'}'
+                    | b'|'
+                    | b'`'
+                    | b'='
+                    | b','
+                    | b';'
+                    | b'/'
+                    | b'?'
+                    | b'#'
+                    | b'@'
+                    | b'\\'
+            )
+    }
+    let bytes = text.as_bytes();
+    let mut shown = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    // Whether `at` may start a user name.
+    let mut start = true;
+    while at < bytes.len() {
+        if !start {
+            start = head(bytes[at]);
+            at += 1;
+            continue;
+        }
+        let user = at;
+        let mut colon = at;
+        while colon < bytes.len() && bytes[colon] != b':' && !head(bytes[colon]) {
+            colon += 1;
+        }
+        if colon == bytes.len() {
+            break;
+        }
+        if bytes[colon] != b':' {
+            // A character that may stand before a user name: the next one
+            // may start one.
+            at = colon + 1;
+            continue;
+        }
+        let password = colon + 1;
+        if bytes.get(password).is_none_or(|&byte| {
+            byte.is_ascii_whitespace() || matches!(byte, b'"' | b'/' | b'?' | b'#' | b'@' | b':')
+        }) {
+            at = password;
+            start = false;
+            continue;
+        }
+        let mut end = password;
+        while let Some(&byte) = bytes.get(end) {
+            match byte {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+                b'\\' | b'"' | b'/' | b'?' | b'#' => break,
+                _ if byte.is_ascii_whitespace() => break,
+                _ => end += 1,
+            }
+        }
+        let word = &text[user..end];
+        if let Some(last) = word.rfind('@')
+            && let Some(hidden) = hidden_userinfo(&word[..last], &word[last + 1..])
+        {
+            shown.push_str(&text[copied..user]);
+            shown.push_str(&word[..hidden]);
+            shown.push_str(mark);
+            copied = user + last;
+        }
+        at = end;
+        start = false;
+    }
+    if copied == 0 {
+        return Cow::Borrowed(text);
+    }
+    shown.push_str(&text[copied..]);
+    Cow::Owned(shown)
+}
+
+/// For `info@after`, a bare `user:password@host` that [`bare_userinfo`]
+/// found: where in `info` the hidden part starts (after an address scheme
+/// such as `mailto:`), or `None` when it holds no credential.
+fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
+    // An image digest (`sha256:` with a letter, which no port has, or a
+    // long hex run, also after the free-text masker hid it) or a version.
+    static PINNED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)^(?:(?:sha\d+|md5):[\da-f]*[a-f][\da-f]*|[a-z\d]+(?:[+._-][a-z\d]+)*:(?:[\da-f]{32,}|\[redacted\]|<redacted>)|v?\d+\.\d+\.\d+(?:[-+][\w.-]*)?)",
+        )
+        .expect("static pinned pattern")
+    });
+    let pinned = PINNED.find(after).is_some_and(|found| {
+        !after[found.end()..].starts_with(|next: char| {
+            next.is_alphanumeric() || matches!(next, '_' | '.' | ':' | '-')
+        })
+    });
+    let (scheme, rest) = info.split_once(':')?;
+    // A time or a ratio (`10:15@home`, `16:9@2x`).
+    let numeric = |part: &str, more: &[u8]| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || more.contains(&byte))
+    };
+    if pinned
+        || (numeric(scheme, b"") && numeric(rest, b":."))
+        || (["npm", "jsr"]
+            .iter()
+            .any(|spec| scheme.eq_ignore_ascii_case(spec))
+            && !rest.is_empty()
+            && !rest.contains([':', '@']))
+    {
+        return None;
+    }
+    if ["mailto", "sip", "sips", "xmpp", "acct"]
+        .iter()
+        .any(|address| scheme.eq_ignore_ascii_case(address))
+    {
+        return rest.contains(':').then_some(scheme.len() + 1);
+    }
+    Some(0)
 }
 
 /// At most `max` characters, ending with `…` when cut. Never splits a char.
@@ -1095,6 +1250,157 @@ mod tests {
         ] {
             assert_eq!(text(kept), kept);
         }
+    }
+
+    #[test]
+    fn free_text_hides_a_user_and_password_written_without_a_scheme() {
+        let sha = "ab12".repeat(16);
+        for (input, output) in [
+            (
+                "curl -x user:PRIVATE@proxy.fixture.test:3128 https://x.test",
+                "curl -x [redacted]@proxy.fixture.test:3128 https://x.test",
+            ),
+            (
+                "https_proxy=user:PRIVATE@proxy.fixture.test:3128",
+                "https_proxy=[redacted]@proxy.fixture.test:3128",
+            ),
+            (
+                "dsn root:PRIVATE@tcp(127.0.0.1:3306)/app",
+                "dsn [redacted]@tcp(127.0.0.1:3306)/app",
+            ),
+            (
+                "CONNECT user:PRIVATE@h.fixture.test:443 HTTP/1.1",
+                "CONNECT [redacted]@h.fixture.test:443 HTTP/1.1",
+            ),
+            (
+                ":PRIVATE@h.fixture.test:443",
+                "[redacted]@h.fixture.test:443",
+            ),
+            ("user:p@ss@h.fixture.test", "[redacted]@h.fixture.test"),
+            ("user:PRIVATE@[::1]:443", "[redacted]@[::1]:443"),
+            (
+                r"host=user:pa\ ss@h.fixture.test:443",
+                "host=[redacted]@h.fixture.test:443",
+            ),
+            (
+                "getaddrinfo ENOTFOUND user:PRIVATE@h.fixture.test",
+                "getaddrinfo ENOTFOUND [redacted]@h.fixture.test",
+            ),
+            (
+                "proxy answered 407 for 'user:PRIVATE@h.fixture.test:443'",
+                "proxy answered 407 for '[redacted]@h.fixture.test:443'",
+            ),
+            (
+                r#"{"proxy":"user:PRIVATE@h.fixture.test:3128"}"#,
+                r#"{"proxy":"[redacted]@h.fixture.test:3128"}"#,
+            ),
+            (
+                "->user:pw@h.fixture.test:443",
+                "->[redacted]@h.fixture.test:443",
+            ),
+            ("[net]user:pw@h:443", "[net][redacted]@h:443"),
+            ("a|user:pass@host", "a|[redacted]@host"),
+            ("a/user:pw@h:443", "a/[redacted]@h:443"),
+            (
+                r"CORP\alex:PRIVATE@proxy:8080",
+                r"CORP\[redacted]@proxy:8080",
+            ),
+            // A spec or an address that says it holds a password.
+            (
+                "npm:user:PRIVATE@h.fixture.test",
+                "[redacted]@h.fixture.test",
+            ),
+            ("npm:a@b@h.fixture.test", "[redacted]@h.fixture.test"),
+            (
+                "mailto:user:PRIVATE@h.fixture.test",
+                "mailto:[redacted]@h.fixture.test",
+            ),
+            // A host named like a digest algorithm or with a version-like
+            // address and a port is still a host.
+            (
+                "CONNECT user:PRIVATE@sha256:8080",
+                "CONNECT [redacted]@sha256:8080",
+            ),
+            ("user:PRIVATE@10.0.0.1:3128", "[redacted]@10.0.0.1:3128"),
+            ("1000:PRIVATE@h.fixture.test", "[redacted]@h.fixture.test"),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "git@github.com:org/repo.git",
+            "scp build.tgz alex@h.fixture.test:/tmp/",
+            "ssh -J alex@jump.fixture.test:2222 alex@h.fixture.test",
+            "rsync -a alex@h.fixture.test::module/ out/",
+            "npm:some-ext@1.2.0",
+            "npm:@scope/ext@1.2.0-beta.1",
+            "spec=npm:some-ext@latest jsr:x@^2.0.0",
+            "mailto:someone@h.fixture.test",
+            "sip:alice@h.fixture.test xmpp:bob@h.fixture.test",
+            "img:tag@sha256:abc",
+            "node:20@v1.2.3 ruby:3.3@3.3.0",
+            "Signed-off-by: Alex <alex@h.fixture.test>",
+            "From: alex@h.fixture.test",
+            r"C:\proj\node_modules\@types\node\index.d.ts",
+            r"C:\proj\node_modules\.pnpm\react@18.2.0\node_modules\react",
+            "C:/proj/node_modules/@babel/core/lib/index.js",
+            "listening on 127.0.0.1:4096, [::1]:4096",
+            "tokio::runtime::task@0x10",
+            "refs/heads/main@{1} HEAD@{2026-10-24 08:00:00}",
+            r#"{"name":"a:b","email":"someone@h.fixture.test"}"#,
+            r#"{\"url\":\"http://localhost:3000\",\"email\":\"me@example.com\"}"#,
+            "at async run (node:internal/process/task_queues:95:5)",
+            "go: example.com/m@v1.0.0: missing go.sum entry",
+            "meet 10:15@home, 10:15:30@main, icon 16:9@2x",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+        // A digest's hex is a long run the free-text masker hides anyway.
+        assert_eq!(
+            text(&format!("pulled alpine:3.19@sha256:{sha}")),
+            "pulled alpine:3.19@sha256:[redacted]"
+        );
+        assert_eq!(
+            text("pulled alpine:3.19@sha256:[redacted]"),
+            "pulled alpine:3.19@sha256:[redacted]"
+        );
+        assert_eq!(
+            args(
+                &[
+                    "--proxy",
+                    "user:PRIVATE@proxy.fixture.test:3128",
+                    "HTTPS_PROXY=user:PRIVATE@proxy.fixture.test:3128",
+                    "git@github.com:org/repo.git",
+                    "npm:some-ext@1.2.0",
+                ]
+                .map(str::to_owned)
+            ),
+            [
+                "--proxy",
+                "<redacted>@proxy.fixture.test:3128",
+                "HTTPS_PROXY=<redacted>@proxy.fixture.test:3128",
+                "git@github.com:org/repo.git",
+                "npm:some-ext@1.2.0",
+            ]
+        );
+    }
+
+    #[test]
+    fn free_text_reads_long_runs_of_bare_user_names_and_passwords_quickly() {
+        let started = std::time::Instant::now();
+        for run in [
+            "a@".repeat(100_000),
+            ",a:".repeat(100_000),
+            "user:pass@".repeat(20_000),
+            format!("a:{}@x", "\\ ".repeat(100_000)),
+            ":".repeat(200_000),
+            "a:b:".repeat(100_000),
+            "x(".repeat(100_000),
+        ] {
+            let _ = bare_userinfo(&run, "[redacted]");
+            let _ = text(&run);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
