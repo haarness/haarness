@@ -668,6 +668,13 @@ impl Tool for LanguageAwareTool {
             return Ok(output);
         }
 
+        // The files stay locked through the formatter, which rewrites them
+        // in place, so a parallel change is not undone by it.
+        let locks = crate::file_lock::lock(
+            lock_paths(self.name, &arguments, &context.workspace),
+            &context.cancel,
+        )
+        .await?;
         let paths = mutation_paths(self.name, &arguments)
             .into_iter()
             .filter_map(|path| {
@@ -682,16 +689,23 @@ impl Tool for LanguageAwareTool {
                 existing_diff_body(resolved).await,
             ));
         }
-        let mut output = self.inner.execute(arguments, context.clone()).await?;
+        let mut output =
+            crate::file_lock::holding(self.inner.execute(arguments, context.clone())).await?;
         let reports = self
             .language
-            .process_files(
+            .format_files(
                 paths.iter().map(|(_, path)| path.clone()).collect(),
                 &context.workspace,
                 context.cancel.clone(),
             )
             .await;
         refresh_formatted_diffs(&mut output, before).await;
+        // Language servers are asked without holding the files.
+        drop(locks);
+        let reports = self
+            .language
+            .diagnose_files(reports, &context.workspace, context.cancel.clone())
+            .await;
         append_language_report(&mut output, &context.workspace, &reports);
         Ok(output)
     }
@@ -796,6 +810,15 @@ fn language_path(workspace: &Path, requested: &str) -> Option<PathBuf> {
         .unwrap_or_else(|_| workspace.to_path_buf());
     let resolved = haarness_core::resolve_permission_path(&workspace, requested);
     resolved.starts_with(&workspace).then_some(resolved)
+}
+
+/// The files a call of a file-changing tool locks: each path it changes,
+/// where it really leads.
+fn lock_paths(tool: &str, arguments: &Value, workspace: &Path) -> Vec<PathBuf> {
+    mutation_paths(tool, arguments)
+        .iter()
+        .map(|path| haarness_core::resolve_permission_path(workspace, path))
+        .collect()
 }
 
 fn mutation_paths(tool: &str, arguments: &Value) -> Vec<String> {
@@ -2760,6 +2783,19 @@ impl Tool for BuiltinTool {
         if context.cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        // A file change holds its files from its first read to its last write.
+        let changes = match self.kind {
+            Kind::Write => "write",
+            Kind::Edit => "edit",
+            Kind::MultiEdit => "multiedit",
+            Kind::ApplyPatch => "apply_patch",
+            _ => "",
+        };
+        let _locks = crate::file_lock::lock(
+            lock_paths(changes, &args, &context.workspace),
+            &context.cancel,
+        )
+        .await?;
         match self.kind {
             Kind::Read => {
                 let path = resolve_existing(string(&args, "path")?, &context)?;
@@ -6344,6 +6380,91 @@ export default workflow({
             )
             .await;
         assert!(matches!(escape, Err(CoreError::PermissionDenied(_))));
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn parallel_edits_of_one_file_wait_for_each_others_formatter() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-edit-lock-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("notes.slow"), "alpha\nbeta\n").unwrap();
+        // A formatter that reads the file, takes a second unless the file
+        // has the second edit, and writes back what it read.
+        let language = Arc::new(LanguageService::new(
+            workspace.clone(),
+            haarness_language::LspConfig {
+                enabled: false,
+                ..haarness_language::LspConfig::default()
+            },
+            haarness_language::FormatterConfig {
+                enabled: true,
+                builtins: false,
+                formatters: std::collections::BTreeMap::from([(
+                    "slow".into(),
+                    haarness_language::FormatterDefinition {
+                        command: vec![
+                            "sh".into(),
+                            "-c".into(),
+                            r#"text=$(cat "$1"); case "$text" in *second*) ;; *) sleep 1 ;; esac; printf '%s\n' "$text" > "$1""#.into(),
+                            "sh".into(),
+                            "$FILE".into(),
+                        ],
+                        extensions: vec![".slow".into()],
+                        ..haarness_language::FormatterDefinition::default()
+                    },
+                )]),
+            },
+        ));
+        let registry = NativeToolRegistry::new(workspace.clone()).with_language(language);
+        let edit = registry.get("edit").unwrap();
+        let patch = registry.get("apply_patch").unwrap();
+        let first = edit.execute(
+            json!({"path":"notes.slow", "old":"alpha", "new":"alpha first"}),
+            tool_context(&workspace),
+        );
+        let second = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            patch
+                .execute(
+                    json!({"input":"*** Begin Patch\n*** Update File: notes.slow\n@@\n-beta\n+beta second\n*** End Patch\n"}),
+                    tool_context(&workspace),
+                )
+                .await
+        };
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("notes.slow")).unwrap(),
+            "alpha first\nbeta second\n"
+        );
+
+        // A call waiting for a file another call holds ends on Stop.
+        let held = crate::file_lock::lock(
+            [workspace.join("notes.slow").canonicalize().unwrap()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let context = tool_context(&workspace);
+        let stop = context.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stop.cancel();
+        });
+        let stopped = edit
+            .execute(
+                json!({"path":"notes.slow", "old":"alpha", "new":"lost"}),
+                context,
+            )
+            .await;
+        assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
+        drop(held);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("notes.slow")).unwrap(),
+            "alpha first\nbeta second\n"
+        );
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
