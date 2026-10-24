@@ -47,7 +47,10 @@ export function SelectionBar() {
     const list = live();
     return (selection()?.chats ?? []).flatMap((key) => list.find((row) => row.key === key) ?? []);
   };
-  const project = () => app.projects().find((item) => item.id === selection()?.scope);
+  /** The list Select chats is on: a project's, or This computer's. */
+  const project = () =>
+    app.projects().find((item) => item.id === selection()?.scope) ??
+    (app.chatHomeGroup()?.id === selection()?.scope ? app.chatHomeGroup() : undefined);
   const trees = () =>
     project()?.locations.filter((location) => selection()?.trees.includes(location.id)) ?? [];
   // Picks that no longer exist count for nothing.
@@ -69,7 +72,9 @@ export function SelectionBar() {
     const current = selection();
     if (!current) return;
     const flat = app.state.sidebarLayout === "flat";
-    if (current.scope === "all" ? !flat : flat || !project()) stop();
+    // This computer keeps its own list in either organization.
+    const own = current.scope === app.chatHomeGroup()?.id;
+    if (current.scope === "all" ? !flat : (flat && !own) || !project()) stop();
   });
   /** The result of one action: what it did, then anything it could not do. */
   function report(done: string, failed: string[]) {

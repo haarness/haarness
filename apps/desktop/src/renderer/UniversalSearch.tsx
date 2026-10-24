@@ -16,6 +16,7 @@ import { isWorktree, locationName, primaryLocation, projectKey } from "../projec
 import { asksForKeys, searchEntries, type SearchEntry } from "./search";
 import { chatTitle } from "./chat-title";
 import { focusComposerWhenShown } from "./composer-focus";
+import { folderName } from "./chat-folder";
 
 
 /** Where Search lists archived chats: a project's, one checkout's of it, or
@@ -67,7 +68,7 @@ export function UniversalSearch(props: {
       void window.haarness
         .api<string[]>(connection, "searchFiles", [{ q, limit: 100 }])
         .then((values) => {
-          if (!disposed) setFiles(values);
+          if (!disposed) setFiles(app.chatFiles(values));
         })
         .catch(() => {
           if (!disposed)
@@ -87,11 +88,18 @@ export function UniversalSearch(props: {
     key: "thread:" + key,
     group: thread.archived ? "Archived chats" : "Chats",
     name: chatTitle(thread.title),
-    detail:
-      (app.projects().find((item) => item.id === projectKey(location))
-        ?.label ?? location.label) +
-      (isWorktree(location) ? " · " + t(locationName(location)) : ""),
-    keywords: thread.id + " " + location.workspace,
+    // A chat without a project is This computer's, in a folder of its own.
+    detail: location.chatHome
+      ? t("This computer") +
+        (thread.directory ? " · " + folderName(thread.directory) : "")
+      : (app.projects().find((item) => item.id === projectKey(location))
+          ?.label ?? location.label) +
+        (isWorktree(location) ? " · " + t(locationName(location)) : ""),
+    keywords:
+      thread.id +
+      " " +
+      (thread.directory ?? location.workspace) +
+      (location.chatHome ? " " + t("This computer") : ""),
     icon: thread.archived ? "archive" : "chat",
     action: (open) =>
       app.chooseProjectSession(location.id, thread.id, open?.keep ? "keep" : "preview"),
@@ -164,7 +172,12 @@ export function UniversalSearch(props: {
         key: "file:" + connection + ":" + path,
         group: "Files",
         name: path.split("/").pop() ?? path,
-        detail: (app.project()?.label ?? t("Workspace")) + " · " + path,
+        detail:
+          (app.project()?.chatHome
+            ? t("This computer")
+            : (app.project()?.label ?? t("Workspace"))) +
+          " · " +
+          path,
         icon: "file",
         action: () => {
           if (app.state.connection?.id !== connection) return;
@@ -229,8 +242,7 @@ export function UniversalSearch(props: {
     );
   });
   const indexing = () =>
-    app
-      .projects()
+    [...app.projects(), ...(app.chatHomeGroup() ? [app.chatHomeGroup()!] : [])]
       .flatMap((project) => project.locations)
       .some(
         (location) =>
@@ -239,7 +251,9 @@ export function UniversalSearch(props: {
       );
   /** The project, and the checkout when it is a worktree, Search is limited to. */
   const scopeName = () => {
-    const project = app.projects().find((item) => item.id === props.archived?.project);
+    const project =
+      app.projects().find((item) => item.id === props.archived?.project) ??
+      (app.chatHomeGroup()?.id === props.archived?.project ? app.chatHomeGroup() : undefined);
     const location = project?.locations.find((item) => item.id === props.archived?.location);
     return (project?.label ?? "") + (isWorktree(location) ? " · " + t(locationName(location!)) : "");
   };

@@ -22,6 +22,10 @@ export function migrateProjectlessLocations(
 
 export const projectKey = (location: ProjectLocation & { id: string }) =>
   location.project?.id ?? location.id;
+/** The saved locations that are projects: all but the chat home, whose
+ * chats the sidebar lists under This computer. */
+export const projectLocations = <T extends ProjectLocation>(locations: T[]) =>
+  locations.filter((location) => !location.chatHome);
 export const sessionKey = (connection: string, thread: string) =>
   JSON.stringify([connection, thread]);
 export const isWorktree = (location?: ProjectLocation) =>
@@ -54,7 +58,7 @@ export function migrateProjectPresentation(
   const lists = { ...ordering };
   lists["list:projects"] = [
     ...new Set(
-      (ordering["list:projects"] ?? recent.map((item) => item.id)).map(
+      (ordering["list:projects"] ?? projectLocations(recent).map((item) => item.id)).map(
         (id) => keys.get(id) ?? id,
       ),
     ),
@@ -178,12 +182,12 @@ export function mergeProjectCatalog(
   const projects = new Map(catalog.projects.map((item) => [item.id, item]));
   const opened = new Set(
     recent
-      .filter((item) => !item.remote)
+      .filter((item) => !item.remote && !item.chatHome)
       .map((item) => byPath.get(item.workspace)?.projectId)
       .filter(Boolean),
   );
   const annotate = (item: Recent): Recent => {
-    if (item.remote) return item;
+    if (item.remote || item.chatHome) return item;
     const checkout = byPath.get(item.workspace);
     const project = checkout && projects.get(checkout.projectId);
     if (!checkout || !project) return item;
