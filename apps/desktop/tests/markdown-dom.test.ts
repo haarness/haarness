@@ -20,6 +20,20 @@ test("markdown is sanitized by a DOMPurify instance of its own", async () => {
   }
 });
 
+// DOMPurify 3.4.17 fixes GHSA-c6gr-qvv4-5v3f (an `attributeName` rewriting a
+// link in XHTML mode), GHSA-cg2g-xh64-v4q7 (template expressions in shadow
+// roots) and GHSA-mrv2-3pqr-j5jr (in-place hooks that detach another node).
+// Markdown uses none of those modes, but Mermaid shares the default instance,
+// so the app ships the fixed release.
+test("the app ships a DOMPurify with the October 2026 advisories fixed", async () => {
+  const { default: DOMPurify } = await import("dompurify");
+  const at = (version: string) => version.split(".").map(Number);
+  const [major, minor, patch] = at(DOMPurify.version);
+  assert.ok(major > 3 || (major === 3 && (minor > 4 || (minor === 4 && patch >= 17))), DOMPurify.version);
+  const lock = JSON.parse(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"));
+  assert.equal(lock.packages["node_modules/dompurify"].version, DOMPurify.version);
+});
+
 // An image (or srcset candidate, SVG image, video poster) at `//host/x.png`
 // resolves against the window's file: page to `file://host/x.png`, which
 // Windows fetches over SMB with the user's sign-in as soon as it is drawn.
