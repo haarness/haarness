@@ -1419,6 +1419,13 @@ async fn search_finds_a_chat_s_files_past_a_big_dependency_folder_and_honours_ig
     std::fs::create_dir_all(root.join("generated")).unwrap();
     std::fs::write(root.join("generated/app.ts"), "x").unwrap();
     std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+    // A build folder outside Git is left out, one in a repository cloned
+    // into the folder is the project's.
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    std::fs::write(root.join("dist/bundle.js"), "x").unwrap();
+    std::fs::create_dir_all(root.join("cloned/dist")).unwrap();
+    git_fixture_command(&root.join("cloned"), ["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("cloned/dist/index.js"), "x").unwrap();
     let (base, _handle) = served(&fixture, runtime).await;
     let client = reqwest::Client::new();
     let search = |query: &str| {
@@ -1456,8 +1463,135 @@ async fn search_finds_a_chat_s_files_past_a_big_dependency_folder_and_honours_ig
             .await
             .contains(&"node_modules/pkg007/f19.js".to_owned())
     );
+    assert!(search("bundle.js").await.is_empty());
+    assert_eq!(search("dist/bundle").await, ["dist/bundle.js"]);
+    assert_eq!(search("index.js").await, ["cloned/dist/index.js"]);
     // `.ignore` counts as `.gitignore` does.
     std::fs::remove_file(root.join(".gitignore")).unwrap();
     std::fs::write(root.join(".ignore"), "generated/\n").unwrap();
     assert_eq!(search("app.ts").await, ["zz-src/app.ts"]);
+}
+
+#[tokio::test]
+async fn search_in_a_git_project_finds_files_committed_under_build_folder_names() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let root = fixture.workspace.clone();
+    let committed = [
+        "dist/index.js",
+        "build/package/Dockerfile",
+        "target/thumbv7em/memory.x",
+        "cmd/dist/main.go",
+        "pkg/venv/activate.go",
+    ];
+    git_fixture_command(&root, ["init", "-q", "-b", "main"]);
+    for path in committed {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+    // What the project ignores stays out.
+    std::fs::create_dir_all(root.join("out")).unwrap();
+    std::fs::write(root.join("out/index.js"), "x").unwrap();
+    std::fs::write(root.join(".gitignore"), "out/\n").unwrap();
+    git_fixture_command(&root, ["add", "-A"]);
+    git_fixture_command(
+        &root,
+        [
+            "-c",
+            "user.email=api@example.invalid",
+            "-c",
+            "user.name=Haarness API Test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+    );
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let search = |query: &str| {
+        let url = format!("{base}/v1/files/search?q={query}&limit=50");
+        let client = client.clone();
+        async move {
+            client
+                .get(url)
+                .bearer_auth("fixture-token")
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<String>>()
+                .await
+                .unwrap()
+        }
+    };
+    for (query, path) in [
+        ("index.js", "dist/index.js"),
+        ("Dockerfile", "build/package/Dockerfile"),
+        ("memory.x", "target/thumbv7em/memory.x"),
+        ("main.go", "cmd/dist/main.go"),
+        ("activate.go", "pkg/venv/activate.go"),
+    ] {
+        assert_eq!(search(query).await, [path], "{query}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_can_be_written_into_a_folder_one_may_write_in_but_not_read() {
+    use std::os::unix::fs::PermissionsExt as _;
+    /// Gives the folder its reading back, also when an assertion fails.
+    struct Readable(PathBuf);
+    impl Drop for Readable {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let drop_box = fixture.workspace.join("drop");
+    std::fs::create_dir_all(&drop_box).unwrap();
+    std::fs::set_permissions(&drop_box, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let readable = Readable(drop_box.clone());
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let written = client
+        .put(format!("{base}/v1/files/content"))
+        .bearer_auth("fixture-token")
+        .json(&json!({"path": "drop/note.txt", "content": "dropped", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        written.status().is_success(),
+        "{}",
+        written.text().await.unwrap()
+    );
+    let action = |body: Value| {
+        client
+            .post(format!("{base}/v1/files/action"))
+            .bearer_auth("fixture-token")
+            .json(&body)
+            .send()
+    };
+    for body in [
+        json!({"action": "mkdir", "path": "drop/inner"}),
+        json!({"action": "rename", "path": "drop/note.txt", "target": "drop/renamed.txt"}),
+    ] {
+        let answer = action(body.clone()).await.unwrap();
+        assert!(
+            answer.status().is_success(),
+            "{body}: {}",
+            answer.text().await.unwrap()
+        );
+    }
+    drop(readable);
+    assert_eq!(
+        std::fs::read_to_string(drop_box.join("renamed.txt")).unwrap(),
+        "dropped"
+    );
+    assert!(drop_box.join("inner").is_dir());
+    assert!(!drop_box.join("note.txt").exists());
 }
