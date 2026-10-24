@@ -270,7 +270,7 @@ export function PromptContextControls(props: {
           // A row the person moved to stays highlighted where the new files
           // put it; otherwise the top row is.
           const held = moved ? options()[cursor()] : undefined;
-          setFound({ connection, names });
+          setFound({ connection, names: app.chatFiles(names) });
           setLoading(false);
           const at = held
             ? options().findIndex((option) => option.kind === held.kind && option.name === held.name)

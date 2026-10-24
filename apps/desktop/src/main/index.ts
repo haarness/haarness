@@ -95,6 +95,7 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
+import { chatHomeFolder, isChatHome } from "./chat-home";
 
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
@@ -380,6 +381,7 @@ function projectLabel(view: Connection) {
   const presentation = data().values["project-presentation:v1"] as
     | { projects?: Record<string, { name?: unknown } | undefined> }
     | undefined;
+  if (view.chatHome) return say("This computer");
   const name = presentation?.projects?.[projectKey(view)]?.name;
   return typeof name === "string" && name.trim()
     ? name.trim()
@@ -441,7 +443,10 @@ let projectCatalog: Promise<Recent[]> | undefined;
 async function refreshProjects(): Promise<Recent[]> {
   if (projectCatalog) return projectCatalog;
   projectCatalog = (async () => {
-    const local = data().recent.filter((item) => !item.remote);
+    // The chat home is not a project: the catalog never registers it.
+    const local = data().recent.filter(
+      (item) => !item.remote && !item.chatHome,
+    );
     let directory: Recent | undefined;
     for (const item of local) {
       if (
@@ -833,9 +838,16 @@ function installHandlers() {
         recent: z.string().optional(),
         /** The folder came from a haarness:// link rather than the user's own choice. */
         deepLink: z.boolean().optional(),
+        /** The chat home ("This computer"): its folder is Haarness's own. */
+        chatHome: z.literal(true).optional(),
       })
       .strict()
       .parse(raw);
+    if (
+      input.chatHome &&
+      Object.keys(input).some((key) => key !== "chatHome")
+    )
+      throw new Error("The chat home is opened on its own");
     // Resolving a network path would already reach its host.
     if (
       input.deepLink &&
@@ -916,7 +928,9 @@ function installHandlers() {
       return kept ? view : null;
     }
 
-    let workspace = input.workspace ?? recent?.workspace;
+    let workspace = input.chatHome
+      ? await chatHomeFolder()
+      : (input.workspace ?? recent?.workspace);
     const url = input.url ?? recent?.url;
     if (!url && !workspace) {
       const result = await dialog.showOpenDialog(win, {
@@ -930,7 +944,16 @@ function installHandlers() {
       workspace = await realpath(workspace!).catch(() => {
         throw new Error(say("The folder in this link was not found."));
       });
-    else if (!url) workspace = await realpath(workspace!);
+    else if (!url) {
+      // A saved chat home whose folder went missing is made again.
+      if (recent?.chatHome && (await isChatHome(recent.workspace)))
+        workspace = await chatHomeFolder();
+      workspace = await realpath(workspace!);
+    }
+    // Chats without a project live in the chat home. Whichever way it is
+    // asked for, it opens as itself: with project configuration off, and
+    // never as a project.
+    const home = !url && (await isChatHome(workspace!));
     // A haarness:// link can name any folder. One already in the sidebar
     // opens as it was saved; any other is confirmed first and opens with its
     // project configuration off, so a link can never start a folder's MCP
@@ -1028,11 +1051,13 @@ function installHandlers() {
           )
         : await connectLocal(
             workspace!,
-            linkTrust ??
-              input.trust ??
-              (input.recent ? current?.trust : undefined) ??
-              true,
+            !home &&
+              (linkTrust ??
+                input.trust ??
+                (input.recent ? current?.trust : undefined) ??
+                true),
           );
+      if (home) view.chatHome = true;
       const saved: Recent = {
         id: view.id,
         label: view.label,
@@ -1043,6 +1068,7 @@ function installHandlers() {
         project: view.project ?? current?.project,
         checkout: view.checkout ?? current?.checkout,
         ...(url ? { url } : {}),
+        ...(home ? { chatHome: true } : {}),
       };
       // A saved project removed from the sidebar while it connected (a row
       // retrying in the background, a notification opening its chat), or
@@ -1070,7 +1096,7 @@ function installHandlers() {
           data().recent = next;
           await persist();
         },
-        after: view.remote
+        after: view.remote || home
           ? undefined
           : async () => {
               await refreshProjects();

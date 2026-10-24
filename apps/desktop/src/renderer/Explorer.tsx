@@ -37,6 +37,21 @@ export function Explorer() {
   const pendingOpens = new Map<string, Promise<void>>();
   const pendingSaves = new Map<EditorSession, Promise<void>>();
   const file = () => tabs().find((item) => item.path === selected());
+  /** The folder the panel shows: a chat without a project's own folder
+   * (relative to the chat home), or the whole project (""). */
+  const root = () => app.chatDirectory() ?? "";
+  /** A new chat without a project has no folder until its first message. */
+  const unfoldered = () => !!app.state.connection?.chatHome && !root();
+  /** A path in the shown folder, as the server names it. */
+  const inRoot = (path: string) => (root() ? root() + "/" + path : path);
+  /** A path a chat names, as the server names it: a chat without a project
+   * names its files from its own folder (a reply's link, a tool's file),
+   * while a preview or a search names them from the chat home. */
+  const requested = (path: string) =>
+    root() && path && path !== root() && !path.startsWith(root() + "/") ? inRoot(path) : path;
+  /** A path as the reader sees it: from the shown folder. */
+  const shown = (path: string) =>
+    root() && path.startsWith(root() + "/") ? path.slice(root().length + 1) : path;
   const [selection, setSelection] = createSignal({ from: 0, to: 0 });
   /** The source lines selected in a Markdown file's Preview. */
   const [previewSelection, setPreviewSelection] = createSignal<SourceRange>();
@@ -166,6 +181,7 @@ export function Explorer() {
   onCleanup(() => window.removeEventListener("beforeunload", beforeUnload));
   createEffect(() => {
     app.state.connection?.id;
+    root();
     workspaceGeneration++;
     selectionGeneration++;
     pendingOpens.clear();
@@ -197,7 +213,7 @@ export function Explorer() {
         void window.haarness
           .api<string[]>(connection, "searchFiles", [{ q, limit: 100 }])
           .then((items) => {
-            if (current === searchGeneration) setResults(items);
+            if (current === searchGeneration) setResults(app.chatFiles(items));
           })
           .catch((error) => {
             if (current === searchGeneration) app.set("error", String(error));
@@ -418,12 +434,13 @@ export function Explorer() {
     if (!request) return;
     app.set("fileRequest", null);
     if (request.connection !== app.state.connection?.id || (request.thread && request.thread !== app.state.selected)) return;
+    const path = requested(request.path);
     void app.run(() =>
       request.action
         ? create(request.action === "folder")
         : request.link
-          ? openLink(request.path, request.line)
-          : open(request.path, request),
+          ? openLink(path, request.line)
+          : open(path, request),
     );
   });
   /** A file in the tree. The server refuses a link that leads out of the
@@ -566,6 +583,7 @@ export function Explorer() {
     const id = app.state.connection?.id;
     const generation = workspaceGeneration;
     if (!id) return;
+    if (unfoldered()) return;
     const input = await ask(directory ? t("New folder") : t("New file"), [
       { name: "path", label: t("Path relative to this folder"), required: true },
     ], {
@@ -573,15 +591,15 @@ export function Explorer() {
       onSubmit: async (input) => {
         if (generation !== workspaceGeneration) throw Error(t("The working folder changed. Close this dialog and try again."));
         if (directory)
-          await window.haarness.files(id, "action", { action: "mkdir", path: input.path });
+          await window.haarness.files(id, "action", { action: "mkdir", path: inRoot(input.path) });
         else
-          await window.haarness.files(id, "write", { path: input.path, content: "", revision: emptyHash });
+          await window.haarness.files(id, "write", { path: inRoot(input.path), content: "", revision: emptyHash });
       },
     });
     if (!input || generation !== workspaceGeneration) return;
-    reveal(input.path);
+    reveal(inRoot(input.path));
     setVersion((v) => v + 1);
-    if (!directory) await open(input.path);
+    if (!directory) await open(inRoot(input.path));
   }
   async function rename() {
     const value = file();
@@ -589,10 +607,11 @@ export function Explorer() {
     const generation = workspaceGeneration;
     if (!value || !id) return;
     await ask(t("Rename file"), [
-      { name: "target", label: t("New path"), value: value.path, required: true },
+      { name: "target", label: t("New path"), value: shown(value.path), required: true },
     ], {
-      onSubmit: async (input) => {
+      onSubmit: async (raw) => {
         if (generation !== workspaceGeneration) throw Error(t("The working folder changed. Close this dialog and try again."));
+        const input = { target: inRoot(raw.target) };
         // A rename must not race a pending write to the old path.
         await pendingSaves.get(value.editor);
         await window.haarness.files(id, "action", {
@@ -669,11 +688,13 @@ export function Explorer() {
         <Button
           icon="file-new"
           label={t("New file")}
+          disabled={unfoldered()}
           onClick={() => app.run(() => create())}
         />
         <Button
           icon="folder-new"
           label={t("New folder")}
+          disabled={unfoldered()}
           onClick={() => app.run(() => create(true))}
         />
         <Button
@@ -684,11 +705,17 @@ export function Explorer() {
       </div>
       <div class="file-workspace">
         <aside class="file-tree">
+          <Show when={unfoldered()}>
+            <p class="file-tree-note">
+              {t("This chat gets a folder of its own when you send its first message.")}
+            </p>
+          </Show>
           <Show
             when={query()}
             fallback={
+              <Show when={!unfoldered()}>
               <Tree
-                path=""
+                path={root()}
                 version={version()}
                 hidden={true}
                 selected={selected()}
@@ -696,17 +723,18 @@ export function Explorer() {
                 expanded={(path) => expanded().has(path)}
                 toggle={toggle}
               />
+              </Show>
             }
           >
             <For each={results()}>
               {(path) => (
                 <button
                   class="file-entry"
-                  title={path}
+                  title={shown(path)}
                   onClick={() => app.run(() => open(path))}
                 >
                   <Icon name="file" size="sm" />
-                  <span>{path}</span>
+                  <span>{shown(path)}</span>
                 </button>
               )}
             </For>

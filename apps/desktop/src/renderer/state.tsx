@@ -83,11 +83,13 @@ import {
   migrateProjectPresentation,
   primaryLocation,
   projectKey,
+  projectLocations,
   readProjectMeta,
   sessionKey,
   type ProjectMeta,
   type ProjectMetaMap,
 } from "../projects";
+import { chatFolderPath, newChatFolder } from "./chat-folder";
 import { createProjectOverview } from "./project-overview";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
@@ -105,6 +107,8 @@ import {
 } from "./ordering";
 /** Which surface the main column is showing. */
 export type Pane = "chat" | "files" | "diff";
+/** `openingProject` while the chat home opens for the first time. */
+export const CHAT_HOME = "chat-home";
 
 interface State extends Live {
   modelRecents: ModelKey[];
@@ -831,7 +835,11 @@ function createApp(saved?: Preferences) {
     const generationNow = generation;
     if (!(await leaveSettings()) || !(await leaveWorkspace())) return;
     if (generationNow !== generation) return;
-    await clearWorkspace(serverAfterRemoval(servers(), state.activeServer));
+    const server = serverAfterRemoval(servers(), state.activeServer);
+    await clearWorkspace(server);
+    // On this computer a chat needs no project.
+    if (server === localServer.id && generationNow + 1 === generation)
+      await openChatHome();
   }
   async function hydrate(knownInfo?: T.ServerInfo) {
     const current = generation,
@@ -858,7 +866,7 @@ function createApp(saved?: Preferences) {
       const view = await window.haarness.connect({ recent: id });
       if (!valid()) return;
       if (!view) return gone();
-      set("connection", view);
+      set("connection", reconcile(view));
       info = view.info;
     }
     if (!valid()) return;
@@ -1013,11 +1021,47 @@ function createApp(saved?: Preferences) {
   );
   // A custom name replaces the catalog's label everywhere a project is shown.
   const projects = createMemo(() =>
-    groupProjects(visibleLocations()).map((project) => {
+    groupProjects(projectLocations(visibleLocations())).map((project) => {
       const name = state.projectMeta[project.id]?.name;
       return name ? { ...project, label: name } : project;
     }),
   );
+
+  /** The chat home ("This computer") when the server shown is this
+   * computer and it has been opened before: the chats started without a
+   * project, each working in a folder of its own. It is never a project. */
+  const chatHome = createMemo(() =>
+    visibleLocations().find((location) => location.chatHome),
+  );
+  /** The chat home as the sidebar lists it: a group of one location. */
+  const chatHomeGroup = createMemo(() => {
+    const home = chatHome();
+    return home ? { ...groupProjects([home])[0], label: t("This computer") } : undefined;
+  });
+  /** The folder the open chat works in when it is a chat without a
+   * project, as the server names it (absolute): where its terminals open.
+   * Undefined in a project, and on the new-chat screen. A delegated chat
+   * works in its parent's. */
+  const chatFolder = () => {
+    if (!state.connection?.chatHome || !state.selected) return undefined;
+    const own = state.threads.find((thread) => thread.id === state.selected);
+    const root = state.threads.find(
+      (thread) => thread.id === conversationRoot(state.threads, state.selected),
+    );
+    return own?.directory ?? root?.directory ?? undefined;
+  };
+  /** The same folder relative to the chat home: what the Files panel shows. */
+  const chatDirectory = () =>
+    state.connection?.chatHome
+      ? chatFolderPath(state.connection.workspace, chatFolder())
+      : undefined;
+  /** The files of the open chat among `paths` found in its workspace: in
+   * This computer only those of its own folder (none before it has one). */
+  const chatFiles = (paths: string[]) => {
+    if (!state.connection?.chatHome) return paths;
+    const root = chatDirectory();
+    return root ? paths.filter((path) => path.startsWith(root + "/")) : [];
+  };
 
   async function clearWorkspace(server: string) {
     ++connectAttempt;
@@ -1075,7 +1119,14 @@ function createApp(saved?: Preferences) {
     await clearWorkspace(id);
     if (request !== connectAttempt) return false;
     if (target) return connect({ recent: target.id });
+    // This computer without a project remembered: a chat without one.
+    if (id === localServer.id) return openChatHome();
     return true;
+  }
+  /** Opens the chat home on a new chat, making it the first time. */
+  function openChatHome() {
+    const home = state.recent.find((item) => item.chatHome && !item.remote);
+    return connect(home ? { recent: home.id } : { chatHome: true }, true);
   }
   async function openProject(newChat = false) {
     stopOpening();
@@ -1310,6 +1361,8 @@ function createApp(saved?: Preferences) {
               // while it is the server shown, never in the background.
               (!current.remoteHost || serverKey(current) === state.activeServer) &&
               (!!state.expandedProjects[projectKey(current)] ||
+                // This computer's chats are always listed.
+                !!current.chatHome ||
                 state.sidebarLayout === "flat" ||
                 state.searchOpen ||
                 Object.values(state.approvalModes[location.id] ?? {}).some(
@@ -1530,7 +1583,7 @@ function createApp(saved?: Preferences) {
       if (request === switchRequest) set("switching", false);
     });
   }
-  async function startChat(location?: string) {
+  async function startChat(location?: string): Promise<boolean | void> {
     batch(() => {
       stopOpening();
       set("loadingChat", 0);
@@ -1540,14 +1593,18 @@ function createApp(saved?: Preferences) {
       if (!target || target.checkout?.exists === false) return false;
       return switching(
         (async () => {
-          await expandProject(projectKey(target), true);
-          await expandLocation(location, true);
+          if (!target.chatHome) {
+            await expandProject(projectKey(target), true);
+            await expandLocation(location, true);
+          }
           if (activation?.id === location) newChatAttempt = connectAttempt;
           return connect({ recent: location }, true);
         })(),
       );
     }
+    // Nothing open: on this computer a chat needs no project.
     if (!project() && !state.openingProject) {
+      if (currentServer().id === localServer.id) return startFolderlessChat();
       await openProject(true);
       return;
     }
@@ -1568,6 +1625,19 @@ function createApp(saved?: Preferences) {
       !activation
     )
       await connect({ recent: primaryLocation(group).id }, true);
+  }
+  /**
+   * A new chat without a project (This computer's +, No folder in the
+   * composer): in place when the chat home is open, else it opens on a new
+   * chat, made the first time.
+   */
+  async function startFolderlessChat(): Promise<boolean | void> {
+    const home = state.recent.find((item) => item.chatHome && !item.remote);
+    if (home && project()?.id === home.id && !state.openingProject)
+      return startChat();
+    if (home) return startChat(home.id);
+    stopOpening();
+    return openChatHome();
   }
   function connect(
     input: Parameters<typeof window.haarness.connect>[0],
@@ -1595,7 +1665,10 @@ function createApp(saved?: Preferences) {
       items: [...state.items],
       panel: state.panel,
     };
-    set("openingProject", input.recent ?? input.workspace ?? "picker");
+    set(
+      "openingProject",
+      input.recent ?? input.workspace ?? (input.chatHome ? CHAT_HOME : "picker"),
+    );
     if (input.recent && input.recent !== state.connection?.id) {
       selection++;
       batch(() => {
@@ -1636,7 +1709,7 @@ function createApp(saved?: Preferences) {
         tabHistory = [];
         set("streams", {});
         set("tasks", {});
-        set("connection", view);
+        set("connection", reconcile(view));
         set("activeServer", serverKey(view));
         set("permissions", []);
         set("questions", []);
@@ -1662,7 +1735,7 @@ function createApp(saved?: Preferences) {
         "project-location:" + projectKey(view),
         view.id,
       );
-      if (state.expandedProjects[projectKey(view)] === undefined)
+      if (!view.chatHome && state.expandedProjects[projectKey(view)] === undefined)
         await expandProject(projectKey(view), true);
       if (!valid()) return false;
       // establish() has just verified this connection. Reuse that snapshot.
@@ -1815,12 +1888,19 @@ function createApp(saved?: Preferences) {
     await chooseProjectSession(view.id, target.thread);
   }
   async function create(
-    options: { provider?: string; model?: string; agent?: string } = {},
+    options: {
+      provider?: string;
+      model?: string;
+      agent?: string;
+      /** A chat without a project: its folder, relative to the chat home. */
+      directory?: string;
+    } = {},
     onCreated?: (id: string) => void,
     panel: State["panel"] = "chat",
   ) {
     const connection = state.connection?.id;
     if (!connection) throw new Error("Open project first");
+    const draftScope = newDraftScope();
     const current = generation;
     const currentSelection = selection;
     const inheritBrowser = !state.selected;
@@ -1850,8 +1930,7 @@ function createApp(saved?: Preferences) {
       }
     }
     // The sender may clear the starter draft once it has a conversation owner.
-    const initialDraft =
-      state.drafts["new:" + (currentProject()?.id ?? connection)] ?? "";
+    const initialDraft = state.drafts["new:" + draftScope] ?? "";
     onCreated?.(thread.id);
     if (generation === current && state.connection?.id === connection) {
       set("threads", (items) => [
@@ -1925,9 +2004,16 @@ function createApp(saved?: Preferences) {
       );
     const commands = [...state.commands];
     const turns = [...state.turns];
+    // A chat without a project gets a folder of its own, named by what it
+    // is about.
     const thread = targetThread
       ? state.threads.find((t) => t.id === targetThread)
-      : await create(options, onCreated);
+      : await create(
+          state.connection?.chatHome
+            ? { ...options, directory: newChatFolder(text) }
+            : options,
+          onCreated,
+        );
     if (!thread) throw new Error("Chat is unavailable");
     if (thread.isSubagent)
       throw new Error("Continue this task from its parent chat.");
@@ -2138,6 +2224,9 @@ function createApp(saved?: Preferences) {
       (item) => item.id === (remembered ?? savedProject),
     );
     if (project) await connect({ recent: project.id });
+    // No project remembered on this computer: a ready message box, for a
+    // chat that needs none.
+    else if (server === localServer.id) await openChatHome();
     else set("ready", true);
     const target = await window.haarness.notificationReady();
     if (target) await openNotification(target);
@@ -2319,6 +2408,12 @@ function createApp(saved?: Preferences) {
     connect,
     projectConnection,
     projects,
+    chatHome,
+    chatHomeGroup,
+    chatFolder,
+    chatDirectory,
+    chatFiles,
+    startFolderlessChat,
     servers,
     currentServer,
     switchServer,
