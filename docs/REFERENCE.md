@@ -285,7 +285,7 @@ credentials at the gateway and uses private credentials for child daemons.
 ## Worktrees
 
 `haarness worktree list` groups local checkouts and linked worktrees by
-project. `worktree create NAME [--from REF] [--branch NAME] [--path PATH]`
+project ([the chat home](#the-chat-home) is none). `worktree create NAME [--from REF] [--branch NAME] [--path PATH]`
 creates a new non-tracking branch and Git worktree; omitted branch/path values
 are collision-resistant, and the checkout goes inside Haarness's data folder
 unless `--path` says otherwise. `worktree open NAME-OR-ID` opens that worktree
@@ -495,6 +495,10 @@ Interface language defaults to English regardless of the OS locale. Use `/langua
 
 Global configuration lives in `~/.config/haarness/` on every OS, including macOS (`$HAARNESS_HOME/config` when `HAARNESS_HOME` is set, otherwise `$XDG_CONFIG_HOME/haarness` when that is set). Haarness writes `haarness.json` there (`haarness.jsonc` is read too); an existing `config.toml` beside it is still read and accepts the same sections. The terminal UI reads its `[tui]` settings from that `config.toml`; settings it once kept in `~/Library/Application Support/dev.haarness.haarness` on macOS still apply until the shared file sets them. Project configuration lives in `haarness.json` or `.haarness/haarness.json` (either may be `.jsonc`) and, like project integrations, loads automatically in Desktop, TUI, CLI, and SDK-launched servers. See [Configure Haarness](https://haarness.ai/docs/cli/configuration) and [configuration scopes](CONFIGURATION-SCOPES.md). CLI flags override project configuration, which overrides global configuration. A team or device management can ship a read-only base folder below the global configuration, named by `HAARNESS_BASE_CONFIG_DIR` ([base folder](CONFIGURATION-SCOPES.md#base-folder)); `haarness doctor` shows it. To use only global configuration, pass `--disable-project-config` or set `HAARNESS_DISABLE_PROJECT_CONFIG=1`. This opt-out also skips project commands, agents, skills, hooks, MCP servers, extensions, workflows, and instruction files. Individual disabled features and ordinary tool permissions still apply. The old `--trust-project` flag remains accepted for compatibility. The agent always asks a person before changing a file Haarness takes permissions, hooks, MCP servers or providers from (`haarness.json`, `.haarness/config.toml`, `.mcp.json`, the global configuration folder's `config.toml`, extensions and prompt files, the base folder), even under `"edit": "allow"`, Auto or `--yolo`; see [Haarness's own configuration files](PERMISSIONS-AND-EXECUTION.md#haarnesss-own-configuration-files).
 
+### The chat home
+
+`haarness --workspace <folder> --chat-home …` makes that folder the computer's chat home: the folder whose server holds the chats that have no project, each in a folder of its own inside it (Desktop starts it as `haarness --workspace "<app data>/Chat folders" --chat-home desktop`). The flag needs `--workspace`, and the folder must be a folder of Haarness's own: one already registered as a project, or a Git repository's own folder, is refused. The folder is registered as a project of its own, even inside a Git repository, and stays the chat home when a later command names it without the flag; besides the registry, `chat-home.json` in the data folder names it, so a Haarness from before chat homes that rewrites the registry does not make it a project again. Every command there runs without project configuration, as with `--disable-project-config`, and every chat there works in a folder of its own: one named when it is created, else a new `<today>/chat-<id>` folder, whoever creates it (a schedule made in a chat runs there too). It is no project: `desktop projects`, `worktree list`, the project lists of the API (`/v1/projects`, `/v1/workspaces`, `/v1/host/projects`) and other computers leave it out, the database of a Haarness from before workspaces moves to the first project rather than to it, and `haarness stats` and `insights` count its chats as "Chats without a project". What a chat's own folder means for its tools, permissions and Undo is in [Permissions and execution](PERMISSIONS-AND-EXECUTION.md#a-chats-own-folder).
+
 The example below uses the TOML form. In `haarness.json` the same sections are JSON objects, for example `{"defaults": {"provider": "openai", "model": "gpt-5.6"}}`.
 
 ```toml
@@ -594,7 +598,9 @@ timeout_ms = 30000
 token_budget = 40000         # optional; omit for an unbounded goal
 max_turns = 20               # autonomous continuations after the initial turn
 
-# Workspace checkpoints behind /undo, /redo, and /diff last.
+# Workspace checkpoints behind /undo, /redo, and /diff last. Git projects
+# and chats' own folders are checkpointed unless this says false; other
+# folders only when it says true.
 [snapshots]
 enabled = true
 retention_days = 7           # 0 keeps every checkpoint forever

@@ -763,6 +763,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             revert: None,
+            directory: None,
         };
         App::new(thread.clone(), vec![thread], vec![], vec![], vec![])
     }

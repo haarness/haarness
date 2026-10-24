@@ -881,8 +881,14 @@ export function askOnce(paths: readonly string[], asked: Set<string>, request: (
 /** The project an image is read from, and whether a server event concerns the chat being viewed. */
 export interface ImageProject {
   connection: string;
-  /** The project's folders (`projectRoots`). */
+  /** What its images are remembered under: the connection, or in This
+   * computer the connection and the chat's own folder. */
+  scope: string;
+  /** The project's folders (`projectRoots`), or the chat's own folder. */
   roots: string[];
+  /** In This computer, the chat whose own folder its images are read from
+   * (the server keeps those reads inside it). */
+  threadId?: string;
   /** A remote host's project, whose files the window coming to the front does not change. */
   remote: boolean;
   viewed: (thread?: string | null, root?: string | null) => ReturnType<typeof inViewedTree>;
@@ -890,18 +896,43 @@ export interface ImageProject {
 
 /** The project of the window's open chat, read from the app's state when an event arrives. */
 export function imageProject(state: {
-  connection?: { id: string; remote: boolean; workspace: string; info?: { workspace?: string | null } } | null;
+  connection?: { id: string; remote: boolean; workspace: string; chatHome?: boolean; info?: { workspace?: string | null } } | null;
   selected?: string | null;
-  threads: readonly { id: string; parentId?: string | null }[];
+  threads: readonly { id: string; parentId?: string | null; directory?: string | null }[];
 }): ImageProject | undefined {
   const connection = state.connection;
   if (!connection) return undefined;
-  return {
-    connection: connection.id,
-    roots: projectRoots(connection),
-    remote: connection.remote,
-    viewed: (thread, root) => inViewedTree(state.selected, state.threads, thread, root),
-  };
+  const viewed: ImageProject["viewed"] = (thread, root) => inViewedTree(state.selected, state.threads, thread, root);
+  if (connection.chatHome) {
+    // A chat of This computer shows its own folder's images, and none
+    // before it has one.
+    const folder = chatFolderOf(state.threads, state.selected);
+    if (!folder || !state.selected) return undefined;
+    return {
+      connection: connection.id,
+      scope: connection.id + "\n" + folder,
+      roots: [windowsPath(folder)],
+      threadId: state.selected,
+      remote: false,
+      viewed,
+    };
+  }
+  return { connection: connection.id, scope: connection.id, roots: projectRoots(connection), remote: connection.remote, viewed };
+}
+
+/** The folder a chat of This computer works in: its own, or its parent's. */
+export function chatFolderOf(
+  threads: readonly { id: string; parentId?: string | null; directory?: string | null }[],
+  selected?: string | null,
+) {
+  // A delegated chat carries its parent's folder; an older one may not.
+  let id: string | null | undefined = selected;
+  for (let guard = 0; id && guard < 64; guard++) {
+    const thread = threads.find((item) => item.id === id);
+    if (thread?.directory) return thread.directory;
+    id = thread?.parentId;
+  }
+  return undefined;
 }
 
 let watching = false;
@@ -913,16 +944,19 @@ function watchProjects(viewed: ImageProject["viewed"]) {
   watching = true;
   window.haarness.onEvent((event) => {
     if (event.kind !== "server" || !event.connection) return;
-    applyProjectEvent(event.connection, event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
+    // A write in a chat's own folder (This computer) names its file from there.
+    const folder = (event.data as { payload?: { directory?: unknown } }).payload?.directory;
+    const scope = typeof folder === "string" && folder ? event.connection + "\n" + folder : event.connection;
+    applyProjectEvent(scope, event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
   });
   window.addEventListener("focus", windowFocused);
 }
 
 /** Reads a project file for an image through the connection's file API. */
 const reader =
-  (connection: string): ImageReader =>
+  (connection: string, threadId?: string): ImageReader =>
   (path) =>
-    window.haarness.files<FileContent>(connection, "read", { path });
+    window.haarness.files<FileContent>(connection, "read", { path, ...(threadId ? { threadId } : {}) });
 
 /**
  * Whether the window can draw the image, or "large" when it has more pixels
@@ -951,9 +985,9 @@ async function decodeImage(data: string): Promise<boolean | "large"> {
 /** Reads one image of the project for a view that shows it until `signal` aborts. */
 export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
   watchProjects(project.viewed);
-  roots.set(project.connection, project.roots);
-  if (!project.remote) localProject(project.connection);
-  requestProjectImage(project.connection, path, reader(project.connection), signal, decodeImage);
+  if (!project.threadId) roots.set(project.connection, project.roots);
+  if (!project.remote) localProject(project.scope);
+  requestProjectImage(project.scope, path, reader(project.connection, project.threadId), signal, decodeImage);
 }
 
 /**

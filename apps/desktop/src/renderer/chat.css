@@ -1288,69 +1288,17 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui-lg);
   margin: var(--s2) 0 0;
 }
-/* The project sits inside the sentence, so it has to read as a word and behave
-   as a control: an underline at rest, a chip once the pointer arrives. */
-.conversation-empty .heading-project-picker {
-  display: inline;
-  padding: 0 3px;
-  margin: 0 -1px;
-  border: 0;
-  min-height: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  letter-spacing: inherit;
-  text-decoration: underline dotted
-    color-mix(in srgb, var(--muted) 55%, transparent);
-  text-underline-offset: 6px;
-}
-.conversation-empty .heading-project-picker:hover,
-.conversation-empty .heading-project-picker[aria-expanded="true"] {
-  color: var(--text);
-  background: var(--hover);
-  text-decoration-color: transparent;
-}
-.picker-caret {
-  vertical-align: middle;
-  margin-inline-start: 2px;
-  opacity: 0.55;
-}
-/* The chevron belongs to the project name, a hair apart from it, and must not
-   touch the question mark: centre it on the x-height with a little room on
-   both sides instead of tucking it under the last letter. */
-.conversation-empty .heading-project-picker {
-  padding-inline-end: 2px;
-}
 /* The name and the mark after it ("?") hold together; a name too long for
-   the line ends in an ellipsis, keeping its caret. */
+   the line ends in an ellipsis. */
 .conversation-empty .heading-project {
   white-space: nowrap;
 }
-.conversation-empty .heading-project-picker {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0;
+.conversation-empty .heading-project-name {
+  display: inline-block;
   max-width: calc(100% - 1.5ch);
-  vertical-align: bottom;
-}
-.conversation-empty .heading-project-picker .picker-label {
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* Right after the ellipsis: the chevron's own inset is the space. */
-.conversation-empty .heading-project-picker .picker-caret {
-  flex: none;
-  align-self: center;
-  margin-inline-start: 0;
-}
-.conversation-empty .picker-caret {
-  width: 18px;
-  height: 18px;
-  vertical-align: 0.06em;
-  margin-inline: 3px -3px;
+  vertical-align: bottom;
 }
 /* Where replies come from when only a local runtime offers a model: a quiet
    line under the starters, not a card. */
@@ -1632,38 +1580,71 @@ html[dir="rtl"] .tool-target {
   }
 }
 
-/* Where the next message will run, docked to the top of the composer. The
-   composer covers the tab's lowest 8px (its 16px negative margin less the
-   column gap), so the bottom padding is the top padding plus exactly that
-   overlap: the label sits vertically centred in the part you can see. */
-.composer-project {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  margin: 0 var(--s4) calc(-1 * var(--s4));
-  padding: var(--s1) var(--s2) calc(var(--s1) + var(--s2));
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-  background: var(--raised);
-}
-.composer-project button {
+/* Where the chat works, beside its approvals and like them a quiet chip: the
+   folder chosen for a new chat, or the folder a chat works in. A long name is
+   what gives way first, before the model or the send button. */
+.composer .composer-folder,
+.composer .location-picker {
   display: inline-flex;
-  gap: var(--s2);
   align-items: center;
-  background: transparent;
-  border: none;
-  min-height: var(--control-sm);
-  font-size: var(--ui-sm);
-  color: var(--muted);
+  gap: var(--s1);
+  flex: 0 1 auto;
+  /* At the least, the folder icon and an ellipsis. */
+  min-width: 44px;
+  max-width: 200px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 var(--s2);
+  border: 0;
   border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  white-space: nowrap;
 }
-.composer-project button:hover {
+.composer .location-picker {
+  max-width: 150px;
+}
+.composer .location-picker .picker-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* In a narrow chat (a small window, the side panel open) the chips and the
+   approvals keep their icons; their names stay in their labels and tips. */
+@container (max-width: 520px) {
+  .composer .composer-folder .picker-label,
+  .composer .composer-folder .picker-caret,
+  .composer .location-picker .picker-label,
+  .composer .approval-mode .pill-label {
+    display: none;
+  }
+  .composer .composer-folder,
+  .composer .location-picker {
+    min-width: 0;
+  }
+}
+.composer .composer-folder > svg,
+.composer .location-picker > svg {
+  flex: none;
+}
+.composer .composer-folder .picker-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer .composer-folder .picker-caret {
+  opacity: 0.55;
+}
+.composer button.composer-folder:hover:not(:disabled),
+.composer button.composer-folder[aria-expanded="true"],
+.composer .location-picker:hover:not(:disabled),
+.composer .location-picker[aria-expanded="true"] {
   background: var(--hover);
   color: var(--text);
 }
-.composer-project .location-picker {
-  margin-inline-start: auto;
-  max-width: 55%;
-  overflow: hidden;
+.composer .composer-folder.static {
+  cursor: default;
 }
 
 /* At rest the edge is quiet; focus, work under way and a waiting decision
@@ -1754,6 +1735,19 @@ html[dir="rtl"] .tool-target {
   align-items: center;
   gap: var(--s0);
   min-width: 0;
+}
+/* The leading controls take the room the trailing ones leave, and the
+   folder chips in them give way (their names ellipsize) rather than push
+   the trailing controls onto a line of their own. */
+.composer-leading {
+  flex: 1 1 0;
+  /* Never wider than the room it has: past the narrowest chips, what does
+     not fit is cut (a focus ring keeps its few pixels). */
+  overflow: clip;
+  overflow-clip-margin: var(--s0);
+}
+.composer-leading > * {
+  flex: none;
 }
 /* One row: the model pill gives way (its name ellipsizes) before the send
    button could drop onto a line of its own. */

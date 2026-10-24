@@ -33,13 +33,19 @@ import { Button, Icon, ask } from "./ui";
 import { createOrdering } from "./Sortable";
 import { registerCyclePanel } from "./tab-cycle";
 
+/** The terminals of `folder` among a server's: in This computer each chat
+ * has its own, opened in its folder; a project's have none. */
+const ofFolder = (tabs: PtyInfo[], folder?: string) =>
+  tabs.filter((tab) => (tab.directory ?? undefined) === folder);
 // A quick hide/reopen can remount the panel before shell creation returns.
-// Share startup by connection so that gesture still opens exactly one shell.
-// Other windows on the project ask too (all at once after the server was
-// replaced): `ifNone` lets the server hand them all the same new shell.
+// Share startup by connection (and chat folder) so that gesture still opens
+// exactly one shell. Other windows on the project ask too (all at once after
+// the server was replaced): `ifNone` lets the server hand them all the same
+// new shell, one opened for the same folder.
 const openings = new Map<string, Promise<void>>();
-async function ensureTerminal(connection: string) {
-  let pending = openings.get(connection);
+async function ensureTerminal(connection: string, folder?: string) {
+  const key = connection + "\n" + (folder ?? "");
+  let pending = openings.get(key);
   if (!pending) {
     pending = (async () => {
       const tabs = await window.haarness.api<PtyInfo[]>(
@@ -47,23 +53,23 @@ async function ensureTerminal(connection: string) {
         "listPtys",
         [],
       );
-      if (!tabs.length) {
+      if (!ofFolder(tabs, folder).length) {
         // Only the window whose create started the shell has all of its
         // output new; another one adopts it, as any terminal it did not start,
         // so it never answers the queries a replay brings back. A server too
         // old to say always started one.
         const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
-          { cols: 100, rows: 20, ifNone: true },
+          { cols: 100, rows: 20, ifNone: true, ...(folder ? { directory: folder } : {}) },
         ]);
         if (item.created !== false) shownOutput.started(connection + ":" + item.id);
       }
     })();
-    openings.set(connection, pending);
+    openings.set(key, pending);
   }
   try {
     await pending;
   } finally {
-    if (openings.get(connection) === pending) openings.delete(connection);
+    if (openings.get(key) === pending) openings.delete(key);
   }
 }
 
@@ -80,17 +86,26 @@ export function TerminalPanel() {
   );
   let generation = 0;
   let disposed = false;
+  /** A chat without a project works in a folder of its own, and its
+   * terminals open there; a new one has no folder until its first message. */
+  const folder = () => app.chatFolder();
+  const unfoldered = () => !!app.state.connection?.chatHome && !folder();
   async function refresh(open = false) {
     const id = ++generation;
     const connection = app.state.connection!.id;
+    const shown = folder();
     try {
-      if (open) await ensureTerminal(connection);
-      const values = await window.haarness.api<PtyInfo[]>(
-        connection,
-        "listPtys",
-        [],
+      if (unfoldered()) {
+        setTabs([]);
+        setSelected("");
+        return [];
+      }
+      if (open) await ensureTerminal(connection, shown);
+      const values = ofFolder(
+        await window.haarness.api<PtyInfo[]>(connection, "listPtys", []),
+        shown,
       );
-      if (id === generation && connection === app.state.connection?.id) {
+      if (id === generation && connection === app.state.connection?.id && shown === folder()) {
         shownOutput.keep(connection + ":", values.map((value) => value.id));
         setTabs(values);
         if (!values.some((value) => value.id === selected()))
@@ -102,12 +117,13 @@ export function TerminalPanel() {
     }
   }
   async function create() {
-    if (starting() || creating()) return;
+    if (starting() || creating() || unfoldered()) return;
     const connection = app.state.connection!.id;
+    const shown = folder();
     setCreating(true);
     try {
       const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
-        { cols: 100, rows: 20 },
+        { cols: 100, rows: 20, ...(shown ? { directory: shown } : {}) },
       ]);
       shownOutput.started(connection + ":" + item.id);
       if (disposed || connection !== app.state.connection?.id) return;
@@ -120,6 +136,7 @@ export function TerminalPanel() {
   }
   createEffect(() => {
     const connection = app.state.connection?.id;
+    folder();
     if (!connection) return;
     setTabs([]);
     setSelected("");
@@ -197,7 +214,7 @@ export function TerminalPanel() {
       group: "Terminals",
       name: tab.title,
       icon: "terminal" as const,
-      detail: app.state.connection?.workspace,
+      detail: folder() ?? app.state.connection?.workspace,
       action: () => setSelected(tab.id),
     })),
     ...(tabs().find((tab) => tab.id === selected())
@@ -262,7 +279,7 @@ export function TerminalPanel() {
         <Button
           icon="plus"
           label={t("New terminal")}
-          disabled={starting() || creating()}
+          disabled={starting() || creating() || unfoldered()}
           onClick={() => app.run(create)}
         />
         <div class="grow" />
@@ -286,11 +303,20 @@ export function TerminalPanel() {
         fallback={
           <div class="terminal-empty">
             <Show
-              when={!starting()}
-              fallback={<span role="status">{t("Opening terminal…")}</span>}
+              when={!unfoldered()}
+              fallback={
+                <span>
+                  {t("This chat gets a folder of its own when you send its first message.")}
+                </span>
+              }
             >
-              <span>{t("No terminal in this workspace.")}</span>
-              <button onClick={() => app.run(create)}>{t("New terminal")}</button>
+              <Show
+                when={!starting()}
+                fallback={<span role="status">{t("Opening terminal…")}</span>}
+              >
+                <span>{t("No terminal in this workspace.")}</span>
+                <button onClick={() => app.run(create)}>{t("New terminal")}</button>
+              </Show>
             </Show>
           </div>
         }

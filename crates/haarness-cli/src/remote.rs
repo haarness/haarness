@@ -10,6 +10,10 @@ use haarness_server::remote::{
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+/// Chats without a project (the chat home) are this computer's alone.
+const CHAT_HOME_STAYS: &str =
+    "Chats without a project stay on their computer; open a project folder instead";
+
 pub struct Host {
     pub paths: Paths,
     pub workspace: PathBuf,
@@ -57,6 +61,7 @@ impl WorkspaceHost for Host {
             Ok::<_, anyhow::Error>(paths.workspace_manager()?.register_local(&path)?)
         })
         .await??;
+        ensure!(!workspace.chat_home, CHAT_HOME_STAYS);
         set_visible(&self.paths, &workspace.id, true)?;
         self.target(workspace.id.clone()).await?;
         Ok(workspace)
@@ -75,6 +80,7 @@ impl WorkspaceHost for Host {
             Ok::<_, anyhow::Error>(paths.workspace_manager()?.get(&id)?)
         })
         .await??;
+        ensure!(!workspace.chat_home, CHAT_HOME_STAYS);
         let lock = self
             .locks
             .lock()

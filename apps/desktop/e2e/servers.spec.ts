@@ -25,6 +25,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
@@ -220,8 +221,10 @@ async function launch() {
   app = await electron.launch({ args: ["."], env });
   page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
+  // With this computer alone the switcher is hidden; a server saved before
+  // brings it back.
   await expect(
-    page.getByRole("button", { name: "Switch server", exact: true }),
+    page.getByRole("button", { name: "New chat", exact: true }),
   ).toBeVisible();
 }
 async function settings(section: string) {
@@ -871,6 +874,7 @@ test.afterEach(async () => {
       });
     } catch {}
   }
+  stopChatHome(binary, env);
   await rm(temporary, { recursive: true, force: true });
   expect(errors).toEqual([]);
 });
@@ -1043,7 +1047,7 @@ test("legacy remote connections migrate independently and empty local selection 
   raw.credentials["remote:" + new URL(remote.url).origin] = legacyCredential;
   delete raw.servers;
   delete raw.values["active-server"];
-  raw.recent[0].label = "Legacy server";
+  raw.recent.find((item: { remote: boolean }) => item.remote).label = "Legacy server";
   await writeFile(file, JSON.stringify(raw));
   await launch();
   await expect(page.locator(".server-switcher-button")).toHaveText(
@@ -1061,8 +1065,9 @@ test("legacy remote connections migrate independently and empty local selection 
   await form.getByRole("button", { name: "Save", exact: true }).click();
   await closeSettings();
   await switchTo("This computer");
-  // No project here yet: Home offers Open project, and the sidebar lists none.
-  await expect(page.getByRole("region", { name: "Project home" })).toBeVisible();
+  // No project here yet: a chat without one, and the sidebar lists no project.
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  await expect(page.getByRole("region", { name: "Project home" })).toHaveCount(0);
   await expect(page.locator(".sidebar .project-heading")).toHaveCount(0);
   await app.close();
   await launch();
@@ -1071,10 +1076,10 @@ test("legacy remote connections migrate independently and empty local selection 
   );
   await expect(
     page.getByRole("textbox", { name: "Message", exact: true }),
-  ).toHaveCount(0);
+  ).toBeEnabled();
   await expect(
     page.getByRole("region", { name: "Project home" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await switchTo("Renamed server");
   const finalPane = await settings("Servers");
   await finalPane.getByRole("button", { name: "Remove", exact: true }).click();
@@ -1085,7 +1090,8 @@ test("legacy remote connections migrate independently and empty local selection 
   await expect(finalPane).not.toContainText("Renamed server");
   const saved = await page.evaluate(() => window.haarness.boot());
   expect(saved.servers).toEqual([]);
-  expect(saved.recent).toEqual([]);
+  // This computer's chat home is all that is left.
+  expect(saved.recent.filter((item) => !item.chatHome)).toEqual([]);
   const client = new Haarness({ baseUrl: remote.url, token: remote.token });
   expect((await client.info()).workspace).toBe(remote.path);
   client.close();
@@ -1639,9 +1645,7 @@ for (const password of ["", "日本:desktop-password"]) {
         await expect(form.getByLabel("Password", { exact: true })).toHaveValue(
           password,
         );
-        await expect(
-          page.getByRole("region", { name: "Project home" }),
-        ).not.toContainText("Couldn’t open project");
+        await expect(page.getByText("Couldn’t open project")).toHaveCount(0);
         await form.getByLabel("Username", { exact: true }).fill("");
         await form
           .getByRole("button", { name: "Show password", exact: true })

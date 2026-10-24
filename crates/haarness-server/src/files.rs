@@ -1,5 +1,7 @@
 //! Bounded workspace file access for graphical clients. Every path is resolved
-//! beneath the server workspace; edits use revisions to detect external changes.
+//! beneath the server workspace, or beneath a chat's own folder when the
+//! request names that chat (`threadId`); edits use revisions to detect
+//! external changes.
 use crate::ServerState;
 use axum::{
     Json, Router,
@@ -22,11 +24,27 @@ type Failure = (StatusCode, String);
 static EDIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
 pub struct FileQuery {
     #[serde(default)]
     pub path: String,
     #[serde(default)]
     pub hidden: bool,
+    /// See [`FileScope::thread_id`].
+    #[serde(default)]
+    pub thread_id: Option<haarness_protocol::ThreadId>,
+}
+/// Which folder a file request is about.
+#[derive(Deserialize, IntoParams, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FileScope {
+    /// The chat whose folder the request is about: for a chat with a
+    /// folder of its own, paths are relative to that folder and confined to
+    /// it (a link out of it, to another chat's folder too, is refused).
+    /// Omitted, or for a chat of the project folder, the server's project
+    /// folder.
+    #[serde(default)]
+    pub thread_id: Option<haarness_protocol::ThreadId>,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +59,10 @@ pub struct FileEntry {
 pub struct FileListing {
     pub entries: Vec<FileEntry>,
     pub truncated: bool,
+    /// The chat folder (canonical and absolute) the entries' paths are
+    /// relative to, when the listing was asked for a chat with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct FileContent {
@@ -50,6 +72,10 @@ pub struct FileContent {
     pub mime: String,
     pub revision: String,
     pub size: u64,
+    /// The chat folder (canonical and absolute) `path` is relative to, when
+    /// the request named a chat with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
 pub struct FileWrite {
@@ -83,6 +109,31 @@ pub fn routes() -> Router<ServerState> {
         .merge(crate::preview::routes())
         .layer(DefaultBodyLimit::max(15 * 1024 * 1024))
 }
+/// The folder a request's paths are relative to: the chat's own folder for
+/// a chat with one (as reads see it: a deleted one is not made again, one a
+/// link stands in for is refused), else the server's project folder. The
+/// second value names the chat folder for the response.
+pub(crate) async fn root_for(
+    state: &ServerState,
+    thread: Option<haarness_protocol::ThreadId>,
+) -> Result<(PathBuf, Option<String>), Failure> {
+    let Some(thread) = thread else {
+        return Ok((state.workspace.clone(), None));
+    };
+    match state.runtime.chat_folder(thread).await {
+        // Someone deleted it: these calls never make it again.
+        Ok(Some(folder)) if !folder.is_dir() => Err((StatusCode::NOT_FOUND, FOLDER_GONE.into())),
+        Ok(Some(folder)) => {
+            let shown = folder.display().to_string();
+            Ok((folder, Some(shown)))
+        }
+        Ok(None) => Ok((state.workspace.clone(), None)),
+        Err(haarness_core::CoreError::NotFound(message)) => {
+            Err((StatusCode::NOT_FOUND, format!("not found: {message}")))
+        }
+        Err(error) => Err(bad(error)),
+    }
+}
 fn bad(error: impl std::fmt::Display) -> Failure {
     (StatusCode::BAD_REQUEST, error.to_string())
 }
@@ -108,6 +159,17 @@ fn folder(failure: Failure) -> Failure {
         failure
     }
 }
+/// Whether a path part names Git's metadata folder as a file system may read
+/// it: in any letter case (`.GIT` is `.git` on macOS and Windows) and
+/// without the trailing dots and spaces Windows drops. (Unicode
+/// normalization cannot make another name `.git`: no other characters
+/// compose or decompose to plain ASCII.)
+fn is_git(part: &std::ffi::OsStr) -> bool {
+    part.to_str().is_some_and(|name| {
+        name.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(".git")
+    })
+}
 /// `value` as a path inside the workspace, refused when it is absolute,
 /// climbs out, or names Git metadata.
 fn relative(value: &str) -> Result<&Path, Failure> {
@@ -119,7 +181,7 @@ fn relative(value: &str) -> Result<&Path, Failure> {
     {
         return Err(bad("Path must be relative to the workspace"));
     }
-    if relative.components().any(|part| part.as_os_str() == ".git") {
+    if relative.components().any(|part| is_git(part.as_os_str())) {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
     Ok(relative)
@@ -133,7 +195,7 @@ fn inside(root: &Path, canonical: &Path) -> Result<(), Failure> {
         .strip_prefix(root)
         .map_err(bad)?
         .components()
-        .any(|part| part.as_os_str() == ".git")
+        .any(|part| is_git(part.as_os_str()))
     {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
@@ -197,7 +259,7 @@ fn browsable_link(root: &Path, listed: &Path, link: &Path) -> bool {
         && !listed.starts_with(&target)
         && !target
             .strip_prefix(root)
-            .is_ok_and(|inside| inside.components().any(|part| part.as_os_str() == ".git"))
+            .is_ok_and(|inside| inside.components().any(|part| is_git(part.as_os_str())))
 }
 pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -223,15 +285,16 @@ pub async fn list_files(
     State(state): State<ServerState>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileListing>, Failure> {
+    let (base, directory) = root_for(&state, query.thread_id).await?;
     tokio::task::spawn_blocking(move || {
-        let path = resolve(&state.workspace, &query.path, false).map_err(folder)?;
+        let path = resolve(&base, &query.path, false).map_err(folder)?;
         let listed = path.canonicalize().map_err(io(FOLDER_GONE))?;
-        let root = state.workspace.canonicalize().map_err(bad)?;
+        let root = base.canonicalize().map_err(bad)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(path).map_err(io(FOLDER_GONE))? {
             let entry = entry.map_err(bad)?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name == ".git" || (!query.hidden && name.starts_with('.')) {
+            if is_git(entry.file_name().as_os_str()) || (!query.hidden && name.starts_with('.')) {
                 continue;
             }
             let meta = match fs::symlink_metadata(entry.path()) {
@@ -244,7 +307,7 @@ pub async fn list_files(
                 name,
                 path: entry
                     .path()
-                    .strip_prefix(&state.workspace)
+                    .strip_prefix(&base)
                     .map_err(bad)?
                     .to_string_lossy()
                     .replace('\\', "/"),
@@ -262,6 +325,7 @@ pub async fn list_files(
         Ok(Json(FileListing {
             entries,
             truncated: false,
+            directory,
         }))
     })
     .await
@@ -273,8 +337,9 @@ pub async fn read_file(
     State(state): State<ServerState>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileContent>, Failure> {
+    let (base, directory) = root_for(&state, query.thread_id).await?;
     tokio::task::spawn_blocking(move || {
-        let real = resolve_for_read(&state.workspace, &query.path)?;
+        let real = resolve_for_read(&base, &query.path)?;
         let data = bytes(&real)?;
         let revision = hash(&data);
         let size = data.len() as u64;
@@ -316,6 +381,7 @@ pub async fn read_file(
             mime,
             revision,
             size,
+            directory,
         }))
     })
     .await
@@ -336,16 +402,18 @@ fn decode_write(input: &FileWrite) -> Result<Vec<u8>, Failure> {
     Ok(data)
 }
 
-#[utoipa::path(put,path="/v1/files/content",request_body=FileWrite,responses((status=200,body=FileContent)))]
+#[utoipa::path(put,path="/v1/files/content",params(FileScope),request_body=FileWrite,responses((status=200,body=FileContent)))]
 pub async fn write_file(
     State(state): State<ServerState>,
+    Query(scope): Query<FileScope>,
     Json(input): Json<FileWrite>,
 ) -> Result<Json<FileContent>, Failure> {
+    let (base, directory) = root_for(&state, scope.thread_id).await?;
     let _guard = EDIT.lock().await;
     let events = state.runtime.events().clone();
-    let changed_path = input.path.clone();
+    let changed = changed(&input.path, scope.thread_id, directory.as_deref());
     let result = tokio::task::spawn_blocking(move || {
-        let path = resolve(&state.workspace, &input.path, true)?;
+        let path = resolve(&base, &input.path, true)?;
         let data = decode_write(&input)?;
         let current = if path.exists() {
             bytes(&path)?
@@ -361,22 +429,19 @@ pub async fn write_file(
         if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_symlink()) {
             return Err(bad("Editing symlinks is not supported"));
         }
-        let temporary = path.with_file_name(format!(".haarness-edit-{}", uuid::Uuid::now_v7()));
+        let (folder, name) = Bound::parent_of(&base, &path)?;
+        let permissions = fs::metadata(&path).ok().map(|meta| meta.permissions());
+        let (mut file, temporary) = folder.create_temporary()?;
         let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .map_err(bad)?;
-            if let Ok(meta) = fs::metadata(&path) {
-                file.set_permissions(meta.permissions()).map_err(bad)?;
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions).map_err(bad)?;
             }
             file.write_all(&data).map_err(bad)?;
             file.sync_all().map_err(bad)?;
-            fs::rename(&temporary, &path).map_err(bad)
+            folder.rename(&temporary, &folder, &name)
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+            folder.remove_quietly(&temporary);
         }
         result?;
         Ok(Json(FileContent {
@@ -386,61 +451,74 @@ pub async fn write_file(
             content: input.content,
             encoding: input.encoding.unwrap_or_else(|| "utf8".into()),
             mime: "text/plain".into(),
+            directory,
         }))
     })
     .await
     .map_err(bad)??;
-    events.publish(
-        "files.updated",
-        None,
-        None,
-        None,
-        serde_json::json!({"path": changed_path}),
-    );
+    events.publish("files.updated", None, None, None, changed);
     Ok(result)
 }
 
-#[utoipa::path(post,path="/v1/files/action",request_body=FileAction,responses((status=200,body=serde_json::Value)))]
+/// A `files.updated` payload: the changed path, and for a chat folder the
+/// chat and folder it is relative to.
+fn changed(
+    path: &str,
+    thread: Option<haarness_protocol::ThreadId>,
+    directory: Option<&str>,
+) -> serde_json::Value {
+    match directory {
+        Some(directory) => {
+            serde_json::json!({"path": path, "threadId": thread, "directory": directory})
+        }
+        None => serde_json::json!({"path": path}),
+    }
+}
+
+#[utoipa::path(post,path="/v1/files/action",params(FileScope),request_body=FileAction,responses((status=200,body=serde_json::Value)))]
 pub async fn mutate_file(
     State(state): State<ServerState>,
+    Query(scope): Query<FileScope>,
     Json(input): Json<FileAction>,
 ) -> Result<Json<serde_json::Value>, Failure> {
+    let (base, directory) = root_for(&state, scope.thread_id).await?;
     let _guard = EDIT.lock().await;
     let events = state.runtime.events().clone();
-    let changed_path = input.path.clone();
+    let changed = changed(&input.path, scope.thread_id, directory.as_deref());
     let result = tokio::task::spawn_blocking(move || {
         if input.path.is_empty() || input.path == "." {
             return Err(bad("Select a workspace entry"));
         }
-        let path = resolve(&state.workspace, &input.path, input.action == "mkdir")?;
-        if path.canonicalize().ok() == state.workspace.canonicalize().ok() {
+        let path = resolve(&base, &input.path, input.action == "mkdir")?;
+        if path.canonicalize().ok() == base.canonicalize().ok() {
             return Err(bad("Select a workspace entry"));
         }
+        // Each change is made in the folder the checks approved, held open,
+        // even if a link is put in place of that folder meanwhile.
+        let (folder, name) = Bound::parent_of(&base, &path)?;
         match input.action.as_str() {
-            "mkdir" => fs::create_dir(path).map_err(bad)?,
+            "mkdir" => folder.mkdir(&name)?,
             "rename" => {
                 let target = resolve(
-                    &state.workspace,
+                    &base,
                     input
                         .target
                         .as_deref()
                         .ok_or_else(|| bad("Target required"))?,
                     true,
                 )?;
-                if target.exists() {
+                let (into, target_name) = Bound::parent_of(&base, &target)?;
+                if into.kind(&target_name)?.is_some() {
                     return Err((StatusCode::CONFLICT, "Target already exists".into()));
                 }
-                fs::rename(path, target).map_err(bad)?;
+                folder.rename(&name, &into, &target_name)?;
             }
             "delete" => {
                 if !input.confirm {
                     return Err(bad("Deletion requires confirmation"));
                 }
-                if fs::symlink_metadata(&path).map_err(bad)?.is_dir() {
-                    fs::remove_dir(path).map_err(bad)?;
-                } else {
-                    fs::remove_file(path).map_err(bad)?;
-                }
+                let directory = folder.kind(&name)?.ok_or_else(|| bad(FILE_GONE))?;
+                folder.remove(&name, directory)?;
             }
             _ => return Err(bad("Unknown file action")),
         }
@@ -448,14 +526,271 @@ pub async fn mutate_file(
     })
     .await
     .map_err(bad)??;
-    events.publish(
-        "files.updated",
-        None,
-        None,
-        None,
-        serde_json::json!({"path": changed_path}),
-    );
+    events.publish("files.updated", None, None, None, changed);
     Ok(result)
+}
+
+/// A folder inside the scope, held once its real place is checked: files are
+/// made, renamed and removed in that folder, not wherever its path leads
+/// later, so a link put in place of the folder (or of one above it) between
+/// the check and the change is not followed.
+struct Bound {
+    held: Held,
+}
+
+enum Held {
+    /// The folder itself, open (and the real path it was opened by):
+    /// changes are made relative to it.
+    #[cfg(unix)]
+    Open(std::os::fd::OwnedFd, PathBuf),
+    /// Its real path, checked again right before each change: where the
+    /// system has no folder handles (Windows), or none it lets this process
+    /// open (a write-only drop-box folder on macOS).
+    Checked(PathBuf),
+}
+
+impl Bound {
+    /// The real folder holding `path` (a path `resolve` approved), and the
+    /// name of `path` in it.
+    fn parent_of(root: &Path, path: &Path) -> Result<(Self, std::ffi::OsString), Failure> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| bad("Select a workspace entry"))?
+            .to_owned();
+        let parent = path.parent().ok_or_else(|| bad("Missing parent"))?;
+        Ok((Self::open(root, parent)?, name))
+    }
+
+    fn open(root: &Path, folder: &Path) -> Result<Self, Failure> {
+        let root = root.canonicalize().map_err(bad)?;
+        let real = folder.canonicalize().map_err(io(FOLDER_GONE))?;
+        inside(&root, &real)?;
+        #[cfg(unix)]
+        {
+            let opened = match open_folder(&real) {
+                Ok(opened) => opened,
+                // Searchable but not readable: hold its checked path.
+                Err(nix::errno::Errno::EACCES) => {
+                    return Ok(Self {
+                        held: Held::Checked(real),
+                    });
+                }
+                Err(error) => return Err(errno(error)),
+            };
+            let stat = nix::sys::stat::fstat(&opened).map_err(errno)?;
+            if !is_folder(stat.st_mode) {
+                return Err(bad("Not a folder"));
+            }
+            // Where the opened folder really is, not where its path leads now.
+            inside(&root, &held_path(&opened, &stat, &real)?)?;
+            Ok(Self {
+                held: Held::Open(opened, real),
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(Self {
+            held: Held::Checked(real),
+        })
+    }
+
+    /// The checked path, when it still leads to the folder that was checked.
+    fn still(path: &Path) -> Result<&Path, Failure> {
+        if path.canonicalize().ok().as_deref() == Some(path) {
+            Ok(path)
+        } else {
+            Err(bad("Path escapes the workspace"))
+        }
+    }
+
+    /// A new, empty file of its own name, for a write to replace a file with.
+    fn create_temporary(&self) -> Result<(fs::File, std::ffi::OsString), Failure> {
+        let name = std::ffi::OsString::from(format!(".haarness-edit-{}", uuid::Uuid::now_v7()));
+        let file = match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => {
+                use nix::{fcntl::OFlag, sys::stat::Mode};
+                fs::File::from(
+                    nix::fcntl::openat(
+                        folder,
+                        name.as_os_str(),
+                        OFlag::O_CREAT
+                            | OFlag::O_EXCL
+                            | OFlag::O_WRONLY
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC,
+                        Mode::from_bits_truncate(0o666),
+                    )
+                    .map_err(errno)?,
+                )
+            }
+            Held::Checked(path) => fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(Self::still(path)?.join(&name))
+                .map_err(bad)?,
+        };
+        Ok((file, name))
+    }
+
+    /// Move `name` to `target` in `into` (this folder or another held one),
+    /// replacing a file there.
+    fn rename(
+        &self,
+        name: &std::ffi::OsStr,
+        into: &Self,
+        target: &std::ffi::OsStr,
+    ) -> Result<(), Failure> {
+        match (&self.held, &into.held) {
+            #[cfg(unix)]
+            (Held::Open(from, _), Held::Open(to, _)) => {
+                nix::fcntl::renameat(from, name, to, target).map_err(errno)
+            }
+            _ => fs::rename(self.path_of(name)?, into.path_of(target)?).map_err(bad),
+        }
+    }
+
+    /// `name` in this folder by path, for the changes that cannot be made
+    /// relative to an open folder.
+    fn path_of(&self, name: &std::ffi::OsStr) -> Result<PathBuf, Failure> {
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, real) => {
+                let stat = nix::sys::stat::fstat(folder).map_err(errno)?;
+                Ok(held_path(folder, &stat, real)?.join(name))
+            }
+            Held::Checked(path) => Ok(Self::still(path)?.join(name)),
+        }
+    }
+
+    fn mkdir(&self, name: &std::ffi::OsStr) -> Result<(), Failure> {
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => nix::sys::stat::mkdirat(
+                folder,
+                name,
+                nix::sys::stat::Mode::from_bits_truncate(0o777),
+            )
+            .map_err(errno),
+            Held::Checked(path) => fs::create_dir(Self::still(path)?.join(name)).map_err(bad),
+        }
+    }
+
+    /// Whether `name` is there, and whether it is a folder (a link is not).
+    fn kind(&self, name: &std::ffi::OsStr) -> Result<Option<bool>, Failure> {
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => {
+                match nix::sys::stat::fstatat(
+                    folder,
+                    name,
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                ) {
+                    Ok(stat) => Ok(Some(is_folder(stat.st_mode))),
+                    Err(nix::errno::Errno::ENOENT) => Ok(None),
+                    Err(error) => Err(errno(error)),
+                }
+            }
+            Held::Checked(path) => match fs::symlink_metadata(Self::still(path)?.join(name)) {
+                Ok(meta) => Ok(Some(meta.is_dir())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(bad(error)),
+            },
+        }
+    }
+
+    fn remove(&self, name: &std::ffi::OsStr, directory: bool) -> Result<(), Failure> {
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => {
+                use nix::unistd::UnlinkatFlags;
+                let flag = if directory {
+                    UnlinkatFlags::RemoveDir
+                } else {
+                    UnlinkatFlags::NoRemoveDir
+                };
+                nix::unistd::unlinkat(folder, name, flag).map_err(errno)
+            }
+            Held::Checked(path) => {
+                let path = Self::still(path)?.join(name);
+                if directory {
+                    fs::remove_dir(path).map_err(bad)
+                } else {
+                    fs::remove_file(path).map_err(bad)
+                }
+            }
+        }
+    }
+
+    fn remove_quietly(&self, name: &std::ffi::OsStr) {
+        let _ = self.remove(name, false);
+    }
+}
+
+/// A failed call, worded as the standard library's would be.
+#[cfg(unix)]
+fn errno(error: nix::errno::Errno) -> Failure {
+    io(FILE_GONE)(std::io::Error::from_raw_os_error(error as i32))
+}
+
+#[cfg(unix)]
+fn is_folder(mode: nix::libc::mode_t) -> bool {
+    (mode & nix::sys::stat::SFlag::S_IFMT.bits()) == nix::sys::stat::SFlag::S_IFDIR.bits()
+}
+
+/// Open the folder `path` names to make changes in it. Linux opens it as a
+/// place only (`O_PATH`), which a folder one may write in but not read
+/// (`-wx`, a drop box) allows; elsewhere it is opened for reading.
+#[cfg(unix)]
+fn open_folder(path: &Path) -> nix::Result<std::os::fd::OwnedFd> {
+    use nix::{fcntl::OFlag, sys::stat::Mode};
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = OFlag::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = OFlag::O_RDONLY;
+    nix::fcntl::open(
+        path,
+        access | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+}
+
+/// The path the system has for the folder `opened` holds, which a link put
+/// in place of `checked` since does not change. Where the system cannot say
+/// (Linux without `/proc`), `checked` itself, as long as it still names that
+/// very folder (the same device and inode); otherwise the change is refused.
+#[cfg(unix)]
+fn held_path(
+    opened: &std::os::fd::OwnedFd,
+    stat: &nix::sys::stat::FileStat,
+    checked: &Path,
+) -> Result<PathBuf, Failure> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let mut path = PathBuf::new();
+        if nix::fcntl::fcntl(opened, nix::fcntl::FcntlArg::F_GETPATH(&mut path)).is_ok() {
+            return Ok(path);
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::fd::AsRawFd as _;
+        if let Ok(path) = fs::read_link(format!("/proc/self/fd/{}", opened.as_raw_fd())) {
+            return Ok(path);
+        }
+    }
+    let _ = opened;
+    same_folder(stat, checked)
+}
+
+/// `checked`, when it still names the folder `stat` describes.
+#[cfg(unix)]
+fn same_folder(stat: &nix::sys::stat::FileStat, checked: &Path) -> Result<PathBuf, Failure> {
+    let named = nix::sys::stat::stat(checked).map_err(errno)?;
+    if (stat.st_dev, stat.st_ino) == (named.st_dev, named.st_ino) {
+        Ok(checked.to_path_buf())
+    } else {
+        Err(bad("Path escapes the workspace"))
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +866,159 @@ mod tests {
             assert!(resolve(&root, "metadata", false).is_err());
         }
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn git_metadata_is_refused_in_any_spelling_the_disk_reads_as_git() {
+        let root = std::env::temp_dir().join(format!("haarness-git-case-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "x").unwrap();
+        for spelling in [
+            ".git",
+            ".GIT",
+            ".Git/config",
+            ".gIt",
+            ".git.",
+            ".git ",
+            "src/.GIT/x",
+        ] {
+            assert_eq!(
+                relative(spelling).unwrap_err(),
+                bad("Git metadata is not editable in the file explorer"),
+                "{spelling}"
+            );
+            assert!(resolve(&root, spelling, true).is_err(), "{spelling}");
+        }
+        for allowed in [".github", ".gitignore", "git", "a.git"] {
+            assert!(relative(allowed).is_ok(), "{allowed}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_change_lands_in_the_checked_folder_even_if_a_link_takes_its_place() {
+        let base =
+            std::env::temp_dir().join(format!("haarness-write-race-{}", uuid::Uuid::now_v7()));
+        let root = base.join("workspace");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let root = root.canonicalize().unwrap();
+        let held = Bound::open(&root, &root.join("sub")).unwrap();
+        // Between the check and the change, the folder is moved aside and a
+        // link out of the workspace put in its place.
+        fs::rename(root.join("sub"), root.join("sub-real")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+        let (mut file, temporary) = held.create_temporary().unwrap();
+        file.write_all(b"written").unwrap();
+        held.rename(&temporary, &held, std::ffi::OsStr::new("w.txt"))
+            .unwrap();
+        held.mkdir(std::ffi::OsStr::new("made")).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("sub-real/w.txt")).unwrap(),
+            "written"
+        );
+        assert!(root.join("sub-real/made").is_dir());
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing outside"
+        );
+        assert_eq!(
+            held.kind(std::ffi::OsStr::new("w.txt")).unwrap(),
+            Some(false)
+        );
+        assert_eq!(held.kind(std::ffi::OsStr::new("made")).unwrap(), Some(true));
+        held.remove(std::ffi::OsStr::new("w.txt"), false).unwrap();
+        assert!(!root.join("sub-real/w.txt").exists());
+        // The link itself is no folder of the workspace to hold.
+        assert_eq!(
+            Bound::open(&root, &root.join("sub")).err(),
+            Some(bad("Path escapes the workspace"))
+        );
+        // A rename between two held folders stays in them too.
+        let into = Bound::open(&root, &root.join("sub-real/made")).unwrap();
+        let (_, temporary) = held.create_temporary().unwrap();
+        held.rename(&temporary, &into, std::ffi::OsStr::new("moved"))
+            .unwrap();
+        assert!(root.join("sub-real/made/moved").is_file());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_change_lands_in_a_folder_one_may_write_in_but_not_read() {
+        use std::{ffi::OsStr, os::unix::fs::PermissionsExt as _};
+        let base = std::env::temp_dir().join(format!("haarness-drop-box-{}", uuid::Uuid::now_v7()));
+        let root = base.join("workspace");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("drop")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let root = root.canonicalize().unwrap();
+        let drop_box = root.join("drop");
+        let mode = |mode| fs::set_permissions(&drop_box, fs::Permissions::from_mode(mode));
+        mode(0o300).unwrap();
+        let changed = (|| {
+            let held = Bound::open(&root, &drop_box)?;
+            let (mut file, temporary) = held.create_temporary()?;
+            file.write_all(b"dropped").map_err(bad)?;
+            held.rename(&temporary, &held, OsStr::new("note.txt"))?;
+            held.mkdir(OsStr::new("inner"))?;
+            let kinds = (
+                held.kind(OsStr::new("note.txt"))?,
+                held.kind(OsStr::new("inner"))?,
+            );
+            held.mkdir(OsStr::new("gone"))?;
+            held.remove(OsStr::new("gone"), true)?;
+            // The folder moved aside and a link out put in its place: a
+            // change lands in the folder or is refused, never outside.
+            fs::rename(&drop_box, root.join("drop-real")).map_err(bad)?;
+            std::os::unix::fs::symlink(&outside, &drop_box).map_err(bad)?;
+            let late = held.mkdir(OsStr::new("late"));
+            Ok::<_, Failure>((kinds, late))
+        })();
+        let real = root.join("drop-real");
+        let _ = fs::set_permissions(&real, fs::Permissions::from_mode(0o755));
+        let _ = mode(0o755);
+        let (kinds, late) = changed.unwrap();
+        assert_eq!(kinds, (Some(false), Some(true)));
+        assert_eq!(
+            fs::read_to_string(real.join("note.txt")).unwrap(),
+            "dropped"
+        );
+        assert!(real.join("inner").is_dir());
+        assert!(!real.join("gone").exists());
+        assert!(late.is_err() || real.join("late").is_dir(), "{late:?}");
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing outside"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn without_a_path_for_the_open_folder_the_checked_path_must_still_name_it() {
+        let base =
+            std::env::temp_dir().join(format!("haarness-same-folder-{}", uuid::Uuid::now_v7()));
+        let outside = base.join("outside");
+        fs::create_dir_all(base.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let base = base.canonicalize().unwrap();
+        let sub = base.join("sub");
+        let opened = open_folder(&sub).unwrap();
+        let stat = nix::sys::stat::fstat(&opened).unwrap();
+        assert_eq!(same_folder(&stat, &sub), Ok(sub.clone()));
+        fs::rename(&sub, base.join("sub-real")).unwrap();
+        std::os::unix::fs::symlink(&outside, &sub).unwrap();
+        assert_eq!(
+            same_folder(&stat, &sub),
+            Err(bad("Path escapes the workspace"))
+        );
+        assert!(same_folder(&stat, &base.join("gone")).is_err());
+        assert_eq!(
+            same_folder(&stat, &base.join("sub-real")),
+            Ok(base.join("sub-real"))
+        );
+        fs::remove_dir_all(base).unwrap();
     }
     #[cfg(unix)]
     #[test]

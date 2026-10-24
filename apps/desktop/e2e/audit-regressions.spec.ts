@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, realpath, writeFile, readFile } from "node:fs/promises"
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 type Fixture = { app: ElectronApplication; page: Page; a: string; b: string; temp: string };
 const test = base.extend<{ desktop: Fixture }>({
@@ -43,7 +44,7 @@ const test = base.extend<{ desktop: Fixture }>({
     await page.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
     try {
       await choose(app, a);
-      await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+      await page.getByRole("button", { name: "Open another project", exact: true }).click();
       await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
       await use({ app, page, a, b, temp });
       expect(errors).toEqual([]);
@@ -59,6 +60,7 @@ const test = base.extend<{ desktop: Fixture }>({
       for (const directory of [a, b]) {
         try { execFileSync(binary, ["--workspace", directory, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
       }
+      stopChatHome(binary, env);
       await info.attach("fixture", { body: temp, contentType: "text/plain" });
     }
   },
@@ -412,7 +414,8 @@ test("audit: attachment drafts larger than preferences storage survive an immedi
   await expect(button(page, "Remove large.png")).toBeVisible();
   const value = await page.evaluate(async () => {
     const data = await window.haarness.boot();
-    const key = "new:" + (data.recent[0].project?.id ?? data.recent[0].id);
+    const project = data.recent.find((item) => !item.chatHome)!;
+    const key = "new:" + (project.project?.id ?? project.id);
     return (await window.haarness.attachmentDraft(key)).map((item) => ({ name: item.name, bytes: item.data.split(",")[1].length * 0.75 }));
   });
   expect(value).toEqual([{ name: "large.png", bytes: 3 * 1024 * 1024 }]);

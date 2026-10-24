@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // A selection in a Markdown file's rendered Preview names the source lines it
 // came from: "Add selection to context" (and its shortcut) adds those lines,
@@ -104,7 +105,7 @@ test.beforeAll(async () => {
   await app.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90000 });
 });
 
@@ -114,6 +115,7 @@ test.afterAll(async () => {
     try {
       execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 });
     } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 

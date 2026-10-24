@@ -20,6 +20,9 @@ interface Overview {
   /** The server answers for chats in Auto itself. */
   shared: boolean;
   loaded: boolean;
+  /** Turns, approvals and questions come from the server now, not only
+   * the cached chats. */
+  live: boolean;
   loading: boolean;
   error: string;
 }
@@ -43,6 +46,7 @@ export function createProjectOverview(input: {
     questions: [],
     shared: false,
     loaded: false,
+    live: false,
     loading: false,
     error: "",
   });
@@ -74,7 +78,9 @@ export function createProjectOverview(input: {
   createEffect(() => {
     if (!input.active()) return;
     const value = input.snapshot();
-    if (value) set({ ...value, loaded: true, loading: false, error: "" });
+    if (!value) return;
+    set({ ...value, loaded: true, live: true, loading: false, error: "" });
+    onCleanup(() => set("live", false));
   });
   createEffect(
     on(
@@ -171,6 +177,7 @@ export function createProjectOverview(input: {
               set("permissions", permissions);
               set("questions", questions);
               set("shared", info.capabilities.includes("approval-mode.v1"));
+              set("live", true);
             };
           },
           apply,
@@ -186,6 +193,7 @@ export function createProjectOverview(input: {
           link.dispose();
           off();
           offHint();
+          set("live", false);
         });
       },
     ),

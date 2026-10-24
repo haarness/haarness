@@ -128,6 +128,9 @@
       "items": {
         "$ref": "#/components/schemas/CommandInfo"
       }
+    },
+    "query": {
+      "$ref": "#/components/schemas/ChatListQuery"
     }
   },
   {
@@ -392,6 +395,9 @@
     "pathParams": [],
     "response": {
       "$ref": "#/components/schemas/WorkflowListResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ChatListQuery"
     }
   },
   {
@@ -1433,6 +1439,9 @@
     },
     "body": {
       "$ref": "#/components/schemas/FileWrite"
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileScope"
     }
   },
   {
@@ -1443,6 +1452,9 @@
     "response": {},
     "body": {
       "$ref": "#/components/schemas/FileAction"
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileScope"
     }
   },
   {

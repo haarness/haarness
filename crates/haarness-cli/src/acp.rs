@@ -162,6 +162,7 @@ impl Service {
                 provider: self.provider.clone(),
                 model: self.model.clone(),
                 ultracode: None,
+                directory: None,
             })
             .await
             .map_err(internal)?;
