@@ -8,7 +8,8 @@ import { join, resolve } from "node:path";
 // move the transcript once for each thing that comes or goes, frame by frame:
 // following, the view is at the end in every frame drawn, no row is drawn at
 // one height and then another, and nothing moves in a frame where nothing
-// came or went.
+// came or went. The running step it let through, opened, stays where it was
+// clicked while a row above the view changes size.
 let app: ElectronApplication, page: Page, root: string, project: string, env: Record<string, string>;
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 const shots = process.env.HAARNESS_SCREENSHOTS;
@@ -27,6 +28,8 @@ type Frame = {
   dock: number;
   /** The activity line, 0 when it is gone. */
   activity: number;
+  /** The reply being written, 0 when there is none. */
+  live: number;
   /** Each drawn row's height, by item. */
   rows: Record<string, number>;
 };
@@ -84,6 +87,7 @@ async function frames(act: () => Promise<void>): Promise<Frame[]> {
         prompt: prompts[prompts.length - 1].getBoundingClientRect().top - view.top,
         dock: document.querySelector(".approvals")?.getBoundingClientRect().height ?? 0,
         activity: list.querySelector<HTMLElement>(".assistant-activity")?.offsetHeight ?? 0,
+        live: list.querySelector<HTMLElement>('[data-testid="streaming-reply"]')?.offsetHeight ?? 0,
         rows,
       });
     });
@@ -129,7 +133,7 @@ function steady(seen: Frame[], growing: string[] = []) {
     }
   expect(redrawn).toEqual([]);
   // The view moves only with something that came or went: the card, a row,
-  // the activity line, or the output of a step opened.
+  // the reply being written, the activity line, or the output of a step opened.
   const unexplained: string[] = [];
   let moves = 0;
   for (let index = 1; index < seen.length; index++) {
@@ -139,7 +143,8 @@ function steady(seen: Frame[], growing: string[] = []) {
     const changed =
       Math.abs(now.dock - was.dock) >= 1 ||
       now.activity !== was.activity ||
-      Object.keys(now.rows).some((id) => was.rows[id] !== now.rows[id]);
+      now.live !== was.live ||
+      Object.keys({ ...was.rows, ...now.rows }).some((id) => was.rows[id] !== now.rows[id]);
     if (!changed) unexplained.push(`${now.at}ms: moved ${Math.round(now.prompt - was.prompt)}px`);
   }
   expect(unexplained).toEqual([]);
@@ -265,5 +270,47 @@ test("a question card leaving moves the view once with the row of its answer", a
   const seen = await frames(() => question().getByRole("button", { name: "Blue", exact: true }).press("Enter"));
   expect(steady(seen)).toBeLessThanOrEqual(3);
   await expect(page.locator(".tool-call").filter({ hasText: "Which color?" })).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("the running step it let through, opened, stays where it was clicked as a row above the view shrinks", async () => {
+  // A long reply wholly above the view once the step is in.
+  for (let reply = 0; reply < 2; reply++) {
+    await send("::long 40");
+    await idle();
+  }
+  await settle();
+  await send('!tool bash {"command":"sleep 4; echo held"}');
+  await permission().getByRole("button", { name: "Allow once", exact: true }).click();
+  await expect(permission()).toHaveCount(0);
+  const step = page.locator(".tool-call").last();
+  const summary = step.locator(":scope > summary");
+  await settle();
+  // Opened as it runs, while following: the end waits for more to be written.
+  await summary.click();
+  await expect(step).toHaveAttribute("open", "");
+  await expect(step.locator(".tool-empty")).toHaveText("Waiting for output…");
+  await settle();
+  const at = () => summary.evaluate((element) => element.getBoundingClientRect().top);
+  const before = await at();
+  // A row wholly above the view drawn 200px shorter, as one measured anew
+  // smaller is (a wider window, an image's placeholder settling).
+  const shrunk = await page.evaluate(() => {
+    const list = document.querySelector<HTMLElement>(".transcript")!;
+    const view = list.getBoundingClientRect();
+    const row = [...list.querySelectorAll<HTMLElement>(".transcript-body > [data-index]")].find(
+      (row) => row.getBoundingClientRect().bottom < view.top - 50 && row.offsetHeight > 400,
+    );
+    const text = row?.querySelector<HTMLElement>(".markdown");
+    if (!text) return false;
+    text.style.height = text.offsetHeight - 200 + "px";
+    text.style.overflow = "hidden";
+    return true;
+  });
+  expect(shrunk).toBe(true);
+  await settle();
+  expect(Math.abs((await at()) - before)).toBeLessThan(1);
+  await idle();
+  await expect(step.locator(".tool-output")).toContainText("held");
   expect(errors).toEqual([]);
 });
