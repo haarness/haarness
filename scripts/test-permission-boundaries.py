@@ -55,6 +55,8 @@ env = {**ISOLATED, 'PATH': f'{Path(bun).parent}:/usr/bin:/bin:/usr/sbin:/sbin', 
        'HAARNESS_TEST_PROVIDER': '1', 'HAARNESS_SCHEDULE_SKIP_INSTALL': '1'}
 projects = []
 checks = []
+# Chats start in Auto, where the reviewer answers an ask: a case about a person's prompt asks for Review.
+REVIEW = {'defaults': {'approval_mode': 'review'}}
 
 
 def project(name, config):
@@ -149,7 +151,7 @@ def case_paths():
 
 def case_headless():
     """A run nobody can answer names the allow rule."""
-    headless = project('headless', {'permission': {'bash': 'ask'}})
+    headless = project('headless', {**REVIEW, 'permission': {'bash': 'ask'}})
     result = haarness(headless, 'run', '!tool bash {"command":"git status"}', check=False)
     assert result.returncode != 0, result.stdout
     assert 'Stopped: the agent asked to run a command (git status), and nobody can approve that in this run.' in result.stderr, result.stderr
@@ -160,7 +162,7 @@ def case_headless():
 
 def case_schedules():
     """Scheduled runs never wait for a person."""
-    scheduled = project('scheduled', {'permission': {'bash': 'ask'}})
+    scheduled = project('scheduled', {**REVIEW, 'permission': {'bash': 'ask'}})
     (scheduled / '.haarness' / 'workflows').mkdir(parents=True)
     (scheduled / '.haarness' / 'workflows' / 'nightly.ts').write_text(
         'import { workflow } from "@haarness-ai/plugin"\n'
@@ -304,7 +306,7 @@ def case_config_files():
 
 def case_home_variable():
     """A shell command that writes under $HOME asks for that folder."""
-    home_project = project('home-variable', {'permission': {'bash': 'allow'}})
+    home_project = project('home-variable', {**REVIEW, 'permission': {'bash': 'allow'}})
     target = home / 'outside-home-variable.txt'
     for command in ['echo x > $HOME/outside-home-variable.txt', 'touch "${HOME}/outside-home-variable.txt"']:
         result = haarness(home_project, 'run', '!tool bash ' + json.dumps({'command': command}), check=False)
@@ -353,12 +355,12 @@ def case_shell_readings():
     assert f'Stopped: the agent asked to run a command ({command}), and nobody can approve that' in result.stderr, result.stderr
     assert 'Allow it by adding {"permission":{"bash":{"git push *":"allow"}}}' in result.stderr, result.stderr
     passed('a git push ask reaches it through an assignment and names the whole command')
-    review = project('shell-review', {'permission': {'bash': {'*': 'ask', 'nice *': 'allow', 'printf *': 'allow'}}})
+    review = project('shell-review', {**REVIEW, 'permission': {'bash': {'*': 'ask', 'nice *': 'allow', 'printf *': 'allow'}}})
     haarness(review, 'run', '!tool bash ' + json.dumps({'command': "nice sh -c 'printf ok > ok.txt'"}))
     haarness(review, 'run', '!tool bash ' + json.dumps({'command': "printf 'quoted words' > quoted.txt"}))
     assert (review / 'ok.txt').read_text() == 'ok' and (review / 'quoted.txt').read_text() == 'quoted words'
     passed('under "bash": "ask", an allowed wrapper and quoted words run without a new question')
-    outside = project('shell-outside', {'permission': {'bash': 'allow'}})
+    outside = project('shell-outside', {**REVIEW, 'permission': {'bash': 'allow'}})
     target = root / 'outside-shell-readings.txt'
     for command in [f"bash -c 'touch {target}'", f'nice touch {target}', f"eval 'echo x > {target}'"]:
         result = haarness(outside, 'run', '!tool bash ' + json.dumps({'command': command}), check=False)
@@ -402,7 +404,7 @@ def case_links():
     (outside / 'kept.txt').write_text('OUTSIDE\n')
     alias = root / 'links-outside-alias'
     alias.symlink_to(outside)
-    links = project('links', {'permission': {'external_directory': {str(alias) + '/*': 'deny'}}})
+    links = project('links', {**REVIEW, 'permission': {'external_directory': {str(alias) + '/*': 'deny'}}})
     (links / 'real.txt').write_text('real\n')
     (links / 'alias.txt').symlink_to('real.txt')
     (links / 'out.txt').symlink_to(outside / 'kept.txt')

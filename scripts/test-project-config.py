@@ -118,7 +118,8 @@ for folder in [project, other]:
     run("git", "-C", folder, "add", ".")
     run("git", "-C", folder, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
         "commit", "-m", "Initial fixture")
-write(state / "config/config.toml", '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n')
+# Chats start in Auto; the permission proof below needs a request that waits, so ask for Review.
+write(state / "config/config.toml", '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n')
 write(state / "config/commands/global-proof.md", "GLOBAL_COMMAND")
 write(state / "config/AGENTS.md", "GLOBAL_INSTRUCTIONS")
 browser_policy = {"enabled": True, "defaults": {"browsing":"allow", "downloads":"allow", "uploads":"allow"}, "sites":[]}

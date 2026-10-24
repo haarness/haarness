@@ -6,7 +6,8 @@ from e2e_env import clean_env
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-parity-tmux-')).resolve()
 workspace=root/'primary';linked=root/'linked';workspace.mkdir()
 config=workspace/'.haarness';(config/'commands').mkdir(parents=True)
-(config/'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_depth=2\nsubagent_concurrency=1\n')
+# Chats start in Auto; these approvals wait for a person, so the project (and its linked worktree) asks for Review.
+(config/'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_depth=2\nsubagent_concurrency=1\n')
 (config/'commands/context.md').write_text('---\ndescription: Dynamic context\n---\nContext: !`printf TMUX_CONTEXT_PROOF`\n')
 def git(*args):subprocess.run(['git','-C',str(workspace),*args],check=True,capture_output=True)
 git('init','-b','main');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-m','fixture');git('worktree','add','-b','linked',str(linked))

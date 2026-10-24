@@ -32,8 +32,9 @@ with tempfile.TemporaryDirectory(prefix="haarness-recovery-tmux-") as directory:
     config = project / ".haarness"
     config.mkdir(parents=True)
     (project / "sample.txt").write_text("tmux-recovery-file-proof")
+    # Chats start in Auto; the repaired call's ask must wait for a person, so ask for Review.
     (config / "config.toml").write_text(
-        '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n'
+        '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n'
     )
     env = dict(os.environ, HAARNESS_DATA_DIR=str(root / "data"), HAARNESS_TEST_PROVIDER="1")
     command = shlex.join([

@@ -61,9 +61,9 @@ with tempfile.TemporaryDirectory(prefix="haarness-copy-", dir=os.environ.get("TU
     root = Path(directory)
     project = root / "project"
     (project / ".haarness").mkdir(parents=True)
-    # Every command asks, so the approval card shows without --yolo.
+    # Every command asks, and Review (chats otherwise start in Auto) shows the approval card without --yolo.
     (project / ".haarness/config.toml").write_text(
-        '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n'
+        '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n'
     )
     run("git", "init", "-q", "-b", "main", cwd=project)
     helpers = root / "bin"
