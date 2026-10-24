@@ -19,7 +19,6 @@ import {
   onProjectImageSettled,
   projectImageElement,
   imageProject,
-  projectRoots,
   readProjectImages,
   relabelProjectImages,
   shownProjectImage,
@@ -137,10 +136,15 @@ export function Markdown(props: {
   function follow(href: string) {
     const connection = app.state.connection;
     const thread = app.state.selected;
-    // In a chat without a project, links start from the chat's own folder
-    // and stay in it.
-    const within = conversation ? app.chatDirectory() : undefined;
-    const target = linkTarget(href, { root: connection?.workspace ?? "", base: props.base, within });
+    // In a chat of This computer, links start from its own folder and stay
+    // in it; before it has one, no file link opens.
+    const chat = conversation && !!connection?.chatHome;
+    const folder = chat ? app.chatFolder() : undefined;
+    const target = linkTarget(href, {
+      root: chat ? (folder ?? "") : (connection?.workspace ?? ""),
+      base: props.base,
+    });
+    if (chat && !folder && target.kind === "file") return;
     if (target.kind === "web") {
       void window.haarness
         .openLink(connection?.id, thread, target.url)
@@ -238,8 +242,8 @@ export function Markdown(props: {
   const reading = new AbortController();
   const asked = new Set<string>();
   /** A read for this project settled: this reply's placeholders for the path show the image, or why not. */
-  function projectSettled(connection: string, path: string, shown: ShownImage) {
-    if (disposed || !host || connection !== app.state.connection?.id) return;
+  function projectSettled(scope: string, path: string, shown: ShownImage) {
+    if (disposed || !host || scope !== imageProject(app.state)?.scope) return;
     const elements = Array.from(host.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded")).filter(
       (element) => madeHere(element) && element.dataset.projectPath === path,
     );
@@ -270,11 +274,11 @@ export function Markdown(props: {
       labels: imageLabels,
       project: conversation
         ? {
-            root: () => (app.state.connection ? projectRoots(app.state.connection) : []),
-            within: () => app.chatDirectory(),
+            // A chat of This computer shows its own folder's images.
+            root: () => imageProject(app.state)?.roots ?? [],
             shown: (path) => {
-              const connection = app.state.connection?.id;
-              const now = connection ? shownProjectImage(connection, path) : undefined;
+              const scope = imageProject(app.state)?.scope;
+              const now = scope ? shownProjectImage(scope, path) : undefined;
               if (!now?.note) return now;
               // A picture this reply already shows stays when its file is
               // gone; only a place still waiting says why.

@@ -62,13 +62,14 @@ export function UniversalSearch(props: {
     setFiles([]);
     setProblem("");
     setLoading(false);
-    if (!q || !connection || props.archived) return;
+    // A chat of This computer before its first message has no files yet.
+    if (!q || !connection || props.archived || app.unfoldered()) return;
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
-        .api<string[]>(connection, "searchFiles", [{ q, limit: 100 }])
+        .api<string[]>(connection, "searchFiles", [{ q, limit: 100, ...app.fileScope() }])
         .then((values) => {
-          if (!disposed) setFiles(app.chatFiles(values));
+          if (!disposed) setFiles(values);
         })
         .catch(() => {
           if (!disposed)
