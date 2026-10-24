@@ -87,20 +87,77 @@ fn words(name: &str) -> Vec<String> {
     words
 }
 
-/// Whether a URL query or fragment parameter of this name carries a
-/// credential: any [`secret_name`], and also a whole `code` (an OAuth code,
-/// a function key), `jwt`, `ticket`, `otp` or `totp`, an `auth`, `access` or
-/// `mfa` code, and a name holding `hmac` or `passcode`.
-fn secret_parameter(name: &str) -> bool {
-    let joined = words(name).concat();
+/// Whether a URL query or fragment parameter of this name, holding `value`,
+/// carries a credential: any [`secret_name`], and also a whole `code` (an
+/// OAuth code, a function key), a whole or last word `jwt`, `bearer`,
+/// `ticket`, `otp` or `totp` (`x-otp`), an `auth`, `access` or `mfa` code,
+/// and a name holding `hmac` or `passcode`.
+///
+/// Parameter names glue their words together more often than settings do,
+/// so these count too: a last word that ends in `pwd` (`pwd`, `adminpwd`,
+/// `userpwds`), a `pass` or `pw` glued to the account it opens (`userpass`,
+/// `dbpass`, `rootpw`), keys glued to what they open (`apikeys`), and tokens
+/// glued to the word before them (`apitokens`) unless the value counts them
+/// (`maxtokens=4096`). Any other glued `pass` stays readable (`bypass`,
+/// `compass`, `trespass`), and so do `keyword` and `show_pw_hint`.
+fn secret_parameter(name: &str, value: &str) -> bool {
+    const ACCOUNTS: [&str; 10] = [
+        "user", "db", "admin", "root", "login", "proxy", "ftp", "smtp", "mail", "ldap",
+    ];
+    const HOLDERS: [&str; 17] = [
+        "api",
+        "auth",
+        "app",
+        "access",
+        "private",
+        "priv",
+        "secret",
+        "session",
+        "master",
+        "encryption",
+        "signing",
+        "subscription",
+        "license",
+        "client",
+        "shared",
+        "account",
+        "ssh",
+    ];
+    let words = words(name);
+    let joined = words.concat();
+    let last = words.last().map_or("", String::as_str);
     secret_name(name)
         || ["code", "jwt", "ticket", "otp", "totp"].contains(&joined.as_str())
+        || ["jwt", "bearer", "ticket", "otp", "totp"].contains(&last)
         || ["authcode", "accesscode", "mfacode"]
             .iter()
             .any(|end| joined.ends_with(end))
         || ["hmac", "passcode"]
             .iter()
             .any(|part| joined.contains(part))
+        || last.ends_with("pwd")
+        || last.ends_with("pwds")
+        || ["pass", "pw"].iter().any(|word| {
+            last.strip_suffix(word)
+                .is_some_and(|start| ACCOUNTS.iter().any(|account| start.ends_with(account)))
+        })
+        || HOLDERS.iter().any(|holder| {
+            last.strip_suffix("keys")
+                .is_some_and(|start| start.ends_with(holder))
+        })
+        || (last.len() > "tokens".len() && last.ends_with("tokens") && !token_count(value))
+}
+
+/// Whether a parameter value is a count rather than a credential: a number,
+/// or `null`, `undefined`, `none`, `auto` or `inf` written in its place.
+fn token_count(value: &str) -> bool {
+    let number = value.strip_prefix('-').unwrap_or(value);
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, "0"));
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(whole) && digits(fraction))
+        || ["null", "undefined", "none", "auto", "inf"]
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
 }
 
 /// `pairs` (`a=1&b=2`, a query or fragment) with the value of each
@@ -117,7 +174,7 @@ fn parameters(pairs: &str) -> Cow<'_, str> {
                 .next()
                 .map(|(name, _)| name.into_owned())
                 .unwrap_or_default();
-            if value.is_empty() || value == REDACTED || !secret_parameter(&name) {
+            if value.is_empty() || value == REDACTED || !secret_parameter(&name, value) {
                 return Cow::Borrowed(pair);
             }
             hidden = true;
@@ -950,6 +1007,64 @@ mod tests {
         assert_eq!(
             urls_in("cannot reach https://user:pa/ss@h.fixture.test/x: refused"),
             "cannot reach https://<redacted>@h.fixture.test/x: refused"
+        );
+    }
+
+    #[test]
+    fn a_url_hides_parameters_whose_names_glue_a_credential_word_to_another() {
+        for name in [
+            "pwd",
+            "PWD",
+            "pwds",
+            "userpwd",
+            "adminpwd",
+            "oldpwd",
+            "userpwds",
+            "userpass",
+            "dbpass",
+            "adminpass",
+            "superuserpass",
+            "rootpw",
+            "userpw",
+            "apitokens",
+            "authtokens",
+            "apikeys",
+            "sshkeys",
+            "x-otp",
+            "x-jwt",
+            "x-ticket",
+            "x-bearer",
+        ] {
+            // A number under a glued `tokens` name counts them.
+            let values: &[&str] = if name.ends_with("tokens") {
+                &["PRIVATE"]
+            } else {
+                &["PRIVATE", "1234"]
+            };
+            for value in values {
+                assert_eq!(
+                    url(&format!("https://h.fixture.test/x?a=1&{name}={value}&b=2")),
+                    format!("https://h.fixture.test/x?a=1&{name}=<redacted>&b=2"),
+                    "{name}={value}"
+                );
+                assert_eq!(
+                    urls_in(&format!(
+                        "GET https://h.fixture.test/cb#{name}={value}&state=s failed: 401"
+                    )),
+                    format!("GET https://h.fixture.test/cb#{name}=<redacted>&state=s failed: 401"),
+                    "{name}={value}"
+                );
+            }
+        }
+        // A glued token count, a glued `pass` that opens nothing, and words
+        // that only hold the letters.
+        let kept = "https://h.fixture.test/?bypass=1&compass=2&trespass=3&surpass=4&passenger=5\
+                    &pattern=a&show_pw_hint=5&keyword=k&monkeys=6&maxtokens=4096&prompttokens=null\
+                    &maxtokens=auto&tokenizer=bpe&sid=4&state=s";
+        assert!(matches!(url(kept), Cow::Borrowed(_)), "{}", url(kept));
+        assert_eq!(
+            url("https://h.fixture.test/?apitokens=4096x"),
+            "https://h.fixture.test/?apitokens=<redacted>"
         );
     }
 
