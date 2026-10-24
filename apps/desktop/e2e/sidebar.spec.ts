@@ -93,6 +93,16 @@ async function createSection(name: string, group: string) {
 async function fileUnder(name: string, group: string) {
   await options(name);
   await item("Section").click();
+  // Sections are a live choice: every row keeps the tick column, New section… too.
+  if (process.env.HAARNESS_SCREENSHOTS) {
+    for (const theme of ["dark", "light"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator(".menu-branch-panel").screenshot({
+        path: join(process.env.HAARNESS_SCREENSHOTS, `section-menu-${theme}.png`),
+      });
+    }
+  }
   await page.getByRole("menuitemradio", { name: group, exact: true }).click();
 }
 async function pin(name: string, pinned = true) {
