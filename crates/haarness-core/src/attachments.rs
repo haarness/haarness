@@ -263,6 +263,27 @@ pub fn is_image_source(source: &str) -> bool {
         .is_some_and(|mime_type| mime_type.starts_with("image/"))
 }
 
+/// The bytes a provider receives for an attachment source: the base64 of a
+/// data URL or of a file, or the address of an image it fetches itself. A
+/// file that cannot be read counts nothing.
+#[must_use]
+pub fn sent_bytes(source: &str) -> usize {
+    if let Some(data) = source.strip_prefix("data:") {
+        return data.split_once(',').map_or(0, |(_, encoded)| encoded.len());
+    }
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return source.len();
+    }
+    local_path(source)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map_or(0, |metadata| {
+            usize::try_from(metadata.len())
+                .unwrap_or(usize::MAX)
+                .div_ceil(3)
+                .saturating_mul(4)
+        })
+}
+
 /// A stored message as a model receives it: text files are appended to the
 /// message, and media that can no longer be read (an upload folder deleted
 /// since) is named instead of failing the turn.

@@ -11,6 +11,7 @@ pub mod definitions;
 mod events;
 mod execution;
 mod goal;
+mod image_budget;
 pub mod images;
 pub mod instructions;
 pub mod links;

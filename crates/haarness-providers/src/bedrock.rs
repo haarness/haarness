@@ -138,6 +138,14 @@ impl ModelProvider for BedrockProvider {
         &self.instance.id
     }
 
+    /// Bedrock takes 20 MB in a request; its images get 15 MiB of it.
+    fn image_limits(&self, _model: &str) -> haarness_core::ImageLimits {
+        haarness_core::ImageLimits {
+            bytes: 15 * 1024 * 1024,
+            ..haarness_core::ImageLimits::default()
+        }
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.instance.id.clone(),

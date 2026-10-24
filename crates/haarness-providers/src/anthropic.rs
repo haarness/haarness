@@ -215,6 +215,21 @@ impl AnthropicProvider {
     }
 }
 
+/// Anthropic takes 100 images in a request to a model with a 200K-token
+/// context window, 600 in one to a larger model, and 32 MB in a request.
+/// A model of unknown size gets the smaller number.
+pub(crate) fn image_limits(models: &[ModelInfo], model: &str) -> haarness_core::ImageLimits {
+    let larger = models
+        .iter()
+        .find(|info| info.id == model)
+        .and_then(|info| info.context_window)
+        .is_some_and(|window| window > 200_000);
+    haarness_core::ImageLimits {
+        count: Some(if larger { 600 } else { 100 }),
+        ..haarness_core::ImageLimits::default()
+    }
+}
+
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn refresh_models(&self, force: bool) {
@@ -248,6 +263,9 @@ impl ModelProvider for AnthropicProvider {
             self.resolved_api_key().as_deref(),
             &self.headers,
         ))
+    }
+    fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
+        image_limits(&self.live_models.get(&self.models), model)
     }
     fn id(&self) -> &str {
         &self.id
