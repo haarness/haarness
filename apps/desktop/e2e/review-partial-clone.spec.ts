@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // For a project whose configuration is not trusted, Review never downloads
 // what a partial clone left out (the server sets GIT_NO_LAZY_FETCH), so a
@@ -65,8 +66,7 @@ test.beforeAll(async () => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
   await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
+    .getByRole("button", { name: "Open another project", exact: true })
     .click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 240000 });
 });
@@ -75,6 +75,7 @@ test.afterAll(async () => {
   await app?.close().catch(() => {});
   if (workspace)
     execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true });
 });
 

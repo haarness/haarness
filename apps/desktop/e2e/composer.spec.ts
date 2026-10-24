@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 /** An isolated Desktop on the echo provider, opened on a fresh project. */
 async function launch(
@@ -39,7 +40,7 @@ async function launch(
   await app.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await ready(page);
   return {
     app,
@@ -50,6 +51,7 @@ async function launch(
       try {
         execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
       } catch {}
+      stopChatHome(binary, env);
       await info.attach("fixture", { body: temporary, contentType: "text/plain" });
     },
   };

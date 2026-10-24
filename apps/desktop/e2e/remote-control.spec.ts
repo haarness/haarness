@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 /**
  * `/remote-control` from the composer. The signed-out case needs nothing but
@@ -46,7 +47,7 @@ async function launch(cloud: Record<string, string>) {
   }, project);
   const page = await app.firstWindow();
   page.setDefaultTimeout(15000);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
   const close = async () => {
     await app.evaluate(({ BrowserWindow }) => {
@@ -54,6 +55,7 @@ async function launch(cloud: Record<string, string>) {
     }).catch(() => {});
     await app.close().catch(() => {});
     try { execFileSync(binary, ["--workspace", project, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
+    stopChatHome(binary, env);
   };
   return { app, page, env, project, close };
 }

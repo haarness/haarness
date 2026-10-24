@@ -167,14 +167,24 @@
   opacity: 1;
 }
 
-/* The trailing control sits flush with the sidebar's inline padding so it
-   shares a column with the per-project menus in the list below. */
-.sidebar > .section-label {
+/* The trailing control sits flush with the list's end so it shares a column
+   with the per-project menus below. A heading keeps its height whether or not
+   it has controls, so nothing shifts as they come and go. */
+.sidebar-heading {
+  box-sizing: border-box;
+  min-height: 36px;
   padding-block: var(--s1) var(--s0);
   padding-inline: var(--s2) 0;
   font-size: var(--ui-sm);
   color: var(--muted);
   flex: none;
+}
+/* This computer's chats, then a clear break before the projects. */
+.computer-chats {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  padding-bottom: var(--s3);
 }
 /* The label keeps the row's start; its controls group at the end. */
 .section-label-actions {
@@ -182,12 +192,12 @@
   align-items: center;
   gap: var(--s0);
 }
-.sidebar > .section-label .icon-button {
+.sidebar-heading .icon-button {
   width: 26px;
   height: 26px;
   opacity: 0.75;
 }
-.sidebar > .section-label .icon-button:hover {
+.sidebar-heading .icon-button:hover {
   opacity: 1;
 }
 
@@ -201,6 +211,8 @@
    sidebar's own padding (its outer edge, the thumb's transparent border, is
    cut off there), so rows still end on the column of the menus above. */
 .sidebar-lists {
+  display: flex;
+  flex-direction: column;
   --sidebar-scrollbar-opacity: 0%;
   transition: --sidebar-scrollbar-opacity 240ms ease-out;
   min-height: 0;
@@ -231,10 +243,11 @@
   );
   background-clip: padding-box;
 }
+/* The rest of the list's height is the drop target for unfiled projects. */
 .project-list {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+  flex: 1 0 auto;
 }
 /* Collapsed rows sit close together; an open conversation list keeps a
    clearer break before the next heading. */

@@ -27,6 +27,7 @@ import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { WebSocketServer } from "ws";
 import { Haarness, type Thread } from "@haarness/sdk";
+import { stopChatHome } from "./fixtures/chat-home";
 let app: ElectronApplication,
   page: Page,
   temporary: string,
@@ -224,8 +225,7 @@ test.beforeAll(async () => {
     });
   }, directories[0]);
   await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
+    .getByRole("button", { name: "Open another project", exact: true })
     .click();
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
@@ -266,6 +266,7 @@ test.afterAll(async () => {
         { env, stdio: "ignore", timeout: 30000 },
       );
     } catch {}
+  stopChatHome(binary, env);
   if (evidence) {
     await mkdir(evidence, { recursive: true });
     await writeFile(join(evidence, "fixture-path.txt"), temporary);

@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, realpath, rm, symlink } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Links a model writes, in a reply or a Markdown file, and haarness:// links
 // from outside: a file link opens in the Files panel or not at all, nothing
@@ -76,7 +77,7 @@ test.beforeAll(async () => {
     };
     shell.showItemInFolder = (...args: unknown[]) => void calls.shell.push(["showItemInFolder", ...args]);
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90000 });
   const connection = JSON.parse(
     execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
@@ -106,6 +107,7 @@ test.afterAll(async () => {
         timeout: 30_000,
       });
     } catch {}
+    stopChatHome(binary, env);
   }
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });

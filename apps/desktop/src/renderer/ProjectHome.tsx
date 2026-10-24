@@ -124,13 +124,15 @@ export function ProjectHome() {
           >
             {(failure) => (
               <>
-                <h1>{t("Couldn’t open project")}</h1>
+                <h1>
+                  {app.homeFailed()
+                    ? t("Couldn’t open This computer")
+                    : t("Couldn’t open project")}
+                </h1>
                 <p class="project-home-error" role="alert">
                   {failure().message}
                 </p>
-                <button
-                  onClick={() => app.run(() => app.connect(failure().input))}
-                >
+                <button onClick={() => app.run(app.retryOpening)}>
                   {t("Retry")}
                 </button>
               </>
@@ -144,7 +146,9 @@ export function ProjectHome() {
             {app.currentServer().cloud
               ? t("Cloud sessions")
               : state.projectFailure
-                ? t("Choose another project")
+                ? app.homeFailed()
+                  ? t("Open project")
+                  : t("Choose another project")
                 : (host() ? hostProjects()?.items.length : projects().length)
                   ? t("Open another project")
                   : t("Open project")}

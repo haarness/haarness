@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { crc32, deflateSync } from "node:zlib";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // An image a reply names by a path in its project shows that file, read
 // through the server, which reads only inside the project; a path out of it,
@@ -97,7 +98,7 @@ test.beforeAll(async () => {
   await app.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90000 });
   const connection = JSON.parse(
     execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
@@ -124,6 +125,7 @@ test.afterAll(async () => {
         timeout: 30_000,
       });
     } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 

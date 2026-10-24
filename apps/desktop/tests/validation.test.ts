@@ -38,6 +38,7 @@ test("local management cannot escape its workspace, trust policy or credential c
     "--data-dir=/tmp/elsewhere",
     "--trust-project",
     "--disable-project-config",
+    "--chat-home",
     "--yolo",
     "--key=secret",
     "--token=secret",

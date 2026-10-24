@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, realpath } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // The hook editor's matcher, and a question a PreToolUse hook answers, in a
 // real Desktop against a real server with the echo provider.
@@ -80,7 +81,7 @@ test.beforeAll(async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
   await theme("light");
 });
@@ -94,6 +95,7 @@ test.afterAll(async () => {
   try {
     execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
   } catch {}
+  stopChatHome(binary, env);
   await test.info().attach("fixture", { body: root ?? "not started", contentType: "text/plain" });
 });
 

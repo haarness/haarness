@@ -20,6 +20,10 @@ export { computers };
  * the menu does not grow under the pointer, and shows nothing signed out. */
 const [signedIn, setSignedIn] = createSignal(false);
 export { signedIn, setSignedIn };
+/** Whether the account has been read since Desktop started (`signedIn`
+ * says nothing before). */
+const [accountKnown, setAccountKnown] = createSignal(false);
+export { accountKnown, setAccountKnown };
 
 let pending: Promise<void> | undefined;
 let generation = 0;

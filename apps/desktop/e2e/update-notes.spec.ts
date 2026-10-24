@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // The update confirmation shows the feed's release notes, rendered and
 // sanitized, in a scroll area of its own, and stays as it was when the feed
@@ -64,7 +65,7 @@ test.beforeAll(async () => {
     win.show();
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, project);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });
 });
 
@@ -73,6 +74,7 @@ test.afterAll(async () => {
   try {
     execFileSync(binary, ["--workspace", project, "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 });
   } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
