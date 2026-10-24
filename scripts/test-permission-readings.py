@@ -10,10 +10,13 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 4. backslash: a line that starts with a backslash is a command of its own (an `rm *` deny refuses
    `true` followed by `\rm -rf victim`, and an allowed `echo *` under `"*": "ask"` does not open
    `echo hi` followed by one), and a line continuation inside a word is joined (`r\` + `m -rf`).
+5. backquotes: the commands in backquotes of an unquoted here-document meet the rules (an `rm *`
+   deny refuses `cat > n.md <<EOF` holding `rm -rf victim` in backquotes), while one under an
+   allowed `cat *` with `"*": "ask"` runs without a question, as before.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash). No model is called; nothing outside the fixture is
+toml_order, cd_link, resource_alias, backslash, backquotes). No model is called; nothing outside the fixture is
 touched.
 """
 import json
@@ -160,8 +163,31 @@ def case_backslash():
     passed('an allowed echo does not open a backslash line after it; plain echo lines still run')
 
 
+def case_backquotes():
+    """Backquotes in an unquoted here-document meet the rules for what they run."""
+    _, env = environment('backquotes')
+    denied = project('backquotes', {'permission': {'bash': {'rm *': 'deny'}}})
+    (denied / 'victim').mkdir()
+    try:
+        output = bash(env, denied, 'cat > n.md <<EOF\n`rm -rf victim`\nEOF')
+        assert "is denied by permission rule 'bash:rm *'" in output, output
+        assert (denied / 'victim').is_dir(), 'the backquoted rm ran'
+        output = bash(env, denied, "cat > q.md <<'EOF'\n`rm -rf victim`\nEOF", code=0)
+        assert (denied / 'q.md').read_text() == '`rm -rf victim`\n', output
+    finally:
+        stop(env, denied)
+    asked = project('backquotes-ask', {'permission': {'bash': {'*': 'ask', 'cat *': 'allow'}}})
+    try:
+        bash(env, asked, 'cat > notes.md <<EOF\nRun `echo hi` first.\nEOF', code=0)
+        assert (asked / 'notes.md').read_text() == 'Run hi first.\n'
+    finally:
+        stop(env, asked)
+    passed('an rm deny refuses rm in backquotes of an unquoted here-document; a quoted one and an '
+           'allowed cat with backquotes run as before')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
-         'backslash': case_backslash}
+         'backslash': case_backslash, 'backquotes': case_backquotes}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

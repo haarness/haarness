@@ -680,6 +680,7 @@ impl Reader<'_> {
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
         let continued = command.contains("\\\n");
+        let mut read_documents = HashSet::new();
 
         for (node, parent) in command_nodes {
             if self.overflow {
@@ -777,6 +778,20 @@ impl Reader<'_> {
             // two words, so the joined text is read again.
             if continued && let Some(joined) = joined_inside_words(&node_text(node, command)) {
                 self.nested(&joined, depth);
+            }
+            // An unquoted here-document's `…` substitutions run as the shell
+            // writes the document, where the parser keeps them as text. Each
+            // document is read once, for the first command that reads it.
+            if let Some(statement) = parent
+                .filter(|parent| parent.kind() == "redirected_statement")
+                .or_else(|| documents.get(&node.id()).copied())
+                && read_documents.insert(statement.id())
+            {
+                for redirect in children(statement) {
+                    if let Some(text) = backquoted(redirect, command) {
+                        self.nested_within_limits(&text, depth);
+                    }
+                }
             }
         }
         self.text_depth = outer_depth;
@@ -1033,6 +1048,21 @@ impl Reader<'_> {
         self.read_bytes += text.len();
         self.texts.insert(key);
         self.read(text, depth);
+    }
+
+    /// [`nested`](Self::nested) for text a line runs that is no command's
+    /// own (an unquoted here-document's `…`): when it would pass a limit it
+    /// is left unread rather than marking the command incomplete, so a long
+    /// document never makes a narrower rule refuse the line.
+    fn nested_within_limits(&mut self, text: &str, depth: Depth) {
+        if depth.text < MAX_NESTING
+            && depth.hops < MAX_HOPS
+            && text.len() <= MAX_NESTED_BYTES
+            && self.read_bytes + text.len() <= MAX_READ_BYTES
+            && self.nested_commands < MAX_NESTED_COMMANDS
+        {
+            self.nested(text, depth);
+        }
     }
 
     /// Read what a command runs: the rest of a wrapper's words, or the text
@@ -2677,6 +2707,75 @@ fn here_string(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> 
         .filter_map(|index| redirect.named_child(index))
         .find(|child| WORD_KINDS.contains(&child.kind()))?;
     Some(unquote(value, source).0)
+}
+
+/// The commands in backquotes an unquoted here-document holds, one per line,
+/// as the shell runs them while it writes the document (`cat > n.md <<EOF`
+/// with `` `npm test` `` in it runs `npm test`): the parser reads `$(…)`
+/// there but keeps backquotes as text. `\`` is a backquote, `\\` a
+/// backslash and `\$` a dollar sign, there and inside them. A document whose
+/// delimiter is quoted (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) is text, and a
+/// backquote never closed runs nothing.
+fn backquoted(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    if redirect.kind() != "heredoc_redirect" {
+        return None;
+    }
+    let parts = children(redirect);
+    let quoted = parts
+        .iter()
+        .find(|part| part.kind() == "heredoc_start")
+        .is_none_or(|start| node_text(*start, source).contains(['\'', '"', '\\']));
+    let body = parts.iter().find(|part| part.kind() == "heredoc_body")?;
+    if quoted {
+        return None;
+    }
+    let text = source.get(body.start_byte()..body.end_byte())?;
+    if !text.contains('`') {
+        return None;
+    }
+    // `$(…)` and `${…}` there are read already.
+    let skipped: Vec<(usize, usize)> = children(*body)
+        .into_iter()
+        .filter(|part| matches!(part.kind(), "command_substitution" | "expansion"))
+        .map(|part| {
+            (
+                part.start_byte() - body.start_byte(),
+                part.end_byte() - body.start_byte(),
+            )
+        })
+        .collect();
+    let bytes = text.as_bytes();
+    let mut commands: Vec<String> = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        if open.is_none()
+            && let Some(&(_, end)) = skipped.iter().find(|(start, _)| *start == at)
+        {
+            at = end;
+            continue;
+        }
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'`' => {
+                match open.take() {
+                    Some(start) => {
+                        let inner = text[start..at]
+                            .replace("\\`", "`")
+                            .replace("\\$", "$")
+                            .replace("\\\\", "\\");
+                        if !inner.trim().is_empty() {
+                            commands.push(inner);
+                        }
+                    }
+                    None => open = Some(at + 1),
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    (!commands.is_empty()).then(|| commands.join("\n"))
 }
 
 fn heredoc_body(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
@@ -6087,6 +6186,94 @@ mod backslash_lines {
         }
         assert!(readings("cargo test \\\n  -p haarness-core").is_empty());
         assert!(!is_obviously_read_only("l\\\ns"));
+    }
+}
+
+/// Backquotes in an unquoted here-document, which the shell runs as it
+/// writes the document.
+#[cfg(test)]
+mod here_document_backquotes {
+    use super::*;
+
+    fn readings(command: &str) -> Vec<String> {
+        analyze(command, &std::env::current_dir().unwrap())
+            .derived
+            .into_iter()
+            .map(|derived| derived.pattern)
+            .collect()
+    }
+
+    #[test]
+    fn backquotes_in_an_unquoted_here_document_are_read_as_commands() {
+        assert_eq!(
+            readings("cat > n.md <<EOF\n`rm -rf victim`\nEOF"),
+            vec!["rm -rf victim"]
+        );
+        assert_eq!(
+            readings(
+                "cat > notes.md <<EOF\n# Notes\nRun `npm test` first, then `cargo build`.\nEOF"
+            ),
+            vec!["npm test", "cargo build"]
+        );
+        // The shell runs them for a document piped on or fed to a group too.
+        assert_eq!(
+            readings("cat <<EOF | kubectl apply -f -\nname: `whoami`\nEOF"),
+            vec!["whoami"]
+        );
+        // `\`` is a backquote there, inside a substitution as well.
+        assert_eq!(
+            readings("cat > n.md <<EOF\nHome is `echo ~/x` and \\`literal\\` here.\nEOF"),
+            vec!["echo ~/x"]
+        );
+        // Fenced code is backquotes too: the shell runs what they hold.
+        assert_eq!(
+            readings("cat > n.md <<EOF\n```bash\nnpm i\n```\nEOF"),
+            vec!["bash", "npm i"]
+        );
+        let analysis = analyze(
+            "cat > n.md <<EOF\n`rm -rf ~/victim`\nEOF",
+            &std::env::current_dir().unwrap(),
+        );
+        // Auto's deletion check sees what they delete.
+        assert!(
+            analysis
+                .deletions
+                .iter()
+                .any(|deletion| deletion.value == "~/victim" && deletion.effect == Effect::Deletes),
+            "{:?}",
+            analysis.deletions
+        );
+    }
+
+    #[test]
+    fn a_quoted_delimiter_or_an_open_backquote_reads_nothing_more() {
+        for command in [
+            "cat > n.md <<'EOF'\n`rm -rf victim`\nEOF",
+            "cat > n.md <<\"EOF\"\n`rm -rf victim`\nEOF",
+            "cat > n.md <<\\EOF\n`rm -rf victim`\nEOF",
+            "cat > n.md <<EOF\nAn unterminated `tick here.\nEOF",
+            "cat > n.md <<EOF\nno backquotes, $HOME and ${USER:-x}\nEOF",
+        ] {
+            assert!(
+                readings(command).is_empty(),
+                "{command:?}: {:?}",
+                readings(command)
+            );
+        }
+        // `$(…)` is read once, as before.
+        assert_eq!(
+            readings("cat <<EOF\n$(echo `date`)\nEOF"),
+            Vec::<String>::new()
+        );
+        let written: Vec<String> = analyze(
+            "cat <<EOF\n$(echo `date`)\nEOF",
+            &std::env::current_dir().unwrap(),
+        )
+        .written
+        .into_iter()
+        .map(|written| written.pattern)
+        .collect();
+        assert!(written.contains(&"date".to_owned()), "{written:?}");
     }
 }
 
