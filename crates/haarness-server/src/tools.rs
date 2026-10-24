@@ -1991,12 +1991,10 @@ impl Tool for WorkflowTool {
                     .get("source")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let mut path = input.get("path").and_then(Value::as_str).map(str::to_owned);
-                if let Some(value) = path.as_ref()
-                    && Path::new(value).is_relative()
-                {
-                    path = Some(context.workspace.join(value).display().to_string());
-                }
+                let path = input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(|value| workflow_path(&context.workspace, value));
                 let name = (source.is_none() && path.is_none())
                     .then(|| input.get("name").and_then(Value::as_str).map(str::to_owned))
                     .flatten();
@@ -2126,6 +2124,18 @@ impl Tool for WorkflowTool {
                 "unknown workflow action: {action}"
             ))),
         }
+    }
+}
+
+/// A workflow file a `start` names: relative to the folder the call works
+/// in, or in the home folder for `~/…`, as for the file tools.
+fn workflow_path(workspace: &Path, value: &str) -> String {
+    let value = haarness_core::expand_home(value);
+    let path = Path::new(value.as_ref());
+    if path.is_relative() {
+        workspace.join(path).display().to_string()
+    } else {
+        value.into_owned()
     }
 }
 
@@ -6761,6 +6771,24 @@ export default workflow({
             "head preview kept the tail"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[test]
+    fn a_workflow_path_from_the_home_folder_is_read_there() {
+        let home = haarness_protocol::home_dir().unwrap();
+        let workspace = Path::new("/work/project");
+        assert_eq!(
+            workflow_path(workspace, "~/flows/check.ts"),
+            home.join("flows/check.ts").display().to_string()
+        );
+        assert_eq!(
+            workflow_path(workspace, "flows/check.ts"),
+            "/work/project/flows/check.ts"
+        );
+        assert_eq!(
+            workflow_path(workspace, "./~/check.ts"),
+            "/work/project/./~/check.ts"
+        );
     }
 
     #[tokio::test]
