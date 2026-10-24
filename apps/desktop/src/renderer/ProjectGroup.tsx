@@ -657,7 +657,7 @@ export function ComputerChats() {
         <div class="section-label-actions">
           <Button
             icon="plus"
-            label={t("New chat without a folder")}
+            label={t("New chat in {name}", { name: t("This computer") })}
             onClick={() =>
               app.run(async () => {
                 await app.startFolderlessChat();

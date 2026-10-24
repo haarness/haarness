@@ -2845,7 +2845,7 @@ export function Session() {
                       },
                     ]}
                   />
-                  <Show when={state.connection || app.homeOpening()}>
+                  <Show when={app.composerShown()}>
                     <FolderPicker />
                   </Show>
                   <Show when={empty() && group()?.git && !group()?.remote}>
@@ -2877,7 +2877,7 @@ export function Session() {
                       </Portal>
                     )}
                   </Show>
-                  <Show when={state.connection || app.homeOpening()}>
+                  <Show when={app.composerShown()}>
                     {/* The name carries the mode it shows, so a voice user
                         can say what they see (WCAG 2.5.3); a name that changes
                         with its state cannot also be a pressed toggle. */}
@@ -2914,7 +2914,7 @@ export function Session() {
                   </Show>
                 </div>
                 <div class="composer-trailing">
-                  <Show when={state.connection || app.homeOpening()}>
+                  <Show when={app.composerShown()}>
                     <Select
                       class="pill-select agent-select"
                       disabled={controls.busy() || !state.agents.length}

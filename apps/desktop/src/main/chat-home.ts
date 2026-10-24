@@ -31,7 +31,7 @@ async function resolve(create: boolean) {
 export const chatHomeFolder = () => resolve(true);
 /** Where the chat home is or will be, without making it: a window shows
  * its new chat while its daemon starts. */
-export const chatHomePath = () => resolved ?? resolve(false);
+export const chatHomePath = async () => resolved ?? (await resolve(false));
 
 /** Whether `workspace` (a resolved path) is the chat home. */
 export async function isChatHome(workspace: string) {

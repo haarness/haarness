@@ -718,7 +718,10 @@ function installHandlers() {
     platform: process.platform,
     // Settings shows this computer's own paths under it as ~.
     home: homedir(),
-    chatHome: await chatHomePath(),
+    chatHome: await chatHomePath().then((workspace) => ({
+      id: "local:" + workspace,
+      workspace,
+    })),
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
   handle("preferences", async (_, input) => {

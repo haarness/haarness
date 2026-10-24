@@ -177,8 +177,9 @@ interface State extends Live {
   openingProject: string;
   /** What `openingProject` opens on is a new chat. */
   openingNewChat: boolean;
-  /** Where the chat home is, made or not (see `chatHomeLocation`). */
-  chatHomePath: string;
+  /** Where the chat home is, made or not, and its location ID (see
+   * `chatHomeLocation`); empty until the window has booted. */
+  chatHomeAt: { id: string; workspace: string };
   /** A switch to another project or checkout is under way, from the click
    * on, before `openingProject` names it. */
   switching: boolean;
@@ -251,7 +252,7 @@ function createApp(saved?: Preferences) {
     catalogLoading: false,
     openingProject: "",
     openingNewChat: false,
-    chatHomePath: "",
+    chatHomeAt: { id: "", workspace: "" },
     switching: false,
     openingChat: 0,
     loadingChat: 0,
@@ -1077,9 +1078,8 @@ function createApp(saved?: Preferences) {
    * will be saved, so its new chat can show while its daemon starts. */
   const chatHomeLocation = (): Recent =>
     state.recent.find((item) => item.chatHome && !item.remote) ?? {
-      id: "local:" + state.chatHomePath,
-      label: state.chatHomePath.split(/[\\/]/).pop() ?? "",
-      workspace: state.chatHomePath,
+      ...state.chatHomeAt,
+      label: t("This computer"),
       remote: false,
       trust: false,
       chatHome: true,
@@ -1091,8 +1091,11 @@ function createApp(saved?: Preferences) {
    */
   const homeOpening = () =>
     state.openingNewChat &&
-    !!state.chatHomePath &&
+    !!state.chatHomeAt.id &&
     state.openingProject === chatHomeLocation().id;
+  /** The message box shows: a project or This computer is open, or This
+   * computer's new chat is opening. */
+  const composerShown = () => !!state.connection || homeOpening();
   /** Settles once the opening under way (if any) has. */
   const homeOpened = () => activation?.promise.then(() => {}) ?? Promise.resolve();
   /** The chat home as the sidebar lists it: a group of one location. */
@@ -1185,6 +1188,23 @@ function createApp(saved?: Preferences) {
     // This computer without a project remembered: a chat without one.
     if (id === localServer.id) return openChatHome();
     return true;
+  }
+  /** The failed opening on screen was This computer's. */
+  const homeFailed = () => {
+    const input = state.projectFailure?.input;
+    return (
+      !!input &&
+      (!!input.chatHome ||
+        state.recent.some((item) => item.id === input.recent && item.chatHome))
+    );
+  };
+  /** Tries the failed opening again, This computer's on its new chat. */
+  function retryOpening() {
+    const failure = state.projectFailure;
+    if (!failure) return Promise.resolve(false);
+    if (homeFailed()) return openChatHome();
+    // A plain copy: the store's own object cannot cross to the main process.
+    return connect({ ...unwrap(failure.input) });
   }
   /** Opens the chat home on a new chat, making it the first time. */
   function openChatHome() {
@@ -1738,7 +1758,10 @@ function createApp(saved?: Preferences) {
       );
       set("openingNewChat", newChat);
     });
-    if (input.recent && input.recent !== state.connection?.id) {
+    // Another location (This computer's, the first time, named by its flag)
+    // shows nothing of the chat on screen while it opens.
+    const target = input.recent ?? (input.chatHome ? chatHomeLocation().id : undefined);
+    if (target && target !== state.connection?.id) {
       selection++;
       batch(() => {
         set("loadingChat", 0);
@@ -2278,7 +2301,7 @@ function createApp(saved?: Preferences) {
     applyRecent(value.recent);
     set("version", value.version);
     set("platform", value.platform);
-    set("chatHomePath", value.chatHome);
+    set("chatHomeAt", value.chatHome);
     const savedProject = await window.haarness.storage("active-project");
     const savedServer = await window.haarness.storage("active-server");
     const legacy = value.recent.find((item) => item.id === savedProject);
@@ -2493,6 +2516,10 @@ function createApp(saved?: Preferences) {
     chatDirectory,
     homeOpening,
     homeOpened,
+    homeFailed,
+    retryOpening,
+    chatHomeLocation,
+    composerShown,
     chatFiles,
     startFolderlessChat,
     servers,

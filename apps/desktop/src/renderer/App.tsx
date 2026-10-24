@@ -1170,7 +1170,7 @@ export function App() {
         <div class="titlebar-session">
           {/* Nothing before a project opens: the sidebar's wordmark already
               names the app. */}
-          <Show when={state.connection || app.homeOpening()}>
+          <Show when={app.composerShown()}>
             <Icon name={app.project()?.chatHome ? "computer" : "folder"} size="sm" />
             <span class="titlebar-caption">
               {app.project()?.chatHome
@@ -1557,12 +1557,11 @@ export function App() {
                     label={
                       state.openingChat || state.loadingChat
                         ? t("Loading chat…")
-                        : state.openingProject &&
-                            !state.recent.some(
-                              (item) => item.id === state.openingProject && item.chatHome,
-                            )
-                          ? t("Opening project…")
-                          : t("Loading…")
+                        : !state.openingProject
+                          ? t("Loading…")
+                          : state.openingProject === app.chatHomeLocation().id
+                            ? t("Opening This computer…")
+                            : t("Opening project…")
                     }
                   />
                 </Show>
@@ -1574,7 +1573,7 @@ export function App() {
                   style={{
                     display:
                       state.panel === "chat" &&
-                      (app.homeOpening() || (state.connection && !loading()))
+                      (app.homeOpening() || (app.composerShown() && !loading()))
                         ? "flex"
                         : "none",
                   }}
