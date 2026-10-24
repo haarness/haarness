@@ -263,6 +263,19 @@ pub fn is_image_source(source: &str) -> bool {
         .is_some_and(|mime_type| mime_type.starts_with("image/"))
 }
 
+/// The file an attachment source names, when it is a file rather than a data
+/// URL or a web address.
+#[must_use]
+pub fn file_path(source: &str) -> Option<PathBuf> {
+    if source.starts_with("data:")
+        || source.starts_with("http://")
+        || source.starts_with("https://")
+    {
+        return None;
+    }
+    local_path(source)
+}
+
 /// The bytes a provider receives for an attachment source: the base64 of a
 /// data URL or of a file, or the address of an image it fetches itself. A
 /// file that cannot be read counts nothing.

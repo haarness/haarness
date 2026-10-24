@@ -151,11 +151,19 @@ fn replace(message: &mut ProviderMessage, source: &str) {
         return;
     };
     attachments.remove(position);
-    let _ = write!(
-        text,
-        "\n[Image {} omitted: the oldest images are left out to keep the request within the provider's limits]",
-        crate::attachments::display_name(source)
-    );
+    // One line the model reads: what is gone, why, and how to see it again.
+    let _ = match crate::attachments::file_path(source) {
+        Some(path) => write!(
+            text,
+            "\n[Image {} omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and read the file again if it is needed.]",
+            path.display()
+        ),
+        None => write!(
+            text,
+            "\n[Image {} omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and ask the person to attach it again if it is needed.]",
+            crate::attachments::display_name(source)
+        ),
+    };
     if let ProviderMessage::Media {
         role,
         content,
@@ -226,7 +234,7 @@ mod tests {
     fn noted(messages: &[ProviderMessage]) -> usize {
         serde_json::to_string(messages)
             .unwrap()
-            .matches("omitted: the oldest images are left out")
+            .matches("omitted to keep the request within the provider's limits")
             .count()
     }
 
@@ -278,7 +286,7 @@ mod tests {
         assert_eq!(role, "user");
         assert_eq!(
             content,
-            "photo a\n[Image a.png omitted: the oldest images are left out to keep the request within the provider's limits]"
+            "photo a\n[Image a.png omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and ask the person to attach it again if it is needed.]"
         );
         assert!(
             matches!(&messages[3], ProviderMessage::Media { content, .. } if content == "photo d")
@@ -408,13 +416,13 @@ mod tests {
         let mut messages = vec![ProviderMessage::Media {
             role: "user".into(),
             content: "file".into(),
-            attachments: vec![path],
+            attachments: vec![path.clone()],
         }];
         messages.extend(photos("bcde", 6 * MIB));
         let (messages, _) = bounded(messages, ImageLimits::default());
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(
-            matches!(&messages[0], ProviderMessage::Text { content, .. } if content.ends_with("[Image big.png omitted: the oldest images are left out to keep the request within the provider's limits]"))
+            matches!(&messages[0], ProviderMessage::Text { content, .. } if content.ends_with(&format!("[Image {path} omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and read the file again if it is needed.]")))
         );
         assert_eq!(sent(&messages), ["d", "e"]);
     }
