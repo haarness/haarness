@@ -2851,9 +2851,13 @@ export function Session() {
                   <Show when={empty() && group()?.git && !group()?.remote}>
                     <MenuButton
                       label={t("Choose working location")}
-                      icon="branch"
                       class="location-picker"
-                      text={t(locationName(project()))}
+                      content={
+                        <>
+                          <Icon name="branch" size="sm" />
+                          <span class="picker-label">{t(locationName(project()))}</span>
+                        </>
+                      }
                       title={project()?.workspace}
                       items={locationChoices()}
                     />
@@ -2898,7 +2902,9 @@ export function Session() {
                     >
                       <Icon name="shield" size="sm" />
                       {/* The same two names as the TUI and the docs. */}
-                      {app.isAutoApproval() ? t("Auto") : t("Review")}
+                      <span class="pill-label">
+                        {app.isAutoApproval() ? t("Auto") : t("Review")}
+                      </span>
                     </button>
                   </Show>
                   <Show when={remoteShared()}>

@@ -375,9 +375,33 @@ test("opening This computer from a project chat shows its new chat at once, and 
       values: { "active-project": "local:" + project, "active-server": "local", "server-project:local": "local:" + project },
     }),
   );
+  // A Git project: its new chat offers the checkout beside the folder chip.
+  for (const args of [["init", "-q", "-b", "main"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-q", "--allow-empty", "-m", "Fixture"]])
+    execFileSync("git", args, { cwd: project, stdio: "ignore" });
   await launch();
   await ready();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: pocket-project");
+  // The composer's row keeps to its width in a small window with the side
+  // panel open, in English and in Arabic: its chips give way to their icons.
+  await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(900, 640));
+  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  // Every control of the row lies inside it, none cut off or under the next.
+  const fits = () =>
+    page.locator(".composer-leading").evaluate((row) => {
+      const box = row.getBoundingClientRect();
+      return [...row.children].every((child) => {
+        const part = child.getBoundingClientRect();
+        return part.left >= box.left - 1 && part.right <= box.right + 1;
+      });
+    });
+  await expect(page.getByRole("button", { name: "Choose working location", exact: true })).toBeVisible();
+  await expect.poll(fits).toBe(true);
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect.poll(fits).toBe(true);
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 820));
   await send("A project chat first");
   await expect(page.locator(".transcript")).toContainText("Echo: A project chat first", { timeout: 60000 });
   // This computer's daemon is slow to start this time. (Opening the project
