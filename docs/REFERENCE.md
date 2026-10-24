@@ -458,11 +458,11 @@ cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
 as binary data: its lines are shown only when they are UTF-8, and a read that
 meets one that is not is refused (`… holds binary data, not text`). A folder, pipe or device is refused instead of waited on. Since
-`read` shows lines without their `\r`, `edit` and `multiedit` give `old` and
-`new` CRLF line ends in a file whose lines mostly end in CRLF, so an `old` of
-several lines matches and the lines `new` adds end like the rest (an `old` of
-several lines that occurs as written, a stretch of LF lines, keeps its ends);
-two matches still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
+`read` shows lines without their `\r`, in a file whose lines mostly end in CRLF
+`edit` and `multiedit` give an `old` of several lines those ends when it does
+not occur as written (one that does, a stretch of LF lines, keeps its own), and
+the lines `new` adds end as the line `old` is found in does: CRLF there, LF in
+an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
 its 10 MiB aggregate adapter budget for inline request overhead. OpenAI,
 Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV

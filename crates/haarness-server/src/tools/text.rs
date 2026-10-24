@@ -451,18 +451,20 @@ pub(super) fn grep_walk(
 }
 
 /// The `old` and `new` texts of an edit as a file whose lines mostly end in
-/// `\r\n` spells them: `read` shows lines without their `\r`, so `old` is
-/// given those ends (an `old` of several lines never occurs as written), and
-/// so is `new`, so the lines it adds end like the rest. An `old` of several
-/// lines that does occur as written is a stretch of LF lines, which keeps
-/// its ends. Any other file's texts stay as they are.
+/// `\r\n` spells them. `read` shows lines without their `\r`, so an `old`
+/// of several lines that does not occur as written is given those ends; one
+/// that does is a stretch of LF lines and keeps its own. The lines `new`
+/// adds end as the line `old` is found in does: in `\r\n` there (`new`
+/// given those ends), else as `new` writes them, so an LF stretch, or a CSV
+/// cell holding bare LF, keeps its LF. Any other file's texts stay as they
+/// are.
 pub(super) fn crlf_edit<'a>(
     text: &str,
     old: &'a str,
     new: &'a str,
 ) -> (Cow<'a, str>, Cow<'a, str>) {
     let crlf = text.matches("\r\n").count();
-    if crlf * 2 <= text.matches('\n').count() || (old.contains('\n') && text.contains(old)) {
+    if crlf * 2 <= text.matches('\n').count() {
         return (Cow::Borrowed(old), Cow::Borrowed(new));
     }
     let spell = |value: &'a str| {
@@ -472,7 +474,31 @@ pub(super) fn crlf_edit<'a>(
             Cow::Borrowed(value)
         }
     };
-    (spell(old), spell(new))
+    let old = if old.contains('\n') && !text.contains(old) {
+        spell(old)
+    } else {
+        Cow::Borrowed(old)
+    };
+    // Where `old` is first found; an `old` that is not found fails the edit.
+    let Some(at) = text.find(old.as_ref()).filter(|_| !old.is_empty()) else {
+        return (old, Cow::Borrowed(new));
+    };
+    let crlf_here = if old.contains('\n') {
+        old.contains("\r\n")
+    } else {
+        // The end of the line `old` sits on; the last line, which has
+        // none, ends as most do.
+        let after = at + old.len();
+        text[after..]
+            .find('\n')
+            .is_none_or(|end| text[..after + end].ends_with('\r'))
+    };
+    let new = if crlf_here {
+        spell(new)
+    } else {
+        Cow::Borrowed(new)
+    };
+    (old, new)
 }
 
 #[cfg(test)]

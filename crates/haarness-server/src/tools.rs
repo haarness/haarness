@@ -7175,6 +7175,32 @@ export default workflow({
             std::fs::read(&file).unwrap(),
             b"int a() {\r\n    // start\r\n    four();\r\n    five();\r\n}\r\n"
         );
+        // Lines added in a stretch of LF lines, or in a CSV cell that holds
+        // bare LF, end in LF as their neighbours do.
+        std::fs::write(&file, b"h1\r\nh2\r\nlf1\nlf2\nh3\r\nh4\r\n").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"lf1","new":"lf1\nlf1b"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"h1\r\nh2\r\nlf1\nlf1b\nlf2\nh3\r\nh4\r\n"
+        );
+        std::fs::write(&file, b"id,note\r\n1,\"line a\nline b\"\r\n2,x\r\n3,y\r\n").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"line a","new":"line A\nline A2"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"id,note\r\n1,\"line A\nline A2\nline b\"\r\n2,x\r\n3,y\r\n"
+        );
         // Two places still refuse, as an LF file does.
         std::fs::write(&file, b"x\r\ny\r\nx\r\ny\r\n").unwrap();
         let ambiguous = edit_in(
