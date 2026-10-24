@@ -4,7 +4,15 @@
 //! after the run looked is refused by the server, and the run puts the
 //! chat's mode back.
 
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use axum::{
     Router,
@@ -262,13 +270,18 @@ async fn a_run_for_a_chat_busy_elsewhere_says_so_and_leaves_the_chat_as_it_was()
         .await;
 }
 
-/// Forwards every request to `upstream`, except that `hidden` (a chat's
-/// active turn) answers that none runs: the run looks before another window
-/// starts its turn, which the server then holds when the run's turn arrives.
+/// Forwards every request to `upstream`, except that the first `hide` looks
+/// at the chat's active turn (`active`) answer that none runs: the run looks
+/// before another window starts its turn, which the server then holds when
+/// the run gets that far. With `change_mode`, someone else puts the chat in
+/// Review right after the run first reads its mode (`mode`).
 struct Proxy {
     upstream: String,
-    hidden: String,
     client: reqwest::Client,
+    active: String,
+    hide: AtomicUsize,
+    mode: String,
+    change_mode: AtomicBool,
 }
 
 async fn forward(State(proxy): State<Arc<Proxy>>, request: Request) -> Response {
@@ -277,9 +290,20 @@ async fn forward(State(proxy): State<Arc<Proxy>>, request: Request) -> Response 
         .path_and_query()
         .map(|path| path.as_str().to_owned())
         .unwrap_or_default();
-    if request.method() == axum::http::Method::GET && path == proxy.hidden {
+    let get = request.method() == axum::http::Method::GET;
+    if get
+        && path == proxy.active
+        && proxy
+            .hide
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    {
         return ([("content-type", "application/json")], "null").into_response();
     }
+    let changes_mode = get && path == proxy.mode && proxy.change_mode.swap(false, Ordering::SeqCst);
+    let authorization = request.headers().get("authorization").cloned();
     let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes()).unwrap();
     let mut forwarded = proxy
         .client
@@ -301,11 +325,28 @@ async fn forward(State(proxy): State<Arc<Proxy>>, request: Request) -> Response 
         .unwrap_or("application/json")
         .to_owned();
     let bytes = response.bytes().await.unwrap();
+    if changes_mode {
+        let changed = proxy
+            .client
+            .put(format!("{}{path}", proxy.upstream))
+            .header("authorization", authorization.unwrap().as_bytes())
+            .json(&json!({"mode":"review"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(changed.status().is_success(), "{}", changed.status());
+    }
     (status, [("content-type", content_type)], bytes).into_response()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_run_refused_after_it_looked_puts_the_chats_mode_back() {
+/// `haarness --auto run --session <a busy chat> <arguments>` through a
+/// [`Proxy`]: the chat's mode before the run, the run's output, and the
+/// chat's mode after it.
+async fn run_behind_proxy(
+    hide: usize,
+    change_mode: bool,
+    arguments: &[&str],
+) -> (Value, std::process::Output, Value) {
     let fixture = Fixture::new();
     let server = fixture.connect().await;
     let thread = api(
@@ -344,41 +385,34 @@ async fn a_run_refused_after_it_looked_puts_the_chats_mode_back() {
     let proxy_url = format!("http://{}", listener.local_addr().unwrap());
     let proxy = Arc::new(Proxy {
         upstream: server.0.clone(),
-        hidden: format!("/v1/threads/{thread}/active"),
         client: reqwest::Client::new(),
+        active: format!("/v1/threads/{thread}/active"),
+        hide: AtomicUsize::new(hide),
+        mode: format!("/v1/threads/{thread}/approval-mode"),
+        change_mode: AtomicBool::new(change_mode),
     });
     let proxied = tokio::spawn(async move {
         axum::serve(listener, Router::new().fallback(forward).with_state(proxy))
             .await
             .unwrap();
     });
-    let output = timeout(
-        Duration::from_secs(60),
-        fixture
-            .haarness()
-            .args([
-                "--auto",
-                "run",
-                "--attach",
-                &proxy_url,
-                "--token",
-                &server.1,
-                "--session",
-                &thread,
-                "hello",
-            ])
-            .output(),
-    )
-    .await
-    .expect("the run ends")
-    .unwrap();
+    let mut command = fixture.haarness();
+    command.args([
+        "--auto",
+        "run",
+        "--attach",
+        &proxy_url,
+        "--token",
+        &server.1,
+        "--session",
+        &thread,
+    ]);
+    let output = timeout(Duration::from_secs(60), command.args(arguments).output())
+        .await
+        .expect("the run ends")
+        .unwrap();
     proxied.abort();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains(BUSY), "{stderr}");
     let after = approval_mode(&server, &thread).await;
-    assert_eq!(after["mode"], before["mode"], "{after}");
-    assert_eq!(after["explicit"], before["explicit"], "{after}");
     // While the chat was in Auto, its reviewer may have answered the other
     // turn's request already: putting the mode back cannot undo that.
     let _ = reqwest::Client::new()
@@ -387,4 +421,73 @@ async fn a_run_refused_after_it_looked_puts_the_chats_mode_back() {
         .json(&json!({"decision":"reject"}))
         .send()
         .await;
+    (before, output, after)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_refused_after_it_looked_puts_the_chats_mode_back() {
+    let (before, output, after) = run_behind_proxy(usize::MAX, false, &["hello"]).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains(BUSY), "{stderr}");
+    assert_eq!(after["mode"], before["mode"], "{after}");
+    assert_eq!(after["explicit"], before["explicit"], "{after}");
+}
+
+/// A goal is refused before the run's turn exists: a turn started elsewhere
+/// after the run's own look, which the goal's own look sees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_goal_refused_after_the_run_looked_puts_the_chats_mode_back() {
+    let (before, output, after) = run_behind_proxy(1, false, &["--goal", "fix it"]).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("while its current turn is still running"),
+        "{stderr}"
+    );
+    assert_eq!(after["mode"], before["mode"], "{after}");
+    assert_eq!(after["explicit"], before["explicit"], "{after}");
+}
+
+/// Any refusal of the run's turn leaves the chat as it was: here an unknown
+/// command on an idle chat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_whose_turn_is_refused_leaves_the_chats_mode() {
+    let fixture = Fixture::new();
+    let server = fixture.connect().await;
+    let thread = api(
+        &server,
+        reqwest::Method::POST,
+        "/threads",
+        Some(json!({"provider":"echo", "model":"echo-1"})),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let before = approval_mode(&server, &thread).await;
+    let output = timeout(
+        Duration::from_secs(60),
+        fixture
+            .haarness()
+            .args([
+                "--auto",
+                "run",
+                "--session",
+                &thread,
+                "--command",
+                "no-such-command",
+                "x",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the run ends")
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("no-such-command"), "{stderr}");
+    let after = approval_mode(&server, &thread).await;
+    assert_eq!(after["mode"], before["mode"], "{after}");
+    assert_eq!(after["explicit"], before["explicit"], "{after}");
 }
