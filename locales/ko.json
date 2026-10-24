@@ -2861,5 +2861,13 @@
   "Choose a folder": "폴더 선택",
   "Search folders": "폴더 검색",
   "Opening This computer…": "이 컴퓨터를 여는 중…",
-  "Couldn’t open This computer": "이 컴퓨터를 열 수 없습니다"
+  "Couldn’t open This computer": "이 컴퓨터를 열 수 없습니다",
+  "no tools yet": "아직 도구 호출 없음",
+  "starting": "시작 중",
+  "running in background": "백그라운드에서 실행 중",
+  "1 tool call": "도구 호출 1회",
+  "{count} tool calls": "도구 호출 {count}회",
+  "less than a day left at this pace": "이 속도라면 하루도 남지 않음",
+  "about 1 day left at this pace": "이 속도라면 약 1일 남음",
+  "about {count} days left at this pace": "이 속도라면 약 {count}일 남음"
 }

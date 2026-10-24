@@ -1154,7 +1154,10 @@ fn workflow_dialog(
 /// not, within a cap so the choices stay on screen.
 /// The `/billing` summary: who, which plan, and what is left to spend. Rows
 /// are `label  value` pairs so they line up like the rest of the panels.
-fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
+fn billing_preface(
+    billing: &haarness_account::billing::State,
+    language: crate::locale::Language,
+) -> Vec<String> {
     use haarness_account::billing::display_credits;
     if !billing.logged_in {
         return vec!["Not signed in to Haarness Cloud.".into()];
@@ -1225,7 +1228,19 @@ fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
     if summary.out_of_credits {
         lines.push("\u{26a0}  Out of credits  add credits with /billing topup".into());
     } else if let Some(days) = summary.days_left.filter(|days| *days < 30) {
-        lines.push(format!("Forecast  about {days} days left at this pace"));
+        // Whole days at this week's pace: none left is under a day, not 0.
+        let left = if days == 0 {
+            language
+                .text("less than a day left at this pace")
+                .to_owned()
+        } else {
+            language.count(
+                days,
+                "about 1 day left at this pace",
+                "about {count} days left at this pace",
+            )
+        };
+        lines.push(format!("Forecast  {left}"));
     }
     if summary.overage_opt_in {
         lines.push("Overage  on · purchased credits pay past your allowance".into());
@@ -1275,7 +1290,7 @@ fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
         Overlay::Options {
             kind: crate::state::OptionsKind::Billing,
             ..
-        } => billing_preface(&app.billing),
+        } => billing_preface(&app.billing, app.language),
         Overlay::Options {
             kind: crate::state::OptionsKind::GoalActions,
             ..
@@ -2800,11 +2815,35 @@ mod tests {
         }
     }
 
+    /// Whole days at this week's pace: under one is "less than a day", one
+    /// is a day, in the person's language.
+    #[test]
+    fn billing_forecast_counts_whole_days() {
+        use crate::locale::Language;
+        for (days, language, forecast) in [
+            (0, Language::English, "less than a day left at this pace"),
+            (1, Language::English, "about 1 day left at this pace"),
+            (2, Language::English, "about 2 days left at this pace"),
+            (1, Language::German, "bei diesem Tempo noch etwa 1 Tag"),
+            (5, Language::German, "bei diesem Tempo noch etwa 5 Tage"),
+        ] {
+            let lines =
+                billing_preface(&billing(serde_json::json!({ "daysLeft": days })), language);
+            assert!(
+                lines.contains(&format!("Forecast  {forecast}")),
+                "{days} {language:?}: {lines:?}"
+            );
+        }
+    }
+
     #[test]
     fn billing_names_trial_seats_yearly_forecast_and_auto_topups() {
-        let lines = billing_preface(&billing(serde_json::json!({
-            "seats": 3, "billingInterval": "year", "daysLeft": 6, "autoTopup": true,
-        })));
+        let lines = billing_preface(
+            &billing(serde_json::json!({
+                "seats": 3, "billingInterval": "year", "daysLeft": 6, "autoTopup": true,
+            })),
+            crate::locale::Language::English,
+        );
         assert!(
             lines.contains(&"Plan  Team plan · 3 seats · yearly".to_owned()),
             "{lines:?}"
@@ -2818,10 +2857,13 @@ mod tests {
             "{lines:?}"
         );
 
-        let lines = billing_preface(&billing(serde_json::json!({
-            "plan": "trial", "subscriptionStatus": null, "trial": true, "outOfCredits": true,
-            "autoTopupFailure": "Your card was declined.",
-        })));
+        let lines = billing_preface(
+            &billing(serde_json::json!({
+                "plan": "trial", "subscriptionStatus": null, "trial": true, "outOfCredits": true,
+                "autoTopupFailure": "Your card was declined.",
+            })),
+            crate::locale::Language::English,
+        );
         assert!(lines.contains(&"Plan  Free trial".to_owned()), "{lines:?}");
         assert!(
             lines.iter().any(|line| line.contains("Out of credits")),
@@ -2838,9 +2880,12 @@ mod tests {
             "{lines:?}"
         );
 
-        let lines = billing_preface(&billing(serde_json::json!({
-            "plan": "No plan", "subscriptionStatus": null, "trialAvailable": true, "daysLeft": 90,
-        })));
+        let lines = billing_preface(
+            &billing(serde_json::json!({
+                "plan": "No plan", "subscriptionStatus": null, "trialAvailable": true, "daysLeft": 90,
+            })),
+            crate::locale::Language::English,
+        );
         assert!(lines.contains(&"Plan  No plan yet".to_owned()), "{lines:?}");
         assert!(
             lines
