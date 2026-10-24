@@ -1102,6 +1102,27 @@ function createApp(saved?: Preferences) {
   createEffect(() => {
     if (state.connection?.chatHome || homeOpening()) setHomeUsed(true);
   });
+  /**
+   * Moves the new chat elsewhere (`move`, the folder chip's choice) with
+   * what was typed in it: typed first and a folder chosen after, the text
+   * goes along, unless the new chat there has a draft of its own.
+   */
+  async function moveNewChat(move: () => Promise<unknown>) {
+    const fromKey = draftKey();
+    const fromStored = "draft:" + newDraftScope() + ":";
+    const text = state.selected ? "" : (state.drafts[fromKey] ?? "");
+    const result = await move();
+    const toKey = draftKey();
+    if (!text.trim() || state.selected || toKey === fromKey) return result;
+    const toStored = "draft:" + newDraftScope() + ":";
+    const own = state.drafts[toKey] ?? (await window.haarness.storage(toStored));
+    if ((typeof own === "string" && own.trim()) || draftKey() !== toKey) return result;
+    set("drafts", toKey, text);
+    set("drafts", fromKey, "");
+    await window.haarness.storage(toStored, text);
+    await window.haarness.storage(fromStored, "");
+    return result;
+  }
   /** The message box shows: a project or This computer is open, or This
    * computer's new chat is opening. */
   const composerShown = () => !!state.connection || homeOpening();
@@ -2552,6 +2573,7 @@ function createApp(saved?: Preferences) {
     chatDirectory,
     homeOpening,
     homeOpened,
+    moveNewChat,
     homeFailed,
     retryOpening,
     chatHomeLocation,
