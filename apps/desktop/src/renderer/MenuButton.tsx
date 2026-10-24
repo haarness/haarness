@@ -10,7 +10,7 @@ import {
 import { Portal } from "solid-js/web";
 import type { JSX } from "solid-js";
 import { Icon, type IconName } from "./ui";
-import { floatingBox, floatingSpan } from "./native-area";
+import { dialogFrame, floatingBox, floatingSpan, frameTop } from "./native-area";
 
 export interface MenuAction {
   label: string;
@@ -94,15 +94,19 @@ export function MenuButton(props: {
       const positionMenu = () => {
         const anchor = handle.getBoundingClientRect();
         const box = menu.getBoundingClientRect();
+        // Opened in a dialog (Settings, a form), it stays inside its box.
+        const frame = dialogFrame(handle);
         setPosition({
           width: props.matchWidth ? anchor.width : 0,
-          left: floatingBox(anchor, box.width).left,
-          top: Math.max(
-            8,
-            anchor.bottom + box.height + 6 <= window.innerHeight - 8
-              ? anchor.bottom + 6
-              : anchor.top - box.height - 6,
-          ),
+          left: floatingBox(anchor, box.width, box.width, frame).left,
+          top:
+            frameTop(anchor, box.height, 6, frame)?.top ??
+            Math.max(
+              8,
+              anchor.bottom + box.height + 6 <= window.innerHeight - 8
+                ? anchor.bottom + 6
+                : anchor.top - box.height - 6,
+            ),
         });
       };
       const scroll = (event: Event) => {

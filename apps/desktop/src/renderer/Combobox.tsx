@@ -11,7 +11,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 import { Icon } from "./icons";
-import { floatingBox } from "./native-area";
+import { dialogFrame, floatingBox, frameTop, shortestList } from "./native-area";
 
 export interface ComboboxOption {
   value: string;
@@ -111,15 +111,23 @@ export function Combobox(props: {
       if (!shown) return;
       const place = () => {
         const anchor = field.getBoundingClientRect();
-        const { left, width } = floatingBox(anchor, Math.max(anchor.width, 260), 220);
+        // Opened in a dialog (Settings, a form), it stays inside its box.
+        const frame = dialogFrame(field);
+        const { left, width } = floatingBox(anchor, Math.max(anchor.width, 260), 220, frame);
+        // Measured at its own height, not one a placement gave it before.
+        if (popup) popup.style.maxHeight = "";
         const height = popup?.getBoundingClientRect().height ?? 0;
+        const list = popup?.querySelector<HTMLElement>(".select-options");
+        const inside = popup && list ? frameTop(anchor, height, 4, frame, shortestList(popup, list)) : undefined;
+        if (popup) popup.style.maxHeight = inside?.height ? inside.height + "px" : "";
         setPosition({
           left,
           width,
           top:
-            anchor.bottom + height + 6 <= window.innerHeight - 8
+            inside?.top ??
+            (anchor.bottom + height + 6 <= window.innerHeight - 8
               ? anchor.bottom + 4
-              : Math.max(8, anchor.top - height - 4),
+              : Math.max(8, anchor.top - height - 4)),
         });
       };
       place();
