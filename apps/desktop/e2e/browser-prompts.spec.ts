@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { Haarness, type Thread, type Item } from "@haarness/sdk";
 import { browserLab } from "./fixtures/browser-lab";
+import { stopChatHome } from "./fixtures/chat-home";
 
 test.skip(
   process.env.HAARNESS_BROWSER_PROMPTS !== "1",
@@ -573,8 +574,7 @@ test.beforeAll(async () => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dir] });
   }, workspace);
   await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
+    .getByRole("button", { name: "Open another project", exact: true })
     .click();
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
@@ -602,6 +602,7 @@ test.afterAll(async () => {
         { env, stdio: "ignore", timeout: 30000 },
       );
     } catch {}
+    stopChatHome(binary, env);
 });
 async function activate(thread: Thread) {
   await page.evaluate(

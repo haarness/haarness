@@ -3,6 +3,7 @@ import { chmod, mkdtemp, mkdir, writeFile, readFile, realpath } from "node:fs/pr
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // A shell request that runs a script carries the script, and the approval card offers it behind a
 // quiet toggle under the command: closed at first, so the card keeps its size, opened in place by
@@ -104,7 +105,7 @@ test.beforeAll(async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
   }, project);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
@@ -116,6 +117,7 @@ test.afterAll(async () => {
   }
   for (const workspace of [project, plain])
     try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
+  stopChatHome(binary, env);
   await test.info().attach("fixture", { body: root ?? "not started", contentType: "text/plain" });
 });
 

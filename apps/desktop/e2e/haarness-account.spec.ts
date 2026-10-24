@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { reasoningLabel } from "../src/renderer/reasoning";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Opt in with a local Cloud stack whose OIDC issuer is the checked-in test fixture.
 const api = process.env.HAARNESS_ACCOUNT_E2E_URL;
@@ -128,7 +129,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
           return { canceled: false, filePaths: [directory] };
         };
       }, workspace);
-      await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open another project", exact: true }).click();
+      await page.getByRole("button", { name: "Open another project", exact: true }).click();
       await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
       const model = page.getByRole("combobox", { name: "Model", exact: true });
       await model.click();
@@ -163,8 +164,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
           return { canceled: false, filePaths: [directory] };
         };
       }, workspace);
-      await page.getByRole("region", { name: "Project home" })
-        .getByRole("button", { name: "Open another project", exact: true }).click();
+      await page.getByRole("button", { name: "Open another project", exact: true }).click();
       await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
       const cases = [
         ["openai/gpt-6.1-sol", ["low", "medium", "high", "xhigh", "max"]],
@@ -291,6 +291,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
         { env, stdio: "ignore" },
       );
     } catch {}
+    stopChatHome(env.HAARNESS_BIN!, env);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -337,6 +338,7 @@ test("unified API key connects Desktop with its actual capabilities", async () =
   } finally {
     await app.close();
     execFileSync(env.HAARNESS_BIN,["--workspace",workspace,"serve","--stop"],{env,stdio:"ignore"});
+    stopChatHome(env.HAARNESS_BIN, env);
     await rm(root,{recursive:true,force:true});
   }
 });

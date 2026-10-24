@@ -4,7 +4,7 @@ import { Button, dismissOnBackdrop, Icon } from "./ui";
 import { Select } from "./Select";
 import { Shimmer } from "./Shimmer";
 import { language, t } from "./i18n";
-import { setSignedIn } from "./computers";
+import { setAccountKnown, setSignedIn } from "./computers";
 import "./account.css";
 import {
   addCredits,
@@ -99,6 +99,7 @@ export function AccountMenu(props: {
     if (!alive) return;
     setAccount(result);
     setSignedIn(!!result.loggedIn);
+    setAccountKnown(true);
     statusKnown = true;
     if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("models:read"))) {
       try {

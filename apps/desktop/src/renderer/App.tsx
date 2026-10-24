@@ -29,11 +29,11 @@ import { Button, Icon, Forms, type IconName } from "./ui";
 import { ImageViewer } from "./ImageViewer";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
-import { computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
+import { accountKnown, computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
 import { toastAnchor } from "./toast-anchors";
-import { ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
+import { ComputerChats, ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
 import { SessionActions, renameSession } from "./SessionActions";
 import { ResizeHandle } from "./ResizeHandle";
 import { createOrdering, createOrderDropTarget } from "./Sortable";
@@ -48,6 +48,7 @@ import { SelectionBar } from "./SelectionBar";
 import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
+import { localServer } from "../servers";
 import { exportLogs } from "./Diagnostics";
 import { SideChatPanel, closeFrontSideThread, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
 import { CHAT_MIN, DOCK_MIN, SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
@@ -126,6 +127,17 @@ const serverIcon = (server: { url?: string; cloud?: boolean; host?: string }): I
 export function App() {
   const app = useApp();
   const { state, set } = app;
+  /** Whether the switcher showed when Desktop last knew, kept while the
+   * account is read at launch so the sidebar does not shift. */
+  const [switcherBefore, setSwitcherBefore] = createSignal(false);
+  /** Whether there may be another server to switch to: one added, the
+   * server shown is not this computer, or signed in, where your other
+   * computers are listed (read only when the switcher opens). */
+  const serverChoices = () =>
+    app.servers().length > 1 ||
+    computers.items.length > 0 ||
+    state.activeServer !== localServer.id ||
+    (accountKnown() ? signedIn() : switcherBefore());
   /** Your other computers in the server switcher, once the account has
    * listed them; the one open now stays listed while it is read again. */
   const computerItems = (): MenuAction[] => {
@@ -458,6 +470,7 @@ export function App() {
       if (typeof raw.sideChatWidth === "number" && Number.isFinite(raw.sideChatWidth))
         setSideWidth(clamp(raw.sideChatWidth, SIDE_MIN, SIDE_MAX));
       if (raw.sideChat === true) setSideOpen(true);
+      if (typeof raw.serverSwitcher === "boolean") setSwitcherBefore(raw.serverSwitcher);
       if (typeof raw.sideChatFront === "boolean") setSideFront(raw.sideChatFront);
       // Restored as it was: neither comes in front of the other.
       if (["files", "diff", "context", "browser"].includes(String(raw.dock)))
@@ -487,6 +500,7 @@ export function App() {
       sideChat: sideOpen(),
       sideChatWidth: sideWidth(),
       sideChatFront: sideFront(),
+      serverSwitcher: accountKnown() ? serverChoices() : switcherBefore(),
     };
     const timer = setTimeout(saveLayout, 200);
     onCleanup(() => clearTimeout(timer));
@@ -748,7 +762,7 @@ export function App() {
           ? t("Switch approvals to Review")
           : t("Enable Auto approvals"),
         keywords: "permissions approval auto review allow once",
-        icon: "shield",
+        icon: app.isAutoApproval() ? "approval-review" : "approval-auto",
         disabled: !connected,
         action: () => app.setAutoApproval(!app.isAutoApproval()),
       },
@@ -1156,10 +1170,12 @@ export function App() {
         <div class="titlebar-session">
           {/* Nothing before a project opens: the sidebar's wordmark already
               names the app. */}
-          <Show when={state.connection}>
-            <Icon name="folder" size="sm" />
+          <Show when={app.composerShown()}>
+            <Icon name={app.project()?.chatHome ? "computer" : "folder"} size="sm" />
             <span class="titlebar-caption">
-              {app.currentProject()?.label ?? app.project()?.label}
+              {app.project()?.chatHome
+                ? t("This computer")
+                : (app.currentProject()?.label ?? app.project()?.label)}
             </span>
             <Show when={isWorktree(app.project())}>
               <span class="checkout-badge" title={app.project()?.workspace}>
@@ -1168,9 +1184,9 @@ export function App() {
                 <span>{t(locationName(app.project()))}</span>
               </span>
             </Show>
-            <Show when={state.connection!.remote}>
+            <Show when={state.connection?.remote}>
               <Show
-                when={state.connection!.remoteHost}
+                when={state.connection?.remoteHost}
                 fallback={
                   <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
                 }
@@ -1222,45 +1238,49 @@ export function App() {
           <div class="sidebar-brand">
             <Wordmark class="wordmark" />
           </div>
-          <div class="server-switcher">
-            <MenuButton
-              label={t("Switch server")}
-              class="server-switcher-button"
-              matchWidth
-              onOpen={() => void loadComputers()}
-              content={
-                <>
-                  <Icon name={serverIcon(app.currentServer())} size="md" />
-                  <span>{t(app.currentServer().label)}</span>
-                  <Icon name="down" size="xs" />
-                </>
-              }
-              items={[
-                ...app
-                  .servers()
-                  .filter((server) => !server.host)
-                  .map((server) => ({
-                    label: t(server.label),
-                    detail:
-                      server.url ??
-                      t(server.cloud ? "Cloud sessions" : "Local projects"),
-                    icon: (server.id === state.activeServer
-                      ? "check"
-                      : serverIcon(server)) as IconName,
-                    run: () => void app.run(() => app.switchServer(server.id)),
-                  })),
-                ...computerItems(),
-                {
-                  label: t("Manage servers"),
-                  icon: "settings",
-                  divider: computerItems().length > 0,
-                  run: () => {
-                    void app.openSettings("servers");
+          {/* With this computer alone there is nothing to switch to, and its
+              chats have their own section; Settings → Servers adds more. */}
+          <Show when={serverChoices()}>
+            <div class="server-switcher">
+              <MenuButton
+                label={t("Switch server")}
+                class="server-switcher-button"
+                matchWidth
+                onOpen={() => void loadComputers()}
+                content={
+                  <>
+                    <Icon name={serverIcon(app.currentServer())} size="md" />
+                    <span>{t(app.currentServer().label)}</span>
+                    <Icon name="down" size="xs" />
+                  </>
+                }
+                items={[
+                  ...app
+                    .servers()
+                    .filter((server) => !server.host)
+                    .map((server) => ({
+                      label: t(server.label),
+                      detail:
+                        server.url ??
+                        t(server.cloud ? "Cloud sessions" : "Local projects"),
+                      icon: (server.id === state.activeServer
+                        ? "check"
+                        : serverIcon(server)) as IconName,
+                      run: () => void app.run(() => app.switchServer(server.id)),
+                    })),
+                  ...computerItems(),
+                  {
+                    label: t("Manage servers"),
+                    icon: "settings",
+                    divider: computerItems().length > 0,
+                    run: () => {
+                      void app.openSettings("servers");
+                    },
                   },
-                },
-              ]}
-            />
-          </div>
+                ]}
+              />
+            </div>
+          </Show>
           <nav class="primary-nav" aria-label={t("Main navigation")}>
             <button
               aria-label={t("New chat")}
@@ -1289,36 +1309,6 @@ export function App() {
               </kbd>
             </button>
           </div>
-          <div class="section-label">
-            <span>{t("Projects")}</span>
-            <div class="section-label-actions">
-              <Button
-                icon="plus"
-                label={t("Open another project")}
-                onClick={() => app.run(open)}
-              />
-              {/* With no project yet there is nothing to organize. */}
-              <Show when={projects.ordered().length}>
-                <MenuButton
-                  icon="more"
-                  label={t("Project list options")}
-                  items={[
-                    {
-                      heading: t("Organize sidebar"),
-                      label: t("By project"),
-                      checked: sidebarLayout() === "project",
-                      run: () => setSidebarLayout("project"),
-                    },
-                    {
-                      label: t("In one list"),
-                      checked: sidebarLayout() === "flat",
-                      run: () => setSidebarLayout("flat"),
-                    },
-                  ]}
-                />
-              </Show>
-            </div>
-          </div>
           <div
             class="sidebar-lists"
             ref={(element) =>
@@ -1331,9 +1321,42 @@ export function App() {
             classList={{ "is-scrolling": sidebarScrolling() }}
             onScroll={showSidebarScrollbar}
           >
+            <Show when={state.activeServer === localServer.id}>
+              <ComputerChats />
+            </Show>
+            <div class="section-label sidebar-heading">
+              <span>{t("Projects")}</span>
+              <div class="section-label-actions">
+                <Button
+                  icon="plus"
+                  label={t("Open another project")}
+                  onClick={() => app.run(open)}
+                />
+                {/* With no project yet there is nothing to organize. */}
+                <Show when={projects.ordered().length}>
+                  <MenuButton
+                    icon="more"
+                    label={t("Project list options")}
+                    items={[
+                      {
+                        heading: t("Organize sidebar"),
+                        label: t("By project"),
+                        checked: sidebarLayout() === "project",
+                        run: () => setSidebarLayout("project"),
+                      },
+                      {
+                        label: t("In one list"),
+                        checked: sidebarLayout() === "flat",
+                        run: () => setSidebarLayout("flat"),
+                      },
+                    ]}
+                  />
+                </Show>
+              </div>
+            </div>
             <div class="project-list" {...unfiledDrop}>
-              {/* With no project yet, Home's Open project (and the + above)
-                  is the way in; the list stays empty rather than repeat it. */}
+              {/* With no project yet, the + above (and the message box's folder
+                  chip) is the way in; the list stays empty rather than repeat it. */}
               <Show when={projects.ordered().length}>
                 <Show
                   when={sidebarLayout() === "project"}
@@ -1527,12 +1550,18 @@ export function App() {
                 </div>
               </Show>
               <div class="workspace-content">
-                <Show when={state.panel === "chat" && loading()}>
+                {/* This computer's new chat shows its message box while it
+                    opens, never a loading screen. */}
+                <Show when={state.panel === "chat" && loading() && !app.homeOpening()}>
                   <ChatLoading
                     label={
                       state.openingChat || state.loadingChat
                         ? t("Loading chat…")
-                        : state.openingProject ? t("Opening project…") : t("Loading…")
+                        : !state.openingProject
+                          ? t("Loading…")
+                          : state.openingProject === app.chatHomeLocation().id
+                            ? t("Opening This computer…")
+                            : t("Opening project…")
                     }
                   />
                 </Show>
@@ -1543,7 +1572,8 @@ export function App() {
                   class="persistent-panel"
                   style={{
                     display:
-                      state.panel === "chat" && state.connection && !loading()
+                      state.panel === "chat" &&
+                      (app.homeOpening() || (app.composerShown() && !loading()))
                         ? "flex"
                         : "none",
                   }}

@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Settings → General → Diagnostics exports this computer's logs (save dialog,
 // then the zip shown in the file manager) and turns Detailed logging on for
@@ -88,7 +89,7 @@ test.beforeAll(async () => {
     win.show();
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, project);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });
 });
 
@@ -97,6 +98,7 @@ test.afterAll(async () => {
   try {
     execFileSync(binary, ["--workspace", project, "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 });
   } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 

@@ -9,6 +9,7 @@ import {
   migrateProjectPresentation,
   migrateProjectlessLocations,
   primaryLocation,
+  projectLocations,
   projectSections,
   readProjectMeta,
   rememberConnected,
@@ -269,6 +270,34 @@ test("legacy chats become ordinary projects without changing identity or trust",
   assert.equal(groups[0].label, "app");
   assert.equal(groups[0].locations[0].id, chats.id);
   assert.equal(migrateProjectlessLocations(migrated), migrated);
+});
+
+test("the chat home is never a project, and the catalog leaves it as it is", () => {
+  const home: Recent = {
+    ...recent("/data/Chat folders"),
+    label: "Chat folders",
+    trust: false,
+    chatHome: true,
+  };
+  const app = recent("/code/app");
+  // Even a catalog that names its folder does not make it a project.
+  const listed: WorkspaceListResponse = {
+    ...catalog,
+    workspaces: [
+      ...catalog.workspaces,
+      { ...catalog.workspaces[0], id: "home", path: home.workspace, name: "Chat folders" },
+    ],
+  };
+  const merged = mergeProjectCatalog([app, home], listed);
+  assert.deepEqual(merged.find((item) => item.id === home.id), home);
+  assert.deepEqual(
+    projectLocations(merged).map((item) => item.id),
+    merged.filter((item) => item.id !== home.id).map((item) => item.id),
+  );
+  assert.deepEqual(
+    groupProjects(projectLocations(merged)).map((item) => item.label),
+    ["app"],
+  );
 });
 
 test("project presentation keeps only meaningful fields and follows a location into its registered project", () => {
