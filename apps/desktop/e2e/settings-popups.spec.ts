@@ -159,6 +159,83 @@ test("lists, menus and suggestions opened in Settings stay inside its panel, and
   expect(errors).toEqual([]);
 });
 
+/** Whether `layer` was shortened to stay in its dialog, where its list is
+ * scrolled to, and whether its chosen or highlighted row is in view. */
+const listState = (layer: Locator) =>
+  layer.evaluate((popup) => {
+    const list = popup.querySelector(".select-options")!;
+    const row = list.querySelector('[aria-selected="true"]');
+    const box = list.getBoundingClientRect();
+    const at = row?.getBoundingClientRect();
+    return {
+      shortened: popup.style.maxHeight !== "",
+      top: list.scrollTop,
+      inView: !!at && at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5,
+    };
+  });
+
+// Placing a list measures it at its own height; the taller box reset the
+// list's scroll, so a list shortened to stay in its dialog lost the chosen
+// option it had scrolled to, and a suggestion list jumped back to its top
+// whenever it was scrolled.
+test("a list shortened to stay in a dialog keeps the chosen option in view, and a suggestion list keeps its scroll", async () => {
+  test.setTimeout(120000);
+  await openSettings();
+  // A schedule's Frequency list (six choices) has room for about five in the
+  // middle of a short window's form: it is shortened, and scrolls.
+  await section("Schedules");
+  await settings().getByRole("button", { name: "Create schedule", exact: true }).first().click();
+  const schedule = page.getByRole("dialog", { name: "Create schedule", exact: true });
+  await expect(schedule).toBeVisible();
+  await page.setViewportSize({ width: 900, height: 540 });
+  const frequency = schedule.getByRole("combobox", { name: "Frequency", exact: true });
+  const layer = page.locator(".select-popover").last();
+  const open = async () => {
+    await frequency.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await frequency.click();
+    await expect(layer).toBeVisible();
+    await page.waitForTimeout(250);
+  };
+  await open();
+  await layer.getByRole("option").last().click();
+  await expect(layer).toBeHidden();
+  await open();
+  const chosen = await listState(layer);
+  expect(chosen.shortened).toBe(true);
+  expect(chosen.top).toBeGreaterThan(0);
+  expect(chosen.inView).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(layer).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(schedule).toBeHidden();
+
+  // A hook's matcher suggestions, filtered to eight, shortened the same way.
+  await page.setViewportSize({ width: 900, height: 520 });
+  await section("Hooks");
+  await settings().getByRole("button", { name: "Add hook", exact: true }).first().click();
+  const form = page.getByRole("dialog", { name: "Add hook", exact: true });
+  await expect(form).toBeVisible();
+  await form.getByRole("combobox", { name: "Hook matcher", exact: true }).fill("agent");
+  const suggestions = page.locator(".combobox-popover");
+  await expect(suggestions).toBeVisible();
+  await page.waitForTimeout(150);
+  expect((await listState(suggestions)).shortened).toBe(true);
+  const list = suggestions.locator(".select-options");
+  await list.hover();
+  await page.mouse.wheel(0, 240);
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect(await list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.keyboard.press("Escape");
+  await expect(suggestions).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(form).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(settings()).toBeHidden();
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  expect(errors).toEqual([]);
+});
+
 /** A screenshot of Settings with `open` showing, in both themes. */
 async function capture(name: string, open: () => Promise<void>, info: { outputPath: (name: string) => string }) {
   for (const theme of ["light", "dark"] as const) {

@@ -115,11 +115,15 @@ export function Combobox(props: {
         const frame = dialogFrame(field);
         const { left, width } = floatingBox(anchor, Math.max(anchor.width, 260), 220, frame);
         // Measured at its own height, not one a placement gave it before.
+        // The list keeps where it was scrolled to, which the taller box
+        // would otherwise reset.
+        const list = popup?.querySelector<HTMLElement>(".select-options");
+        const scrolled = list?.scrollTop ?? 0;
         if (popup) popup.style.maxHeight = "";
         const height = popup?.getBoundingClientRect().height ?? 0;
-        const list = popup?.querySelector<HTMLElement>(".select-options");
         const inside = popup && list ? frameTop(anchor, height, 4, frame, shortestList(popup, list)) : undefined;
         if (popup) popup.style.maxHeight = inside?.height ? inside.height + "px" : "";
+        if (list) list.scrollTop = scrolled;
         setPosition({
           left,
           width,
@@ -136,12 +140,16 @@ export function Combobox(props: {
         const path = event.composedPath();
         if (!path.includes(field) && (!popup || !path.includes(popup))) close();
       };
+      // Only what moves the field moves the list: never the list's own scroll.
+      const scroll = (event: Event) => {
+        if (event.target === document || (event.target instanceof Element && event.target.contains(field))) place();
+      };
       document.addEventListener("pointerdown", outside, true);
-      document.addEventListener("scroll", place, true);
+      document.addEventListener("scroll", scroll, true);
       window.addEventListener("resize", place);
       onCleanup(() => {
         document.removeEventListener("pointerdown", outside, true);
-        document.removeEventListener("scroll", place, true);
+        document.removeEventListener("scroll", scroll, true);
         window.removeEventListener("resize", place);
       });
     }),

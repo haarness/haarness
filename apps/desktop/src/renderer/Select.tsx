@@ -215,10 +215,14 @@ export function Select(props: {
         const preferred = Math.max(anchor.width, searchable() ? 360 : 240);
         const { left, width } = floatingBox(anchor, preferred, Math.min(preferred, 260), frame);
         // Measured at its own height, not one a placement gave it before.
+        // The list keeps where it was scrolled to (the chosen option), which
+        // the taller box would otherwise reset.
+        const scrolled = list.scrollTop;
         popup.style.maxHeight = "";
         const height = popup.getBoundingClientRect().height;
         const inside = frameTop(anchor, height, 6, frame, shortestList(popup, list));
         popup.style.maxHeight = inside?.height ? inside.height + "px" : "";
+        list.scrollTop = scrolled;
         setPosition({
           width,
           left,
