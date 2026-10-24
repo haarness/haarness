@@ -3507,6 +3507,7 @@ async fn schedule_command(
                 prompt: args.prompt,
                 request: args.natural,
                 workspace: directory,
+                directory: None,
                 model,
                 agent: args.agent,
                 variant: args.variant,
@@ -3853,7 +3854,11 @@ async fn execute_schedule(
                 provider: provider.clone(),
                 model: model.clone(),
                 ultracode: None,
-                directory: None,
+                // A schedule made in a chat with a folder of its own works there.
+                directory: schedule
+                    .directory
+                    .as_ref()
+                    .map(|folder| folder.display().to_string()),
             })
             .await?;
         thread_id = Some(thread.id.0);
@@ -7858,6 +7863,10 @@ async fn application_at(
         project_context,
         runtime_config,
     );
+    if registered_workspace.chat_home {
+        // Every chat there works in a folder of its own, whoever creates it.
+        runtime = runtime.as_chat_home();
+    }
     let hooks = (!json_layers.hooks.is_empty()).then(|| {
         Arc::new(haarness_server::ConfiguredHooks::new(
             json_layers.hooks.clone(),
@@ -7889,15 +7898,11 @@ async fn application_at(
         }
     }
     if folder_snapshots_enabled(file_config.snapshots.as_ref()) {
-        if folders.is_none() {
-            match haarness_store::SqliteSnapshotFolders::open(&paths.database) {
-                Ok(opened) => folders = Some(opened),
-                Err(error) => tracing::warn!(%error, "chat folder snapshots disabled"),
-            }
-        }
-        if let Some(folders) = &folders {
-            runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
-        }
+        // Opened when a chat's folder first is: a server none of whose chats
+        // has a folder opens nothing more.
+        let folders = folders
+            .get_or_insert_with(|| haarness_store::SqliteSnapshotFolders::open(&paths.database));
+        runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
     }
     if let Some(folders) = folders {
         spawn_snapshot_retention(folders, &snapshot_config);

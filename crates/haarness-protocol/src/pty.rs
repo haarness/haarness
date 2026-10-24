@@ -81,9 +81,9 @@ pub struct PtyCreateRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub if_none: bool,
     /// Open the terminal for a chat's folder (a thread's `directory`): given
-    /// relative to the project folder, as a chat's folder is created, or as
-    /// the absolute folder the thread reports. It must exist inside the
-    /// project; the shell starts there, and `ifNone` then hands back only a
+    /// as `<date>/<name>` relative to the project folder, as a chat's folder
+    /// is created, or as the absolute folder the thread reports. It must be
+    /// that chat folder, existing and no link; the shell starts there, and `ifNone` then hands back only a
     /// terminal opened for the same folder (without it, only one opened
     /// without a folder). Not together with `cwd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

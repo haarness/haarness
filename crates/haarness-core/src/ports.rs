@@ -131,6 +131,13 @@ pub trait ThreadRepository: Send + Sync {
     async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>>;
     /// Whether a chat, archived or not, works in the folder `directory`
     /// (canonical and absolute, as [`Thread::directory`] holds it).
+    /// Give chat `id`, which has no folder, the folder `directory` (canonical
+    /// and absolute), and return it as stored.
+    async fn assign_thread_directory(&self, _id: ThreadId, _directory: &str) -> CoreResult<Thread> {
+        Err(CoreError::Storage(
+            "giving a chat a folder is unavailable".into(),
+        ))
+    }
     async fn directory_in_use(&self, directory: &str) -> CoreResult<bool> {
         Ok(self
             .list_threads(true)
