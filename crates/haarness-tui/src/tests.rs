@@ -9657,6 +9657,280 @@ async fn a_release_answers_only_the_card_that_was_pressed() {
     );
 }
 
+/// The cell of the first hit whose target `matches`: (column, row).
+fn hit_cell(app: &App, matches: impl Fn(&crate::view::frame::HitTarget) -> bool) -> (u16, u16) {
+    let hit = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| matches(&hit.target))
+        .cloned()
+        .expect("the target is on screen");
+    (
+        u16::try_from(hit.start + 2).unwrap(),
+        u16::try_from(hit.row).unwrap(),
+    )
+}
+
+/// A list replaced under a held press is not acted on by its release: in
+/// /queue, a press on the third message, then Enter opening its actions
+/// with Remove under the pointer, removes nothing, with or without a slip.
+#[tokio::test]
+async fn a_list_replaced_under_a_held_press_is_not_clicked() {
+    let thread = fixture_thread();
+    let queue = haarness_protocol::InputQueue {
+        revision: 4,
+        items: ["first queued", "second queued", "third queued"]
+            .map(|text| queued_input(text, &[]))
+            .to_vec(),
+    };
+    // The /queue list, as the command opens it.
+    let listed = || {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.input_queue = queue.clone();
+        app.open_overlay(crate::state::Overlay::Options {
+            title: "Queued messages · paused — send when ready".into(),
+            kind: crate::state::OptionsKind::InputQueue,
+            entries: queue
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| crate::state::OptionEntry {
+                    label: format!("{}. {}", index + 1, item.text),
+                    description: "Enter for actions".into(),
+                    value: item.id.to_string(),
+                })
+                .collect(),
+        });
+        app
+    };
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    // A terminal size where Enter on the third message puts the action of
+    // the same row index (Remove) under the pointer: the case where a list
+    // row's index alone cannot tell the two lists apart.
+    let mut size = None;
+    for height in 16..60 {
+        let mut app = listed();
+        let lines = app.lines((120, height));
+        let (column, row) = screen_cell(&lines, "3. third queued");
+        let before = app.hit_at(usize::from(row), usize::from(column));
+        app.selection = 2;
+        crate::input::handle_key(&mut app, enter, &offline_client())
+            .await
+            .unwrap();
+        let _ = app.lines((120, height));
+        if app.hit_at(usize::from(row), usize::from(column)) == before {
+            size = Some((height, column, row));
+            break;
+        }
+    }
+    let (height, column, row) = size.expect("a size that puts Remove under the press");
+    for slip in [0, 1] {
+        let mut app = listed();
+        let (client, seen) = sign_in_server(Vec::new()).await;
+        let _ = app.lines((120, height));
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        )
+        .await;
+        crate::input::handle_key(&mut app, enter, &client)
+            .await
+            .unwrap();
+        let lines = app.lines((120, height));
+        let under = line_text(&lines[usize::from(row)]);
+        assert!(
+            under.contains("Remove"),
+            "Remove is under the press: {under}"
+        );
+        if slip == 1 {
+            mouse_at(
+                &mut app,
+                &client,
+                MouseEventKind::Drag(MouseButton::Left),
+                column + 1,
+                row,
+            )
+            .await;
+        }
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Up(MouseButton::Left),
+            column + slip,
+            row,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "slip {slip}: the message was removed: {:?}",
+            seen.lock().unwrap()
+        );
+        assert!(matches!(
+            app.overlay,
+            crate::state::Overlay::Options {
+                kind: crate::state::OptionsKind::InputQueueActions,
+                ..
+            }
+        ));
+        // A click on Remove itself still acts (the stub then refuses it,
+        // which is no concern here).
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            let _ = crate::input::mouse::handle_mouse(
+                &mut app,
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &client,
+            )
+            .await;
+        }
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("remove")),
+            "slip {slip}: the click on Remove acted: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+}
+
+/// A press where Confirm appears once "always" is staged under it is not a
+/// confirmation, and a question replaced by another under a held press is
+/// not answered (single choice) or marked (several).
+#[tokio::test]
+async fn a_staged_always_or_a_replaced_question_is_not_clicked() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, seen) = sign_in_server(Vec::new()).await;
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-j"));
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let stage = async |app: &mut App| {
+        for code in [KeyCode::Right, KeyCode::Enter] {
+            crate::input::handle_key(app, key(code), &client)
+                .await
+                .unwrap();
+        }
+    };
+    app.permission_focus = true;
+    let _ = app.lines((100, 40));
+    stage(&mut app).await;
+    assert!(
+        app.confirm_always.is_some(),
+        "Always stages the confirmation"
+    );
+    let _ = app.lines((100, 40));
+    let (column, row) = hit_cell(&app, |target| {
+        *target == crate::view::frame::HitTarget::PermissionOption(0)
+    });
+    crate::input::handle_key(&mut app, key(KeyCode::Esc), &client)
+        .await
+        .unwrap();
+    assert!(app.confirm_always.is_none());
+    let _ = app.lines((100, 40));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    app.permission_selection = 0;
+    app.permission_focus = true;
+    stage(&mut app).await;
+    assert!(app.confirm_always.is_some());
+    let _ = app.lines((100, 40));
+    assert_eq!(
+        app.hit_at(usize::from(row), usize::from(column)),
+        Some(crate::view::frame::HitTarget::PermissionOption(0)),
+        "Confirm is under the press"
+    );
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+    assert_eq!(app.pending_permissions.len(), 1);
+    app.pending_permissions.clear();
+    app.confirm_always = None;
+
+    let question = |id: &str, multiple: bool| haarness_protocol::PendingQuestionInfo {
+        question_id: id.into(),
+        prompt: "Which colour?".into(),
+        choices: vec!["red".into(), "green".into(), "blue".into()],
+        multiple,
+        custom: false,
+        thread_id: thread.id,
+        root_thread_id: Some(thread.id),
+        turn_id: None,
+        call_id: None,
+        created_at: Utc::now(),
+    };
+    for multiple in [true, false] {
+        app.pending_questions = vec![question("q1", multiple)];
+        app.question_selected.clear();
+        let _ = app.lines((100, 40));
+        let (column, row) = hit_cell(&app, |target| {
+            *target == crate::view::frame::HitTarget::QuestionChoice(1)
+        });
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        )
+        .await;
+        app.pending_questions = vec![question("q2", multiple)];
+        let _ = app.lines((100, 40));
+        assert_eq!(
+            app.hit_at(usize::from(row), usize::from(column)),
+            Some(crate::view::frame::HitTarget::QuestionChoice(1))
+        );
+        mouse_at(
+            &mut app,
+            &client,
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            app.question_selected.is_empty(),
+            "multiple {multiple}: marked"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "multiple {multiple}: answered {:?}",
+            seen.lock().unwrap()
+        );
+        assert_eq!(app.pending_questions.len(), 1);
+    }
+}
+
 /// Over text, a drag of one cell copies: both cells of a wide glyph, or a
 /// two-letter word.
 #[tokio::test]

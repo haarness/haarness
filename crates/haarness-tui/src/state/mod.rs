@@ -1040,6 +1040,10 @@ pub struct App {
     pub hit_rows: std::cell::RefCell<Vec<crate::view::frame::HitRegion>>,
     /// The left press awaiting its release (click detection).
     pub mouse_down: Option<crate::input::mouse::Press>,
+    /// Counts the lists put on screen: a dialog opened, closed or replaced,
+    /// suggestions or a catalog that arrived. A press on a list row is not
+    /// carried over to a row of another list (see [`App::menu_row_key`]).
+    pub list_generation: u64,
     /// Screen cell last reached by a real mouse-movement event. Storing the
     /// cell rather than only the target keeps repeated targets (for example a
     /// task shown in transcript and sidebar) from highlighting together.
@@ -1279,6 +1283,7 @@ impl App {
             theme_preview_restore: None,
             hit_rows: std::cell::RefCell::new(Vec::new()),
             mouse_down: None,
+            list_generation: 0,
             hovered_cell: None,
             selection_range: None,
             last_frame: std::cell::RefCell::default(),
@@ -2501,6 +2506,7 @@ impl App {
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay) {
+        self.list_generation += 1;
         // A refused command's notice is done with once a dialog takes over.
         self.end_notice(NoticeLasts::UntilNextCommand);
         *self.dialog_anchor.get_mut() = None;
@@ -2583,6 +2589,7 @@ impl App {
     }
 
     pub fn close_overlay(&mut self) {
+        self.list_generation += 1;
         self.remember_message_browser();
         // Leaving the picker abandons the preview. A committed choice is
         // captured before the overlay closes and re-applied afterwards, so
@@ -3147,6 +3154,40 @@ impl App {
                         || agent.name.to_ascii_lowercase().contains(&query))
             })
             .collect()
+    }
+
+    /// What list row `index` on screen stands for: the list it is in (see
+    /// [`App::list_generation`]) and its item, by id where it has one, so a
+    /// press on a row never acts on another row or another list's.
+    pub(crate) fn menu_row_key(&self, index: usize) -> String {
+        let item = match &self.overlay {
+            Overlay::Commands => {
+                selected(&self.filtered_slash_entries(&self.overlay_filter), index)
+                    .map(|entry| entry.name.clone())
+            }
+            Overlay::Threads => {
+                selected(&self.filtered_threads(), index).map(|thread| thread.id.to_string())
+            }
+            Overlay::Models => selected(&self.filtered_models(), index).cloned(),
+            Overlay::Agents => {
+                selected(&self.filtered_agents(), index).map(|agent| agent.id.clone())
+            }
+            Overlay::Themes => selected(&self.filtered_themes(), index)
+                .map(|(name, variant, _)| format!("{name} {variant}")),
+            Overlay::Options { entries, .. } => {
+                selected(&self.filtered_options(entries), index).map(|entry| entry.value.clone())
+            }
+            // Suggestions under the prompt follow what is typed there.
+            Overlay::None => Some(format!(
+                "{}\u{0}{}",
+                self.slash_suggestions()
+                    .and_then(|commands| selected(&commands, index).map(|entry| entry.name.clone()))
+                    .unwrap_or_default(),
+                self.composer.text()
+            )),
+            _ => None,
+        };
+        format!("{}\u{0}{}", self.list_generation, item.unwrap_or_default())
     }
 
     pub fn selected_overlay_choice(&self) -> Option<OverlayChoice> {
