@@ -14,6 +14,14 @@ assert subprocess.check_output([str(binary),'--version'],text=True).strip()=='ha
 bun=binary.parent/('bun.exe' if platform.system()=='Windows' else 'bun')
 assert subprocess.check_output([str(bun),'--version'],text=True).strip()=='1.3.14'
 subprocess.run([str(binary),'--help'],check=True,stdout=subprocess.DEVNULL)
+if platform.system()=='Darwin':
+    # Every program in bin/ starts wherever the app does: a Mac packages the other architecture's app too, and
+    # 0.1.3's x64 app carried an arm64-only voice helper, so dictation could not start on Intel Macs.
+    app_archs=set(subprocess.check_output(['lipo','-archs',str(binary.parents[2]/'MacOS'/'Haarness')],text=True).split())
+    for helper in sorted(binary.parent.iterdir()):
+        if helper.is_file() and subprocess.check_output(['file','-b',str(helper)],text=True).startswith('Mach-O'):
+            archs=set(subprocess.check_output(['lipo','-archs',str(helper)],text=True).split())
+            assert app_archs<=archs,f'{helper.name} runs on {sorted(archs)}, the app on {sorted(app_archs)}'
 # Haarness for Chrome sits beside bin/, where `haarness browser setup` looks for it.
 manifest=json.loads((binary.parent.parent/'browser-extension'/'chrome'/'manifest.json').read_text())
 release=versions['version'].split('-')[0]

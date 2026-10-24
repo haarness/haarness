@@ -9,7 +9,7 @@ the launcher command, menu entry and icon the .deb has. With Docker, the CLI
 also loads OpenTUI and answers a turn on the oldest supported distributions,
 none of which has Git installed.
 """
-import hashlib, http.server, json, os, re, shutil, subprocess, sys, tempfile, threading
+import errno, hashlib, http.server, json, os, re, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
 from e2e_env import clean_env
 
@@ -31,6 +31,26 @@ def check_binary(binary):
     needed = set(re.findall(r'NEEDED\s+(\S+)', subprocess.check_output(['objdump', '-p', str(binary)], text=True)))
     assert needed <= LIBRARIES, f'{binary} links {sorted(needed - LIBRARIES)} beyond the C library'
     print(f'PASS CLI needs glibc {newest[0]}.{newest[1]} at most and links only {sorted(needed)}')
+
+def extract_appimage(appimage, scratch):
+    # Extraction needs no FUSE, so it works on build machines and in containers. An x86-64 emulator (Rosetta in
+    # Docker Desktop on Apple silicon, qemu-user) may refuse to start an AppImage, whose ELF header carries the
+    # AppImage magic bytes: then its squashfs, which starts where the runtime's ELF ends, is read directly.
+    # Returns the extracted folder and whether the AppImage runs here.
+    try:
+        subprocess.run([str(appimage), '--appimage-extract'], cwd=scratch, check=True, stdout=subprocess.DEVNULL)
+        return scratch / 'squashfs-root', True
+    except OSError as error:
+        if error.errno != errno.ENOEXEC or not shutil.which('unsquashfs'):
+            raise
+        with open(appimage, 'rb') as f:
+            header = f.read(64)
+        field = lambda start, end: int.from_bytes(header[start:end], 'little')
+        offset = field(0x28, 0x30) + field(0x3a, 0x3c) * field(0x3c, 0x3e)
+        subprocess.run(['unsquashfs', '-q', '-n', '-o', str(offset), '-d', str(scratch / 'squashfs-root'), str(appimage)],
+                       check=True, stdout=subprocess.DEVNULL)
+        print(f'NOTE {appimage.name} cannot start here (exec format error); read its squashfs at offset {offset}')
+        return scratch / 'squashfs-root', False
 
 def desktop_file(text):
     assert 'MimeType=x-scheme-handler/haarness;' in text, text
@@ -64,7 +84,7 @@ def install(payload, version, product, home):
     finally:
         server.shutdown(); server.server_close(); thread.join()
 
-def check_installer(binary, appimage, version):
+def check_installer(binary, appimage, version, appimage_runs=True):
     with tempfile.TemporaryDirectory(prefix='haarness-linux-install-') as home:
         home = Path(home)
         install(binary, version, 'cli', home)
@@ -78,11 +98,17 @@ def check_installer(binary, appimage, version):
         desktop_file(entry)
         assert f'Exec="{launcher}" %U' in entry, entry
         icon = home / '.local/share/icons/haarness-desktop.png'
-        assert icon.read_bytes().startswith(b'\x89PNG') and f'Icon={icon}' in entry, entry
+        if appimage_runs:
+            assert icon.read_bytes().startswith(b'\x89PNG') and f'Icon={icon}' in entry, entry
+        else:
+            # install.sh takes the icon out by running the AppImage, which cannot start here: the entry names the
+            # theme's icon instead. A machine of this architecture runs the full check.
+            assert 'Icon=haarness-desktop\n' in entry and not icon.exists(), entry
         if shutil.which('desktop-file-validate'):
             subprocess.run(['desktop-file-validate', str(home / '.local/share/applications/haarness-desktop.desktop')], check=True)
         assert 'haarness-desktop' in output, output
-    print('PASS install.sh installs the CLI, and the AppImage with a haarness-desktop command, menu entry and icon')
+    print('PASS install.sh installs the CLI, and the AppImage with a haarness-desktop command, menu entry and '
+          + ('icon' if appimage_runs else 'the theme icon name (the AppImage cannot start here to give its own)'))
 
 def check_desktop(binary, version):
     release = ROOT / 'apps/desktop/release'
@@ -95,6 +121,12 @@ def check_desktop(binary, version):
         assert len(found) == 1, (kind, sorted(p.name for p in release.iterdir()))
         return found[0]
     deb, appimage = package('deb'), package('AppImage')
+    # The AppImage's runtime starts before anything it carries, with the system's libraries alone, so each must be one
+    # every system has: electron-builder's legacy arm64 runtime asks for libz.so, which only zlib's development
+    # package installs, and 0.1.3's arm64 AppImage did not start on a stock Ubuntu.
+    runtime = set(re.findall(r'NEEDED\s+(\S+)', subprocess.check_output(['objdump', '-p', str(appimage)], text=True)))
+    unversioned = sorted(name for name in runtime if not re.search(r'\.so\.\d', name))
+    assert not unversioned, f'{appimage.name} needs {unversioned}, which only development packages provide'
     expected = digest(binary)
     field = lambda name: subprocess.check_output(['dpkg-deb', '-f', str(deb), name], text=True).strip()
     assert field('Package') == 'haarness-desktop', field('Package')
@@ -110,16 +142,14 @@ def check_desktop(binary, version):
         launchers = list((scratch / 'deb/usr/share/applications').glob('*.desktop'))
         assert len(launchers) == 1, launchers
         desktop_file(launchers[0].read_text())
-        # Extraction needs no FUSE, so it works on build machines and in containers.
-        subprocess.run([str(appimage), '--appimage-extract'], cwd=scratch, check=True, stdout=subprocess.DEVNULL)
-        extracted = scratch / 'squashfs-root'
+        extracted, appimage_runs = extract_appimage(appimage, scratch)
         assert digest(extracted / 'resources/bin/haarness') == expected, 'the AppImage carries a different CLI'
         desktop_file(next(extracted.glob('*.desktop')).read_text())
         # Ubuntu 22.04's hicolor theme has no 1024x1024 folder; menus need a listed size.
         icons = {path.parent.parent.name for path in (scratch / 'deb/usr/share/icons/hicolor').glob('*/apps/haarness-desktop.png')}
         assert {'48x48', '256x256', '512x512'} <= icons, icons
     print(f'PASS {deb.name} and {appimage.name} carry the release CLI, a launcher for haarness:// links, icons and package metadata')
-    check_installer(binary, appimage, version)
+    check_installer(binary, appimage, version, appimage_runs)
 
 def check_distros(binary):
     if not DISTROS or os.environ.get('HAARNESS_SKIP_DOCKER') == '1':
