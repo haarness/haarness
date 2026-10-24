@@ -6731,6 +6731,8 @@ struct LastRound {
     /// The finish reason as the provider sent it (`max_tokens`, `length`).
     reason: String,
     output_tokens: Option<u64>,
+    /// The round streamed text that is more than whitespace.
+    wrote_text: bool,
 }
 
 struct GoalRunAccounting {
@@ -9148,6 +9150,7 @@ impl RunnerTask {
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
+                let wrote_text = !text.trim().is_empty();
                 self.flush_reasoning_segment(&mut reasoning, thought_from)
                     .await?;
                 if blocked.is_some() {
@@ -9247,6 +9250,7 @@ impl RunnerTask {
                 *self.last_round.lock() = Some(LastRound {
                     reason: finish_reason,
                     output_tokens: usage.map(|(_, output_tokens, _, _)| output_tokens),
+                    wrote_text,
                 });
                 if let Some(error) = blocked {
                     for (call_id, name, _) in calls {
@@ -12171,8 +12175,9 @@ fn output_limit(reason: &str) -> bool {
 
 /// What a parent reads as the result of a subagent's run `turn`: its last
 /// reply in that run. A run that stopped at its output limit says so, and
-/// one without any reply says why: a blank result, or an earlier run's
-/// reply, would tell the parent nothing or something untrue.
+/// one that ended without a reply says why, before any text an earlier round
+/// wrote: a blank result, or text that was not the run's answer, would tell
+/// the parent nothing or something untrue.
 fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> String {
     let reply = last_reply(items, turn);
     let limit = last.filter(|round| output_limit(&round.reason));
@@ -12181,6 +12186,9 @@ fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> Str
         .map(|tokens| format!(" ({tokens} output tokens)"))
         .unwrap_or_default();
     match (reply, limit) {
+        (Some(reply), None) if last.is_some_and(|round| !round.wrote_text) => {
+            format!("{} Its last text:\n\n{reply}", ended_without_reply(last))
+        }
         (Some(reply), None) => reply.to_owned(),
         (Some(reply), Some(_)) => format!(
             "The subagent stopped at its output limit{tokens} before it finished. Its last text:\n\n{reply}"
@@ -12188,15 +12196,21 @@ fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> Str
         (None, Some(_)) => format!(
             "The subagent stopped at its output limit{tokens} before writing a reply. Give it a smaller task, or split the task."
         ),
-        (None, None) => match last
-            .map(|round| round.reason.as_str())
-            .filter(|reason| !reason.is_empty())
-        {
-            Some(reason) => {
-                format!("The subagent ended without writing a reply (finish reason: {reason}).")
-            }
-            None => "The subagent ended without writing a reply.".into(),
-        },
+        (None, None) => ended_without_reply(last),
+    }
+}
+
+/// "The subagent ended without writing a reply", with the provider's finish
+/// reason when `last` names one.
+fn ended_without_reply(last: Option<&LastRound>) -> String {
+    match last
+        .map(|round| round.reason.as_str())
+        .filter(|reason| !reason.is_empty())
+    {
+        Some(reason) => {
+            format!("The subagent ended without writing a reply (finish reason: {reason}).")
+        }
+        None => "The subagent ended without writing a reply.".into(),
     }
 }
 
@@ -15093,6 +15107,7 @@ mod tests {
                 Some(&super::LastRound {
                     reason: reason.into(),
                     output_tokens: None,
+                    wrote_text: false,
                 }),
             )
         };
@@ -15112,6 +15127,35 @@ mod tests {
         assert_eq!(
             super::subagent_reply(&[], turn, None),
             "The subagent ended without writing a reply."
+        );
+    }
+
+    /// A reply is the run's answer only when the run's last round wrote it.
+    #[test]
+    fn a_subagent_reply_from_an_earlier_round_is_marked_as_such() {
+        let turn = TurnId::new();
+        let items = [Item {
+            id: ItemId::new(),
+            thread_id: ThreadId::new(),
+            turn_id: Some(turn),
+            sequence: 1,
+            data: ItemData::AssistantMessage {
+                text: "Let me look.".into(),
+            },
+            created_at: Utc::now(),
+        }];
+        let round = |wrote_text| super::LastRound {
+            reason: "stop".into(),
+            output_tokens: Some(12),
+            wrote_text,
+        };
+        assert_eq!(
+            super::subagent_reply(&items, turn, Some(&round(true))),
+            "Let me look."
+        );
+        assert_eq!(
+            super::subagent_reply(&items, turn, Some(&round(false))),
+            "The subagent ended without writing a reply (finish reason: stop). Its last text:\n\nLet me look."
         );
     }
 
