@@ -12,6 +12,7 @@ fs2.workspace = true
 hex.workspace = true
 sha2.workspace = true
 tempfile = "3"
+tracing.workspace = true
 
 [build-dependencies]
 flate2.workspace = true

@@ -12,7 +12,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 import { Icon } from "./icons";
-import { floatingBox } from "./native-area";
+import { dialogFrame, floatingBox, frameTop, shortestList } from "./native-area";
 
 export interface SelectOption {
   value: string | number;
@@ -210,18 +210,30 @@ export function Select(props: {
       const place = () => {
         if (!popup) return;
         const anchor = trigger.getBoundingClientRect();
+        // Opened in a dialog (Settings, a form), it stays inside its box.
+        const frame = dialogFrame(trigger);
         const preferred = Math.max(anchor.width, searchable() ? 360 : 240);
-        const { left, width } = floatingBox(anchor, preferred, Math.min(preferred, 260));
+        const { left, width } = floatingBox(anchor, preferred, Math.min(preferred, 260), frame);
+        // Measured at its own height, not one a placement gave it before.
+        // The list keeps where it was scrolled to (the chosen option), which
+        // the taller box would otherwise reset.
+        const scrolled = list.scrollTop;
+        popup.style.maxHeight = "";
         const height = popup.getBoundingClientRect().height;
+        const inside = frameTop(anchor, height, 6, frame, shortestList(popup, list));
+        popup.style.maxHeight = inside?.height ? inside.height + "px" : "";
+        list.scrollTop = scrolled;
         setPosition({
           width,
           left,
-          top: Math.max(
-            8,
-            anchor.bottom + height + 6 <= window.innerHeight - 8
-              ? anchor.bottom + 6
-              : anchor.top - height - 6,
-          ),
+          top:
+            inside?.top ??
+            Math.max(
+              8,
+              anchor.bottom + height + 6 <= window.innerHeight - 8
+                ? anchor.bottom + 6
+                : anchor.top - height - 6,
+            ),
         });
       };
       const outside = (event: Event) => {

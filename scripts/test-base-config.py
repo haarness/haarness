@@ -41,6 +41,7 @@ from pathlib import Path
 
 import e2e_scratch
 import e2e_tmux
+from e2e_env import clean_env
 
 repo = Path(__file__).resolve().parents[1]
 binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
@@ -53,7 +54,7 @@ team = root / "team base"
 state = root / "state"
 home = root / "home"
 config = state / "config"
-env = {k: v for k, v in os.environ.items() if not k.startswith("HAARNESS_")}
+env = clean_env()
 env.update(HOME=str(home), HAARNESS_HOME=str(home), HAARNESS_DATA_DIR=str(state),
            HAARNESS_TEST_PROVIDER="1", HAARNESS_SCHEDULE_SKIP_INSTALL="1")
 based = {**env, "HAARNESS_BASE_CONFIG_DIR": str(team)}

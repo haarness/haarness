@@ -192,6 +192,11 @@ export function App() {
   });
   const loading = () =>
     !state.ready || !!state.openingProject || !!state.openingChat || !!state.loadingChat;
+  /** Another chat of the open project reading its history: the conversation
+   * and its message box stay on screen, and Session shows the loading mark
+   * over the transcript, so a switch never blanks the window. */
+  const chatLoading = () =>
+    !!state.loadingChat && state.ready && !state.openingProject && !state.openingChat;
   const [palette, setPalette] = createSignal(false);
   /** Search's scope when the sidebar opened it on archived chats. */
   const [paletteArchived, setPaletteArchived] = createSignal<ArchivedScope>();
@@ -1551,8 +1556,9 @@ export function App() {
               </Show>
               <div class="workspace-content">
                 {/* This computer's new chat shows its message box while it
-                    opens, never a loading screen. */}
-                <Show when={state.panel === "chat" && loading() && !app.homeOpening()}>
+                    opens, never a loading screen, and so does another chat of
+                    the open project while its history loads. */}
+                <Show when={state.panel === "chat" && loading() && !app.homeOpening() && !chatLoading()}>
                   <ChatLoading
                     label={
                       state.openingChat || state.loadingChat
@@ -1573,7 +1579,8 @@ export function App() {
                   style={{
                     display:
                       state.panel === "chat" &&
-                      (app.homeOpening() || (app.composerShown() && !loading()))
+                      (app.homeOpening() ||
+                        (app.composerShown() && (!loading() || chatLoading())))
                         ? "flex"
                         : "none",
                   }}

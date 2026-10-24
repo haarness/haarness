@@ -336,37 +336,58 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
 /// The line under a delegation row: `↳` what the child is doing while it
 /// runs, `└` what it did once it stopped. The status line already says how
 /// to open child views, so the row does not repeat it.
-fn delegation_detail_line(task: &ChildTask, theme: &Theme) -> Line {
-    let tools = match task.tool_calls {
-        0 => "no tools yet".to_owned(),
-        1 => "1 tool".to_owned(),
-        count => format!("{count} tools"),
-    };
+fn delegation_detail_line(
+    task: &ChildTask,
+    theme: &Theme,
+    language: crate::locale::Language,
+) -> Line {
+    let tools =
+        (task.tool_calls > 0).then(|| language.count(task.tool_calls, "1 tool", "{count} tools"));
     let (text, tone) = if task.is_active() {
+        let tools = tools.unwrap_or_else(|| language.text("no tools yet").to_owned());
         let doing = task
             .last_tool
-            .as_deref()
-            .map_or_else(|| "starting".to_owned(), str::to_owned);
+            .clone()
+            .unwrap_or_else(|| language.text("starting").to_owned());
         let elapsed = task
             .elapsed_seconds()
             .map_or_else(String::new, |seconds| format!(" · {seconds}s"));
         match task.state.as_str() {
             "waiting_permission" => (
-                format!("↳ waiting for approval · {tools}{elapsed}"),
+                format!(
+                    "↳ {} · {tools}{elapsed}",
+                    language.text("waiting for approval")
+                ),
                 theme.accent,
             ),
             "background" => (
-                format!("↳ running in background · {doing} · {tools}{elapsed}"),
+                format!(
+                    "↳ {} · {doing} · {tools}{elapsed}",
+                    language.text("running in background")
+                ),
                 theme.muted,
             ),
             _ => (format!("↳ {doing} · {tools}{elapsed}"), theme.muted),
         }
     } else {
-        match task.state.as_str() {
-            "done" => (format!("└ {tools}"), theme.muted),
-            "failed" => (format!("└ failed · {tools}"), theme.danger),
-            _ => (format!("└ cancelled · {tools}"), theme.muted),
-        }
+        // How it ended, then what it did; a child that made no calls says
+        // only how it ended.
+        let (ended, tone) = match task.state.as_str() {
+            "done" => (None, theme.muted),
+            "failed" => (Some(language.text("failed")), theme.danger),
+            _ => (Some(language.text("cancelled")), theme.muted),
+        };
+        let parts = ended
+            .map(str::to_owned)
+            .into_iter()
+            .chain(tools)
+            .collect::<Vec<_>>();
+        let summary = if parts.is_empty() {
+            language.text("completed").to_owned()
+        } else {
+            parts.join(" · ")
+        };
+        (format!("└ {summary}"), tone)
     };
     Line::new(vec![Span::new("    ", tone), Span::new(text, tone)])
 }
@@ -688,30 +709,92 @@ fn render_file_diffs(metadata: &serde_json::Value, width: usize, theme: &Theme) 
     rendered
 }
 
+/// Why a provider refused images that later requests leave out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// It named the image.
+    Named,
+    /// It refused an image without saying which.
+    Unsaid,
+    /// The request had too many images.
+    TooMany,
+    /// The request was too large for its images.
+    TooLarge,
+}
+
+impl Refusal {
+    /// What a `media_omitted` item says the refusal was.
+    fn of(data: &ItemData) -> Self {
+        match data {
+            ItemData::MediaOmitted {
+                too_large: true, ..
+            } => Self::TooLarge,
+            ItemData::MediaOmitted { too_many: true, .. }
+            | ItemData::MediaOmitted { oldest: true, .. } => Self::TooMany,
+            ItemData::MediaOmitted { guessed: true, .. } => Self::Unsaid,
+            _ => Self::Named,
+        }
+    }
+}
+
 /// What the person reads when a provider refused images and later requests
-/// leave them out.
+/// leave them out: the oldest of them, or the newest.
 fn media_omitted_notice(
     language: crate::locale::Language,
     names: &[String],
-    guessed: bool,
+    refusal: Refusal,
+    oldest: bool,
 ) -> String {
     let list = names.join(", ");
-    if !guessed {
-        language.format(
+    let count = names.len().to_string();
+    let (list, count) = (list.as_str(), count.as_str());
+    let (key, value) = match (refusal, oldest, names.len() == 1) {
+        (Refusal::TooLarge, true, true) => (
+            "The request was too large for the provider, so the oldest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::TooLarge, true, false) => (
+            "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.",
+            ("count", count),
+        ),
+        (Refusal::TooLarge, false, true) => (
+            "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::TooLarge, false, false) => (
+            "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.",
+            ("names", list),
+        ),
+        (Refusal::TooMany, true, true) => (
+            "The request had too many images for the provider, so the oldest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::TooMany, true, false) => (
+            "The request had too many images for the provider, so the oldest {count} images are left out of this chat from now on.",
+            ("count", count),
+        ),
+        (Refusal::TooMany, false, true) => (
+            "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::TooMany, false, false) => (
+            "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.",
+            ("names", list),
+        ),
+        (Refusal::Named, _, _) => (
             "The provider refused {name}, so it is left out of this chat from now on.",
-            &[("name", &list)],
-        )
-    } else if names.len() == 1 {
-        language.format(
+            ("name", list),
+        ),
+        (Refusal::Unsaid, _, true) => (
             "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
-            &[("name", &list)],
-        )
-    } else {
-        language.format(
+            ("name", list),
+        ),
+        (Refusal::Unsaid, _, false) => (
             "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
-            &[("names", &list)],
-        )
-    }
+            ("names", list),
+        ),
+    };
+    language.format(key, &[value])
 }
 
 #[cfg(test)]
@@ -737,6 +820,103 @@ mod workflow_tests {
             binary: false,
             truncated: false,
         }
+    }
+
+    #[test]
+    fn a_request_with_too_many_images_names_the_images_left_out() {
+        use super::Refusal;
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let notice = |list: &[&str], refusal, oldest| {
+            super::media_omitted_notice(
+                crate::locale::Language::English,
+                &names(list),
+                refusal,
+                oldest,
+            )
+        };
+        assert_eq!(
+            notice(&["a.png"], Refusal::TooMany, true),
+            "The request had too many images for the provider, so the oldest image, a.png, is left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(&["a.png", "b.png", "c.png"], Refusal::TooMany, true),
+            "The request had too many images for the provider, so the oldest 3 images are left out of this chat from now on."
+        );
+        // When leaving out older images would not have helped, the newest go.
+        assert_eq!(
+            notice(&["b.png", "c.png"], Refusal::TooMany, false),
+            "The request had too many images for the provider, so the newest images, b.png, c.png, are left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(&["d.png"], Refusal::Unsaid, false),
+            "The provider refused an image without saying which, so the newest one, d.png, is left out of this chat from now on."
+        );
+        assert_eq!(
+            super::media_omitted_notice(
+                crate::locale::Language::German,
+                &names(&["a.png", "b.png"]),
+                Refusal::TooMany,
+                true
+            ),
+            "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleiben die 2 ältesten Bilder in diesem Chat ab jetzt außen vor."
+        );
+        // The record's flags, as the server sets them.
+        let record = |guessed, oldest, too_large, too_many| {
+            Refusal::of(&haarness_protocol::ItemData::MediaOmitted {
+                fingerprints: Vec::new(),
+                names: Vec::new(),
+                reason: String::new(),
+                guessed,
+                oldest,
+                too_large,
+                too_many,
+            })
+        };
+        assert_eq!(record(true, false, false, true), Refusal::TooMany);
+        assert_eq!(record(false, true, false, true), Refusal::TooMany);
+        assert_eq!(record(true, false, true, false), Refusal::TooLarge);
+        assert_eq!(record(true, false, false, false), Refusal::Unsaid);
+        assert_eq!(record(false, false, false, false), Refusal::Named);
+    }
+
+    #[test]
+    fn a_request_too_large_says_so_and_names_the_images_left_out() {
+        use super::Refusal;
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let notice = |language, list: &[&str], oldest| {
+            super::media_omitted_notice(language, &names(list), Refusal::TooLarge, oldest)
+        };
+        let english = crate::locale::Language::English;
+        assert_eq!(
+            notice(english, &["a.png"], true),
+            "The request was too large for the provider, so the oldest image, a.png, is left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(english, &["a.png", "b.png"], true),
+            "The request was too large for the provider, so the oldest 2 images are left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(english, &["big.png"], false),
+            "The request was too large for the provider, so the newest image, big.png, is left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(english, &["left.png", "right.png"], false),
+            "The request was too large for the provider, so the newest images, left.png, right.png, are left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(crate::locale::Language::German, &["a.png"], true),
+            "Die Anfrage war zu groß für den Anbieter. Daher bleibt das älteste Bild, a.png, in diesem Chat ab jetzt außen vor."
+        );
     }
 
     #[test]
@@ -1067,7 +1247,9 @@ pub(crate) fn mark_reply(lines: &mut [Line], theme: &Theme) {
             span.text = rest.to_owned();
         }
     }
-    first.spans.insert(0, Span::new("▸ ", theme.primary));
+    first
+        .spans
+        .insert(0, Span::new("▸ ", theme.primary).unselectable());
 }
 
 /// The user's prompt as a raised block: sage bar, surface background, padded
@@ -1175,7 +1357,7 @@ fn user_block_rows(
                 .iter()
                 .map(|span| span.text.width())
                 .sum::<usize>();
-            let mut spans = vec![Span::new("▎ ", theme.user).on(theme.surface)];
+            let mut spans = vec![Span::new("▎ ", theme.user).on(theme.surface).unselectable()];
             spans.extend(
                 row.spans
                     .into_iter()
@@ -1252,7 +1434,7 @@ fn gutter_row(text: &str, width: usize, color: haarness_opentui::Color, theme: &
         // A hairline quote bar, not a box edge: tool output is subordinate
         // content hanging off the activity row, the same way a prompt hangs
         // off its own bar.
-        Span::new("  ▏ ", theme.hairline()),
+        Span::new("  ▏ ", theme.hairline()).unselectable(),
         Span::new(single_line(text, width.saturating_sub(6)), color),
     ])
 }
@@ -1265,13 +1447,17 @@ fn gutter_rows(
     color: haarness_opentui::Color,
     theme: &Theme,
 ) -> Vec<Line> {
-    wrap_spans(
+    let mut rows = wrap_spans(
         &[Span::new(text.replace('\r', ""), color)],
         width.saturating_sub(2),
         "  ▏ ",
         "  ▏ ",
         theme.hairline(),
-    )
+    );
+    for row in &mut rows {
+        crate::view::span::decorate_prefix(row, "  ▏ ");
+    }
+    rows
 }
 
 /// Older runtimes persisted every tool call as it streamed but buffered the
@@ -2040,7 +2226,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 {
                     block.push_tagged(row, HitTarget::TaskOpen(call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme),
+                        delegation_detail_line(task, theme, app.language),
                         HitTarget::TaskOpen(call_id.clone()),
                     );
                 } else if name == "workflow"
@@ -2215,7 +2401,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ]);
                     block.push_tagged(child_row, HitTarget::TaskOpen(child_call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme),
+                        delegation_detail_line(task, theme, app.language),
                         HitTarget::TaskOpen(child_call_id.clone()),
                     );
                 }
@@ -2332,10 +2518,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             ItemData::MediaOmitted {
                 names,
                 reason,
-                guessed,
+                oldest,
                 ..
             } => {
-                let notice = media_omitted_notice(app.language, names, *guessed);
+                let refusal = Refusal::of(&item.data);
+                let notice = media_omitted_notice(app.language, names, refusal, *oldest);
                 for (index, wrapped) in textwrap::wrap(&notice, width.saturating_sub(4).max(10))
                     .into_iter()
                     .enumerate()
@@ -2478,9 +2665,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         mark_reply(&mut live, theme);
         if let Some(last) = live.last_mut() {
             if last.width() < width {
-                last.spans.push(Span::new("▌", theme.primary));
+                last.spans
+                    .push(Span::new("▌", theme.primary).unselectable());
             } else {
-                live.push(line("  ▌", theme.primary));
+                live.push(Line::new(vec![
+                    Span::new("  ▌", theme.primary).unselectable(),
+                ]));
             }
         }
         let mut block = TaggedLines::default();

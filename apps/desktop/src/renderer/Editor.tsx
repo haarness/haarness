@@ -163,7 +163,7 @@ export function Editor(props: {
           backgroundColor: "transparent",
           color: "var(--text)",
         },
-        ".cm-scroller": { fontFamily: "var(--mono)", fontSize: "13px" },
+        ".cm-scroller": { fontFamily: "var(--mono)", fontSize: "13px", fontVariantLigatures: "none" },
         ".cm-gutters": {
           backgroundColor: "var(--page)",
           color: "var(--muted)",

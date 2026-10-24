@@ -22,6 +22,7 @@ pub use cloud::*;
 pub use goal::*;
 pub use home::{
     BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, base_config_dir_problem, home_dir,
+    test_binary, test_binary_path, test_folder,
 };
 pub use input::*;
 pub use management::*;
@@ -384,6 +385,19 @@ pub enum ItemData {
         /// ones were left out.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         guessed: bool,
+        /// The provider refused the request for how many images it carried
+        /// or how large they made it, so the oldest ones were left out.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        oldest: bool,
+        /// The provider refused the request as too large for its images,
+        /// rather than for one of them or for how many there were; with
+        /// `oldest` or `guessed`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        too_large: bool,
+        /// The provider refused the request for how many images it carried;
+        /// with `oldest` or `guessed`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        too_many: bool,
     },
     Usage {
         #[serde(default, skip_serializing_if = "Option::is_none")]

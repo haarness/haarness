@@ -138,6 +138,23 @@ impl ModelProvider for BedrockProvider {
         &self.instance.id
     }
 
+    /// Bedrock takes 20 MB in a request; its images get 15 MiB of it. A
+    /// Claude model takes as many images as it does from Anthropic, named by
+    /// its id or an ARN holding it (a foundation model or a cross-region
+    /// inference profile). An application inference profile's ARN names no
+    /// model, and finding it would take a request to Bedrock, so it gets the
+    /// byte limit alone.
+    fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
+        let count = model
+            .contains("anthropic.claude")
+            .then(|| crate::anthropic::image_limits(&self.models, model).count)
+            .flatten();
+        haarness_core::ImageLimits {
+            bytes: 15 * 1024 * 1024,
+            count,
+        }
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             id: self.instance.id.clone(),
@@ -634,6 +651,51 @@ mod tests {
             "usage":{"inputTokens":2,"outputTokens":1},
             "stopReason":"end_turn"
         }))
+    }
+
+    #[test]
+    fn a_claude_model_takes_as_many_images_as_from_anthropic() {
+        let provider = BedrockProvider::new_with_region(
+            NativeInstance {
+                id: "amazon-bedrock".into(),
+                name: "Amazon Bedrock".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: Some("bedrock-token".into()),
+                models: vec![
+                    "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
+                    "amazon.nova-pro-v1:0".into(),
+                ],
+                discover_models: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: ProviderHeaders::default(),
+            },
+            None,
+            "us-east-1".into(),
+        );
+        let limits = provider.image_limits("us.anthropic.claude-haiku-4-5-20251001-v1:0");
+        assert_eq!(
+            limits,
+            haarness_core::ImageLimits {
+                bytes: 15 * 1024 * 1024,
+                count: Some(100),
+            }
+        );
+        assert_eq!(provider.image_limits("amazon.nova-pro-v1:0").count, None);
+        for arn in [
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+        ] {
+            assert_eq!(provider.image_limits(arn).count, Some(100), "{arn}");
+        }
+        assert_eq!(
+            provider
+                .image_limits(
+                    "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3"
+                )
+                .count,
+            None
+        );
     }
 
     #[test]

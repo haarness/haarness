@@ -236,6 +236,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         text_depth: 0,
         nested_cd: false,
         moved: 0,
+        unplaced: false,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -245,6 +246,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         written,
         overflow,
         nested_cd,
+        unplaced,
         ..
     } = reader;
     if nested_cd {
@@ -263,7 +265,20 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         }
     }
     if analysis.patterns.is_empty() && analysis.external_dirs.is_empty() {
-        return fallback(command);
+        let mut fallback = fallback(command);
+        for written in &mut fallback.written {
+            written.incomplete |= unplaced;
+        }
+        return fallback;
+    }
+    if unplaced && analysis.written.is_empty() {
+        let fallback = fallback(command);
+        analysis.patterns.extend(fallback.patterns);
+        analysis.always.extend(fallback.always);
+        analysis.written = fallback.written;
+        for written in &mut analysis.written {
+            written.incomplete = true;
+        }
     }
     // A command written on its own is judged as written, whatever else it
     // is also read from.
@@ -271,6 +286,284 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         .derived
         .retain(|derived| !written.contains_key(&derived.pattern));
     analysis
+}
+
+/// What the parser is given for a shell line: the line itself, except for
+/// the backslash shapes tree-sitter-bash reads otherwise than the shell does,
+/// where one backslash is written as a space. The parser takes a line feed
+/// directly followed by a backslash as part of the next word, so the line
+/// after it becomes more words of the command before (`true` then a line
+/// `\rm -rf x` reads as one `true` command, and the first line of a
+/// here-document that starts with a backslash as words of the line that
+/// opens it), and it takes `\`, a carriage return and a line feed for a line
+/// continuation. The shell ends the command at that line feed. Only these
+/// shapes change, each where the backslash is not itself escaped and the
+/// parser reads the line feed (or the backslash) inside one command:
+///
+/// - a line that starts with `\` and a name character (`\rm`, `\r\m`,
+///   `\./run.sh`): the backslash only stops an alias, and becomes a space;
+/// - a line that is only `\` (it joins the line after it to it): the
+///   backslash becomes a space, an empty line;
+/// - `\`, a carriage return and a line feed: the backslash quotes the
+///   carriage return, so the line feed ends the command (`true \` CR LF
+///   `rm -rf x` runs `rm`), and the backslash becomes a space.
+///
+/// The text keeps its length, so every node's range is a range of the line
+/// as written, which every text is read from: patterns, words and
+/// here-documents stay as written. Any other backslash form is read as
+/// before, and so is a line of a here-document's text that starts with that
+/// document's delimiter once its backslash is gone (the parser ends a
+/// document at such a line, blanks before it or not), a line the parser
+/// already starts a command at (after `&&`, `|`, `;` or a comment line) and
+/// one inside quotes or a here-document's text.
+/// It takes one parse and a pass over the line: no shape costs more than its
+/// length.
+fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
+    if !command.contains("\n\\") && !command.contains("\\\r\n") {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    let Some(tree) = parser.parse(command, None) else {
+        return std::borrow::Cow::Borrowed(command);
+    };
+    let name = |byte: u8| byte.is_ascii_alphanumeric() || b"_./:@%+,-".contains(&byte);
+    let bytes = command.as_bytes();
+    // What could change, read as if every change before it were made: the
+    // backslash to turn into a space, and the byte the parser must read
+    // inside one command for it (the line feed before it, or itself).
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    let mut run = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = run % 2 == 1;
+        if bytes[at] == b'\n'
+            && !escaped
+            && bytes.get(at + 1) == Some(&b'\\')
+            && bytes
+                .get(at + 2)
+                .is_none_or(|byte| *byte == b'\n' || name(*byte))
+        {
+            candidates.push((at + 1, at));
+            // As a space, the backslash quotes nothing after it.
+            run = 0;
+            at += 2;
+            continue;
+        }
+        if bytes[at] == b'\\' && !escaped && bytes[at + 1..].starts_with(b"\r\n") {
+            candidates.push((at, at));
+            run = 0;
+            at += 1;
+            continue;
+        }
+        run = if bytes[at] == b'\\' { run + 1 } else { 0 };
+        at += 1;
+    }
+    if candidates.is_empty() {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    let inside = inside_one_command(tree.root_node(), candidates.iter().map(|(_, at)| *at));
+    let documents = documents(tree.root_node(), command);
+    // The changes made, in order, each only where what is before it in the
+    // text as changed so far still leaves its backslash unquoted.
+    let mut changed = bytes.to_vec();
+    let mut any = false;
+    let mut run = 0;
+    // Whether the byte before `at` is a line feed a backslash quotes.
+    let mut quoted_feed = false;
+    let mut next = candidates.iter().zip(inside).peekable();
+    for at in 0..changed.len() {
+        while next
+            .peek()
+            .is_some_and(|((backslash, _), _)| *backslash < at)
+        {
+            next.next();
+        }
+        if let Some(&(&(backslash, check), true)) = next.peek()
+            && backslash == at
+        {
+            let applies = if check + 1 == at {
+                // The parser ends a here-document at a line of its text that
+                // starts with its delimiter after blanks, so a body line that
+                // would turn into one (`\EOF`, `\EOFX`) stays as it is.
+                let line = &command[at + 1..];
+                let line =
+                    line[..line.find('\n').unwrap_or(line.len())].trim_start_matches([' ', '\t']);
+                let document = documents.partition_point(|(start, _, _)| *start <= at);
+                let closes = document.checked_sub(1).is_some_and(|index| {
+                    let (_, end, delimiter) = &documents[index];
+                    at < *end && line.starts_with(delimiter.as_str())
+                });
+                !quoted_feed && !closes
+            } else {
+                run % 2 == 0
+            };
+            if applies {
+                changed[at] = b' ';
+                any = true;
+                run = 0;
+                quoted_feed = false;
+                continue;
+            }
+        }
+        quoted_feed = changed[at] == b'\n' && run % 2 == 1;
+        run = if changed[at] == b'\\' { run + 1 } else { 0 };
+    }
+    if !any {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    // Only ASCII backslashes became spaces: the text is still UTF-8.
+    std::borrow::Cow::Owned(String::from_utf8(changed).unwrap_or_else(|_| command.to_owned()))
+}
+
+/// For each of `positions` (in order), whether the parser reads the byte
+/// there inside one command: the smallest node that holds it is a command, a
+/// word of one or a redirect, not a list, a pipeline, the program or quoted
+/// text. One walk down the tree, into the nodes that hold a position only,
+/// so a command of a million words costs one look at each of them.
+fn inside_one_command(
+    root: tree_sitter::Node<'_>,
+    positions: impl Iterator<Item = usize>,
+) -> Vec<bool> {
+    let positions: Vec<usize> = positions.collect();
+    let mut inside = vec![false; positions.len()];
+    let within = |node: tree_sitter::Node<'_>| {
+        matches!(
+            node.kind(),
+            "word"
+                | "command_name"
+                | "concatenation"
+                | "command"
+                | "declaration_command"
+                | "unset_command"
+                | "variable_assignment"
+                | "variable_assignments"
+                | "file_redirect"
+                | "heredoc_redirect"
+                | "herestring_redirect"
+                | "redirected_statement"
+        )
+    };
+    // Each node with the range of `positions` it holds.
+    let mut stack = vec![(root, 0, positions.len())];
+    while let Some((node, low, high)) = stack.pop() {
+        let mut index = low;
+        for child in node.children(&mut node.walk()) {
+            if index >= high {
+                break;
+            }
+            // Positions before this child, between its siblings: the node's.
+            while index < high && positions[index] < child.start_byte() {
+                inside[index] = within(node);
+                index += 1;
+            }
+            let end = index + positions[index..high].partition_point(|at| *at < child.end_byte());
+            if end > index {
+                stack.push((child, index, end));
+                index = end;
+            }
+        }
+        for slot in &mut inside[index..high] {
+            *slot = within(node);
+        }
+    }
+    inside
+}
+
+/// The text of each here-document the parser finds in `command`, from the
+/// line after the one that opens it (or the end of the document before it on
+/// that line) to its end, in order and apart, each with its delimiter as the
+/// shell compares a line with it (quotes and backslashes gone).
+fn documents(root: tree_sitter::Node<'_>, command: &str) -> Vec<(usize, usize, String)> {
+    let feeds: Vec<usize> = command
+        .bytes()
+        .enumerate()
+        .filter(|(_, byte)| *byte == b'\n')
+        .map(|(at, _)| at)
+        .collect();
+    let mut found: Vec<(usize, usize, String)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "heredoc_redirect"
+            && let Some(start) = children(node)
+                .into_iter()
+                .find(|part| part.kind() == "heredoc_start")
+        {
+            let feed = feeds.partition_point(|at| *at < start.end_byte());
+            if let Some(feed) = feeds.get(feed) {
+                let word: String = node_text(start, command)
+                    .trim_start_matches("$'")
+                    .chars()
+                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                    .collect();
+                found.push((feed + 1, node.end_byte(), word));
+            }
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    found.sort_by_key(|(_, end, _)| *end);
+    let mut documents: Vec<(usize, usize, String)> = Vec::new();
+    for (start, end, word) in found {
+        let start = documents
+            .last()
+            .map_or(start, |(_, before, _)| start.max(*before));
+        if start < end && !word.is_empty() {
+            documents.push((start, end, word));
+        }
+    }
+    documents
+}
+
+/// The text of a command with its line continuations joined, as the shell
+/// reads it, when one touches a word: `r\` at the end of a line and `m -rf
+/// x` on the next is `rm -rf x`, where the parser reads the words `r` and
+/// `m`; `rm\` and ` -rf x` (or `git \` and `push`) are words the parser
+/// reads right, but the command as written keeps the line break where a
+/// rule such as `rm *` or `git push *` looks for a space. With `within`,
+/// only a continuation inside a word counts, the one that changes the words.
+/// A continuation between blanks, inside single quotes, or at the start or
+/// end of the text changes nothing and gives `None`.
+fn joined_continuations(text: &str, within: bool) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut joined = String::with_capacity(text.len());
+    let (mut single, mut double, mut found) = (false, false, false);
+    let mut last = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            b'\\' if !single => {
+                if bytes.get(at + 1) == Some(&b'\n') {
+                    let before = at.checked_sub(1).map(|index| bytes[index]);
+                    let after = bytes.get(at + 2).copied();
+                    let (before, after) = (
+                        before.is_some_and(|byte| !byte.is_ascii_whitespace()),
+                        after.is_some_and(|byte| !byte.is_ascii_whitespace()),
+                    );
+                    if (before && after) || (!within && (before || after)) {
+                        found = true;
+                    }
+                    joined.push_str(&text[last..at]);
+                    last = at + 2;
+                }
+                at += 2;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    if !found {
+        return None;
+    }
+    joined.push_str(&text[last.min(text.len())..]);
+    Some(joined)
 }
 
 struct Reader<'w> {
@@ -304,6 +597,9 @@ struct Reader<'w> {
     /// How many wrappers that choose a directory (`env -C`, `sudo -D`) the
     /// command being read runs behind.
     moved: u32,
+    /// The line holds backquotes in a here-document no written command
+    /// opens, so the line as one command is a command not read whole.
+    unplaced: bool,
 }
 
 /// The written command whose standard input a program reads.
@@ -381,7 +677,9 @@ impl Reader<'_> {
         if parser.set_language(&language.into()).is_err() {
             return false;
         }
-        let Some(tree) = parser.parse(command, None) else {
+        // The tree comes from the shell's reading of the line; every text is
+        // read from the line itself, which has the same length.
+        let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
             return false;
         };
         // Each node with its parent: asking the tree for a node's parent
@@ -391,6 +689,7 @@ impl Reader<'_> {
         let mut command_nodes: Vec<(tree_sitter::Node<'_>, Option<tree_sitter::Node<'_>>)> =
             Vec::new();
         let mut redirects = Vec::new();
+        let mut heredocs = Vec::new();
         let mut previous = HashMap::new();
         let mut wrappers = HashMap::new();
         // The statement whose here-document or here-string a command reads,
@@ -418,6 +717,9 @@ impl Reader<'_> {
             }
             if node.kind() == "file_redirect" {
                 redirects.push(node);
+            }
+            if node.kind() == "heredoc_redirect" {
+                heredocs.push(node);
             }
             if node.kind() == "ERROR" {
                 errors.push(node);
@@ -512,6 +814,10 @@ impl Reader<'_> {
             };
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
+        let continued = command.contains("\\\n");
+        // The written command each command node is read for, by where the
+        // node starts.
+        let mut sources: Vec<(usize, Option<usize>)> = Vec::new();
 
         for (node, parent) in command_nodes {
             if self.overflow {
@@ -569,6 +875,7 @@ impl Reader<'_> {
                     }
                 }
             }
+            sources.push((node.start_byte(), self.source));
             let assigned = node
                 .named_children(&mut cursor)
                 .any(|child| child.kind() == "variable_assignment");
@@ -604,6 +911,52 @@ impl Reader<'_> {
                     self.nested(line, depth);
                 }
             }
+            // `r\<newline>m -rf x`: the shell drops a line continuation
+            // inside a word before it reads the line, where the parser reads
+            // two words, so the joined text is read again.
+            if continued
+                && let Some(joined) = joined_continuations(&node_text(node, command), false)
+            {
+                self.nested(&joined, depth);
+            }
+        }
+        // An unquoted here-document's `…` substitutions run as the shell
+        // writes the document, where the parser keeps them as text. They are
+        // read for the command written last before the document's `<<`: the
+        // one on its line, or the last of a loop, a group or an `if` it is
+        // attached to.
+        // A document no written command opens (a bare `<<EOF`, `X=1 <<EOF`,
+        // `cd src <<EOF`) is not read: the command written nearest to it, or
+        // the line, counts as one a limit stopped reading.
+        if !self.overflow {
+            // The last written command up to each command, and the first
+            // from each on.
+            let mut last = Vec::with_capacity(sources.len() + 1);
+            last.push(None);
+            for (_, source) in &sources {
+                last.push(source.or(*last.last().unwrap_or(&None)));
+            }
+            let mut first = vec![None; sources.len() + 1];
+            for index in (0..sources.len()).rev() {
+                first[index] = sources[index].1.or(first[index + 1]);
+            }
+            for heredoc in heredocs {
+                let Some(text) = backquoted(heredoc, command) else {
+                    continue;
+                };
+                let before = sources.partition_point(|(start, _)| *start < heredoc.start_byte());
+                if let Some(source) = before.checked_sub(1).and_then(|index| sources[index].1) {
+                    self.source = Some(source);
+                    self.nested(&text, depth);
+                } else if let Some(source) = last[before].or(first[before]) {
+                    self.source = Some(source);
+                    self.stopped();
+                } else if depth.text > 0 && self.source.is_some() {
+                    self.stopped();
+                } else {
+                    self.unplaced = true;
+                }
+            }
         }
         self.text_depth = outer_depth;
         for redirect in redirects {
@@ -624,7 +977,7 @@ impl Reader<'_> {
             {
                 continue;
             }
-            if value.starts_with("/dev/") {
+            if stream_device(&value, complete) {
                 continue;
             }
             // `>` (not `>>`) empties a file that is there already.
@@ -1114,9 +1467,24 @@ impl Reader<'_> {
                 continue;
             }
             let raw = node_text(word, source);
-            if let Some(dir) = external_dir(self.workspace, &raw, &argument, complete) {
-                push_unique(&mut self.analysis.external_dirs, glob(&dir));
-            }
+            self.check_folder(&name, &raw, &argument, complete);
+        }
+    }
+
+    /// An argument of a command in [`PATH_COMMANDS`] that leads outside the
+    /// project asks for the folder it reaches. The shell's own `cd` steps
+    /// out of the path as written (`cd -L`, its default), not of where a link
+    /// in it leads, so a `cd` is also judged that way: with `a/l` leading
+    /// deeper into the project, `cd a/l/../../..` reaches the project's
+    /// parent, though followed it is the project itself.
+    fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
+        if let Some(dir) = external_dir(self.workspace, raw, value, complete) {
+            push_unique(&mut self.analysis.external_dirs, glob(&dir));
+        }
+        if name == "cd"
+            && let Some(dir) = cd_dir(self.workspace, raw, value, complete)
+        {
+            push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
     }
 
@@ -1628,11 +1996,7 @@ impl Reader<'_> {
                 if path.value.starts_with('-') || (name == "chmod" && path.value.starts_with('+')) {
                     continue;
                 }
-                if let Some(dir) =
-                    external_dir(self.workspace, &path.raw, &path.value, path.complete)
-                {
-                    push_unique(&mut self.analysis.external_dirs, glob(&dir));
-                }
+                self.check_folder(&name, &path.raw, &path.value, path.complete);
             }
         }
     }
@@ -2494,6 +2858,76 @@ fn here_string(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> 
     Some(unquote(value, source).0)
 }
 
+/// The commands in backquotes an unquoted here-document holds, one per line,
+/// as the shell runs them while it writes the document (`cat > n.md <<EOF`
+/// with `` `npm test` `` in it runs `npm test`): the parser reads `$(…)`
+/// there but keeps backquotes as text. `\`` is a backquote, `\\` a
+/// backslash and `\$` a dollar sign, there and inside them. A document whose
+/// delimiter is quoted (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) is text, and a
+/// backquote never closed runs nothing.
+fn backquoted(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    if redirect.kind() != "heredoc_redirect" {
+        return None;
+    }
+    let parts = children(redirect);
+    let quoted = parts
+        .iter()
+        .find(|part| part.kind() == "heredoc_start")
+        .is_none_or(|start| node_text(*start, source).contains(['\'', '"', '\\']));
+    let body = parts.iter().find(|part| part.kind() == "heredoc_body")?;
+    if quoted {
+        return None;
+    }
+    let text = source.get(body.start_byte()..body.end_byte())?;
+    if !text.contains('`') {
+        return None;
+    }
+    // `$(…)` there is read already; backquotes in a `${…}` (`${X:-`…`}`)
+    // are text to the parser too.
+    let skipped: Vec<(usize, usize)> = children(*body)
+        .into_iter()
+        .filter(|part| part.kind() == "command_substitution")
+        .map(|part| {
+            (
+                part.start_byte() - body.start_byte(),
+                part.end_byte() - body.start_byte(),
+            )
+        })
+        .collect();
+    let bytes = text.as_bytes();
+    let mut commands: Vec<String> = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        if open.is_none()
+            && let Some(&(_, end)) = skipped.iter().find(|(start, _)| *start == at)
+        {
+            at = end;
+            continue;
+        }
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'`' => {
+                match open.take() {
+                    Some(start) => {
+                        let inner = text[start..at]
+                            .replace("\\`", "`")
+                            .replace("\\$", "$")
+                            .replace("\\\\", "\\");
+                        if !inner.trim().is_empty() {
+                            commands.push(inner);
+                        }
+                    }
+                    None => open = Some(at + 1),
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    (!commands.is_empty()).then(|| commands.join("\n"))
+}
+
 fn heredoc_body(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
     (0..redirect.named_child_count())
         .filter_map(|index| redirect.named_child(index))
@@ -2660,7 +3094,10 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     if parser.set_language(&language.into()).is_err() {
         return false;
     }
-    let Some(tree) = parser.parse(command, None) else {
+    if joined_continuations(command, true).is_some() {
+        return false;
+    }
+    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
         return false;
     };
     if tree.root_node().has_error() {
@@ -3081,6 +3518,60 @@ fn external_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Opt
     }
 }
 
+/// Whether a redirect names one of the devices a line reads or writes as a
+/// stream rather than a file: `/dev/null`, `zero`, `full`, `random`,
+/// `urandom`, `tty`, `stdin`, `stdout`, `stderr`, a descriptor (`/dev/fd/3`)
+/// and bash's own network paths (`/dev/tcp/host/port`, `/dev/udp/…`). Any
+/// other path under `/dev` is a path like any other: Linux's `/dev/shm` and
+/// `/dev/mqueue` hold files anyone can write, and a link there can lead
+/// anywhere.
+fn stream_device(value: &str, complete: bool) -> bool {
+    let Some(name) = value.strip_prefix("/dev/") else {
+        return false;
+    };
+    if name.starts_with("tcp/") || name.starts_with("udp/") {
+        return true;
+    }
+    if let Some(descriptor) = name.strip_prefix("fd/") {
+        return !complete
+            || (!descriptor.is_empty() && descriptor.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+    complete
+        && matches!(
+            name,
+            "null" | "zero" | "full" | "random" | "urandom" | "tty" | "stdin" | "stdout" | "stderr"
+        )
+}
+
+/// Where the shell's own `cd` takes a path from `workspace` when that is
+/// outside the project: by name, each `..` dropping the folder written
+/// before it whatever link that is, then into the folder that names (links
+/// there followed, as the shell enters it). A dynamic part is judged by the
+/// literal start before it, as [`external_dir`] judges it.
+fn cd_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Option<PathBuf> {
+    let target = if complete {
+        value
+    } else {
+        value.rfind('/').map_or("", |end| &value[..=end])
+    };
+    if target.is_empty() {
+        return None;
+    }
+    let named = match home_expansion(raw, target) {
+        Some(expanded) => lexical(workspace, &expanded),
+        None => lexical(workspace, Path::new(target)),
+    };
+    let resolved = resolve(workspace, named);
+    if resolved.starts_with(resolve(workspace, Path::new(""))) {
+        return None;
+    }
+    if !complete || resolved.is_dir() {
+        Some(resolved)
+    } else {
+        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
+    }
+}
+
 /// The folder an unquoted leading `~` expands to: `~` and `~/…` are the
 /// user's home, `~name/…` that user's home, taken as a sibling of this one.
 /// Without a known home the path is put at `/`, which is never the project.
@@ -3343,7 +3834,12 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(command, None) else {
+    // A word the shell joins across lines may name another file than the
+    // tree's words do.
+    if joined_continuations(command, true).is_some() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
         return Vec::new();
     };
     // A line the tree cannot read whole may hold an `&` or a `cd` where the
@@ -4426,6 +4922,83 @@ mod regression {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
                 vec![expected],
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_redirect_into_dev_is_a_path_unless_it_names_a_stream() {
+        let workspace = std::env::current_dir().unwrap();
+        for command in [
+            "make > /dev/null 2>&1",
+            "echo x > /dev/stderr",
+            "echo x >/dev/stdout",
+            "read -r line < /dev/tty",
+            "exec 3< /dev/fd/0",
+            "cat < \"/dev/stdin\"",
+            "head -c 8 < /dev/urandom",
+            "echo ping > /dev/tcp/127.0.0.1/9",
+            "echo x > /dev/fd/$FD",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        for (command, folder) in [
+            ("echo x > /dev/shm/x", "/dev/shm/*"),
+            ("cat < /dev/shm/x", "/dev/shm/*"),
+            ("echo x > /dev/mqueue/q", "/dev/mqueue/*"),
+        ] {
+            let found = analyze(command, &workspace).external_dirs;
+            assert!(
+                found.iter().any(|dir| dir.ends_with(folder)),
+                "{command}: {found:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cd_through_a_link_is_also_judged_by_the_path_as_written() {
+        let root = std::env::temp_dir().join(format!("haarness-cd-links-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("deep/er/x")).unwrap();
+        std::fs::create_dir_all(workspace.join("a")).unwrap();
+        std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), workspace.join("away")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere/sub")).unwrap();
+        let parent = root.canonicalize().unwrap();
+        // Followed, `a/l/../../..` is the project; the shell's `cd` takes it by
+        // name, which is the project's parent.
+        for command in [
+            "cd a/l/../../.. && touch escaped.txt",
+            "cd a/l/../../../",
+            "cd 'a/l/../../..'",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                vec![glob(&parent)],
+                "{command}"
+            );
+        }
+        // Either reading outside asks: followed, `away/sub/..` is outside.
+        assert_eq!(
+            analyze("cd away/sub/.. && ls", &workspace).external_dirs,
+            vec![glob(&parent.join("elsewhere"))]
+        );
+        // Inside both ways, and other programs' arguments as before.
+        for command in [
+            "cd a/l/.. && ls",
+            "cd a/l && ls",
+            "cd deep/er/x/.. && ls",
+            "touch a/l/../../x",
+            "cat a/l/../../../project/README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
                 "{command}"
             );
         }
@@ -5608,6 +6181,532 @@ mod readings {
             decide("python3 - <<'EOF' 2>&1 | rm -rf x\nprint(1)\nEOF"),
             PermissionDecision::Deny
         );
+    }
+}
+
+/// Lines the shell reads otherwise than tree-sitter-bash: a line feed with a
+/// backslash right after it, and a line continuation inside a word.
+#[cfg(test)]
+mod backslash_lines {
+    use super::*;
+
+    /// The commands tree-sitter-bash finds in `text` as it is, each as the
+    /// words it reads.
+    fn parsed(text: &str) -> Vec<Vec<String>> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        let mut commands = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "command" {
+                commands.push((
+                    node.start_byte(),
+                    words(node, text)
+                        .into_iter()
+                        .map(|word| word.raw)
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            stack.extend(node.children(&mut node.walk()));
+        }
+        commands.sort();
+        commands.into_iter().map(|(_, words)| words).collect()
+    }
+
+    fn written(command: &str) -> Vec<String> {
+        analyze(command, &std::env::current_dir().unwrap())
+            .written
+            .into_iter()
+            .map(|written| written.pattern)
+            .collect()
+    }
+
+    fn readings(command: &str) -> Vec<String> {
+        analyze(command, &std::env::current_dir().unwrap())
+            .derived
+            .into_iter()
+            .map(|derived| derived.pattern)
+            .collect()
+    }
+
+    /// Pins tree-sitter-bash 0.25's reading, which `shell_reading` corrects:
+    /// a line feed followed by a backslash becomes the start of the next
+    /// word, so that line is read as more words of the command before.
+    /// Should a later grammar read these as the shell does, this test says
+    /// so, and the correction is no longer needed.
+    #[test]
+    fn the_parser_reads_a_line_after_a_line_feed_and_backslash_as_more_words() {
+        for (text, words) in [
+            ("true\n\\rm -rf x", vec![vec!["true", "\n\\rm", "-rf", "x"]]),
+            ("ls\n\\rm -rf x", vec![vec!["ls", "\n\\rm", "-rf", "x"]]),
+            ("true # c\n\\rm x", vec![vec!["true", "\n\\rm", "x"]]),
+            ("true\n\n\\rm x", vec![vec!["true", "\n\n\\rm", "x"]]),
+            ("true\r\n\\rm x", vec![vec!["true", "\n\\rm", "x"]]),
+            ("true \\\r\n\\rm x", vec![vec!["true", "\\rm", "x"]]),
+            ("true\n\\\nrm x", vec![vec!["true", "rm", "x"]]),
+            ("r\\\nm -rf x", vec![vec!["r", "m", "-rf", "x"]]),
+        ] {
+            let words: Vec<Vec<String>> = words
+                .into_iter()
+                .map(|words| words.into_iter().map(str::to_owned).collect())
+                .collect();
+            assert_eq!(parsed(text), words, "{text:?}");
+        }
+        // Blanks after the line feed, or an operator before it, and the
+        // parser starts a new command as the shell does.
+        for text in [
+            "true\n  \t\\rm x",
+            "true &&\n\\rm x",
+            "true;\n\\rm x",
+            "true |\n\\rm x",
+        ] {
+            assert_eq!(parsed(text).len(), 2, "{text:?}");
+        }
+        // The first line of a here-document that starts with a backslash
+        // becomes words of the line that opens it, not of its body.
+        let text = "bash <<'EOF'\n\\rm -rf x\nEOF";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        let mut stack = vec![tree.root_node()];
+        let mut bodies = Vec::new();
+        while let Some(node) = stack.pop() {
+            if node.kind() == "heredoc_body" {
+                bodies.push(node_text(node, text));
+            }
+            stack.extend(node.children(&mut node.walk()));
+        }
+        assert!(
+            bodies.iter().all(|body| !body.contains("rm -rf x")),
+            "{bodies:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_that_starts_with_a_backslash_is_a_command_of_its_own() {
+        for command in [
+            "true\n\\rm -rf victim",
+            "ls\n\\rm -rf victim",
+            "npm run build\n\\rm -rf victim",
+            "true # c\n\\rm -rf victim",
+            "true\n\n\\rm -rf victim",
+            "true\r\n\\rm -rf victim",
+            "true 2>err.txt\n\\rm -rf victim",
+            "export A=1\n\\rm -rf victim",
+            "(true\n\\rm -rf victim)",
+            "{ true\n\\rm -rf victim; }",
+            "echo $(true\n\\rm -rf victim)",
+            "cat <<EOF\n$(true\n\\rm -rf victim)\nEOF",
+            "true \\\r\n\\rm -rf victim",
+        ] {
+            assert!(
+                written(command).contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {:?}",
+                written(command)
+            );
+        }
+        // A line that is only a backslash joins the next line to it.
+        assert!(written("true\n\\\nrm -rf victim").contains(&"rm -rf victim".to_owned()));
+        // Escaped further in (`\r\m`): the shell runs `rm`.
+        assert!(readings("true\n\\r\\m -f victim").contains(&"rm -f victim".to_owned()));
+        // A shell's here-document whose first line starts with a backslash
+        // is read whole.
+        assert!(
+            readings("bash <<'EOF'\n\\rm -rf victim\nEOF").contains(&"rm -rf victim".to_owned())
+        );
+        // Nothing else reads those words as the command before's.
+        assert!(!is_obviously_read_only("ls\n\\rm -rf victim"));
+        let workspace = std::env::current_dir().unwrap();
+        let parent = workspace.parent().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            analyze("true\n\\cat ../x", &workspace).external_dirs,
+            vec![glob(&parent)]
+        );
+        assert!(
+            analyze("mkdir -p d\n\\echo ../x", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        assert!(
+            analyze("cat <<'EOF'\n\\head -1 ../x\nEOF", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn other_backslashes_read_as_before() {
+        // Inside quotes the parser reads the text whole either way, and every
+        // text is read from the line as written.
+        assert_eq!(written("echo 'a\n\\rm x'"), vec!["echo 'a\n\\rm x'"]);
+        assert_eq!(readings("echo 'a\n\\rm x'"), vec!["echo a\n\\rm x"]);
+        assert_eq!(readings("echo \"a\n\\rm x\""), vec!["echo a\\rm x"]);
+        for command in [
+            "echo 'a\n\\rm x'",
+            "echo \"a\n\\rm x\"",
+            "true &&\n\\rm x",
+            "true;\n\\rm x",
+            "true |\n\\rm x",
+            "# note\n\\rm x",
+            "cat <<'EOF'\nHi\n\\begin{x}\nEOF",
+            "true \\\nhead -1 x",
+            "cargo test \\\n  -p haarness-core",
+            "docker run --rm \\\n  -v \"$PWD\":/app \\\n  -w /app node:22 npm test",
+            "true\n\\$x",
+            "cat > win.txt <<EOF\nC:\\Users\\me\\file\nEOF",
+            "\\cp -f a b",
+        ] {
+            assert_eq!(shell_reading(command), command, "{command:?}");
+        }
+        // Here-document text keeps its backslashes.
+        let latex = "cat > paper.tex <<'EOF'\n\\documentclass{article}\n\\begin{document}\nEOF";
+        assert_eq!(written(latex), vec![latex.to_owned()]);
+        assert!(readings(latex).is_empty(), "{:?}", readings(latex));
+        // A body line that starts with the delimiter stays as it is, so the
+        // here-document does not end there.
+        let closing = "cat <<'EOF'\n\\EOF\nrm -rf victim\nEOF";
+        assert_eq!(shell_reading(closing), closing);
+        assert!(!written(closing).contains(&"rm -rf victim".to_owned()));
+    }
+
+    #[test]
+    fn a_line_continuation_that_touches_a_word_is_joined() {
+        assert_eq!(readings("r\\\nm -rf victim"), vec!["rm -rf victim"]);
+        assert_eq!(readings("git pu\\\nsh --force"), vec!["git push --force"]);
+        // The parser reads these words right, but the command as written
+        // keeps the line break where `rm *` or `git push *` looks for a
+        // space.
+        assert_eq!(readings("rm\\\n -rf victim"), vec!["rm -rf victim"]);
+        assert_eq!(readings("git \\\npush --force"), vec!["git push --force"]);
+        assert_eq!(readings("true\n\\rm\\\n -rf victim"), vec!["rm -rf victim"]);
+        assert_eq!(
+            joined_continuations("echo \"a\\\nb\"", true),
+            Some("echo \"ab\"".to_owned())
+        );
+        assert_eq!(joined_continuations("git \\\npush", true), None);
+        // Between blanks, inside single quotes, or none: nothing to join.
+        for text in [
+            "cargo test \\\n  -p haarness-core",
+            "echo 'a\\\nb'",
+            "git status",
+            "a \\\n b",
+        ] {
+            assert_eq!(joined_continuations(text, false), None, "{text:?}");
+        }
+        assert!(readings("cargo test \\\n  -p haarness-core").is_empty());
+        assert!(!is_obviously_read_only("l\\\ns"));
+        // The words the read-only check and the script card read are the
+        // shell's when no word is split.
+        assert!(is_obviously_read_only("ls \\\n-la"));
+    }
+
+    #[test]
+    fn a_backslash_before_a_windows_line_ending_ends_the_command() {
+        for command in [
+            "true \\\r\nrm -rf victim",
+            "git status \\\r\nrm -rf victim",
+            "true\n\\\r\nrm -rf victim",
+            "true\r\n\\\r\nrm -rf victim",
+        ] {
+            assert!(
+                written(command).contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {:?}",
+                written(command)
+            );
+        }
+        // Read as the shell runs it: the line after it is a command of its own.
+        assert_eq!(
+            written("docker run --rm \\\r\n  -v x:/app \\\r\n  node:22 npm test"),
+            vec!["docker run --rm", "-v x:/app", "node:22 npm test"]
+        );
+        // Quoted, it is text.
+        assert_eq!(shell_reading("echo \"a \\\r\nb\""), "echo \"a \\\r\nb\"");
+    }
+
+    #[test]
+    fn a_here_document_delimiter_is_the_parser_s_own() {
+        // `<<` in a string, a comment or an arithmetic expansion opens no
+        // here-document.
+        for command in [
+            "echo \"<<rm\"\n\\rm -rf victim",
+            "echo '<<rm'\n\\rm -rf victim",
+            "true # <<r\n\\rm -rf victim",
+            "git log --oneline -5 # see <<rm\n\\rm -rf victim",
+            "echo $((1<<2))\n\\rm -rf victim",
+            // Closed by `rm`, the here-document is over before the line.
+            "cat <<rm\nhello\nrm\n\\rm -rf victim",
+            // A body line left as written, since the parser would end the
+            // document at ` EOFX`.
+            "cat <<EOF\n\\EOFX\nEOF\n\\rm -rf victim",
+            // The delimiter counts only inside its own document's text.
+            "echo ok\n\\rm -rf victim\ncat <<$'r'\nr",
+            "true\n\\rm -rf victim\ncat <<r\nx\nr",
+        ] {
+            let patterns = analyze(command, &std::env::current_dir().unwrap()).patterns;
+            assert!(
+                patterns.contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {patterns:?}"
+            );
+        }
+        // A body line that starts with a delimiter once its backslash is
+        // gone stays, blanks before it or not.
+        for command in [
+            "cat <<'EOF'\n\\EOF\nrm -rf victim\nEOF",
+            "cat <<EOF\n\\EOFX\nEOF",
+            "cat <<-EOF\n\\\tEOF\nEOF",
+        ] {
+            assert_eq!(shell_reading(command), command, "{command:?}");
+        }
+        // However many here-documents the line holds.
+        let mut many = String::new();
+        for index in 0..65 {
+            let _ =
+                std::fmt::Write::write_fmt(&mut many, format_args!("cat <<D{index}\nD{index}\n"));
+        }
+        many.push_str("true\n\\rm -rf victim");
+        assert!(
+            analyze(&many, &std::env::current_dir().unwrap())
+                .patterns
+                .contains(&"rm -rf victim".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_shell_reading_costs_no_more_than_the_line_s_length() {
+        use std::fmt::Write as _;
+        // `<<` thirty thousand times in a string, then as many backslash
+        // lines: with every `<<` taken for a delimiter, or the tree searched
+        // from its root for each line, this took seconds where one parse of
+        // the line takes milliseconds.
+        let mut line = String::from("echo '");
+        for word in 0..30_000 {
+            let _ = write!(line, "<<w{word} ");
+        }
+        line.push('\'');
+        let plain = line.clone();
+        for word in 0..30_000 {
+            let _ = write!(line, "\n\\x{word}");
+        }
+        let started = std::time::Instant::now();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        parser.parse(&line, None).unwrap();
+        let parse = started.elapsed();
+        let started = std::time::Instant::now();
+        let reading = shell_reading(&line);
+        let read = started.elapsed();
+        assert!(matches!(reading, std::borrow::Cow::Owned(_)));
+        assert!(
+            read < parse * 10 + std::time::Duration::from_millis(500),
+            "{read:?} for a line one parse of which takes {parse:?}"
+        );
+        // As many here-documents, each with a backslash line in its text.
+        let mut documents = String::new();
+        for word in 0..10_000 {
+            let _ = write!(documents, "cat <<D{word}\n\\x{word}\nD{word}\n");
+        }
+        let started = std::time::Instant::now();
+        parser.parse(&documents, None).unwrap();
+        let parse = started.elapsed();
+        let started = std::time::Instant::now();
+        shell_reading(&documents);
+        let read = started.elapsed();
+        assert!(
+            read < parse * 10 + std::time::Duration::from_millis(500),
+            "{read:?} for here-documents one parse of which takes {parse:?}"
+        );
+        // And the whole reading of the line costs what it costs without the
+        // backslashes.
+        let mut without = plain;
+        for word in 0..30_000 {
+            let _ = write!(without, "\nx{word}");
+        }
+        let workspace = std::env::current_dir().unwrap();
+        let started = std::time::Instant::now();
+        let baseline = analyze(&without, &workspace);
+        let base = started.elapsed();
+        let started = std::time::Instant::now();
+        let analysis = analyze(&line, &workspace);
+        let whole = started.elapsed();
+        assert_eq!(analysis.written.len(), baseline.written.len());
+        assert!(
+            whole < base * 3 + std::time::Duration::from_secs(1),
+            "{whole:?} against {base:?} for the same line without backslashes"
+        );
+    }
+}
+
+/// Backquotes in an unquoted here-document, which the shell runs as it
+/// writes the document.
+#[cfg(test)]
+mod here_document_backquotes {
+    use super::*;
+
+    fn readings(command: &str) -> Vec<String> {
+        analyze(command, &std::env::current_dir().unwrap())
+            .derived
+            .into_iter()
+            .map(|derived| derived.pattern)
+            .collect()
+    }
+
+    #[test]
+    fn backquotes_in_an_unquoted_here_document_are_read_as_commands() {
+        assert_eq!(
+            readings("cat > n.md <<EOF\n`rm -rf victim`\nEOF"),
+            vec!["rm -rf victim"]
+        );
+        assert_eq!(
+            readings(
+                "cat > notes.md <<EOF\n# Notes\nRun `npm test` first, then `cargo build`.\nEOF"
+            ),
+            vec!["npm test", "cargo build"]
+        );
+        // The shell runs them for a document piped on or fed to a group too.
+        assert_eq!(
+            readings("cat <<EOF | kubectl apply -f -\nname: `whoami`\nEOF"),
+            vec!["whoami"]
+        );
+        // `\`` is a backquote there, inside a substitution as well.
+        assert_eq!(
+            readings("cat > n.md <<EOF\nHome is `echo ~/x` and \\`literal\\` here.\nEOF"),
+            vec!["echo ~/x"]
+        );
+        // Fenced code is backquotes too: the shell runs what they hold.
+        assert_eq!(
+            readings("cat > n.md <<EOF\n```bash\nnpm i\n```\nEOF"),
+            vec!["bash", "npm i"]
+        );
+        let analysis = analyze(
+            "cat > n.md <<EOF\n`rm -rf ~/victim`\nEOF",
+            &std::env::current_dir().unwrap(),
+        );
+        // Auto's deletion check sees what they delete.
+        assert!(
+            analysis
+                .deletions
+                .iter()
+                .any(|deletion| deletion.value == "~/victim" && deletion.effect == Effect::Deletes),
+            "{:?}",
+            analysis.deletions
+        );
+    }
+
+    #[test]
+    fn a_here_document_of_a_loop_a_group_or_an_if_and_one_in_an_expansion_are_read_too() {
+        for command in [
+            "while read -r l; do echo \"$l\"; done <<EOF\n`rm -rf victim`\nEOF",
+            "for i in 1; do cat; done <<EOF\n`rm -rf victim`\nEOF",
+            "until false; do cat; break; done <<EOF\n`rm -rf victim`\nEOF",
+            "if true; then cat; fi <<EOF\n`rm -rf victim`\nEOF",
+            "{ cat; } <<EOF\n`rm -rf victim`\nEOF",
+            "(cat) <<EOF\n`rm -rf victim`\nEOF",
+            "cat > n.md <<EOF\n${X:-`rm -rf victim`}\nEOF",
+            "cat > n.md <<EOF\n${X:=`rm -rf victim`}\nEOF",
+            "cat > n.md <<EOF\n${X/a/`rm -rf victim`}\nEOF",
+        ] {
+            assert!(
+                readings(command).contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {:?}",
+                readings(command)
+            );
+        }
+    }
+
+    #[test]
+    fn a_document_past_the_reading_limits_leaves_its_command_not_read_whole() {
+        let command = format!(
+            "bash -c '{}' ; cat > n.md <<EOF\n`rm -rf victim`\nEOF",
+            vec!["true"; 4096].join(";")
+        );
+        let analysis = analyze(&command, &std::env::current_dir().unwrap());
+        let cat = analysis
+            .written
+            .iter()
+            .find(|written| written.pattern.starts_with("cat > n.md"))
+            .unwrap();
+        assert!(cat.incomplete, "{:?}", analysis.written);
+    }
+
+    #[test]
+    fn a_document_no_written_command_opens_leaves_the_line_not_read_whole() {
+        let workspace = std::env::current_dir().unwrap();
+        for command in [
+            "{ cd src; } <<EOF\n`rm -rf victim`\nEOF",
+            "cd . <<EOF\n`rm -rf victim`\nEOF",
+            "for d in a; do cd src; done <<EOF\n`rm -rf victim`\nEOF",
+            "X=1 <<EOF\n`rm -rf victim`\nEOF",
+            "> out.txt <<EOF\n`rm -rf victim`\nEOF",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(
+                !analysis.written.is_empty()
+                    && analysis.written.iter().all(|written| written.incomplete),
+                "{command:?}: {:?}",
+                analysis.written
+            );
+        }
+        // A line that starts with `<<` the parser reads as commands.
+        assert!(
+            analyze("<<EOF\n`rm -rf victim`\nEOF", &workspace)
+                .patterns
+                .contains(&"rm -rf victim".to_owned())
+        );
+        // The command written nearest to it, when there is one.
+        let analysis = analyze("echo hi; cd . <<EOF\n`rm -rf victim`\nEOF", &workspace);
+        assert_eq!(analysis.written.len(), 1);
+        assert!(analysis.written[0].incomplete, "{:?}", analysis.written);
+        // Nothing to read, nothing changes.
+        for command in [
+            "{ cd src; } <<'EOF'\n`rm -rf victim`\nEOF",
+            "cd . <<EOF\nplain text\nEOF",
+        ] {
+            assert!(
+                analyze(command, &workspace)
+                    .written
+                    .iter()
+                    .all(|written| !written.incomplete),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_delimiter_or_an_open_backquote_reads_nothing_more() {
+        for command in [
+            "cat > n.md <<'EOF'\n`rm -rf victim`\nEOF",
+            "cat > n.md <<\"EOF\"\n`rm -rf victim`\nEOF",
+            "cat > n.md <<\\EOF\n`rm -rf victim`\nEOF",
+            "cat > n.md <<EOF\nAn unterminated `tick here.\nEOF",
+            "cat > n.md <<EOF\nno backquotes, $HOME and ${USER:-x}\nEOF",
+        ] {
+            assert!(
+                readings(command).is_empty(),
+                "{command:?}: {:?}",
+                readings(command)
+            );
+        }
+        // `$(…)` is read once, as before.
+        assert_eq!(
+            readings("cat <<EOF\n$(echo `date`)\nEOF"),
+            Vec::<String>::new()
+        );
+        let written: Vec<String> = analyze(
+            "cat <<EOF\n$(echo `date`)\nEOF",
+            &std::env::current_dir().unwrap(),
+        )
+        .written
+        .into_iter()
+        .map(|written| written.pattern)
+        .collect();
+        assert!(written.contains(&"date".to_owned()), "{written:?}");
     }
 }
 

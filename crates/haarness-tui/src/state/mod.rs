@@ -13,7 +13,6 @@ use haarness_protocol::{
     Thread, ThreadId, Turn, TurnId, WorkflowDefinition, WorkflowInvalidDefinition, WorkflowRun,
     WorkflowRunStatus, WorkspaceListResponse, WorkspaceRefsResponse,
 };
-use unicode_width::UnicodeWidthChar as _;
 
 use crate::commands::COMMANDS;
 use crate::input::{WorkspaceMutation, WorkspaceRefOperation, composer::Composer};
@@ -1039,16 +1038,23 @@ pub struct App {
     pub terminal_focused: bool,
     /// Cell-bounded click targets of the last rendered frame.
     pub hit_rows: std::cell::RefCell<Vec<crate::view::frame::HitRegion>>,
-    /// Left-button press position awaiting its release (click detection).
-    pub mouse_down: Option<(u16, u16)>,
+    /// The left press awaiting its release (click detection).
+    pub mouse_down: Option<crate::input::mouse::Press>,
+    /// Counts the lists put on screen: a dialog opened, closed or replaced,
+    /// suggestions or a catalog that arrived. A press on a list row is not
+    /// carried over to a row of another list (see [`App::menu_row_key`]).
+    pub list_generation: u64,
     /// Screen cell last reached by a real mouse-movement event. Storing the
     /// cell rather than only the target keeps repeated targets (for example a
     /// task shown in transcript and sidebar) from highlighting together.
     pub hovered_cell: Option<(u16, u16)>,
     /// Screen-anchored drag selection: (anchor, head), char-cell coords.
     pub selection_range: Option<((u16, u16), (u16, u16))>,
-    /// Plain text of the last rendered frame rows, for selection copy.
-    pub last_frame: std::cell::RefCell<Vec<String>>,
+    /// The last rendered frame as a selection copies it.
+    pub last_frame: std::cell::RefCell<crate::view::frame::CopyFrame>,
+    /// Panes drawn into the frame being built (see
+    /// [`crate::view::frame::CopyPane`]).
+    pub copy_panes: std::cell::RefCell<Vec<crate::view::frame::CopyPane>>,
     /// Rendered-lines cache for expensive items (markdown, diffs); entries
     /// are keyed by item and invalidated by width or generation changes.
     pub render_cache: std::cell::RefCell<std::collections::HashMap<ItemId, CachedRender>>,
@@ -1277,9 +1283,11 @@ impl App {
             theme_preview_restore: None,
             hit_rows: std::cell::RefCell::new(Vec::new()),
             mouse_down: None,
+            list_generation: 0,
             hovered_cell: None,
             selection_range: None,
-            last_frame: std::cell::RefCell::new(Vec::new()),
+            last_frame: std::cell::RefCell::default(),
+            copy_panes: std::cell::RefCell::new(Vec::new()),
             render_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             diff_stats: std::cell::RefCell::new(std::collections::HashMap::new()),
             batch_results: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2498,6 +2506,7 @@ impl App {
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay) {
+        self.list_generation += 1;
         // A refused command's notice is done with once a dialog takes over.
         self.end_notice(NoticeLasts::UntilNextCommand);
         *self.dialog_anchor.get_mut() = None;
@@ -2580,6 +2589,7 @@ impl App {
     }
 
     pub fn close_overlay(&mut self) {
+        self.list_generation += 1;
         self.remember_message_browser();
         // Leaving the picker abandons the preview. A committed choice is
         // captured before the overlay closes and re-applied afterwards, so
@@ -3146,6 +3156,40 @@ impl App {
             .collect()
     }
 
+    /// What list row `index` on screen stands for: the list it is in (see
+    /// [`App::list_generation`]) and its item, by id where it has one, so a
+    /// press on a row never acts on another row or another list's.
+    pub(crate) fn menu_row_key(&self, index: usize) -> String {
+        let item = match &self.overlay {
+            Overlay::Commands => {
+                selected(&self.filtered_slash_entries(&self.overlay_filter), index)
+                    .map(|entry| entry.name.clone())
+            }
+            Overlay::Threads => {
+                selected(&self.filtered_threads(), index).map(|thread| thread.id.to_string())
+            }
+            Overlay::Models => selected(&self.filtered_models(), index).cloned(),
+            Overlay::Agents => {
+                selected(&self.filtered_agents(), index).map(|agent| agent.id.clone())
+            }
+            Overlay::Themes => selected(&self.filtered_themes(), index)
+                .map(|(name, variant, _)| format!("{name} {variant}")),
+            Overlay::Options { entries, .. } => {
+                selected(&self.filtered_options(entries), index).map(|entry| entry.value.clone())
+            }
+            // Suggestions under the prompt follow what is typed there.
+            Overlay::None => Some(format!(
+                "{}\u{0}{}",
+                self.slash_suggestions()
+                    .and_then(|commands| selected(&commands, index).map(|entry| entry.name.clone()))
+                    .unwrap_or_default(),
+                self.composer.text()
+            )),
+            _ => None,
+        };
+        format!("{}\u{0}{}", self.list_generation, item.unwrap_or_default())
+    }
+
     pub fn selected_overlay_choice(&self) -> Option<OverlayChoice> {
         match self.overlay {
             Overlay::Commands => selected(
@@ -3425,55 +3469,29 @@ impl App {
 }
 
 impl App {
-    /// The drag selection normalized to ((first_row, first_col), (last_row,
-    /// last_col)) in char cells.
-    #[must_use]
-    pub fn normalized_selection(&self) -> Option<((usize, usize), (usize, usize))> {
+    /// The drag selection as ((row, column) where it started, (row, column)
+    /// it reached).
+    fn selection_ends(&self) -> Option<((usize, usize), (usize, usize))> {
         let ((ax, ay), (bx, by)) = self.selection_range?;
-        let a = (ay as usize, ax as usize);
-        let b = (by as usize, bx as usize);
-        Some(if a <= b { (a, b) } else { (b, a) })
+        Some(((ay as usize, ax as usize), (by as usize, bx as usize)))
     }
 
-    /// Text under the current drag selection, extracted from the last frame.
+    /// Text under the current drag selection, extracted from the last frame:
+    /// only the pane the drag started in, without decoration.
     #[must_use]
     pub fn selected_text(&self) -> String {
-        let Some(((row1, col1), (row2, col2))) = self.normalized_selection() else {
+        let Some((anchor, head)) = self.selection_ends() else {
             return String::new();
         };
-        let frame = self.last_frame.borrow();
-        let mut out = Vec::new();
-        for row in row1..=row2.min(frame.len().saturating_sub(1)) {
-            let from = if row == row1 { col1 } else { 0 };
-            let to = if row == row2 { col2 + 1 } else { usize::MAX };
-            let mut cell = 0;
-            let mut slice = String::new();
-            let mut selected_base = false;
-            for character in frame[row].chars() {
-                let cells = character.width().unwrap_or(0);
-                let next = cell + cells;
-                // Mouse columns are display cells, not Unicode scalar
-                // indexes. Intersect the selected cells with each glyph so a
-                // CJK character or emoji is copied whole from either cell.
-                let intersects = if cells == 0 {
-                    selected_base
-                } else {
-                    next > from && cell < to
-                };
-                if intersects {
-                    slice.push(character);
-                }
-                selected_base = intersects;
-                cell = next;
-                if cell >= to && cells > 0 {
-                    // Keep immediately following combining marks, but no
-                    // later visible glyphs.
-                    selected_base = true;
-                }
-            }
-            out.push(slice.trim_end().to_owned());
-        }
-        out.join("\n")
+        self.last_frame.borrow().text(anchor, head)
+    }
+
+    /// The cells to paint as selected: what [`Self::selected_text`] copies.
+    pub(crate) fn selection_runs(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        let Some((anchor, head)) = self.selection_ends() else {
+            return Vec::new();
+        };
+        self.last_frame.borrow().painted(anchor, head)
     }
 }
 

@@ -99,6 +99,10 @@ try:
     (data / "logs" / "haarness.log.2026-10-21").write_text(
         "2026-10-21T08:00:00.000Z 4242 serve  WARN haarness_core::provider: request failed "
         "Authorization: Bearer sk-live-SECRETVALUE123456789\n"
+        # Shapes a hook or a tool prints: a DB_PASS-style name, a proxy's user and password without a
+        # scheme, and a credential parameter of a path.
+        "2026-10-21T08:00:01.000Z 4242 serve  WARN haarness_server::hooks: hook command failed stderr=DB_PASS=SECRETDB "
+        "curl -x user:SECRETPROXY@proxy.fixture.test:3128 GET /cb?code=SECRETCODE4f2a91c07be3&state=s\n"
     )
     command = shlex.join([
         "env", f"PATH={tools}:/usr/bin:/bin:/usr/sbin:/sbin", f"HOME={server.home}",
@@ -143,7 +147,11 @@ try:
     with zipfile.ZipFile(zips[0]) as archive:
         text = "".join(archive.read(name).decode(errors="replace") for name in archive.namelist())
     assert "request failed Authorization:" in text and "SECRETVALUE" not in text, text[:400]
-    assert copied.read_text() == str(zips[0]), copied.read_text()
+    for secret in ("SECRETDB", "SECRETPROXY", "SECRETCODE"):
+        assert secret not in text, (secret, text[:800])
+    assert "@proxy.fixture.test:3128 GET /cb?code=[redacted]&state=s" in text, text[:800]
+    # The clipboard tool runs on its own worker, a moment after the status line says so.
+    until(lambda: copied.exists() and copied.read_text() == str(zips[0]), "the path was not copied")
     # Said where, in few enough words to fit the status line.
     assert f"Logs saved to ~/Downloads/{zips[0].name} · path copied" in pane(), pane()
 

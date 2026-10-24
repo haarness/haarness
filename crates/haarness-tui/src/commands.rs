@@ -4373,7 +4373,10 @@ impl App {
                     format!("last activity: {tool}")
                 });
             }
-            detail.push(format!("{} tool calls", task.tool_calls));
+            detail.push(
+                self.language
+                    .count(task.tool_calls, "1 tool call", "{count} tool calls"),
+            );
             detail.push("enter opens the child".into());
             entries.push(OptionEntry {
                 label: title,

@@ -17,6 +17,7 @@ import urllib.request
 
 import e2e_scratch
 import e2e_tmux
+from e2e_env import clean_env
 
 
 repo = Path(__file__).resolve().parents[1]
@@ -31,7 +32,7 @@ project = root / "mock project"
 (project / "AGENTS.md").write_text("This is a disposable chat test. Only access this project. Keep fixtures unchanged. Put any requested generated files in output/. Do not access credentials, network resources or other directories.\n")
 (project / ".haarness/config.toml").write_text(f'[defaults]\nprovider="openai"\nmodel="{model}"\n[permissions]\nread="allow"\nwrite="allow"\nedit="allow"\nbash="allow"\n')
 subprocess.run(["git", "init", "-q", str(project)], check=True)
-env = {k: v for k, v in os.environ.items() if not k.startswith("HAARNESS_")}
+env = clean_env()
 env["HAARNESS_DATA_DIR"] = str(root / "state")
 if not env.get("OPENAI_API_KEY"):
     credentials = Path.home() / ".local/share/haarness/auth.json"

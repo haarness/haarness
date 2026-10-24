@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from e2e_env import ISOLATED
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).resolve()
@@ -152,8 +153,9 @@ try:
             (workspace / '.haarness').mkdir(parents=True)
             (workspace / 'AGENTS.md').write_text('PROJECT_WIRE_MARKER: explain fixture decisions briefly.\n')
             # The mock is on 127.0.0.1, where providers wait as long as it takes
-            # unless configured: tune the built-in provider to a short limit.
-            (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n[providers.{provider}]\nstream_idle_timeout={IDLE_LIMIT}\n')
+            # unless configured: tune the built-in provider to a short limit. Review (chats otherwise
+            # start in Auto) shows in the TUI once it is up, and keeps any ask a side question raised waiting.
+            (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\napproval_mode="review"\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n[providers.{provider}]\nstream_idle_timeout={IDLE_LIMIT}\n')
             run(['git', 'init', '-q', str(workspace)])
             launcher = home / '.local/bin/haarness-fixture-mcp'
             launcher.write_text('#!' + sys.executable + '\n' + '''import json,os,sys,time
@@ -179,7 +181,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}),flush=True)
 ''')
             launcher.chmod(0o755)
-            env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
+            env = {**ISOLATED, 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
                    'HAARNESS_DATA_DIR': str(root / 'data'), 'USER': os.environ.get('USER', 'fixture'), 'LANG': 'en_US.UTF-8',
                    'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key',
                    'OPENAI_BASE_URL': f'http://127.0.0.1:{service.server_port}/v1',

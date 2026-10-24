@@ -1005,7 +1005,12 @@ type Conversation = ReturnType<
 function openChat(app: ReturnType<typeof useApp>, event: MouseEvent, row: Conversation) {
   const from = event.currentTarget as Element;
   return app.run(async () => {
-    await app.chooseProjectSession(row.location.id, row.thread.id, "preview");
+    const opening = app.chooseProjectSession(row.location.id, row.thread.id, "preview");
+    // A chat of the open project is on screen at once, its message box with
+    // it, while its history loads: the keyboard goes there now, so what is
+    // typed meanwhile is that chat's draft rather than keys on this row.
+    if (event.detail > 0 && app.state.selected === row.thread.id) focusComposerWhenShown(from, true);
+    await opening;
     if (event.detail > 0) focusComposerWhenShown(from);
   });
 }

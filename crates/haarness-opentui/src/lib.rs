@@ -484,6 +484,10 @@ pub struct Span {
     pub fg: Color,
     pub bg: Option<Color>,
     pub attributes: u32,
+    /// Whether a mouse selection copies this text. Decoration, such as a
+    /// gutter bar, is drawn but never copied (`OpenTUI`'s `selectable`). The
+    /// renderer ignores it.
+    pub selectable: bool,
 }
 
 impl Span {
@@ -494,7 +498,14 @@ impl Span {
             fg,
             bg: None,
             attributes: attr::NONE,
+            selectable: true,
         }
+    }
+    /// The same text as decoration: drawn, never copied by a selection.
+    #[must_use]
+    pub fn unselectable(mut self) -> Self {
+        self.selectable = false;
+        self
     }
     #[must_use]
     pub fn on(mut self, bg: Color) -> Self {

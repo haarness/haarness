@@ -20,6 +20,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
+from e2e_env import clean_env
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -53,15 +54,14 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
     root = Path(directory)
     project = root / "project"
     (project / ".haarness").mkdir(parents=True)
+    # Chats start in Auto; the approval cards here wait for a person, so ask for Review.
     (project / ".haarness/config.toml").write_text(
-        '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n'
+        '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n'
     )
     (project / "fixture.txt").write_text("navigation fixture\n")
     for args in [["init", "-b", "main"], ["add", "."], ["-c", "user.name=Nav Test", "-c", "user.email=nav@example.test", "commit", "-m", "Fixture"]]:
         run("git", *args, cwd=project, stderr=subprocess.DEVNULL)
-    env = dict(os.environ, HAARNESS_HOME=str(root / "home"), HAARNESS_DATA_DIR=str(root / "data"), HAARNESS_TEST_PROVIDER="1")
-    for name in [name for name in env if name.startswith("HAARNESS_") and name not in ("HAARNESS_HOME", "HAARNESS_DATA_DIR", "HAARNESS_TEST_PROVIDER")]:
-        del env[name]
+    env = dict(clean_env(), HAARNESS_HOME=str(root / "home"), HAARNESS_DATA_DIR=str(root / "data"), HAARNESS_TEST_PROVIDER="1")
     session = "tui"
     checks = []
     try:

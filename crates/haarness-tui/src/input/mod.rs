@@ -585,7 +585,7 @@ pub async fn handle_key_at(
         } else if app.workspace_mutation.is_some() || app.workspace_ref_operation.is_some() {
             app.notice = "Folder operation is still running · it cannot be safely cancelled".into();
         } else if matches!(app.overlay, Overlay::ProviderLogin) {
-            app.cancel_login(client).await;
+            app.cancel_login(client);
         } else if matches!(app.overlay, Overlay::SideChat) {
             app.side_interrupt();
         } else if !matches!(app.overlay, Overlay::None) {
@@ -1583,6 +1583,7 @@ pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
             suggestions.extend(crate::resource_mentions::suggestions(app, &query));
             app.ask_resources(client);
             app.mention_suggestions = suggestions;
+            app.list_generation += 1;
             app.selection = 0;
             app.select_wanted();
         }
@@ -1904,11 +1905,8 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
         match key.code {
             // A failed sign-in has nothing left to cancel; Escape goes back to
             // the providers, as its "esc back" says.
-            KeyCode::Esc if failed => {
-                app.connect.login = None;
-                app.open_connect_picker(None, client).await?;
-            }
-            KeyCode::Esc => app.cancel_login(client).await,
+            KeyCode::Esc if failed => app.return_to_connect_picker(),
+            KeyCode::Esc => app.cancel_login(client),
             KeyCode::Enter if failed => app.retry_login(client).await?,
             KeyCode::Enter | KeyCode::Char('o') => app.reopen_login_browser(),
             KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {

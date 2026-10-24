@@ -18,6 +18,7 @@ from pathlib import Path
 
 import e2e_scratch
 import e2e_tmux
+from e2e_env import clean_env
 
 repo = Path(__file__).resolve().parents[1]
 binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
@@ -26,7 +27,7 @@ project = root / "Project 日本 with spaces"
 other = root / "Other project"
 state = root / "state"
 home = root / "home"
-env = {k: v for k, v in os.environ.items() if not k.startswith("HAARNESS_")}
+env = clean_env()
 env.update(HOME=str(home), HAARNESS_HOME=str(home), HAARNESS_DATA_DIR=str(state),
            HAARNESS_TEST_PROVIDER="1", HAARNESS_SCHEDULE_SKIP_INSTALL="1")
 marker = "MCP-" + uuid.uuid4().hex
@@ -117,7 +118,8 @@ for folder in [project, other]:
     run("git", "-C", folder, "add", ".")
     run("git", "-C", folder, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
         "commit", "-m", "Initial fixture")
-write(state / "config/config.toml", '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n')
+# Chats start in Auto; the permission proof below needs a request that waits, so ask for Review.
+write(state / "config/config.toml", '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n')
 write(state / "config/commands/global-proof.md", "GLOBAL_COMMAND")
 write(state / "config/AGENTS.md", "GLOBAL_INSTRUCTIONS")
 browser_policy = {"enabled": True, "defaults": {"browsing":"allow", "downloads":"allow", "uploads":"allow"}, "sites":[]}

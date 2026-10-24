@@ -10,7 +10,7 @@ import {
 import { Portal } from "solid-js/web";
 import type { JSX } from "solid-js";
 import { Icon, type IconName } from "./ui";
-import { floatingBox, floatingSpan } from "./native-area";
+import { dialogFrame, floatingBox, floatingSpan, frameTop } from "./native-area";
 
 export interface MenuAction {
   label: string;
@@ -28,6 +28,10 @@ export interface MenuAction {
   heading?: string;
   run?: () => void;
 }
+
+/** Choices that carry icons are ticked at the row's end (see MenuItem). */
+const trailingTick = (items: MenuAction[]) =>
+  items.some((item) => item.checked !== undefined && !!item.icon);
 
 /** The hairline between two groups of choices; keyboard navigation skips it. */
 const Divider = (props: { when?: boolean }) => (
@@ -90,15 +94,19 @@ export function MenuButton(props: {
       const positionMenu = () => {
         const anchor = handle.getBoundingClientRect();
         const box = menu.getBoundingClientRect();
+        // Opened in a dialog (Settings, a form), it stays inside its box.
+        const frame = dialogFrame(handle);
         setPosition({
           width: props.matchWidth ? anchor.width : 0,
-          left: floatingBox(anchor, box.width).left,
-          top: Math.max(
-            8,
-            anchor.bottom + box.height + 6 <= window.innerHeight - 8
-              ? anchor.bottom + 6
-              : anchor.top - box.height - 6,
-          ),
+          left: floatingBox(anchor, box.width, box.width, frame).left,
+          top:
+            frameTop(anchor, box.height, 6, frame)?.top ??
+            Math.max(
+              8,
+              anchor.bottom + box.height + 6 <= window.innerHeight - 8
+                ? anchor.bottom + 6
+                : anchor.top - box.height - 6,
+            ),
         });
       };
       const scroll = (event: Event) => {
@@ -235,6 +243,7 @@ export function MenuButton(props: {
                       <Heading text={item.heading} />
                       <MenuItem
                         item={item}
+                        trailing={trailingTick(props.items)}
                         /* Moving to a sibling folds an open branch, as native
                            menus do. */
                         onPointerEnter={() => setBranch("")}
@@ -328,6 +337,7 @@ export function MenuButton(props: {
                               <Divider when={child.divider} />
                               <MenuItem
                                 item={child}
+                                trailing={trailingTick(item.submenu!)}
                                 onRun={() => {
                                   close(true);
                                   child.run?.();
@@ -349,9 +359,15 @@ export function MenuButton(props: {
   );
 }
 
-/** A leaf choice. `checked` turns it into a radio within its group. */
+/**
+ * A leaf choice. `checked` turns it into a radio within its group, ticked in
+ * a column of its own before the label. In a menu whose choices carry icons
+ * (`trailing`), the icons keep that place and the tick sits at the row's
+ * trailing end instead, as a picker's chosen option's does.
+ */
 function MenuItem(props: {
   item: MenuAction;
+  trailing?: boolean;
   onRun: () => void;
   onPointerEnter?: () => void;
 }) {
@@ -370,7 +386,7 @@ function MenuItem(props: {
         props.onRun();
       }}
     >
-      <Show when={props.item.checked !== undefined}>
+      <Show when={props.item.checked !== undefined && !props.trailing}>
         <span class="menu-check" aria-hidden="true">
           <Show when={props.item.checked}>
             <Icon name="check" size="sm" />
@@ -384,6 +400,11 @@ function MenuItem(props: {
         <span class="menu-item-label">
           {props.item.label}
           <small>{props.item.detail}</small>
+        </span>
+      </Show>
+      <Show when={props.item.checked && props.trailing}>
+        <span class="select-check" aria-hidden="true">
+          ✓
         </span>
       </Show>
     </button>

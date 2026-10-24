@@ -23,6 +23,8 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+mod text;
+
 /// Composition-root port for user-managed skills, plugins, MCP servers, and
 /// agent profiles. The server owns provider-facing schemas while the CLI
 /// adapter owns platform paths, compatibility discovery, and credential I/O.
@@ -56,7 +58,7 @@ pub trait ManagementRegistry: Send + Sync {
     ) -> CoreResult<ToolOutput>;
 }
 
-const READ_DESCRIPTION: &str = "Read a text, image, PDF, audio, or video file when you already know its path. Binary document/media results are returned as provider-visible attachments instead of base64 text. The path may be workspace-relative or absolute; external paths still require permission. For text, this returns up to 2000 lines from the start by default. offset is a zero-based line offset and limit is the maximum number of lines (capped at 20000); call read again with a larger offset for later sections. Use grep to locate specific text and glob when the filename is unknown. Use list for directories. Prefer a useful context window over many tiny repeated reads.";
+const READ_DESCRIPTION: &str = "Read a text, image, PDF, audio, or video file when you already know its path. Binary document/media results are returned as provider-visible attachments instead of base64 text. The path may be workspace-relative or absolute; external paths still require permission. For text, this returns up to 2000 lines from the start by default; one read returns at most 2000 lines or 50 KB, cuts lines longer than 2000 characters, and ends with the offset to read on from when the file goes on. offset is a zero-based line offset and limit is the maximum number of lines; call read again with that offset for later sections. Use grep to locate specific text and glob when the filename is unknown. Use list for directories. Prefer a useful context window over many tiny repeated reads.";
 const IMAGE_GENERATE_DESCRIPTION: &str = "Generate exactly one image only when the user explicitly requests an image asset as a deliverable. The optional backend uses HAARNESS_IMAGE_GENERATE_URL, or the OpenAI Images endpoint when OPENAI_API_KEY is configured. Output is saved under .haarness-chat-attachments and returned as provider-visible media. Do not use this for ordinary analysis, diagrams expressible as code, or screenshot inspection.";
 const VIDEO_GENERATE_DESCRIPTION: &str = "Generate exactly one video only when the user explicitly requests a video or animation as the deliverable. This optional backend uses HAARNESS_VIDEO_GENERATE_URL and requires a synchronous JSON response containing base64 media. Output is saved under .haarness-chat-attachments and returned as provider-visible media. Never infer video intent from a visual discussion or attachment.";
 const MAX_GENERATION_RESPONSE_BYTES: usize = 72 * 1024 * 1024;
@@ -668,6 +670,13 @@ impl Tool for LanguageAwareTool {
             return Ok(output);
         }
 
+        // The files stay locked through the formatter, which rewrites them
+        // in place, so a parallel change is not undone by it.
+        let locks = crate::file_lock::lock(
+            lock_paths(self.name, &arguments, &context.workspace),
+            &context.cancel,
+        )
+        .await?;
         let paths = mutation_paths(self.name, &arguments)
             .into_iter()
             .filter_map(|path| {
@@ -682,16 +691,23 @@ impl Tool for LanguageAwareTool {
                 existing_diff_body(resolved).await,
             ));
         }
-        let mut output = self.inner.execute(arguments, context.clone()).await?;
+        let mut output =
+            crate::file_lock::holding(self.inner.execute(arguments, context.clone())).await?;
         let reports = self
             .language
-            .process_files(
+            .format_files(
                 paths.iter().map(|(_, path)| path.clone()).collect(),
                 &context.workspace,
                 context.cancel.clone(),
             )
             .await;
         refresh_formatted_diffs(&mut output, before).await;
+        // Language servers are asked without holding the files.
+        drop(locks);
+        let reports = self
+            .language
+            .diagnose_files(reports, &context.workspace, context.cancel.clone())
+            .await;
         append_language_report(&mut output, &context.workspace, &reports);
         Ok(output)
     }
@@ -796,6 +812,15 @@ fn language_path(workspace: &Path, requested: &str) -> Option<PathBuf> {
         .unwrap_or_else(|_| workspace.to_path_buf());
     let resolved = haarness_core::resolve_permission_path(&workspace, requested);
     resolved.starts_with(&workspace).then_some(resolved)
+}
+
+/// The files a call of a file-changing tool locks: each path it changes,
+/// where it really leads.
+fn lock_paths(tool: &str, arguments: &Value, workspace: &Path) -> Vec<PathBuf> {
+    mutation_paths(tool, arguments)
+        .iter()
+        .map(|path| haarness_core::resolve_permission_path(workspace, path))
+        .collect()
 }
 
 fn mutation_paths(tool: &str, arguments: &Value) -> Vec<String> {
@@ -1989,12 +2014,10 @@ impl Tool for WorkflowTool {
                     .get("source")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let mut path = input.get("path").and_then(Value::as_str).map(str::to_owned);
-                if let Some(value) = path.as_ref()
-                    && Path::new(value).is_relative()
-                {
-                    path = Some(context.workspace.join(value).display().to_string());
-                }
+                let path = input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(|value| workflow_path(&context.workspace, value));
                 let name = (source.is_none() && path.is_none())
                     .then(|| input.get("name").and_then(Value::as_str).map(str::to_owned))
                     .flatten();
@@ -2124,6 +2147,18 @@ impl Tool for WorkflowTool {
                 "unknown workflow action: {action}"
             ))),
         }
+    }
+}
+
+/// A workflow file a `start` names: relative to the folder the call works
+/// in, or in the home folder for `~/…`, as for the file tools.
+fn workflow_path(workspace: &Path, value: &str) -> String {
+    let value = haarness_core::expand_home(value);
+    let path = Path::new(value.as_ref());
+    if path.is_relative() {
+        workspace.join(path).display().to_string()
+    } else {
+        value.into_owned()
     }
 }
 
@@ -2531,7 +2566,7 @@ impl Tool for BuiltinTool {
                 json!({
                     "path":{"type":"string","description":"Workspace-relative or absolute path to the text, image, PDF, audio, or video file to read."},
                     "offset":{"type":"integer","minimum":0,"description":"Zero-based line offset. Defaults to 0."},
-                    "limit":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum lines to return. Defaults to 2000 and is capped at 20000."}
+                    "limit":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum lines to return. Defaults to 2000; one read returns at most 2000 lines or 50 KB."}
                 }),
                 vec!["path"],
             ),
@@ -2760,6 +2795,19 @@ impl Tool for BuiltinTool {
         if context.cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        // A file change holds its files from its first read to its last write.
+        let changes = match self.kind {
+            Kind::Write => "write",
+            Kind::Edit => "edit",
+            Kind::MultiEdit => "multiedit",
+            Kind::ApplyPatch => "apply_patch",
+            _ => "",
+        };
+        let _locks = crate::file_lock::lock(
+            lock_paths(changes, &args, &context.workspace),
+            &context.cancel,
+        )
+        .await?;
         match self.kind {
             Kind::Read => {
                 let path = resolve_existing(string(&args, "path")?, &context)?;
@@ -2836,17 +2884,19 @@ impl Tool for BuiltinTool {
                         }),
                     });
                 }
-                let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
                 let offset = usize_value(&args, "offset").unwrap_or(0);
-                let limit = usize_value(&args, "limit").unwrap_or(2000).min(20_000);
-                let mut output = truncate_output(
-                    text.lines()
-                        .skip(offset)
-                        .take(limit)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-                .await?;
+                let limit = usize_value(&args, "limit").map(|limit| limit.min(20_000));
+                // A line at a time, off the async workers: a file of any size,
+                // or one long line, holds only what is shown.
+                let file = path.clone();
+                let cancel = context.cancel.clone();
+                let read = tokio::task::spawn_blocking(move || {
+                    text::read_text(&file, offset, limit, &cancel)
+                });
+                let mut output = output(tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    read = read => read.map_err(tool_error)??,
+                });
                 self.instructions
                     .attach(&mut output, &path, &context.workspace, context.thread_id);
                 Ok(output)
@@ -2981,53 +3031,31 @@ impl Tool for BuiltinTool {
                         false,
                     ));
                 }
-                let mut matches = Vec::new();
-                let mut skipped = Skipped::default();
-                let mut partial = false;
-                // Match ripgrep semantics: respect .gitignore,
-                // .ignore, repository excludes, hidden files, and parent
-                // ignore files instead of scanning dependency/build trees.
-                // Links are not followed, so every file is where it is named.
-                for (files, entry) in ignore::WalkBuilder::new(&root)
-                    .standard_filters(true)
-                    .build()
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-                    .enumerate()
-                {
-                    if files == 20_000 {
-                        partial = true;
-                        break;
-                    }
-                    if let Some(hidden) = secrets.names_hidden(entry.path()) {
-                        skipped.count(hidden);
-                        continue;
-                    }
-                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                        for (index, line) in text.lines().enumerate() {
-                            if regex.is_match(line) {
-                                matches.push(format!(
-                                    "{}:{}:{}",
-                                    entry
-                                        .path()
-                                        .strip_prefix(&context.workspace)
-                                        .unwrap_or(entry.path())
-                                        .display(),
-                                    index + 1,
-                                    line
-                                ));
-                                if matches.len() >= 10_000 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                // The walk reads files synchronously, so it runs off the async
+                // workers, as glob's does: a large tree or a slow disk holds
+                // none of them, and Stop ends the call at once.
+                let workspace = context.workspace.clone();
+                let cancel = context.cancel.clone();
+                let walk = tokio::task::spawn_blocking(move || {
+                    text::grep_walk(&regex, &root, &workspace, &secrets, &cancel)
+                });
+                let found = tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    found = walk => found.map_err(tool_error)??,
+                };
+                let mut output = with_skipped(
+                    truncate_output(found.matches.join("\n")).await?,
+                    found.skipped,
+                    found.stopped.is_some(),
+                );
+                if let Some(stop) = found.stopped {
+                    output.text = if output.text.is_empty() {
+                        stop.note()
+                    } else {
+                        format!("{}\n\n{}", output.text, stop.note())
+                    };
                 }
-                Ok(with_skipped(
-                    truncate_output(matches.join("\n")).await?,
-                    skipped,
-                    partial,
-                ))
+                Ok(output)
             }
             Kind::Write => {
                 let requested_path = string(&args, "path")?;
@@ -3053,7 +3081,9 @@ impl Tool for BuiltinTool {
                 let path = resolve_existing(requested_path, &context)?;
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
-                let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let text = text::read_utf8(&path, "edit").await?;
+                let (before, after) = text::crlf_edit(&text, before, after);
+                let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
                 if count != 1 {
                     return Err(CoreError::Tool(format!(
@@ -3085,7 +3115,7 @@ impl Tool for BuiltinTool {
                     .ok_or_else(|| {
                         CoreError::Invalid("edits must contain 1 to 100 entries".into())
                     })?;
-                let original = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let original = text::read_utf8(&path, "multiedit").await?;
                 let mut updated = original.clone();
                 for (index, edit) in edits.iter().enumerate() {
                     let before = string(edit, "old")?;
@@ -3096,6 +3126,8 @@ impl Tool for BuiltinTool {
                             index + 1
                         )));
                     }
+                    let (before, after) = text::crlf_edit(&updated, before, after);
+                    let (before, after) = (before.as_ref(), after.as_ref());
                     let count = updated.matches(before).count();
                     let replace_all = edit
                         .get("replaceAll")
@@ -3157,114 +3189,23 @@ impl Tool for BuiltinTool {
                         )));
                     }
                 }
-                let mut report = Vec::new();
-                let mut diffs = Vec::new();
-                let mut diffs_truncated = false;
-                for operation in operations {
-                    match operation {
-                        haarness_core::patch::FileOp::Add { path, content } => {
-                            let resolved = resolve_new(&path, &context)?;
-                            let existing = existing_diff_body(&resolved).await;
-                            if let Some(parent) = resolved.parent() {
-                                tokio::fs::create_dir_all(parent)
-                                    .await
-                                    .map_err(tool_error)?;
-                            }
-                            tokio::fs::write(&resolved, &content)
-                                .await
-                                .map_err(tool_error)?;
-                            push_tool_diff(
-                                &mut diffs,
-                                replacement_diff(&path, existing, &content),
-                                &mut diffs_truncated,
-                            );
-                            report.push(format!("added {path}"));
-                        }
-                        haarness_core::patch::FileOp::Update {
-                            path,
-                            move_to,
-                            hunks,
-                        } => {
-                            let resolved = resolve_existing(&path, &context)?;
-                            let text = tokio::fs::read_to_string(&resolved)
-                                .await
-                                .map_err(tool_error)?;
-                            let updated = haarness_core::patch::apply_hunks(&text, &hunks)
-                                .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
-                            if let Some(target) = move_to {
-                                // The move takes the source's entry away: a
-                                // link goes, not the file it leads to.
-                                let entry = resolve_entry(&path, &context)?;
-                                let removed = entry_diff_body(&entry).await;
-                                let destination = resolve_new(&target, &context)?;
-                                // A file the patch added earlier is checked here.
-                                if same_entry(
-                                    &entry,
-                                    &destination,
-                                    &haarness_core::resolve_permission_entry(
-                                        &context.workspace,
-                                        &target,
-                                    ),
-                                ) {
-                                    return Err(CoreError::Invalid(format!(
-                                        "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
-                                    )));
-                                }
-                                let destination_before = existing_diff_body(&destination).await;
-                                if let Some(parent) = destination.parent() {
-                                    tokio::fs::create_dir_all(parent)
-                                        .await
-                                        .map_err(tool_error)?;
-                                }
-                                tokio::fs::write(&destination, &updated)
-                                    .await
-                                    .map_err(tool_error)?;
-                                tokio::fs::remove_file(&entry).await.map_err(tool_error)?;
-                                push_tool_diff(
-                                    &mut diffs,
-                                    deletion_diff(&path, removed),
-                                    &mut diffs_truncated,
-                                );
-                                push_tool_diff(
-                                    &mut diffs,
-                                    replacement_diff(&target, destination_before, &updated),
-                                    &mut diffs_truncated,
-                                );
-                                report.push(format!("moved {path} → {target}"));
-                            } else {
-                                tokio::fs::write(&resolved, &updated)
-                                    .await
-                                    .map_err(tool_error)?;
-                                push_tool_diff(
-                                    &mut diffs,
-                                    text_file_diff(
-                                        &path,
-                                        FileDiffStatus::Modified,
-                                        Some(&text),
-                                        Some(&updated),
-                                    ),
-                                    &mut diffs_truncated,
-                                );
-                                report.push(format!("updated {path}"));
-                            }
-                        }
-                        haarness_core::patch::FileOp::Delete { path } => {
-                            // A link is deleted itself, not the file it leads to.
-                            let resolved = resolve_entry(&path, &context)?;
-                            let existing = entry_diff_body(&resolved).await;
-                            tokio::fs::remove_file(&resolved)
-                                .await
-                                .map_err(tool_error)?;
-                            push_tool_diff(
-                                &mut diffs,
-                                deletion_diff(&path, existing),
-                                &mut diffs_truncated,
-                            );
-                            report.push(format!("deleted {path}"));
-                        }
-                    }
-                }
-                Ok(output_with_diffs(report.join("\n"), diffs, diffs_truncated))
+                // Every operation is worked out before anything is written,
+                // so a hunk that does not match leaves every file as it was.
+                let several = operations.len() > 1;
+                let plan = plan_patch(operations, &context)
+                    .await
+                    .map_err(|error| unchanged(error, several))?;
+                let report = plan
+                    .steps
+                    .iter()
+                    .map(|(line, _)| line.clone())
+                    .collect::<Vec<_>>();
+                write_patch(plan.steps).await?;
+                Ok(output_with_diffs(
+                    report.join("\n"),
+                    plan.diffs,
+                    plan.diffs_truncated,
+                ))
             }
             Kind::Bash => {
                 let command = string(&args, "command")?;
@@ -3377,6 +3318,468 @@ impl Tool for BuiltinTool {
         }
     }
 }
+/// What a patch leaves at a path once its earlier operations are done: the
+/// new text, or nothing.
+enum Planned {
+    Text(String),
+    Removed,
+}
+
+/// What a patch's earlier operations leave at each path they touch.
+struct PatchFiles {
+    files: HashMap<PathBuf, Planned>,
+    /// Whether each folder looked at ignores letter case (macOS's and
+    /// Windows' disks do by default): `Foo.txt` and `foo.txt` are one file
+    /// there.
+    folds: parking_lot::Mutex<HashMap<PathBuf, bool>>,
+}
+
+impl PatchFiles {
+    fn new() -> Self {
+        Self {
+            files: HashMap::new(),
+            folds: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether the folder that holds `path` ignores letter case. A new
+    /// file's folder may not exist yet; the nearest one that does decides.
+    fn folds(&self, path: &Path) -> bool {
+        let Some(folder) = path.ancestors().skip(1).find(|folder| folder.is_dir()) else {
+            return false;
+        };
+        *self
+            .folds
+            .lock()
+            .entry(folder.to_path_buf())
+            .or_insert_with(|| folds_case(folder))
+    }
+
+    /// The path an earlier operation gave the file `path` names, and what it
+    /// left there.
+    fn find(&self, path: &Path) -> Option<(&PathBuf, &Planned)> {
+        self.files.get_key_value(path).or_else(|| {
+            if !self.folds(path) {
+                return None;
+            }
+            let folded = fold(path);
+            self.files.iter().find(|(key, _)| fold(key) == folded)
+        })
+    }
+
+    fn get(&self, path: &Path) -> Option<&Planned> {
+        self.find(path).map(|(_, planned)| planned)
+    }
+
+    /// Whether two paths name one file.
+    fn same(&self, left: &Path, right: &Path) -> bool {
+        left == right || (fold(left) == fold(right) && self.folds(left))
+    }
+
+    fn insert(&mut self, path: PathBuf, planned: Planned) {
+        if self.folds(&path) {
+            let folded = fold(&path);
+            self.files.retain(|key, _| fold(key) != folded);
+        }
+        self.files.insert(path, planned);
+    }
+}
+
+fn fold(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+/// Whether `folder` ignores letter case: another letter case of a name in
+/// it leads to that entry. Each folder is asked, so a case-sensitive disk
+/// mounted inside one that is not counts as what it is; a folder with no
+/// name to try asks the folder holding it, on the same disk. When it cannot
+/// tell, it says no, and a patch takes names exactly as written, as it
+/// always did.
+fn folds_case(folder: &Path) -> bool {
+    let mut folder = folder.to_path_buf();
+    loop {
+        if let Some(folds) = names_fold_case(&folder) {
+            return folds;
+        }
+        let Some(parent) = folder.parent().map(Path::to_path_buf) else {
+            return false;
+        };
+        if !same_disk(&folder, &parent) {
+            return false;
+        }
+        folder = parent;
+    }
+}
+
+/// What the first name with a letter in `folder` says, if it has one.
+fn names_fold_case(folder: &Path) -> Option<bool> {
+    let entries = std::fs::read_dir(folder).ok()?;
+    for entry in entries.flatten().take(64) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let swapped: String = name
+            .chars()
+            .map(|letter| {
+                if letter.is_ascii_lowercase() {
+                    letter.to_ascii_uppercase()
+                } else {
+                    letter.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        if swapped == name {
+            continue;
+        }
+        let (named, other) = (folder.join(name), folder.join(swapped));
+        #[cfg(unix)]
+        return Some(same_link(&named, &other));
+        #[cfg(not(unix))]
+        return Some(same_file(&named, &other));
+    }
+    None
+}
+
+/// Whether two folders are on one disk (a mount point is not on its
+/// parent's).
+fn same_disk(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        matches!(
+            (std::fs::metadata(left), std::fs::metadata(right)),
+            (Ok(left), Ok(right)) if left.dev() == right.dev()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        left.components().next() == right.components().next()
+    }
+}
+
+/// The one write a patch operation makes.
+enum PatchStep {
+    Write {
+        file: String,
+        path: PathBuf,
+        content: String,
+    },
+    Remove {
+        file: String,
+        entry: PathBuf,
+    },
+    /// Checked again just before it writes: a file the patch adds earlier
+    /// is on disk only then.
+    Move {
+        file: String,
+        target: String,
+        entry: PathBuf,
+        destination: PathBuf,
+        target_entry: PathBuf,
+        content: String,
+    },
+}
+
+struct PatchPlan {
+    /// Each operation's report line and its write, in patch order.
+    steps: Vec<(String, PatchStep)>,
+    diffs: Vec<FileDiff>,
+    diffs_truncated: bool,
+}
+
+/// Work out every operation of a patch without writing: each reads a file
+/// as the operations before it leave it.
+async fn plan_patch(
+    operations: Vec<haarness_core::patch::FileOp>,
+    context: &ToolContext,
+) -> CoreResult<PatchPlan> {
+    let mut planned = PatchFiles::new();
+    let mut plan = PatchPlan {
+        steps: Vec::new(),
+        diffs: Vec::new(),
+        diffs_truncated: false,
+    };
+    for operation in operations {
+        match operation {
+            haarness_core::patch::FileOp::Add { path, content } => {
+                let resolved = planned_target(&path, &planned, context)?;
+                let existing = planned_body(&planned, &resolved).await;
+                push_tool_diff(
+                    &mut plan.diffs,
+                    replacement_diff(&path, existing, &content),
+                    &mut plan.diffs_truncated,
+                );
+                planned.insert(resolved.clone(), Planned::Text(content.clone()));
+                plan.steps.push((
+                    format!("added {path}"),
+                    PatchStep::Write {
+                        file: path,
+                        path: resolved,
+                        content,
+                    },
+                ));
+            }
+            haarness_core::patch::FileOp::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
+                let gone = || CoreError::Tool(format!("{path}: an earlier operation removes it"));
+                if removed_entry(&path, &planned, context) {
+                    return Err(gone());
+                }
+                // A file an earlier operation writes is read as it leaves it.
+                let earlier = match resolve_new(&path, context) {
+                    Ok(key) => match planned.find(&key) {
+                        Some((key, Planned::Text(text))) => Some((key.clone(), text.clone())),
+                        Some((_, Planned::Removed)) => return Err(gone()),
+                        None => None,
+                    },
+                    Err(_) => None,
+                };
+                let (resolved, text) = match earlier {
+                    Some(earlier) => earlier,
+                    None => {
+                        let resolved =
+                            resolve_existing(&path, context).map_err(|error| at(&path, error))?;
+                        let text = tokio::fs::read_to_string(&resolved)
+                            .await
+                            .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
+                        (resolved, text)
+                    }
+                };
+                let updated = haarness_core::patch::apply_hunks(&text, &hunks)
+                    .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
+                if let Some(target) = move_to {
+                    // The move takes the source's entry away: a link goes,
+                    // not the file it leads to. A file the patch adds earlier
+                    // is its own entry.
+                    let entry = match resolve_entry(&path, context) {
+                        Ok(entry) => entry,
+                        Err(_) if planned.get(&resolved).is_some() => resolved.clone(),
+                        Err(error) => return Err(at(&path, error)),
+                    };
+                    let removed = match planned.get(&entry) {
+                        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                        _ => entry_diff_body(&entry).await,
+                    };
+                    let destination = planned_target(&target, &planned, context)?;
+                    let target_entry =
+                        haarness_core::resolve_permission_entry(&context.workspace, &target);
+                    // A file the patch adds earlier is checked here.
+                    if planned.same(&destination, &entry)
+                        || same_entry(&entry, &destination, &target_entry)
+                    {
+                        return Err(CoreError::Invalid(format!(
+                            "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                        )));
+                    }
+                    let destination_before = planned_body(&planned, &destination).await;
+                    push_tool_diff(
+                        &mut plan.diffs,
+                        deletion_diff(&path, removed),
+                        &mut plan.diffs_truncated,
+                    );
+                    push_tool_diff(
+                        &mut plan.diffs,
+                        replacement_diff(&target, destination_before, &updated),
+                        &mut plan.diffs_truncated,
+                    );
+                    planned.insert(entry.clone(), Planned::Removed);
+                    planned.insert(destination.clone(), Planned::Text(updated.clone()));
+                    plan.steps.push((
+                        format!("moved {path} → {target}"),
+                        PatchStep::Move {
+                            file: path,
+                            target,
+                            entry,
+                            destination,
+                            target_entry,
+                            content: updated,
+                        },
+                    ));
+                } else {
+                    push_tool_diff(
+                        &mut plan.diffs,
+                        text_file_diff(
+                            &path,
+                            FileDiffStatus::Modified,
+                            Some(&text),
+                            Some(&updated),
+                        ),
+                        &mut plan.diffs_truncated,
+                    );
+                    planned.insert(resolved.clone(), Planned::Text(updated.clone()));
+                    plan.steps.push((
+                        format!("updated {path}"),
+                        PatchStep::Write {
+                            file: path,
+                            path: resolved,
+                            content: updated,
+                        },
+                    ));
+                }
+            }
+            haarness_core::patch::FileOp::Delete { path } => {
+                if removed_entry(&path, &planned, context) {
+                    return Err(CoreError::Tool(format!(
+                        "{path}: an earlier operation removes it"
+                    )));
+                }
+                // A link is deleted itself, not the file it leads to. A file
+                // the patch adds earlier is its own entry.
+                let resolved = match resolve_entry(&path, context) {
+                    Ok(resolved) => resolved,
+                    Err(error) => match resolve_new(&path, context)
+                        .ok()
+                        .and_then(|key| planned.find(&key))
+                    {
+                        Some((key, Planned::Text(_))) => key.clone(),
+                        _ => return Err(at(&path, error)),
+                    },
+                };
+                let existing = match planned.get(&resolved) {
+                    Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                    _ => entry_diff_body(&resolved).await,
+                };
+                push_tool_diff(
+                    &mut plan.diffs,
+                    deletion_diff(&path, existing),
+                    &mut plan.diffs_truncated,
+                );
+                planned.insert(resolved.clone(), Planned::Removed);
+                plan.steps.push((
+                    format!("deleted {path}"),
+                    PatchStep::Remove {
+                        file: path,
+                        entry: resolved,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Whether an earlier operation of the patch removes the entry `path` names.
+fn removed_entry(path: &str, planned: &PatchFiles, context: &ToolContext) -> bool {
+    let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
+    matches!(planned.get(&entry), Some(Planned::Removed))
+}
+
+/// Where a patch writes `path`: the entry itself when an earlier operation
+/// removes it (a link it deletes no longer leads anywhere), else the file
+/// the path leads to.
+fn planned_target(path: &str, planned: &PatchFiles, context: &ToolContext) -> CoreResult<PathBuf> {
+    let entry = haarness_core::resolve_permission_entry(&context.workspace, path);
+    if matches!(planned.get(&entry), Some(Planned::Removed)) {
+        return ensure_within(entry, context);
+    }
+    let resolved = resolve_new(path, context)?;
+    // Another spelling of a file an earlier operation removes (`README.md`
+    // deleted, then `readme.md` added on a disk that ignores letter case) is
+    // written as the patch spells it, not under the name it had. A link
+    // still leads where it leads.
+    let link =
+        std::fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    if !link && matches!(planned.get(&resolved), Some(Planned::Removed)) {
+        return ensure_within(entry, context);
+    }
+    Ok(resolved)
+}
+
+/// What `path` holds before an operation, as the earlier ones leave it.
+async fn planned_body(planned: &PatchFiles, path: &Path) -> ExistingDiffBody {
+    match planned.get(path) {
+        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+        Some(Planned::Removed) => ExistingDiffBody::Missing,
+        None => existing_diff_body(path).await,
+    }
+}
+
+/// Write a planned patch in order. A write that fails says which operations
+/// were already applied.
+async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
+    let mut applied: Vec<String> = Vec::new();
+    for (line, step) in steps {
+        let note = |message: String| {
+            if applied.is_empty() {
+                message
+            } else {
+                format!("{message}; already applied: {}", applied.join(", "))
+            }
+        };
+        let failed = |message: String| CoreError::Tool(note(message));
+        match step {
+            PatchStep::Write {
+                file,
+                path,
+                content,
+            } => write_file(&path, &content)
+                .await
+                .map_err(|error| failed(format!("could not write {file}: {error}")))?,
+            PatchStep::Remove { file, entry } => tokio::fs::remove_file(&entry)
+                .await
+                .map_err(|error| failed(format!("could not delete {file}: {error}")))?,
+            PatchStep::Move {
+                file,
+                target,
+                entry,
+                destination,
+                target_entry,
+                content,
+            } => {
+                if same_entry(&entry, &destination, &target_entry) {
+                    return Err(CoreError::Invalid(note(format!(
+                        "{file}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                    ))));
+                }
+                write_file(&destination, &content)
+                    .await
+                    .map_err(|error| failed(format!("could not write {target}: {error}")))?;
+                tokio::fs::remove_file(&entry).await.map_err(|error| {
+                    failed(format!(
+                        "wrote {target} but could not remove {file}: {error}"
+                    ))
+                })?;
+            }
+        }
+        applied.push(line);
+    }
+    Ok(())
+}
+
+/// Write `content` to `path`, creating the folders it needs.
+async fn write_file(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, content).await
+}
+
+/// An I/O failure of one patch operation, naming its file.
+fn at(path: &str, error: CoreError) -> CoreError {
+    match error {
+        CoreError::Tool(message) => CoreError::Tool(format!("{path}: {message}")),
+        error => error,
+    }
+}
+
+/// A patch that failed before writing, saying so when it had other
+/// operations.
+fn unchanged(error: CoreError, several: bool) -> CoreError {
+    const NOTE: &str = "; no file was changed";
+    match error {
+        CoreError::Tool(message) if several => CoreError::Tool(format!("{message}{NOTE}")),
+        CoreError::Invalid(message) if several => CoreError::Invalid(format!("{message}{NOTE}")),
+        CoreError::PermissionDenied(message) if several => {
+            CoreError::PermissionDenied(format!("{message}{NOTE}"))
+        }
+        error => error,
+    }
+}
+
 // Paths resolve where the call works (`ToolContext::workspace`): a chat's own
 // folder, or the project folder.
 fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
@@ -3491,7 +3894,8 @@ impl SecretFilter {
                 workspace.to_path_buf(),
             ],
             root: root.to_path_buf(),
-            named_root: workspace.join(requested),
+            // `~/notes` names the home folder, as the tools read it.
+            named_root: workspace.join(haarness_core::expand_home(requested).as_ref()),
             rules,
         }
     }
@@ -4405,6 +4809,11 @@ fn output_preview(text: &str) -> String {
     for line in text.lines().take(TOOL_OUTPUT_MAX_LINES) {
         let size = line.len() + usize::from(!preview.is_empty());
         if bytes + size > TOOL_OUTPUT_MAX_BYTES {
+            // A first line too long to show whole (minified code, a JSON
+            // dump) shows its head, so the preview is never empty.
+            if preview.is_empty() {
+                return text::shown(line, true).into_owned();
+            }
             break;
         }
         preview.push(line);
@@ -4414,19 +4823,9 @@ fn output_preview(text: &str) -> String {
 }
 
 pub(crate) fn tool_output_dir() -> PathBuf {
-    if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
-        return PathBuf::from(root).join("data/tool-output");
-    }
-    // HAARNESS_HOME keeps everything under one folder.
-    if let Some(root) = std::env::var_os("HAARNESS_HOME")
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute())
-    {
-        return root.join("data/tool-output");
-    }
-    directories::ProjectDirs::from("dev", "haarness", "haarness").map_or_else(
+    crate::data_folder().map_or_else(
         || std::env::temp_dir().join("haarness/tool-output"),
-        |project| project.data_local_dir().join("tool-output"),
+        |folder| folder.join("tool-output"),
     )
 }
 fn tool_error(error: impl std::fmt::Display) -> CoreError {
@@ -5815,10 +6214,121 @@ export default workflow({
         .unwrap_err()
         .to_string();
         assert!(error.contains("names the same file"), "{error}");
+        // Refused before the file it adds was written.
+        assert!(!workspace.join("added.txt").exists());
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_plans_every_operation_before_it_writes() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-plan-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("first.txt"), "one\n").unwrap();
+        std::fs::write(workspace.join("second.txt"), "two\n").unwrap();
+        std::fs::write(workspace.join("blocker"), "a file\n").unwrap();
+        std::fs::write(workspace.join("windows.txt"), "a\r\nb\r\nc\r\n").unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: &str| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            let input = input.to_owned();
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+
+        // A later hunk that does not match leaves the earlier file as it was.
+        let error = run(concat!(
+            "*** Begin Patch\n*** Update File: first.txt\n@@\n-one\n+ONE\n",
+            "*** Update File: second.txt\n@@\n-absent\n+x\n*** End Patch\n"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("second.txt: hunk context not found: \"absent\"; no file was changed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("first.txt")).unwrap(),
+            "one\n"
+        );
+
+        // A write that fails partway says what it already applied.
+        let error = run(concat!(
+            "*** Begin Patch\n*** Add File: added.txt\n+a\n",
+            "*** Add File: blocker/inner.txt\n+b\n*** End Patch\n"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("could not write blocker/inner.txt"),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("; already applied: added added.txt"),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read_to_string(workspace.join("added.txt")).unwrap(),
             "a\n"
         );
+
+        // Operations read a file as the earlier ones leave it.
+        let output = run(concat!(
+            "*** Begin Patch\n*** Add File: made.txt\n+one\n",
+            "*** Update File: made.txt\n@@\n-one\n+two\n",
+            "*** Delete File: first.txt\n*** Add File: first.txt\n+fresh\n",
+            "*** Update File: windows.txt\n@@\n a\n-b\n+B\n+added\n*** End Patch\n"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("made.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("first.txt")).unwrap(),
+            "fresh\n"
+        );
+        // A CRLF file stays CRLF.
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("windows.txt")).unwrap(),
+            "a\r\nB\r\nadded\r\nc\r\n"
+        );
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(output.metadata["diffs"].clone()).unwrap();
+        let shown = diffs
+            .iter()
+            .map(|diff| (diff.file.as_str(), diff.status, diff.before.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown[..4],
+            [
+                ("made.txt", FileDiffStatus::Added, None),
+                ("made.txt", FileDiffStatus::Modified, Some("one\n")),
+                ("first.txt", FileDiffStatus::Deleted, Some("one\n")),
+                ("first.txt", FileDiffStatus::Added, None),
+            ]
+        );
+        let error = run(concat!(
+            "*** Begin Patch\n*** Delete File: made.txt\n",
+            "*** Update File: made.txt\n@@\n-two\n+three\n*** End Patch\n"
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("made.txt: an earlier operation removes it; no file was changed"),
+            "{error}"
+        );
+        assert!(workspace.join("made.txt").exists());
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
@@ -6006,6 +6516,325 @@ export default workflow({
             )
             .await;
         assert!(matches!(escape, Err(CoreError::PermissionDenied(_))));
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_renames_by_letter_case_and_finds_a_file_it_adds_in_another_case() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-case-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("README.md"), "# hi\n").unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: &str| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            let input = input.to_owned();
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+        let names = || {
+            let mut names = std::fs::read_dir(&workspace)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        // On any disk the file ends up as the patch spells it.
+        run("*** Begin Patch\n*** Delete File: README.md\n*** Add File: readme.md\n+# hi\n*** End Patch\n")
+            .await
+            .unwrap();
+        assert_eq!(names(), ["readme.md"]);
+        // On a disk that ignores letter case, a file the patch adds is found
+        // by another case, as it was when each operation wrote at once.
+        if workspace.join("README.MD").exists() {
+            // In an empty folder too, which asks the folder holding it.
+            std::fs::create_dir(workspace.join("empty")).unwrap();
+            run(concat!(
+                "*** Begin Patch\n*** Add File: Foo.txt\n+one\n",
+                "*** Update File: foo.txt\n@@\n-one\n+two\n",
+                "*** Add File: Gone.txt\n+x\n*** Delete File: gone.txt\n",
+                "*** Add File: empty/Bar.txt\n+one\n",
+                "*** Update File: empty/bar.txt\n@@\n-one\n+two\n*** End Patch\n"
+            ))
+            .await
+            .unwrap();
+            assert_eq!(names(), ["Foo.txt", "empty", "readme.md"]);
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("empty/Bar.txt")).unwrap(),
+                "two\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("Foo.txt")).unwrap(),
+                "two\n"
+            );
+        }
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// `HAARNESS_TEST_CASE_SENSITIVE_DIR` names a case-sensitive disk mounted
+    /// inside one that ignores case (a case-sensitive APFS image on macOS),
+    /// for the checks only such a disk can make.
+    #[tokio::test]
+    async fn letter_case_is_folded_only_in_folders_that_ignore_it() {
+        let folder = std::env::temp_dir().join(format!("haarness-fold-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("Probe.txt"), "").unwrap();
+        std::fs::create_dir(folder.join("1")).unwrap();
+        let folds = folder.join("PROBE.TXT").exists();
+        assert_eq!(folds_case(&folder), folds);
+        // An empty folder answers through the folder holding it.
+        assert_eq!(folds_case(&folder.join("1")), folds);
+        std::fs::remove_dir_all(folder).unwrap();
+        let Some(sensitive) = std::env::var_os("HAARNESS_TEST_CASE_SENSITIVE_DIR") else {
+            return;
+        };
+        // The mount itself and a folder without letters below it.
+        let sensitive = PathBuf::from(sensitive).canonicalize().unwrap();
+        let digits = sensitive.join(std::process::id().to_string());
+        std::fs::create_dir(&digits).unwrap();
+        assert!(!folds_case(&digits));
+        std::fs::write(digits.join("Probe.txt"), "").unwrap();
+        assert!(!folds_case(&sensitive));
+        assert!(!folds_case(&digits));
+        // Two files whose names differ only in case stay two files.
+        std::fs::write(digits.join("Foo.txt"), "same\n").unwrap();
+        std::fs::write(digits.join("foo.txt"), "same\n").unwrap();
+        std::fs::write(digits.join("Gone.txt"), "upper\n").unwrap();
+        std::fs::write(digits.join("gone.txt"), "lower\n").unwrap();
+        NativeToolRegistry::new(digits.clone())
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input": concat!(
+                    "*** Begin Patch\n*** Update File: Foo.txt\n@@\n-same\n+upper\n",
+                    "*** Update File: foo.txt\n@@\n-same\n+lower\n",
+                    "*** Delete File: gone.txt\n*** Update File: Gone.txt\n@@\n-upper\n+UPPER\n",
+                    "*** End Patch\n"
+                )}),
+                tool_context(&digits),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(digits.join("Foo.txt")).unwrap(),
+            "upper\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(digits.join("foo.txt")).unwrap(),
+            "lower\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(digits.join("Gone.txt")).unwrap(),
+            "UPPER\n"
+        );
+        assert!(!digits.join("gone.txt").exists());
+        std::fs::remove_dir_all(digits).unwrap();
+    }
+
+    #[tokio::test]
+    async fn patches_taking_two_files_in_opposite_orders_never_wait_on_each_other() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-order-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(workspace.join(name), "one\ntwo\n").unwrap();
+        }
+        let workspace = workspace.canonicalize().unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        // Another call holds both files, so both patches queue for them.
+        let held = crate::file_lock::lock(
+            [workspace.join("a.txt"), workspace.join("b.txt")],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let run = |input: &'static str| {
+            let patch = registry.get("apply_patch").unwrap();
+            let context = tool_context(&workspace);
+            tokio::spawn(async move { patch.execute(json!({ "input": input }), context).await })
+        };
+        // As written, one patch names a.txt first and the other b.txt.
+        let forward = run(concat!(
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+ONE\n",
+            "*** Update File: b.txt\n@@\n-one\n+ONE\n*** End Patch\n"
+        ));
+        let backward = run(concat!(
+            "*** Begin Patch\n*** Update File: b.txt\n@@\n-two\n+TWO\n",
+            "*** Update File: x/../a.txt\n@@\n-two\n+TWO\n*** End Patch\n"
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(held);
+        let (forward, backward) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(forward, backward)
+        })
+        .await
+        .expect("the patches waited on each other");
+        forward.unwrap().unwrap();
+        backward.unwrap().unwrap();
+        for name in ["a.txt", "b.txt"] {
+            assert_eq!(
+                std::fs::read_to_string(workspace.join(name)).unwrap(),
+                "ONE\nTWO\n",
+                "{name}"
+            );
+        }
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_edit_does_not_wait_for_another_edits_diagnostics() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-edit-diagnose-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("notes.mock"), "alpha\nbeta\n").unwrap();
+        // A language server that takes three seconds to start, so the first
+        // edit's diagnostics take that long.
+        let language = Arc::new(LanguageService::new(
+            workspace.clone(),
+            haarness_language::LspConfig {
+                builtins: false,
+                servers: std::collections::BTreeMap::from([(
+                    "slow".into(),
+                    haarness_language::LspServerConfig {
+                        command: vec!["python3".into(), language_fixture("mock_lsp.py")],
+                        extensions: vec![".mock".into()],
+                        environment: std::collections::BTreeMap::from([(
+                            "INIT_DELAY".into(),
+                            "3".into(),
+                        )]),
+                        ..haarness_language::LspServerConfig::default()
+                    },
+                )]),
+                ..haarness_language::LspConfig::default()
+            },
+            haarness_language::FormatterConfig::default(),
+        ));
+        let registry = NativeToolRegistry::new(workspace.clone()).with_language(language.clone());
+        let edit = |old: &str, new: &str| {
+            let edit = registry.get("edit").unwrap();
+            let context = tool_context(&workspace);
+            let arguments = json!({"path":"notes.mock", "old": old, "new": new});
+            tokio::spawn(async move { edit.execute(arguments, context).await })
+        };
+        let read = || std::fs::read_to_string(workspace.join("notes.mock")).unwrap();
+        let first = edit("alpha", "alpha first");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !read().contains("alpha first") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first edit never landed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The first edit now waits for the language server; the second edit
+        // is written meanwhile.
+        let second = edit("beta", "beta second");
+        let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+        while !read().contains("beta second") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second edit waited for the first one's diagnostics"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!first.is_finished());
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(read(), "alpha first\nbeta second\n");
+        language.shutdown().await;
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parallel_edits_of_one_file_wait_for_each_others_formatter() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-edit-lock-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("notes.slow"), "alpha\nbeta\n").unwrap();
+        // A formatter that reads the file, takes a second unless the file
+        // has the second edit, and writes back what it read.
+        let language = Arc::new(LanguageService::new(
+            workspace.clone(),
+            haarness_language::LspConfig {
+                enabled: false,
+                ..haarness_language::LspConfig::default()
+            },
+            haarness_language::FormatterConfig {
+                enabled: true,
+                builtins: false,
+                formatters: std::collections::BTreeMap::from([(
+                    "slow".into(),
+                    haarness_language::FormatterDefinition {
+                        command: vec![
+                            "sh".into(),
+                            "-c".into(),
+                            r#"text=$(cat "$1"); case "$text" in *second*) ;; *) sleep 1 ;; esac; printf '%s\n' "$text" > "$1""#.into(),
+                            "sh".into(),
+                            "$FILE".into(),
+                        ],
+                        extensions: vec![".slow".into()],
+                        ..haarness_language::FormatterDefinition::default()
+                    },
+                )]),
+            },
+        ));
+        let registry = NativeToolRegistry::new(workspace.clone()).with_language(language);
+        let edit = registry.get("edit").unwrap();
+        let patch = registry.get("apply_patch").unwrap();
+        let first = edit.execute(
+            json!({"path":"notes.slow", "old":"alpha", "new":"alpha first"}),
+            tool_context(&workspace),
+        );
+        let second = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            patch
+                .execute(
+                    json!({"input":"*** Begin Patch\n*** Update File: notes.slow\n@@\n-beta\n+beta second\n*** End Patch\n"}),
+                    tool_context(&workspace),
+                )
+                .await
+        };
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("notes.slow")).unwrap(),
+            "alpha first\nbeta second\n"
+        );
+
+        // A call waiting for a file another call holds ends on Stop.
+        let held = crate::file_lock::lock(
+            [workspace.join("notes.slow").canonicalize().unwrap()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let context = tool_context(&workspace);
+        let stop = context.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stop.cancel();
+        });
+        let stopped = edit
+            .execute(
+                json!({"path":"notes.slow", "old":"alpha", "new":"lost"}),
+                context,
+            )
+            .await;
+        assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
+        drop(held);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("notes.slow")).unwrap(),
+            "alpha first\nbeta second\n"
+        );
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
@@ -6769,6 +7598,461 @@ export default workflow({
             "head preview kept the tail"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[test]
+    fn a_workflow_path_from_the_home_folder_is_read_there() {
+        let home = haarness_protocol::home_dir().unwrap();
+        let workspace = Path::new("/work/project");
+        assert_eq!(
+            workflow_path(workspace, "~/flows/check.ts"),
+            home.join("flows/check.ts").display().to_string()
+        );
+        assert_eq!(
+            workflow_path(workspace, "flows/check.ts"),
+            "/work/project/flows/check.ts"
+        );
+        assert_eq!(
+            workflow_path(workspace, "./~/check.ts"),
+            "/work/project/./~/check.ts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_shows_the_head_of_a_first_line_too_long_for_it() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-output-{}", uuid::Uuid::now_v7()));
+        let body = format!("{}\nsecond", "y".repeat(200_000));
+        let result = truncate_output_at(body, &directory).await.unwrap();
+        assert!(
+            result
+                .text
+                .starts_with(&format!("{}{}", "y".repeat(2_000), text::LINE_CUT)),
+            "{}",
+            &result.text[..80]
+        );
+        assert!(result.text.contains("Full output saved to:"));
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    fn read_fixture(name: &str, body: &[u8]) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join(name), body).unwrap();
+        (root.clone(), root.join(name))
+    }
+
+    async fn read_text_of(root: &Path, args: Value) -> CoreResult<ToolOutput> {
+        let registry = NativeToolRegistry::new(root.to_path_buf());
+        registry
+            .get("read")
+            .unwrap()
+            .execute(args, tool_context(root))
+            .await
+    }
+
+    #[tokio::test]
+    async fn read_shows_the_head_of_a_line_that_never_ends() {
+        let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        // 40 MiB on one line, as a minified bundle or a JSON dump.
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(root.join("bundle.min.js")).unwrap();
+            let chunk = "x".repeat(1024 * 1024);
+            for _ in 0..40 {
+                file.write_all(chunk.as_bytes()).unwrap();
+            }
+            file.write_all(b"\nlast line\n").unwrap();
+        }
+        let result = read_text_of(&root, json!({"path":"bundle.min.js"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            format!("{}{}\nlast line", "x".repeat(2_000), text::LINE_CUT)
+        );
+        // Shown inline: nothing is copied to the tool output folder.
+        assert!(result.metadata.get("outputPath").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_stops_at_fifty_kilobytes_and_says_where_to_go_on() {
+        let body = (0..3_000)
+            .map(|line| format!("line {line:04} {}", "z".repeat(90)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (root, _) = read_fixture("long.txt", body.as_bytes());
+        let first = read_text_of(&root, json!({"path":"long.txt","limit":3000}))
+            .await
+            .unwrap();
+        let (shown, note) = first.text.rsplit_once("\n\n").unwrap();
+        assert!(shown.len() <= 50 * 1024, "{}", shown.len());
+        let count = shown.lines().count();
+        assert!(count > 400 && count < 3_000, "{count}");
+        assert_eq!(
+            note,
+            format!("(stopped at 50 KB; read on with offset={count})")
+        );
+        assert!(first.metadata.get("outputPath").is_none());
+        let next = read_text_of(&root, json!({"path":"long.txt","offset":count,"limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(
+            next.text,
+            format!(
+                "{}\n\n(more lines follow; read on with offset={})",
+                body.lines().nth(count).unwrap(),
+                count + 1
+            )
+        );
+        // A limit, the default one or one the call gives, ending before the
+        // file does says where to go on.
+        let short = (0..2_500)
+            .map(|line| format!("{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("short.txt"), &short).unwrap();
+        let default = read_text_of(&root, json!({"path":"short.txt"}))
+            .await
+            .unwrap();
+        assert!(
+            default
+                .text
+                .ends_with("1999\n\n(more lines follow; read on with offset=2000)"),
+            "{}",
+            &default.text[default.text.len() - 80..]
+        );
+        let given = read_text_of(&root, json!({"path":"short.txt","limit":500}))
+            .await
+            .unwrap();
+        assert!(
+            given
+                .text
+                .ends_with("499\n\n(more lines follow; read on with offset=500)"),
+            "{}",
+            &given.text[given.text.len() - 60..]
+        );
+        let rest = read_text_of(&root, json!({"path":"short.txt","offset":2000}))
+            .await
+            .unwrap();
+        assert!(rest.text.ends_with("\n2499") && !rest.text.contains("more lines"));
+        // A limit inside the budget reads the lines it always did.
+        let small = read_text_of(&root, json!({"path":"long.txt","offset":10,"limit":5}))
+            .await
+            .unwrap();
+        assert_eq!(
+            small.text,
+            format!(
+                "{}\n\n(more lines follow; read on with offset=15)",
+                body.lines().skip(10).take(5).collect::<Vec<_>>().join("\n")
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_splits_lines_as_it_always_did() {
+        for body in [
+            "one\ntwo\nthree\n",
+            "one\r\ntwo\r\nthree",
+            "\n\nthird\n\n",
+            "",
+            "lone\rreturn\n",
+        ] {
+            let (root, _) = read_fixture("f.txt", body.as_bytes());
+            for (offset, limit) in [(0, 2000), (1, 1), (2, 5), (9, 3)] {
+                let result =
+                    read_text_of(&root, json!({"path":"f.txt","offset":offset,"limit":limit}))
+                        .await
+                        .unwrap();
+                let shown = body.lines().skip(offset).take(limit).count();
+                let mut expected = body
+                    .lines()
+                    .skip(offset)
+                    .take(limit)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if body.lines().count() > offset + limit {
+                    expected = format!(
+                        "{expected}\n\n(more lines follow; read on with offset={})",
+                        offset + shown
+                    );
+                }
+                assert_eq!(result.text, expected, "{body:?} {offset} {limit}");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_long_cjk_or_accented_line_reads_as_utf8() {
+        let body = format!("{}\na{}\nend\n", "日".repeat(3_000), "é".repeat(5_000));
+        let (root, _) = read_fixture("wide.txt", body.as_bytes());
+        let result = read_text_of(&root, json!({"path":"wide.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            format!(
+                "{}{cut}\na{}{cut}\nend",
+                "日".repeat(2_000),
+                "é".repeat(1_999),
+                cut = text::LINE_CUT
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_shows_text_that_is_not_utf8_and_refuses_binary_data() {
+        let (root, _) = read_fixture("latin1.txt", b"caf\xe9\nna\xefve\n");
+        let result = read_text_of(&root, json!({"path":"latin1.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            "caf\u{fffd}\nna\u{fffd}ve\n\n(this file is not UTF-8: bytes that do not decode show as \u{fffd}; edit cannot change it, and write would replace those bytes)"
+        );
+        let refused = NativeToolRegistry::new(root.clone())
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"latin1.txt","old":"na","new":"no"}),
+                tool_context(&root),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("latin1.txt is not UTF-8 text, so edit cannot change it"),
+            "{refused}"
+        );
+        // A NUL near the start marks binary data: only UTF-8 shows, as before.
+        std::fs::write(root.join("blob.bin"), b"\x00\x01\xff\xfe").unwrap();
+        let refused = read_text_of(&root, json!({"path":"blob.bin"}))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("holds binary data"),
+            "{refused}"
+        );
+        std::fs::write(root.join("nul.txt"), b"a\x00b\n").unwrap();
+        let shown = read_text_of(&root, json!({"path":"nul.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(shown.text, "a\u{0}b");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_refuses_a_pipe_rather_than_waiting_on_it() {
+        let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let refused = read_text_of(&root, json!({"path":"pipe"}))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("is not a regular file"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn grep_in(root: &Path, args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        NativeToolRegistry::new(root.to_path_buf())
+            .get("grep")
+            .unwrap()
+            .execute(args, context)
+            .await
+    }
+
+    #[tokio::test]
+    async fn grep_shows_the_head_of_a_long_matching_line() {
+        let (root, _) = read_fixture(
+            "bundle.min.js",
+            format!("needle{}\nshort needle\n", "q".repeat(100_000)).as_bytes(),
+        );
+        let found = grep_in(&root, json!({"pattern":"needle"}), tool_context(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.text,
+            format!(
+                "bundle.min.js:1:needle{}{}\nbundle.min.js:2:short needle",
+                "q".repeat(1_994),
+                text::LINE_CUT
+            )
+        );
+        assert!(found.metadata.get("outputPath").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn grep_stops_at_its_match_limit_and_says_so() {
+        let body = "hit\n".repeat(6_000);
+        let (root, _) = read_fixture("a.txt", body.as_bytes());
+        std::fs::write(root.join("b.txt"), &body).unwrap();
+        std::fs::write(root.join("c.txt"), &body).unwrap();
+        let found = grep_in(&root, json!({"pattern":"hit"}), tool_context(&root))
+            .await
+            .unwrap();
+        // The listing is long enough to be saved whole; it holds the limit
+        // exactly, however many files are left.
+        let saved =
+            std::fs::read_to_string(found.metadata["outputPath"].as_str().unwrap()).unwrap();
+        assert_eq!(saved.lines().count(), 10_000);
+        assert!(
+            found
+                .text
+                .ends_with("(stopped at 10000 matching lines; narrow the pattern or the path)"),
+            "{}",
+            &found.text[found.text.len() - 200..]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn grep_leaves_the_async_workers_free_and_stop_ends_it() {
+        let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let line = format!("{}\n", "w".repeat(200));
+        for index in 0..4_000 {
+            std::fs::write(root.join(format!("f{index}.txt")), line.repeat(20)).unwrap();
+        }
+        let context = tool_context(&root);
+        let cancel = context.cancel.clone();
+        // On this runtime's one thread, Stop can only come while the walk
+        // leaves the thread free.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            cancel.cancel();
+        });
+        let started = std::time::Instant::now();
+        let stopped = grep_in(&root, json!({"pattern":"absent"}), context).await;
+        assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn edit_in(root: &Path, tool: &str, args: Value) -> CoreResult<ToolOutput> {
+        NativeToolRegistry::new(root.to_path_buf())
+            .get(tool)
+            .unwrap()
+            .execute(args, tool_context(root))
+            .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_of_several_lines_meets_a_file_with_crlf_line_ends() {
+        let (root, file) = read_fixture("main.c", b"int a() {\r\n    one();\r\n}\r\n");
+        // What read shows, without the `\r`.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"    one();\n}","new":"    two();\n    three();\n}"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    two();\r\n    three();\r\n}\r\n"
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"main.c","edits":[
+                {"old":"two();\n    three();","new":"four();"},
+                {"old":"{\n","new":"{\n    // start\n","replaceAll":true}
+            ]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    // start\r\n    four();\r\n}\r\n"
+        );
+        // A one-line old with lines added: they end in CRLF too.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"    four();","new":"    four();\n    five();"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    // start\r\n    four();\r\n    five();\r\n}\r\n"
+        );
+        // Lines added in a stretch of LF lines, or in a CSV cell that holds
+        // bare LF, end in LF as their neighbours do.
+        std::fs::write(&file, b"h1\r\nh2\r\nlf1\nlf2\nh3\r\nh4\r\n").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"lf1","new":"lf1\nlf1b"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"h1\r\nh2\r\nlf1\nlf1b\nlf2\nh3\r\nh4\r\n"
+        );
+        std::fs::write(&file, b"id,note\r\n1,\"line a\nline b\"\r\n2,x\r\n3,y\r\n").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"line a","new":"line A\nline A2"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"id,note\r\n1,\"line A\nline A2\nline b\"\r\n2,x\r\n3,y\r\n"
+        );
+        // Two places still refuse, as an LF file does.
+        std::fs::write(&file, b"x\r\ny\r\nx\r\ny\r\n").unwrap();
+        let ambiguous = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"x\ny","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(ambiguous.to_string().contains("found 2"), "{ambiguous}");
+        // A file mostly of LF line ends is matched as written.
+        std::fs::write(&file, b"a\nb\nc\r\nd\n").unwrap();
+        let missed = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"c\nd","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(missed.to_string().contains("found 0"), "{missed}");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"a\nb","new":"ab"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nc\r\nd\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

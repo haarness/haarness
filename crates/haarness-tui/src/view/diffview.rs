@@ -13,7 +13,7 @@ use crate::diffview::{
 };
 use crate::state::App;
 use crate::theme::Theme;
-use crate::view::frame::{HitRegion, HitTarget};
+use crate::view::frame::{CopyPane, HitRegion, HitTarget};
 use crate::view::span::single_line;
 
 /// Rows spent on chrome: header, its rule, the footer rule, and the footer.
@@ -52,6 +52,21 @@ pub fn frame(
         } else {
             Vec::new()
         };
+        if tree_width > 0 {
+            // The tree and the patch are panes: a drag down the patch never
+            // copies file names beside it.
+            let mut panes = app.copy_panes.borrow_mut();
+            panes.push(crate::view::frame::CopyPane {
+                rows: 2..2 + body_height,
+                columns: 0..tree_width,
+                side: false,
+            });
+            panes.push(crate::view::frame::CopyPane {
+                rows: 2..2 + body_height,
+                columns: tree_width + 1..width,
+                side: false,
+            });
+        }
         let patch = patch_rows(app, viewer, patch_width, body_height, &mut hits, tree_width);
         for row in 0..body_height {
             let mut spans = Vec::new();
@@ -62,7 +77,7 @@ pub fn frame(
                         .unwrap_or_else(|| blank(tree_width, theme))
                         .spans,
                 );
-                spans.push(Span::new("│", theme.hairline()));
+                spans.push(Span::new("│", theme.hairline()).unselectable());
             }
             spans.extend(
                 patch
@@ -408,7 +423,35 @@ fn patch_rows(
     }
     let start = viewer.scroll.min(viewer.display.len().saturating_sub(1));
     let mut lines = Vec::new();
+    // Side by side, each side of a run of rows is a pane of its own, so a
+    // drag down the new code never copies the old beside it.
+    let left = tree_width + usize::from(tree_width > 0);
+    let side_width = width.saturating_sub(1) / 2;
+    let mut split_from = None;
+    let split_panes = |from: usize, to: usize| {
+        // Rows here count from the body, which starts under the header and
+        // its rule.
+        let mut panes = app.copy_panes.borrow_mut();
+        panes.push(CopyPane {
+            rows: 2 + from..2 + to,
+            columns: left..left + side_width,
+            side: true,
+        });
+        panes.push(CopyPane {
+            rows: 2 + from..2 + to,
+            columns: left + side_width + 1..left + width,
+            side: true,
+        });
+    };
     for (offset, row) in viewer.display.iter().skip(start).take(height).enumerate() {
+        match (matches!(row, DisplayRow::Split { .. }), split_from) {
+            (true, None) => split_from = Some(offset),
+            (false, Some(from)) => {
+                split_panes(from, offset);
+                split_from = None;
+            }
+            _ => {}
+        }
         let index = start + offset;
         let cursor = viewer.cursor == Some(index) && viewer.focus == DiffFocus::Patch;
         lines.push(match row {
@@ -439,6 +482,9 @@ fn patch_rows(
             target: HitTarget::DiffBodyRow(index),
             paint_hover: false,
         });
+    }
+    if let Some(from) = split_from {
+        split_panes(from, lines.len());
     }
     lines
 }
@@ -571,7 +617,7 @@ fn unified_row(
         let gutter = " ".repeat(digits * 2 + 3);
         let body = format!("{gutter}⋮");
         return Line::new(vec![
-            Span::new(body.clone(), theme.hairline()),
+            Span::new(body.clone(), theme.hairline()).unselectable(),
             Span::new(" ".repeat(width.saturating_sub(body.width())), theme.muted),
         ]);
     }
@@ -584,13 +630,16 @@ fn unified_row(
         number(row.new, digits)
     );
     let content_width = width.saturating_sub(gutter.width() + 2);
+    // Line numbers and the +/− sign are the viewer's; a selection copies the
+    // code.
     let mut spans = vec![
-        paint(gutter, theme.muted, style.gutter_background),
+        paint(gutter, theme.muted, style.gutter_background).unselectable(),
         paint(
             format!("{} ", style.sign),
             style.sign_color,
             style.background,
-        ),
+        )
+        .unselectable(),
     ];
     let (content, used) = content_spans(app, viewer, file, row, content_width, &style);
     spans.extend(content);
@@ -619,14 +668,14 @@ fn split_row(
     if gap {
         let body = "  ⋮";
         return Line::new(vec![
-            Span::new(body, theme.hairline()),
+            Span::new(body, theme.hairline()).unselectable(),
             Span::new(" ".repeat(width.saturating_sub(body.width())), theme.muted),
         ]);
     }
     let side_width = width.saturating_sub(1) / 2;
     let digits = digits(viewer, file);
     let mut spans = side_spans(app, viewer, file, left, side_width, digits, cursor, true);
-    spans.push(Span::new("│", theme.hairline()));
+    spans.push(Span::new("│", theme.hairline()).unselectable());
     spans.extend(side_spans(
         app,
         viewer,
@@ -679,13 +728,16 @@ fn side_spans(
     let number_text = number(if old_side { row.old } else { row.new }, digits);
     let gutter = format!("{marker}{number_text} ");
     let content_width = width.saturating_sub(gutter.width() + 2);
+    // Line numbers and the +/− sign are the viewer's; a selection copies the
+    // code.
     let mut spans = vec![
-        paint(gutter, theme.muted, style.gutter_background),
+        paint(gutter, theme.muted, style.gutter_background).unselectable(),
         paint(
             format!("{} ", style.sign),
             style.sign_color,
             style.background,
-        ),
+        )
+        .unselectable(),
     ];
     let (content, used) = content_spans(app, viewer, file, row, content_width, &style);
     spans.extend(content);

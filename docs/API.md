@@ -498,19 +498,58 @@ screenshots apply the same rules; a `read` of a damaged image fails the call
 with the reason.
 
 An attachment or tool image whose file is deleted later is named in the message
-("no longer available") instead of failing every later request. When a
-provider still refuses an image (its type, size, pixels or count, or a
+("no longer available") instead of failing every later request.
+
+A long chat can hold more images than a provider takes in one request. Before
+each request the runtime counts the images it would send, as the base64 the
+provider receives. Where a message takes them past the provider's limit, the
+images before it are replaced by a one-line note, oldest first, until the rest
+fit in three fifths of the limit (the person's own images in that message's
+turn stay, and what cannot be reached that way stays too). The images of the
+message that passed the limit go only when they and the person's images
+together still pass the limit itself, oldest first and only until the request
+fits, so the newest image reaches the model whenever it fits beside the
+person's. The note names the image (a file by its path), says it is no longer
+visible and must not be described from memory, and says to read the file again,
+or for an attached image to ask the person to attach it again, if it is needed.
+The limit is 25 MiB of images (Anthropic and Haarness Cloud take 32 MB in a
+request; OpenAI, the Gemini API and Gemini on Vertex AI take more), 15 MiB on
+Bedrock, which takes 20 MB, and for Claude models, directly, on Bedrock or
+through Haarness Cloud, also 100 images in a request to a model with a
+200K-token context window and 600 to a larger one. The cut moves only when the
+images kept pass the limit again, not with each new image, so the requests
+between two cuts carry the same history and the provider's prompt cache holds.
+The person's own images are those they attached to their messages (steers
+included, not what Haarness adds); when those alone pass the limit the request
+is sent as it is. Which turn an image belongs to is read from the history, not
+from the turn now running, so a new turn's first request repeats every earlier
+cut and reads the cache too. PDFs, audio and video are neither counted nor
+replaced. Stored messages do not change, and the transcript shows nothing: a
+cut is logged as one `INFO` line of counts.
+
+When a provider still refuses an image (its type, size, pixels or count, or a
 request too large because of images), the runtime appends a `media_omitted`
 item to the thread with the SHA-256 `fingerprints` of the refused attachment
-sources, their display `names`, the provider's `reason` and `guessed`. Every
-later request of that thread, after restarts and in forks, sends a short note
-in place of those images, so the prompt stays stable for caching; the original
-attachments stay in their messages. When the provider names the image by its
-place in the request (Anthropic's `messages.N.content.M`) only that image is
-left out; otherwise the newest images are (`guessed: true`). A refusal before
-anything streamed is retried once per turn; a second refusal in the same turn
-fails it, and the next turn sends without the images. TUI and Desktop show the
-item as a notice.
+sources, their display `names`, the provider's `reason`, `guessed`, `oldest`,
+`too_large` and `too_many`. Every later request of that thread, after restarts
+and in forks, sends a short note in place of those images, so the prompt stays
+stable for caching; the original attachments stay in their messages. When the
+provider names the image by its place in the request (Anthropic's
+`messages.N.content.M`) only that image is left out. A refusal of the request
+for how many images it carries ("too many images", recorded with
+`too_many: true`) or how large they make it (HTTP 413, Gemini's "Request
+payload size exceeds the limit", recorded with `too_large: true` whichever
+images it leaves out) leaves out the oldest half of them by that measure
+(`oldest: true`), so the newest images then reach the model. The turn's own
+images and those of the last message carrying any stay, and so does a file read
+again among them: the record leaves a source out everywhere. When those that
+stay hold more than half of the refused request by that measure, leaving out
+the others would not help, so the newest go instead and the older ones are
+kept. Any other refusal that names no image leaves out the newest images
+(`guessed: true`): what the last request added is the likeliest cause. A
+refusal before anything streamed is retried once per turn; a second refusal in
+the same turn fails it, and the next turn sends without the images. TUI and
+Desktop show the item as a notice.
 
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and

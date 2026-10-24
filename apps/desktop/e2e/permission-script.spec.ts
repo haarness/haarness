@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stopChatHome } from "./fixtures/chat-home";
+import { isolatedEnv } from "./fixtures/isolated-env";
 
 // A shell request that runs a script carries the script, and the approval card offers it behind a
 // quiet toggle under the command: closed at first, so the card keeps its size, opened in place by
@@ -85,9 +86,7 @@ test.beforeAll(async () => {
   await writeFile(join(outside, "run.sh"), "#!/bin/sh\nprintf ran > ran.txt\n");
   await chmod(join(outside, "run.sh"), 0o755);
   current = project;
-  env = Object.fromEntries(
-    Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("HAARNESS_")),
-  ) as Record<string, string>;
+  env = isolatedEnv();
   Object.assign(env, {
     HAARNESS_BIN: binary,
     HAARNESS_HOME: join(root, "home"),

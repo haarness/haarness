@@ -135,8 +135,34 @@ fn valid_binary(path: &Path) -> io::Result<bool> {
     Ok(hex::encode(Sha256::digest(fs::read(path)?)) == SHA256)
 }
 
+/// `existing` with the bundled rg's folder first. When rg cannot be put in
+/// place (a cache folder that cannot be written, a link in it), `existing`
+/// as it is, so terminals and commands still start and find any rg on it.
 pub fn prepend_path(existing: Option<&OsStr>) -> io::Result<OsString> {
-    path_with_binary(&binary_path()?, existing)
+    path_from(binary_path(), existing)
+}
+
+fn path_from(binary: io::Result<PathBuf>, existing: Option<&OsStr>) -> io::Result<OsString> {
+    match binary {
+        Ok(binary) => path_with_binary(&binary, existing),
+        Err(error) => {
+            unavailable(&error);
+            existing.map(OsStr::to_os_string).ok_or(error)
+        }
+    }
+}
+
+/// Says once per process that the bundled rg could not be used: a cache
+/// folder that cannot be written does not mend between commands, and one
+/// line is enough to explain why `rg` is the one on `PATH`, if any.
+fn unavailable(error: &io::Error) {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::warn!(
+            %error,
+            "the bundled ripgrep cannot be extracted; commands and terminals use PATH as it is"
+        );
+    });
 }
 
 fn path_with_binary(binary: &Path, existing: Option<&OsStr>) -> io::Result<OsString> {
@@ -152,11 +178,23 @@ fn path_with_binary(binary: &Path, existing: Option<&OsStr>) -> io::Result<OsStr
 
 /// Keep the existing login-shell behavior, restoring the bundled directory after
 /// profiles run. Pass its path as an argument, never interpolate it as shell code.
+/// When the bundled rg cannot be put in place, the command still runs, with
+/// `PATH` as it is (said once in the log).
 pub fn shell_command(script: &str) -> io::Result<Command> {
-    shell_with_binary(script, &binary_path()?)
+    shell_from(script, binary_path())
 }
 
-fn shell_with_binary(script: &str, binary: &Path) -> io::Result<Command> {
+fn shell_from(script: &str, binary: io::Result<PathBuf>) -> io::Result<Command> {
+    match binary {
+        Ok(binary) => shell_with_binary(script, Some(&binary)),
+        Err(error) => {
+            unavailable(&error);
+            shell_with_binary(script, None)
+        }
+    }
+}
+
+fn shell_with_binary(script: &str, binary: Option<&Path>) -> io::Result<Command> {
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt as _;
@@ -174,23 +212,33 @@ fn shell_with_binary(script: &str, binary: &Path) -> io::Result<Command> {
     #[cfg(not(windows))]
     let mut command = {
         let mut command = Command::new("sh");
+        // The bundled rg's folder goes back first after the profiles ran.
+        let restore = if binary.is_some() {
+            "export PATH=\"$1${PATH:+:$PATH}\"; "
+        } else {
+            ""
+        };
         command
             .args([
                 "-lc",
                 &format!(
-                    "export PATH=\"$1${{PATH:+:$PATH}}\"; shift; \
+                    "{restore}shift; \
                      command unset CDPATH 2>/dev/null || :\n{script}"
                 ),
                 "sh",
             ])
-            .arg(binary.parent().expect("binary directory"))
+            .arg(binary.map_or_else(PathBuf::new, |binary| {
+                binary.parent().expect("binary directory").to_path_buf()
+            }))
             .env_remove("CDPATH");
         command
     };
-    command.env(
-        "PATH",
-        path_with_binary(binary, env::var_os("PATH").as_deref())?,
-    );
+    if let Some(binary) = binary {
+        command.env(
+            "PATH",
+            path_with_binary(binary, env::var_os("PATH").as_deref())?,
+        );
+    }
     Ok(command)
 }
 
@@ -243,6 +291,32 @@ mod tests {
         assert_eq!(fs::read_to_string(outside).unwrap(), "preserve");
     }
 
+    /// A cache folder that cannot be written (or a link in it) leaves the
+    /// bundled rg out, and commands and terminals still start with `PATH` as
+    /// it is.
+    #[test]
+    fn without_the_bundled_rg_commands_run_with_path_as_it_is() {
+        let failed = || Err(io::Error::other("cache folder is read-only"));
+        assert_eq!(
+            path_from(failed(), Some(OsStr::new("/usr/bin:/bin"))).unwrap(),
+            OsString::from("/usr/bin:/bin")
+        );
+        assert!(path_from(failed(), None).is_err());
+        #[cfg(unix)]
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output = shell_from("printf 'ran:%s' \"$#\"", failed())
+                .unwrap()
+                .current_dir(root.path())
+                .env("HOME", root.path())
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "ran:0");
+        }
+    }
+
     /// A login shell for `script` from `folder`, with `home` as its home
     /// folder (where its `.profile` is).
     #[cfg(unix)]
@@ -252,7 +326,7 @@ mod tests {
         home: &Path,
         cdpath: Option<&Path>,
     ) -> std::process::Output {
-        let mut command = shell_with_binary(script, &folder.join("bin/rg")).unwrap();
+        let mut command = shell_with_binary(script, Some(&folder.join("bin/rg"))).unwrap();
         command.current_dir(folder).env("HOME", home);
         if let Some(cdpath) = cdpath {
             command.env("CDPATH", cdpath);
@@ -323,7 +397,7 @@ mod tests {
         // No externally installed rg; the login shell can reset PATH again.
         let output = shell_with_binary(
             "command -v rg; rg --version; printf 'args:%s' \"$#\"",
-            &binary,
+            Some(&binary),
         )
         .unwrap()
         .env("PATH", "/usr/bin:/bin")

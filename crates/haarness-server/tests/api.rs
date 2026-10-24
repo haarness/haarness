@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 mod content_filter;
 #[path = "support/reliability.rs"]
 mod reliability;
+#[path = "support/subagent_results.rs"]
+mod subagent_results;
 
 fn git_fixture_command<'a>(directory: &std::path::Path, args: impl IntoIterator<Item = &'a str>) {
     let output = std::process::Command::new("git")
@@ -6210,6 +6212,150 @@ async fn direct_tool_after_undo_commits_the_boundary_before_mutating() {
         runtime.unrevert(thread.id).await.is_err(),
         "redo is unavailable after the direct action commits undo"
     );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+/// A runtime over `workspace` with snapshots on and edits allowed.
+fn undo_fixture(root: &std::path::Path, workspace: &std::path::Path) -> AgentRuntime {
+    let database = root.join("db.sqlite");
+    let store = Arc::new(SqliteStore::open(&database).unwrap());
+    let snapshots = Arc::new(
+        haarness_store::SqliteSnapshotStore::open(&database, workspace.to_path_buf()).unwrap(),
+    );
+    AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(
+            workspace.to_path_buf(),
+        )),
+        EventBus::new(64),
+        workspace.to_path_buf(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            config.base_rules.push(haarness_core::PermissionRule {
+                pattern: "write:*".into(),
+                decision: haarness_core::PermissionDecision::Allow,
+            });
+            config
+        },
+    )
+    .with_snapshots(snapshots)
+}
+
+#[tokio::test]
+async fn undo_restores_the_files_a_persons_shell_command_wrote() {
+    let root = std::env::temp_dir().join(format!("haarness-shell-undo-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::write(workspace.join("old.txt"), "kept\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Shell undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // A person's own `!` command, as the TUI and Desktop send it.
+    let result = runtime
+        .run_shell(
+            thread.id,
+            "printf new > note.txt && printf changed > old.txt".into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &result.data,
+            haarness_protocol::ItemData::ToolResult {
+                is_error: false,
+                ..
+            }
+        ),
+        "{:?}",
+        result.data
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("old.txt"))
+            .await
+            .unwrap(),
+        "changed"
+    );
+    runtime.revert(thread.id, None).await.unwrap();
+    assert!(!workspace.join("note.txt").exists());
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("old.txt"))
+            .await
+            .unwrap(),
+        "kept\n"
+    );
+    runtime.unrevert(thread.id).await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("note.txt"))
+            .await
+            .unwrap(),
+        "new"
+    );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn undo_of_a_move_brings_back_the_old_path_and_removes_the_new() {
+    let root = std::env::temp_dir().join(format!("haarness-move-undo-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join("src"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join("src/old.rs"), "fn one() {}\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Move undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let patch = "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n-fn one() {}\n+fn two() {}\n*** End Patch\n";
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "!tool apply_patch {}",
+                serde_json::json!({ "input": patch })
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(!workspace.join("src/old.rs").exists());
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("src/new.rs"))
+            .await
+            .unwrap(),
+        "fn two() {}\n"
+    );
+    runtime.revert(thread.id, None).await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("src/old.rs"))
+            .await
+            .unwrap(),
+        "fn one() {}\n"
+    );
+    assert!(!workspace.join("src/new.rs").exists());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -12993,31 +13139,43 @@ async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A test never writes preview versions or saved tool output into the data
+/// folder of the person running it (Upstream PR #1145's rule): a test binary
+/// gets a data folder of its own under the system temp folder.
+#[test]
+fn tests_never_resolve_the_persons_own_data_folder() {
+    if std::env::var_os("HAARNESS_DATA_DIR").is_some()
+        || std::env::var_os("HAARNESS_HOME").is_some()
+    {
+        return;
+    }
+    let folder = haarness_server::data_folder().unwrap();
+    assert!(
+        folder.starts_with(std::env::temp_dir()),
+        "{}",
+        folder.display()
+    );
+    if let Some(project) = directories::ProjectDirs::from("dev", "haarness", "haarness") {
+        assert!(
+            !folder.starts_with(project.data_local_dir()),
+            "{}",
+            folder.display()
+        );
+    }
+    if let Some(home) = haarness_protocol::home_dir() {
+        assert!(
+            !folder.starts_with(home.join(".local/share")),
+            "{}",
+            folder.display()
+        );
+    }
+    let workspace = std::env::temp_dir();
+    assert!(preview_versions(&workspace).starts_with(folder.join("preview")));
+}
+
 /// Where `preview` keeps a workspace's versions, as the server finds it.
 fn preview_versions(workspace: &std::path::Path) -> std::path::PathBuf {
-    use sha2::Digest as _;
-    let root = std::env::var_os("HAARNESS_DATA_DIR")
-        .map(|root| std::path::PathBuf::from(root).join("data"))
-        .or_else(|| {
-            std::env::var_os("HAARNESS_HOME")
-                .map(std::path::PathBuf::from)
-                .filter(|root| root.is_absolute())
-                .map(|root| root.join("data"))
-        })
-        .unwrap_or_else(|| {
-            directories::ProjectDirs::from("dev", "haarness", "haarness")
-                .unwrap()
-                .data_local_dir()
-                .to_owned()
-        });
-    let key = sha2::Sha256::digest(
-        workspace
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .as_bytes(),
-    );
-    root.join("preview").join(format!("{key:x}"))
+    haarness_server::preview::versions_folder(workspace).unwrap()
 }
 
 #[tokio::test]
