@@ -20,6 +20,7 @@ export type BtwEvent = ({ "text": string; "type": "delta" } | { "text": string; 
 export type BtwRequest = { "history"?: Array<BtwTurn>; "question": string; "requestId"?: RequestId };
 export type BtwResponse = { "answer": string; "inputTokens": number; "outputTokens": number };
 export type BtwTurn = { "answer": string; "question": string };
+export type ChatListQuery = { "threadId"?: string };
 export type ChatOptions = { "agent"?: (string | null); "attachments"?: Array<string>; "autoApprove"?: boolean; "command"?: (string | null); "model"?: (string | null); "provider"?: (string | null); "reasoningEffort"?: (string | null); "requestId"?: RequestId; "resources"?: Array<ResourceMention>; "synthetic"?: boolean; "tools"?: ({ [key: string]: boolean } | null) };
 export type ChromeBlock = "browser-control" | "project";
 export type ChromeHostSettings = { "blockedBy"?: (null | ChromeBlock); "defaultBrowser": DefaultBrowser; "enabled": boolean; "everConnected": boolean; "globalEnabled": boolean };
