@@ -874,11 +874,11 @@ fn user_credential(scheme: Option<&str>, name: &str) -> bool {
 /// `@` or `\`; the password and host run to a space (not a
 /// backslash-escaped one), `"`, `/`, `?`, `#` or `\`, so a Windows path is
 /// never read as one and the text is read in linear time. A password never
-/// starts with `@`, `/`, `:`, `<`, `-` or a space, so `npm:@scope/pkg`,
-/// `host:/path`, `crate::path@0x10`, `MAIL FROM:<me@example.com>`,
-/// `${USER:-root}@host` and `name: me@example.com` stay, and a word after
-/// an `@` is the host of an ssh target (`alex@host:icon@2x.png`), not a
-/// user name. See [`hidden_userinfo`] for what else stays.
+/// starts with `@`, `/`, `<` or a space, so `npm:@scope/pkg`, `host:/path`,
+/// `MAIL FROM:<me@example.com>` and `name: me@example.com` stay, nor with
+/// the `-` of a shell default (`${USER:-root}@host`); and the host and path
+/// of an scp target (`alex@host:icon@2x.png`) are no user and password.
+/// See [`hidden_userinfo`] for what else stays.
 fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     // What may stand before a user name.
     fn head(byte: u8) -> bool {
@@ -911,7 +911,7 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     let mut at = 0;
     // Whether `at` may start a user name.
     let mut start = true;
-    // The end and last `@` of the word a cut password was last looked for in.
+    // The word a cut password was last looked for in.
     let mut word = None;
     while at < bytes.len() {
         if !start {
@@ -934,9 +934,12 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
             continue;
         }
         let password = colon + 1;
+        // A shell default (`${USER:-root}@host`) is no user name.
+        let default = user >= 2 && &bytes[user - 2..user] == b"${";
         if bytes.get(password).is_none_or(|&byte| {
             byte.is_ascii_whitespace()
-                || matches!(byte, b'"' | b'/' | b'?' | b'#' | b'@' | b':' | b'<' | b'-')
+                || matches!(byte, b'"' | b'/' | b'?' | b'#' | b'@' | b'<')
+                || (default && byte == b'-')
         }) {
             at = password;
             start = false;
@@ -962,7 +965,7 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
         }
         let found = &text[user..end];
         if let Some(last) = found.rfind('@')
-            && (user == 0 || bytes[user - 1] != b'@')
+            && !scp_target(bytes, user, &found[last + 1..])
             && let Some(hidden) = hidden_userinfo(&found[..last], &found[last + 1..])
         {
             shown.push_str(&text[copied..user]);
@@ -980,72 +983,109 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     Cow::Owned(shown)
 }
 
+/// Whether the bare `host:path@after` starting at `user` is the target of an
+/// scp or ssh command (`scp alex@host:icon@2x.png .`): a plain account name
+/// and `@` right before it, at the start of a word, and no port after the
+/// last `@`, which a proxy's `alex@corp:pw@proxy:8080` has.
+fn scp_target(bytes: &[u8], user: usize, after: &str) -> bool {
+    if user < 2 || bytes[user - 1] != b'@' {
+        return false;
+    }
+    let account = bytes[..user - 1]
+        .iter()
+        .rposition(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+        .map_or(0, |index| index + 1);
+    let plain = account < user - 1 && (account == 0 || bytes[account - 1].is_ascii_whitespace());
+    let host = after
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+        })
+        .map_or(after.len(), |end| end);
+    plain && !after[host..].starts_with(':')
+}
+
 /// Where the `user:p/ss@host:port` that a raw `/`, `#`, `?` or `\` cut at
 /// `cut` ends: past the host and port after the last `@` of the word; `None`
-/// unless a host and a port follow that `@`. `word` keeps the end and last
-/// `@` of the word last read, which every cut inside it shares, so a long
-/// word is read once.
-fn bare_password_end(
-    bytes: &[u8],
-    cut: usize,
-    word: &mut Option<(usize, Option<usize>)>,
-) -> Option<usize> {
-    let (end, last) = match *word {
-        Some((end, last)) if cut < end => (end, last),
+/// unless a host and a port follow that `@`. `word` keeps, for the word last
+/// read, its end, its last `@` and where the host and port after that `@`
+/// end, which every cut inside it shares, so a long word is read once.
+fn bare_password_end(bytes: &[u8], cut: usize, word: &mut Option<BareWord>) -> Option<usize> {
+    let read = match *word {
+        Some(read) if cut < read.end => read,
         _ => {
-            let mut end = cut;
-            let mut last = None;
-            while let Some(&byte) = bytes.get(end) {
-                match byte {
-                    b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
-                    _ if byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`') => break,
-                    b'@' => {
-                        last = Some(end);
-                        end += 1;
-                    }
-                    _ => end += 1,
-                }
-            }
-            let end = end.min(bytes.len());
-            *word = Some((end, last));
-            (end, last)
+            let read = BareWord::read(bytes, cut);
+            *word = Some(read);
+            read
         }
     };
-    let at = last.filter(|&at| at > cut)?;
-    let host = at
-        + 1
-        + bytes[at + 1..end]
-            .iter()
-            .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))?;
-    if host == at + 1 || bytes[host] != b':' {
-        return None;
+    read.last.filter(|&at| at > cut)?;
+    read.port_end
+}
+
+/// A word [`bare_password_end`] read: where it ends, its last `@`, and where
+/// a host and a port after that `@` end, when they do.
+#[derive(Clone, Copy)]
+struct BareWord {
+    end: usize,
+    last: Option<usize>,
+    port_end: Option<usize>,
+}
+
+impl BareWord {
+    fn read(bytes: &[u8], from: usize) -> Self {
+        let mut end = from;
+        let mut last = None;
+        while let Some(&byte) = bytes.get(end) {
+            match byte {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+                _ if byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`') => break,
+                b'@' => {
+                    last = Some(end);
+                    end += 1;
+                }
+                _ => end += 1,
+            }
+        }
+        let end = end.min(bytes.len());
+        let port_end = last.and_then(|at| {
+            let host = at
+                + 1
+                + bytes[at + 1..end].iter().position(|byte| {
+                    !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+                })?;
+            if host == at + 1 || bytes[host] != b':' {
+                return None;
+            }
+            let port = host
+                + 1
+                + bytes[host + 1..end]
+                    .iter()
+                    .position(|byte| !byte.is_ascii_digit())
+                    .unwrap_or(end - host - 1);
+            (port > host + 1 && (port == end || bytes[port] == b'/')).then_some(port)
+        });
+        Self {
+            end,
+            last,
+            port_end,
+        }
     }
-    let port = host
-        + 1
-        + bytes[host + 1..end]
-            .iter()
-            .position(|byte| !byte.is_ascii_digit())
-            .unwrap_or(end - host - 1);
-    (port > host + 1 && (port == end || bytes[port] == b'/')).then_some(port)
 }
 
 /// For `info@after`, a bare `user:password@host` that [`bare_userinfo`]
-/// found: where in `info` the hidden part starts (after an address scheme
+/// found: where in `info` the hidden part starts (after an address label
 /// such as `mailto:`), or `None` when it holds no credential.
 ///
-/// These stay: what pins an image or a package rather than names a host
-/// (`alpine:3.19@sha256:…`, `node:20@v1.2.3`); an `npm:` or `jsr:` spec
-/// (`npm:pkg@1.0`); an IPv6 address (`2001:db8::1@eth0`); a time
+/// Only shapes that cannot be a user and password stay: what pins an image
+/// or a package rather than names a host (`alpine:3.19@sha256:…`,
+/// `node:20@v1.2.3`); an `npm:` or `jsr:` spec (`npm:pkg@1.0`); a time
 /// (`10:15@home`, `3:30pm@office`, `2026-10-24T08:00:00Z@db1`) or a ratio
-/// (`16:9@2x`); an address after `mailto:`, `sip:`, `xmpp:`, `acct:`, a
-/// cloud member kind (`serviceAccount:`, `group:`, `domain:`, `principal:`)
-/// or a mail header or search field (`from:`, `to:`, `cc:`, `bcc:`,
-/// `email:`), unless a second `:` says it holds a password; and an email
-/// address after any label (`user:alex@example.com`, `owner:a@b.co`), or any
-/// address after a capitalised field name as Go prints a struct
-/// (`Email:alex@localhost`). An address there is a local part a mailbox may
-/// have, then a host without a port: emails are common and passwords there
-/// are rare, so `user:pw@proxy:3128` and `root:pw@tcp(db)` still go.
+/// (`16:9@2x`); and an address after a label that names one: `mailto:`,
+/// `sip:`, `xmpp:`, `acct:`, a cloud member kind (`serviceAccount:`,
+/// `group:`, `domain:`, `principal:`), a mail or search field (`from:`,
+/// `to:`, `cc:`, `bcc:`, `email:`, Go's `Email:`), unless a second `:` says
+/// it holds a password. `user:alex@example.com` is hidden: it reads as a
+/// user and password too.
 fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
     // An image digest (`sha256:` with a letter, which no port has, or a
     // long hex run, also after the free-text masker hid it) or a version.
@@ -1073,7 +1113,6 @@ fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
                 .all(|byte| byte.is_ascii_digit() || more.contains(&byte))
     };
     if pinned
-        || info.contains("::")
         || TIME.is_match(info)
         || (numeric(scheme, b"") && numeric(rest, b":."))
         || (["npm", "jsr"]
@@ -1104,29 +1143,6 @@ fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
     .any(|address| scheme.eq_ignore_ascii_case(address))
     {
         return rest.contains(':').then_some(scheme.len() + 1);
-    }
-    // A mailbox's local part, then a host with no port after it.
-    let mailbox = !rest.is_empty()
-        && rest.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b'+' | b'-')
-        });
-    let host = after
-        .find(|character: char| {
-            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
-        })
-        .map_or(after, |end| &after[..end]);
-    let port = after[host.len()..].starts_with(':');
-    if mailbox && !host.is_empty() && !port {
-        let domain = host.rsplit_once('.').is_some_and(|(name, top)| {
-            !name.is_empty() && top.len() >= 2 && top.bytes().all(|byte| byte.is_ascii_alphabetic())
-        });
-        let field = scheme.starts_with(|character: char| character.is_ascii_uppercase())
-            && scheme
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'));
-        if domain || field {
-            return None;
-        }
     }
     Some(0)
 }
@@ -1577,8 +1593,8 @@ mod tests {
                 "host=[redacted]@h.fixture.test:443",
             ),
             (
-                "getaddrinfo ENOTFOUND user:PRIVATE@h.fixture.test:443",
-                "getaddrinfo ENOTFOUND [redacted]@h.fixture.test:443",
+                "getaddrinfo ENOTFOUND user:PRIVATE@h.fixture.test",
+                "getaddrinfo ENOTFOUND [redacted]@h.fixture.test",
             ),
             (
                 "proxy answered 407 for 'user:PRIVATE@h.fixture.test:443'",
@@ -1616,11 +1632,10 @@ mod tests {
                 "CONNECT [redacted]@sha256:8080",
             ),
             ("user:PRIVATE@10.0.0.1:3128", "[redacted]@10.0.0.1:3128"),
-            (
-                "1000:PRIVATE@h.fixture.test:80",
-                "[redacted]@h.fixture.test:80",
-            ),
-            // A local part a mailbox cannot have, or a host with no name.
+            ("1000:PRIVATE@h.fixture.test", "[redacted]@h.fixture.test"),
+            // When in doubt, hidden: an address-like password, a label that
+            // names a user, a capital or a `-`, `::` in the password, a proxy
+            // reached as `alex@corp`, a host with no port.
             ("db=root:PRIVATE@/app", "db=[redacted]@/app"),
             (
                 "root:PRIVATE@unix(/tmp/mysql.sock)/app",
@@ -1634,6 +1649,45 @@ mod tests {
                 "Admin:PRIVATE@db.fixture.test:5432",
                 "[redacted]@db.fixture.test:5432",
             ),
+            (
+                "admin:S3cretPRIVATE.pw@db.example.com",
+                "[redacted]@db.example.com",
+            ),
+            (
+                "export https_proxy=alex:PRIVATEHunter2@proxy.corp.example.com",
+                "export https_proxy=[redacted]@proxy.corp.example.com",
+            ),
+            (
+                "db=Root:PRIVATE@tcp(db:3306)/app",
+                "db=[redacted]@tcp(db:3306)/app",
+            ),
+            ("SA:PRIVATE@sqlhost", "[redacted]@sqlhost"),
+            ("dsn root:PRIVATE@db.internal", "dsn [redacted]@db.internal"),
+            (
+                "https_proxy=alex@corp.example.com:PRIVATE@proxy.corp.example.com:8080",
+                "https_proxy=alex@[redacted]@proxy.corp.example.com:8080",
+            ),
+            (
+                "user:PRIVATE-x@proxy.example.com:3128",
+                "[redacted]@proxy.example.com:3128",
+            ),
+            (
+                "user:-PRIVATE@proxy.example.com:3128",
+                "[redacted]@proxy.example.com:3128",
+            ),
+            (
+                "admin:Pa::PRIVATE@proxy.example.com:3128",
+                "[redacted]@proxy.example.com:3128",
+            ),
+            (
+                "user:PRIVATE@proxy.corp.local",
+                "[redacted]@proxy.corp.local",
+            ),
+            (
+                "member=user:PRIVATE@example.com",
+                "member=[redacted]@example.com",
+            ),
+            ("Owner:PRIVATE@localhost", "[redacted]@localhost"),
         ] {
             assert_eq!(text(input), output, "{input}");
             assert_eq!(text(output), output, "{output}");
@@ -1656,41 +1710,31 @@ mod tests {
             r"C:\proj\node_modules\.pnpm\react@18.2.0\node_modules\react",
             "C:/proj/node_modules/@babel/core/lib/index.js",
             "listening on 127.0.0.1:4096, [::1]:4096",
-            "tokio::runtime::task@0x10",
             "refs/heads/main@{1} HEAD@{2026-10-24 08:00:00}",
             r#"{"name":"a:b","email":"someone@h.fixture.test"}"#,
             r#"{\"url\":\"http://localhost:3000\",\"email\":\"me@example.com\"}"#,
             "at async run (node:internal/process/task_queues:95:5)",
             "go: example.com/m@v1.0.0: missing go.sum entry",
             "meet 10:15@home, 10:15:30@main, icon 16:9@2x",
-            // Addresses after a label, which an email is far more often than a
-            // password: cloud members, mail headers and search fields, Go's
-            // struct printing, and a name a DNS lookup or a log line quotes.
-            "gcloud projects add-iam-policy-binding p --member=user:alex@example.com --role=roles/viewer",
             "--iam-account=serviceAccount:ci@proj.iam.gserviceaccount.com",
-            r#""members": ["user:alex@example.com", "group:devs@example.com", "domain:example.com"]"#,
+            // Addresses after a label that names one: cloud members, mail
+            // headers and search fields, and Go's struct printing.
+            r#""members": ["group:devs@example.com", "domain:example.com"]"#,
             "principal:alex@example.com",
             "> MAIL FROM:<alex@example.com> SIZE=1024",
             "> RCPT TO:<bob@example.com>",
             "search from:alice@example.com to:bob@example.com cc:c@example.com bcc:d@example.com",
             "email:alex@example.com,name:Alex",
-            "user.email:alex@example.com AND status:active",
             "To:alex@example.com",
-            "login ok for account:alex@example.com",
             r#"level=info msg="created user" user={ID:42 Email:alex@example.com Role:admin}"#,
             "&{Name:alex Email:alex@example.com Admin:false}",
-            "Owner:alex@localhost",
-            "getaddrinfo ENOTFOUND user:alex@h.fixture.test",
-            "scp host:db@2026.tgz .",
             // Shell defaults, ssh targets and protocol specs.
             "ssh ${DEPLOY_USER:-deploy}@${HOST} uptime",
             "scp build.tgz ${USER:-root}@10.0.0.5:/tmp/",
             "scp alex@build.fixture.test:icon@2x.png .",
-            r#"resolution: "pkg@patch:pkg@npm%3A1.0.0#~/.yarn/patches/pkg.patch""#,
-            // Times and IPv6 addresses.
+            // Times.
             "backup finished 2026-10-24T08:00:00Z@db1 in 3s",
             "call me at 3:30pm@office, time 12:30:45.123@worker-3",
-            "2001:db8::1@eth0 [2001:db8::1]:443@x fe80::1%en0@host",
         ] {
             assert_eq!(text(kept), kept);
         }
@@ -1705,7 +1749,7 @@ mod tests {
         );
         // MCP arguments in those forms stay as written, so they stay editable.
         let kept = [
-            "--member=user:alex@example.com",
+            "--member=group:devs@example.com",
             "serviceAccount:ci@proj.iam.gserviceaccount.com",
             "alex@build.fixture.test:icon@2x.png",
             "${USER:-root}@10.0.0.5:/tmp/",
@@ -1844,6 +1888,8 @@ mod tests {
             "x(".repeat(100_000),
             "a:b/".repeat(100_000),
             format!("a:b/{}@h:1", "c/".repeat(100_000)),
+            // Every cut shares the word's host, read once.
+            format!("{}@{}", "a:b/".repeat(40_000), "h".repeat(160_000)),
         ] {
             let _ = bare_userinfo(&run, "[redacted]");
             let _ = text(&run);
