@@ -8914,6 +8914,9 @@ impl RunnerTask {
                 let mut blocked = None;
                 let mut finished = false;
                 let mut finish_reason = String::new();
+                // Text that is more than whitespace streamed in this round,
+                // whatever reasoning flushed it into an item meanwhile.
+                let mut wrote_text = false;
                 let mut saw_provider_event = false;
                 loop {
                     let event = tokio::select! {
@@ -9010,6 +9013,7 @@ impl RunnerTask {
                                 .await?;
                             // Reasoning after this text begins where it ends.
                             thought_from = std::time::Instant::now();
+                            wrote_text |= !delta.trim().is_empty();
                             streamed.push_str(&delta);
                             text.push_str(&delta);
                             self.set_status("responding", None);
@@ -9150,7 +9154,6 @@ impl RunnerTask {
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
-                let wrote_text = !text.trim().is_empty();
                 self.flush_reasoning_segment(&mut reasoning, thought_from)
                     .await?;
                 if blocked.is_some() {
