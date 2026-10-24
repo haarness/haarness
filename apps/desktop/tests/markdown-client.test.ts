@@ -75,11 +75,15 @@ test("worker transport coalesces updates, suppresses stale replies, disposes own
   }
 });
 
-test("a client drawn here draws each text as it is given, with no worker", (context) => {
+test("a client drawn here draws each text as it is given, and only starts the worker", (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const original = globalThis.Worker;
-  let made = 0;
-  globalThis.Worker = class { constructor() { made++; } } as unknown as typeof Worker;
+  let made = 0, posted = 0;
+  globalThis.Worker = class {
+    constructor() { made++; }
+    postMessage() { posted++; }
+    terminate() {}
+  } as unknown as typeof Worker;
   const html: string[] = [];
   const drawn: string[] = [];
   const client = createMarkdownClient((patch) => {
@@ -92,7 +96,9 @@ test("a client drawn here draws each text as it is given, with no worker", (cont
     assert.deepEqual(drawn, ["<p><strong>Saved</strong> reply</p>\n"]);
     client.update("**Saved** reply\n\n- and a list", false);
     assert.equal(drawn.at(-1), "<p><strong>Saved</strong> reply</p>\n<ul>\n<li>and a list</li>\n</ul>\n");
-    assert.equal(made, 0);
+    // The worker is started for the replies streamed next, and given nothing.
+    assert.equal(made, 1);
+    assert.equal(posted, 0);
   } finally {
     client.dispose();
     context.mock.timers.tick(30_000);
