@@ -30,7 +30,9 @@ test("agent switch discloses model and scope; filtered responses stay visible", 
   const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-provider-ui-")));
   const workspace = join(root, "workspace");
   await mkdir(join(workspace, ".haarness/agents"), { recursive: true });
-  await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n[lsp]\nenabled=false\n');
+  // Chats start in Auto, where the reviewer answers an agent switch: the
+  // disclosure is on the card a person sees in Review.
+  await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[lsp]\nenabled=false\n');
   await writeFile(join(workspace, ".haarness/agents/reviewer.md"), '---\ndescription: Fixture reviewer\nmode: primary\nmodel: openai/gpt-5.4-mini\n---\nReply briefly.\n');
   execFileSync("git", ["init", "-q", workspace]);
   const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
