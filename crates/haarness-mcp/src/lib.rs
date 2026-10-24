@@ -449,15 +449,21 @@ impl McpRegistry for NativeMcpRegistry {
         .await
     }
     async fn prompts(&self, name: &str) -> CoreResult<Vec<Value>> {
-        self.worker_request(name, |reply| WorkerCommand::Prompts { reply })
-            .await
+        self.bounded(
+            name,
+            self.worker_request(name, |reply| WorkerCommand::Prompts { reply }),
+        )
+        .await
     }
     async fn get_prompt(&self, name: &str, prompt: &str, arguments: Value) -> CoreResult<Value> {
-        self.worker_request(name, |reply| WorkerCommand::GetPrompt {
-            prompt: prompt.to_owned(),
-            arguments,
-            reply,
-        })
+        self.bounded(
+            name,
+            self.worker_request(name, |reply| WorkerCommand::GetPrompt {
+                prompt: prompt.to_owned(),
+                arguments,
+                reply,
+            }),
+        )
         .await
     }
 }
@@ -892,8 +898,9 @@ impl NativeMcpRegistry {
     }
 
     /// `request`, given as long as `name`'s connection timeout (30 s unless
-    /// its `timeout_ms` says otherwise). A resource listing or read that
-    /// takes longer ends with an error; the server is told to stop a read.
+    /// its `timeout_ms` says otherwise). A resource or prompt listing, a
+    /// resource read or getting a prompt that takes longer ends with an
+    /// error; the server is told to stop a read or a prompt it was getting.
     async fn bounded<T>(
         &self,
         name: &str,
@@ -1569,15 +1576,19 @@ fn spawn_worker(
                     )
                     .await;
                 }
-                WorkerCommand::Prompts { reply } => {
+                WorkerCommand::Prompts { mut reply } => {
                     let result = if peer
                         .peer_info()
                         .is_some_and(|info| info.capabilities.prompts.is_some())
                     {
-                        peer.list_all_prompts()
-                            .await
-                            .map_err(mcp_error)
-                            .and_then(json_values)
+                        // As a resource listing: one nobody waits for any
+                        // more is dropped, so the server's next request runs.
+                        tokio::select! {
+                            () = reply.closed() => continue,
+                            result = peer.list_all_prompts() => {
+                                result.map_err(mcp_error).and_then(json_values)
+                            }
+                        }
                     } else {
                         Ok(Vec::new())
                     };
@@ -1593,13 +1604,15 @@ fn spawn_worker(
                     let request = rmcp::model::ClientRequest::GetPromptRequest(
                         rmcp::model::GetPromptRequest::new(params),
                     );
+                    // Getting a prompt changes nothing: once nobody waits for
+                    // it, the server is told to stop.
                     dispatch(
                         &peer,
                         &mut calls,
                         request,
                         reply,
                         limit.clone(),
-                        false,
+                        true,
                         |result| match result {
                             rmcp::model::ServerResult::GetPromptResult(result) => {
                                 json_value(result)
@@ -3009,6 +3022,133 @@ mod tests {
                 .as_deref()
                 .is_some_and(|detail| detail.contains("after 300 ms"))
         );
+        server.abort();
+    }
+
+    /// A server that offers prompts and never answers a prompt request, but
+    /// answers its tool at once. `methods` records what it was sent.
+    async fn run_silent_prompts_fixture(
+        listener: TcpListener,
+        methods: Arc<parking_lot::Mutex<Vec<String>>>,
+    ) {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let methods = methods.clone();
+            tokio::spawn(async move {
+                let (request, _, body) = read_http_exchange(&mut stream).await;
+                if !request.starts_with("POST ") {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let method = message["method"].as_str().unwrap_or_default().to_owned();
+                methods.lock().push(method.clone());
+                let Some(id) = message.get("id").cloned() else {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                };
+                let result = match method.as_str() {
+                    "initialize" => json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {}, "prompts": {} },
+                        "serverInfo": { "name": "silent-prompts", "version": "1.0.0" }
+                    }),
+                    "tools/list" => json!({
+                        "tools": [{ "name": "quick", "inputSchema": { "type": "object" } }]
+                    }),
+                    "tools/call" => json!({
+                        "content": [{ "type": "text", "text": "quick answer" }],
+                        "isError": false
+                    }),
+                    // The answer's event stream opens and stays silent.
+                    "prompts/list" | "prompts/get" => {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
+                        tokio::time::sleep(Duration::from_secs(600)).await;
+                        return;
+                    }
+                    method => panic!("unexpected fixture method {method:?}"),
+                };
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                )
+                .await;
+            });
+        }
+    }
+
+    /// A prompt listing the server never answers ends at the server's
+    /// timeout, and the server's other requests are not held behind it.
+    #[tokio::test]
+    async fn a_prompt_listing_that_never_answers_ends_and_frees_the_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let methods = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_silent_prompts_fixture(listener, methods.clone()));
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure("silent", streamable_config(address, 300))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), registry.prompts("silent"))
+            .await
+            .expect("the listing ends")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "tool error: MCP server \"silent\" did not answer within 300 ms"
+        );
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.call("silent", "mcp__silent__quick", json!({})),
+        )
+        .await
+        .expect("a tool call after the listing is not held behind it")
+        .unwrap();
+        assert_eq!(output.text, "quick answer");
+        server.abort();
+    }
+
+    /// Getting a prompt ends at the server's timeout, and the server is told
+    /// to stop.
+    #[tokio::test]
+    async fn getting_a_prompt_that_never_answers_ends_and_tells_the_server_to_stop() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let methods = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_silent_prompts_fixture(listener, methods.clone()));
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure("silent", streamable_config(address, 300))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.get_prompt("silent", "review", json!({})),
+        )
+        .await
+        .expect("getting the prompt ends")
+        .unwrap_err();
+        assert!(error.to_string().contains("did not answer within 300 ms"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !methods
+                .lock()
+                .iter()
+                .any(|method| method == "notifications/cancelled")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the server is told to stop");
         server.abort();
     }
 

@@ -7,6 +7,8 @@
   provider, follow permission rules, and read in plain words in the TUI.
 - A server with `"apps": false` is a plain MCP server (no page, its page refused, no app notice in the TUI), and
   Desktop's switch request turns its apps back on in the server's own file.
+- A prompt listing or a prompt a server never answers ends at the server's timeout (the listing no longer holds every
+  later request to that server, a tool call included) and the server is told to stop getting the prompt.
 - `${keychain:NAME}` resolves when a server starts, from `haarness mcp secret set` or Desktop's request; a missing
   entry fails that server naming the reference; the setting stays as written and no log holds the secret.
 
@@ -48,6 +50,7 @@ settings.write_text(json.dumps({
         'keyed': server('env.py', env={'TOKEN': '${keychain:fixture-token}', 'AWKWARD': '${keychain:awkward}',
                                        'HOME_SEEN': '${HOME}'}),
         'missing': server('env.py', env={'TOKEN': 'Bearer ${keychain:absent-token}'}),
+        'silent': server('prompts.py', timeoutMs=2000, env={'CANCEL_LOG': str(root/'prompt-cancels')}),
     },
 }, indent=2) + '\n')
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
@@ -102,7 +105,7 @@ try:
     check('`haarness mcp secret set` stores a piped secret without showing it')
 
     connection = desktop({'action': 'connect'})
-    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing'}
+    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
@@ -177,6 +180,32 @@ try:
     api('/mcp/app/reconnect', {})
     api('/mcp/hidden/reconnect', {})
     check('the resource tools are offered only while a server declares resources')
+
+    # --- prompt requests a server never answers
+    def refused(path, body=None):
+        started = time.monotonic()
+        try:
+            api(path, body)
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())['message'], time.monotonic() - started
+        raise AssertionError(f'{path} answered')
+    status, message, waited = refused('/mcp/silent/prompts')
+    assert status == 422 and message == 'tool error: MCP server "silent" did not answer within 2 s', (status, message)
+    assert waited < 10, waited
+    try:
+        cli('mcp', 'prompts', 'silent')
+        raise AssertionError('`haarness mcp prompts` answered')
+    except subprocess.CalledProcessError as error:
+        assert 'MCP server "silent" did not answer within 2 s' in error.stderr, error.stderr
+    started = time.monotonic()
+    assert call(thread, 'mcp__silent__ping', {})['output'] == 'pong'
+    assert time.monotonic() - started < 10, 'the tool call waited behind the listing'
+    check(f'a prompt listing the server never answers ends after its 2 s timeout ({waited:.1f} s), in the CLI too, and its next tool call answers at once')
+    status, message, waited = refused('/mcp/silent/prompts/review', {})
+    assert status == 422 and 'did not answer within 2 s' in message, (status, message)
+    until(lambda: (root/'prompt-cancels').exists() and 'cancelled' in (root/'prompt-cancels').read_text(),
+          'the server was not told to stop getting the prompt', 10)
+    check('getting a prompt the server never answers ends after its timeout and the server is told to stop')
 
     # --- the 64 MB message limit
     big = call(thread, 'mcp__flood__big', {})
