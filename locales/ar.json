@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "قاعدةٌ تُبقي هذا المورد بعيدًا عن النموذج",
   "did not answer within {seconds} s": "لم يُجب خلال {seconds} ث",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "لا يستطيع هذا الخادم قراءة موارد MCP. أزلها من الرسالة أو حدّث الخادم.",
-  "Sent again as it was read.": "يُرسَل مرة أخرى كما قُرئ."
+  "Sent again as it was read.": "يُرسَل مرة أخرى كما قُرئ.",
+  "No folder": "بلا مجلد",
+  "Open folder…": "فتح مجلد…",
+  "What should we work on?": "على ماذا نعمل؟",
+  "New chat without a folder": "محادثة جديدة بلا مجلد",
+  "Couldn’t open these chats.": "تعذّر فتح هذه المحادثات.",
+  "This chat gets a folder of its own when you send its first message.": "تحصل هذه المحادثة على مجلد خاص بها عند إرسال رسالتها الأولى.",
+  "Folder for new chat: {name}": "مجلد المحادثة الجديدة: {name}",
+  "Chat folder: {name}": "مجلد المحادثة: {name}",
+  "Choose a folder": "اختر مجلدًا"
 }

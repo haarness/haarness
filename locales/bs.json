@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "pravilo drži ovaj resurs dalje od modela",
   "did not answer within {seconds} s": "nije odgovorio u roku od {seconds} s",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "Ovaj server ne može čitati MCP resurse. Uklonite ih iz poruke ili ažurirajte server.",
-  "Sent again as it was read.": "Šalje se ponovo onako kako je pročitan."
+  "Sent again as it was read.": "Šalje se ponovo onako kako je pročitan.",
+  "No folder": "Bez foldera",
+  "Open folder…": "Otvori folder…",
+  "What should we work on?": "Na čemu radimo?",
+  "New chat without a folder": "Novi chat bez foldera",
+  "Couldn’t open these chats.": "Ovi chatovi se nisu mogli otvoriti.",
+  "This chat gets a folder of its own when you send its first message.": "Ovaj chat dobija vlastiti folder kada pošaljete prvu poruku.",
+  "Folder for new chat: {name}": "Folder novog chata: {name}",
+  "Chat folder: {name}": "Folder chata: {name}",
+  "Choose a folder": "Odaberite folder"
 }

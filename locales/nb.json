@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "en regel holder denne ressursen unna modellen",
   "did not answer within {seconds} s": "svarte ikke innen {seconds} s",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "Denne serveren kan ikke lese MCP-ressurser. Fjern dem fra meldingen, eller oppdater serveren.",
-  "Sent again as it was read.": "Sendes på nytt slik den ble lest."
+  "Sent again as it was read.": "Sendes på nytt slik den ble lest.",
+  "No folder": "Ingen mappe",
+  "Open folder…": "Åpne mappe…",
+  "What should we work on?": "Hva skal vi jobbe med?",
+  "New chat without a folder": "Ny chat uten mappe",
+  "Couldn’t open these chats.": "Kunne ikke åpne disse chattene.",
+  "This chat gets a folder of its own when you send its first message.": "Denne chatten får sin egen mappe når du sender den første meldingen.",
+  "Folder for new chat: {name}": "Mappe for ny chat: {name}",
+  "Chat folder: {name}": "Chatmappe: {name}",
+  "Choose a folder": "Velg en mappe"
 }

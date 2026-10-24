@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "กฎกันทรัพยากรนี้ไว้จากโมเดล",
   "did not answer within {seconds} s": "ไม่ตอบกลับภายใน {seconds} วินาที",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "เซิร์ฟเวอร์นี้อ่านทรัพยากร MCP ไม่ได้ นำออกจากข้อความ หรืออัปเดตเซิร์ฟเวอร์",
-  "Sent again as it was read.": "ส่งอีกครั้งตามที่อ่านไว้"
+  "Sent again as it was read.": "ส่งอีกครั้งตามที่อ่านไว้",
+  "No folder": "ไม่มีโฟลเดอร์",
+  "Open folder…": "เปิดโฟลเดอร์…",
+  "What should we work on?": "เราจะทำอะไรกันดี?",
+  "New chat without a folder": "แชตใหม่โดยไม่มีโฟลเดอร์",
+  "Couldn’t open these chats.": "ไม่สามารถเปิดแชตเหล่านี้ได้",
+  "This chat gets a folder of its own when you send its first message.": "แชตนี้จะมีโฟลเดอร์ของตัวเองเมื่อคุณส่งข้อความแรก",
+  "Folder for new chat: {name}": "โฟลเดอร์ของแชตใหม่: {name}",
+  "Chat folder: {name}": "โฟลเดอร์ของแชต: {name}",
+  "Choose a folder": "เลือกโฟลเดอร์"
 }
