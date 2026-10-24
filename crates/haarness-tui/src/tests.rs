@@ -6528,27 +6528,27 @@ async fn child_rows_count_one_call_and_end_without_calls() {
     app.reduce(update("running", 3), &client).await.unwrap();
     app.language = crate::locale::Language::Russian;
     assert!(
-        sidebar(&app).contains("Инструменты: 3"),
+        sidebar(&app).contains("инструменты: 3"),
         "{}",
         sidebar(&app)
     );
-    assert!(tasks(&mut app).contains("Вызовы инструментов: 3"));
+    assert!(tasks(&mut app).contains("вызовы инструментов: 3"));
     app.language = crate::locale::Language::Polish;
-    assert!(sidebar(&app).contains("Narzędzia: 3"), "{}", sidebar(&app));
+    assert!(sidebar(&app).contains("narzędzia: 3"), "{}", sidebar(&app));
     // Arabic and Bosnian nouns change past ten and at 21: a label too.
     app.language = crate::locale::Language::Arabic;
     assert!(sidebar(&app).contains("الأدوات: 3"), "{}", sidebar(&app));
     app.language = crate::locale::Language::Bosnian;
-    assert!(sidebar(&app).contains("Alati: 3"), "{}", sidebar(&app));
+    assert!(sidebar(&app).contains("alati: 3"), "{}", sidebar(&app));
     // One reads the same way as many.
     app.reduce(update("running", 1), &client).await.unwrap();
     app.language = crate::locale::Language::Russian;
     assert!(
-        sidebar(&app).contains("Инструменты: 1"),
+        sidebar(&app).contains("инструменты: 1"),
         "{}",
         sidebar(&app)
     );
-    assert!(tasks(&mut app).contains("Вызовы инструментов: 1"));
+    assert!(tasks(&mut app).contains("вызовы инструментов: 1"));
     app.language = crate::locale::Language::English;
 
     for (state, row) in [
