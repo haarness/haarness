@@ -3,8 +3,9 @@
 
 1. read: a line that never ends (a 64 MiB one-line bundle) shows its first 2000 characters, the
    server holding no copy of the file; a read past 50 KB stops there and names the offset to go
-   on from, with nothing copied to the tool output folder; Latin-1 text reads with U+FFFD; a pipe
-   is refused at once instead of waited on.
+   on from, with nothing copied to the tool output folder, and a read without a limit says when
+   more lines follow; Latin-1 text reads with U+FFFD and a note, and edit refuses it plainly; a
+   pipe is refused at once instead of waited on.
 2. grep: a long matching line shows its head; the 10,000-line limit holds across files and says
    so.
 3. ~: `write ~/Desktop/notes.md` writes in the home folder (an `external_directory` rule written
@@ -138,6 +139,10 @@ def case_read_budget():
     output = tool(files, 'read', {'path': 'long.txt', 'offset': count, 'limit': 1})
     assert lines[count] in output and lines[count - 1] not in output, output[-400:]
     passed(f'a read stops at 50 KB after {count} lines and goes on from offset={count}')
+    (files / 'short.txt').write_text('\n'.join(str(index) for index in range(2500)))
+    output = tool(files, 'read', {'path': 'short.txt'})
+    assert '1999\n\n(more lines follow; read on with offset=2000)' in output, output[-300:]
+    passed('a read without a limit says when its 2000 lines end before the file does')
 
 
 def case_read_text():
