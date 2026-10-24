@@ -460,6 +460,71 @@ test("quitting in the middle of an event stream's read ends that stream after th
   }
 });
 
+test("quitting with no window open ends the event streams before the app exits", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("windowless");
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const thread = await chat(client, "Windowless chat");
+    await launch();
+    let stderr = "";
+    app.process().stderr?.on("data", (chunk) => (stderr += chunk));
+    const exited = new Promise<number | null>((resolve) => app.process().once("exit", (code) => resolve(code)));
+    await addServer("Windowless server", remote.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: thread.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Windowless chat start");
+    // Event stream sockets are told apart by the events they carry, and say
+    // when they are read first and when something ends them.
+    await app.evaluate(() => {
+      const net = process.getBuiltinModule("node:net");
+      const socket = net.Socket.prototype as unknown as {
+        push(chunk: unknown, ...rest: unknown[]): boolean;
+        destroy(...args: unknown[]): unknown;
+      };
+      const push = socket.push;
+      const destroy = socket.destroy;
+      const streams = new WeakMap<object, number>();
+      let next = 0;
+      socket.push = function (chunk, ...rest) {
+        if (!streams.has(this) && Buffer.isBuffer(chunk) && /^(?:id|data): /m.test(chunk.toString("latin1"))) {
+          streams.set(this, ++next);
+          process.stderr.write(`event stream ${next} read\n`);
+        }
+        return push.call(this, chunk, ...rest);
+      };
+      socket.destroy = function (...args) {
+        if (streams.has(this)) process.stderr.write(`event stream ${streams.get(this)} ended\n`);
+        return destroy.apply(this, args);
+      };
+      process.on("exit", () => void process.stderr.write("process exits\n"));
+    });
+    // A reply reaches the window's stream and the one behind notifications.
+    await turn(client, thread, "read by both streams");
+    await expect.poll(() => stderr.match(/event stream \d+ read/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // The window closes (on macOS the app stays, following the project's
+    // notifications) and, once the window's size is saved, the app quits
+    // with none open: before-quit and will-quit come in the same call.
+    await app
+      .evaluate(({ app: electronApp, BrowserWindow }) => {
+        for (const win of BrowserWindow.getAllWindows()) win.close();
+        const quit = () =>
+          BrowserWindow.getAllWindows().length ? setTimeout(quit, 50) : setTimeout(() => electronApp.quit(), 1000);
+        quit();
+      })
+      .catch(() => {});
+    expect(await exited).toBe(0);
+    // Every stream ended before the process exits, not during its teardown.
+    expect(stderr).toContain("process exits");
+    const before = stderr.slice(0, stderr.indexOf("process exits"));
+    const read = [...before.matchAll(/event stream (\d+) read/g)].map((match) => match[1]);
+    const ended = new Set([...before.matchAll(/event stream (\d+) ended/g)].map((match) => match[1]));
+    expect(read.filter((id) => !ended.has(id))).toEqual([]);
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+  }
+});
+
 /** An Anthropic-format endpoint that lists its models in four pages of
  * 2.2 s each (inside the server's 3 s for a page and 10 s for the list), and
  * answers a message with "late hello". */

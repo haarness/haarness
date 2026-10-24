@@ -130,15 +130,22 @@ app.on("will-quit", () => {
 });
 // The last saves (open browser tabs, the window size) start as the app quits;
 // let them reach the disk before the process exits, for two seconds at most.
+// The streams end in a setImmediate of before-quit's, which with no window
+// open comes in the same call as this: wait for that turn first, so they end
+// and what their ending saves is written too.
 let saved = false;
 app.on("will-quit", (event) => {
   if (saved) return;
   saved = true;
   event.preventDefault();
-  void Promise.race([
-    written(),
-    new Promise((resolve) => setTimeout(resolve, 2000)),
-  ]).then(() => app.exit());
+  void new Promise((resolve) => setImmediate(resolve))
+    .then(() =>
+      Promise.race([
+        written(),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]),
+    )
+    .then(() => app.exit());
 });
 app.on("quit", () => {
   quitting = true;
