@@ -45,11 +45,11 @@ impl Fixture {
         for directory in [&fixture.workspace, &fixture.data, &fixture.home] {
             std::fs::create_dir_all(directory).expect("create held-session fixture directory");
         }
-        // A write asks, so a turn that writes waits for a person.
+        // In Review a write asks, so a turn that writes waits for a person.
         std::fs::create_dir_all(fixture.workspace.join(".haarness")).unwrap();
         std::fs::write(
             fixture.workspace.join(".haarness/config.toml"),
-            "[defaults]\nprovider = \"echo\"\nmodel = \"echo-1\"\n[permissions]\nwrite = \"ask\"\n",
+            "[defaults]\nprovider = \"echo\"\nmodel = \"echo-1\"\napproval_mode = \"review\"\n[permissions]\nwrite = \"ask\"\n",
         )
         .unwrap();
         std::fs::create_dir_all(fixture.workspace.join(".haarness/workflows")).unwrap();
