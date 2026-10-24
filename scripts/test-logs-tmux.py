@@ -102,7 +102,7 @@ try:
         # Shapes a hook or a tool prints: a DB_PASS-style name, a proxy's user and password without a
         # scheme, and a credential parameter of a path.
         "2026-10-21T08:00:01.000Z 4242 serve  WARN haarness_server::hooks: hook command failed stderr=DB_PASS=SECRETDB "
-        "curl -x user:SECRETPROXY@proxy.fixture.test:3128 GET /cb?code=SECRETCODE&state=s\n"
+        "curl -x user:SECRETPROXY@proxy.fixture.test:3128 GET /cb?code=SECRETCODE4f2a91c07be3&state=s\n"
     )
     command = shlex.join([
         "env", f"PATH={tools}:/usr/bin:/bin:/usr/sbin:/sbin", f"HOME={server.home}",

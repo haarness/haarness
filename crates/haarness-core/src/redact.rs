@@ -108,6 +108,36 @@ fn pass_name(name: &str) -> bool {
         || account_pass(last)
 }
 
+/// Whether a [`pass_name`] names an account's password outright: a passcode
+/// or passphrase, or a `pass`, `pw` or `pwd` of an account (`DB_PASS`,
+/// `MYSQL_ROOT_PWD`, `storepass`). Only those hide a number: `tests_pass=12`
+/// and `num_pass: 7` count tests.
+fn account_password_name(name: &str) -> bool {
+    let words = words(name);
+    let Some(last) = words.last() else {
+        return false;
+    };
+    passcode(&words)
+        || account_pass(last)
+        || (words.len() > 1
+            && matches!(last.as_str(), "pass" | "pw" | "pwd")
+            && ACCOUNTS
+                .iter()
+                .any(|account| words[words.len() - 2].ends_with(account)))
+}
+
+/// Whether a [`pass_name`] flag switches something rather than takes a
+/// password (`--skip-pass`, `--ask-pass`, `--no-pass`): what follows it is
+/// the next argument.
+fn switch_name(name: &str) -> bool {
+    let words = words(name);
+    words.len() > 1
+        && [
+            "skip", "no", "ask", "allow", "require", "force", "check", "test", "tests", "lint",
+        ]
+        .contains(&words[0].as_str())
+}
+
 /// The words of a name, lower case: `X-Api-Key`, `api_key` and `apiKey` are
 /// all `api`, `key`.
 fn words(name: &str) -> Vec<String> {
@@ -134,10 +164,32 @@ fn words(name: &str) -> Vec<String> {
     words
 }
 
+/// Words that say what a glued key opens or who holds it (`apikeys`,
+/// `sshkeys`).
+const HOLDERS: [&str; 17] = [
+    "api",
+    "auth",
+    "app",
+    "access",
+    "private",
+    "priv",
+    "secret",
+    "session",
+    "master",
+    "encryption",
+    "signing",
+    "subscription",
+    "license",
+    "client",
+    "shared",
+    "account",
+    "ssh",
+];
+
 /// Whether a URL query or fragment parameter of this name, holding `value`,
 /// carries a credential: any [`secret_name`], and also a whole `code` (an
-/// OAuth code, a function key), a whole or last word `jwt`, `bearer`,
-/// `ticket`, `otp` or `totp` (`x-otp`), an `auth`, `access` or `mfa` code,
+/// OAuth code, a function key) or `ticket`, a whole or last word `jwt`,
+/// `bearer`, `otp` or `totp` (`x-otp`), an `auth`, `access` or `mfa` code,
 /// and a name holding `hmac` or `passcode`.
 ///
 /// Parameter names glue their words together more often than settings do,
@@ -148,31 +200,16 @@ fn words(name: &str) -> Vec<String> {
 /// (`maxtokens=4096`). Any other glued `pass` stays readable (`bypass`,
 /// `compass`, `trespass`), and so do `keyword` and `show_pw_hint`.
 fn secret_parameter(name: &str, value: &str) -> bool {
-    const HOLDERS: [&str; 17] = [
-        "api",
-        "auth",
-        "app",
-        "access",
-        "private",
-        "priv",
-        "secret",
-        "session",
-        "master",
-        "encryption",
-        "signing",
-        "subscription",
-        "license",
-        "client",
-        "shared",
-        "account",
-        "ssh",
-    ];
     let words = words(name);
     let joined = words.concat();
     let last = words.last().map_or("", String::as_str);
+    // A working directory, not a password: `?pwd=/Users/me/proj`.
+    if last.ends_with("pwd") && value.starts_with(['/', '~']) {
+        return false;
+    }
     secret_name(name)
         || ["code", "jwt", "ticket", "otp", "totp"].contains(&joined.as_str())
-        || ["jwt", "bearer", "ticket", "otp", "totp"].contains(&last)
+        || ["jwt", "bearer", "otp", "totp"].contains(&last)
         || ["authcode", "accesscode", "mfacode"]
             .iter()
             .any(|end| joined.ends_with(end))
@@ -190,13 +227,14 @@ fn secret_parameter(name: &str, value: &str) -> bool {
 }
 
 /// Whether a parameter value is a count rather than a credential: a number,
-/// or `null`, `undefined`, `none`, `auto` or `inf` written in its place.
+/// or `null`, `undefined`, `none`, `auto` or `inf` written in its place, or
+/// a switch's `true` or `false` (`showtokens=true`).
 fn token_count(value: &str) -> bool {
     let number = value.strip_prefix('-').unwrap_or(value);
     let (whole, fraction) = number.split_once('.').unwrap_or((number, "0"));
     let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
     (digits(whole) && digits(fraction))
-        || ["null", "undefined", "none", "auto", "inf"]
+        || ["null", "undefined", "none", "auto", "inf", "true", "false"]
             .iter()
             .any(|word| value.eq_ignore_ascii_case(word))
 }
@@ -616,7 +654,12 @@ pub fn text(text: &str) -> String {
     if pairs.is_match(&text) {
         text = pairs
             .replace_all(&text, |found: &regex::Captures<'_>| {
-                if pass_name(&found[1]) && hides(&found[3]) {
+                let value = &found[3];
+                let count = value.bytes().all(|byte| byte.is_ascii_digit());
+                if pass_name(&found[1])
+                    && hides(value)
+                    && (!count || account_password_name(&found[1]))
+                {
                     format!("{}{}[redacted]", &found[1], &found[2])
                 } else {
                     found[0].to_owned()
@@ -627,7 +670,7 @@ pub fn text(text: &str) -> String {
     if flags.is_match(&text) {
         text = flags
             .replace_all(&text, |found: &regex::Captures<'_>| {
-                if pass_name(&found[3]) && hides(&found[4]) {
+                if pass_name(&found[3]) && !switch_name(&found[3]) && hides(&found[4]) {
                     format!("{}{} [redacted]", &found[1], &found[2])
                 } else {
                     found[0].to_owned()
@@ -643,7 +686,7 @@ pub fn text(text: &str) -> String {
                     .map(|(name, _)| name.into_owned())
                     .unwrap_or_default();
                 let value = &found[3];
-                if value != "[redacted]" && value != REDACTED && secret_parameter(&name, value) {
+                if hides(value) && path_parameter(&name, value) {
                     format!("{}{}=[redacted]", &found[1], &found[2])
                 } else {
                     found[0].to_owned()
@@ -655,12 +698,39 @@ pub fn text(text: &str) -> String {
 }
 
 /// Whether a value found under a credential's name in free text is hidden:
-/// anything but what is hidden already and a flag's `true` or `false`.
+/// anything but what is hidden already (`[redacted]@host` included), a
+/// flag's `true` or `false`, and a shell's `$VAR` or `$(…)`, which the text
+/// names rather than holds.
 fn hides(value: &str) -> bool {
     let unquoted = value.trim_matches(['"', '\'']);
-    !(value == "[redacted]"
+    !(value.starts_with("[redacted]")
+        || value.starts_with(REDACTED)
+        || unquoted.starts_with('$')
         || unquoted.eq_ignore_ascii_case("true")
         || unquoted.eq_ignore_ascii_case("false"))
+}
+
+/// Whether a parameter of a path written without a scheme holds a
+/// credential, as [`secret_parameter`] says, except where a path's own
+/// names often mean something else: a short whole `code` (an OAuth code
+/// is long; `?code=US` and `?code=SUMMER20` are not one) and a key that
+/// only sorts, caches or indexes (`sort_key`, `cache_key`, `primary_key`).
+fn path_parameter(name: &str, value: &str) -> bool {
+    let words = words(name);
+    let joined = words.concat();
+    if joined == "code" && value.len() < 16 {
+        return false;
+    }
+    if words.len() > 1
+        && words.last().is_some_and(|last| last == "key")
+        && !secret_name(&words[..words.len() - 1].join("_"))
+        && !HOLDERS
+            .iter()
+            .any(|holder| words[words.len() - 2] == *holder)
+    {
+        return false;
+    }
+    secret_parameter(name, value)
 }
 
 /// `text` with each URL's user name and password replaced by `[redacted]`:
@@ -1319,9 +1389,18 @@ mod tests {
             "--db-pass true",
             "npm run pass:all",
             "pwsh -NoProfile -Command Get-Date",
+            // Test counts and switches named after passing.
+            "tests_pass=12 tests_fail=0 num_pass: 7, num_fail: 1 lint_pass: true",
+            "--skip-pass build --ask-pass playbook.yml",
+            "DB_PASS=[redacted]@h DB_PASS=$DB_PASSWORD",
         ] {
             assert_eq!(text(kept), kept);
         }
+        // An account's password is hidden when it is a number too.
+        assert_eq!(
+            text("DB_PASS=123456 MYSQL_ROOT_PWD=4242 --db-pass 99"),
+            "DB_PASS=[redacted] MYSQL_ROOT_PWD=[redacted] --db-pass [redacted]"
+        );
         assert_eq!(
             args(&["--passcode", "1234", "PASS_CODE=5678"].map(str::to_owned)),
             ["--passcode", REDACTED, "PASS_CODE=<redacted>"]
@@ -1429,8 +1508,12 @@ mod tests {
     fn free_text_hides_credential_parameters_of_a_path_without_a_scheme() {
         for (input, output) in [
             (
-                "GET /cb?code=PRIVATE&state=s failed: 400",
+                "GET /cb?code=PRIVATE0123456789abc&state=s failed: 400",
                 "GET /cb?code=[redacted]&state=s failed: 400",
+            ),
+            (
+                "/x?api_key=PRIVATE&key=PRIVATE",
+                "/x?api_key=[redacted]&key=[redacted]",
             ),
             (
                 "GET /p?n=1&pwd=PRIVATE returned 401",
@@ -1451,6 +1534,13 @@ mod tests {
             "/x?keyword=k&bypass=1&compass=2#install",
             "a=1&b=2&state=s",
             "/x?code=&next=1",
+            // A short code names a country or an offer, a switch is a bit, a
+            // shell names a value, and these keys sort, cache or index.
+            "GET /api/countries?code=US&name=United /products?code=SUMMER20&lang=en",
+            "?pass=false&key=true&passcode=TRUE",
+            "GET /v1/items?sort_key=name&cache_key=abc&primary_key=id",
+            "cd /tmp&&pwd=$(pwd) echo",
+            "GET /v1/files?pwd=/Users/me/proj 200",
         ] {
             assert_eq!(text(kept), kept);
         }
@@ -1833,7 +1923,6 @@ mod tests {
             "sshkeys",
             "x-otp",
             "x-jwt",
-            "x-ticket",
             "x-bearer",
         ] {
             // A number under a glued `tokens` name counts them.
@@ -1861,7 +1950,8 @@ mod tests {
         // that only hold the letters.
         let kept = "https://h.fixture.test/?bypass=1&compass=2&trespass=3&surpass=4&passenger=5\
                     &pattern=a&show_pw_hint=5&keyword=k&monkeys=6&maxtokens=4096&prompttokens=null\
-                    &maxtokens=auto&tokenizer=bpe&sid=4&state=s";
+                    &maxtokens=auto&tokenizer=bpe&sid=4&state=s&showtokens=true\
+                    &support_ticket=JIRA-1&pwd=/Users/me/proj&oldpwd=~/src";
         assert!(matches!(url(kept), Cow::Borrowed(_)), "{}", url(kept));
         assert_eq!(
             url("https://h.fixture.test/?apitokens=4096x"),
