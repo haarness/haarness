@@ -27,27 +27,33 @@ const READ_MAX_BYTES: usize = super::TOOL_OUTPUT_MAX_BYTES;
 
 /// One line, without its `\n` or `\r\n`: its first `keep` bytes, and whether
 /// it went on past them.
-pub(super) struct Line {
-    pub(super) bytes: Vec<u8>,
+pub(super) struct Line<'a> {
+    pub(super) bytes: &'a [u8],
     pub(super) long: bool,
 }
 
 /// Splits text into lines exactly where `str::lines` does (at `\n`, a `\r`
-/// right before it dropped), keeping at most `keep` bytes of each.
+/// right before it dropped), keeping at most `keep` bytes of each, in one
+/// buffer every line reuses.
 pub(super) struct Lines<R> {
     reader: R,
     keep: usize,
+    buffer: Vec<u8>,
 }
 
 impl<R: BufRead> Lines<R> {
     pub(super) fn new(reader: R, keep: usize) -> Self {
-        Self { reader, keep }
+        Self {
+            reader,
+            keep,
+            buffer: Vec::new(),
+        }
     }
 
     /// The next line, `None` at the end. Stop ends it even inside a line
     /// that never ends.
-    pub(super) fn next_line(&mut self, cancel: &CancellationToken) -> CoreResult<Option<Line>> {
-        let mut bytes = Vec::new();
+    pub(super) fn next_line(&mut self, cancel: &CancellationToken) -> CoreResult<Option<Line<'_>>> {
+        self.buffer.clear();
         // The line's length and last byte before its `\n`, kept or not.
         let mut length = 0_usize;
         let mut last = None;
@@ -69,8 +75,8 @@ impl<R: BufRead> Lines<R> {
             if let Some(&byte) = part.last() {
                 last = Some(byte);
             }
-            let room = self.keep.saturating_sub(bytes.len());
-            bytes.extend_from_slice(&part[..part.len().min(room)]);
+            let room = self.keep.saturating_sub(self.buffer.len());
+            self.buffer.extend_from_slice(&part[..part.len().min(room)]);
             length += part.len();
             let used = part.len() + usize::from(end.is_some());
             self.reader.consume(used);
@@ -84,23 +90,23 @@ impl<R: BufRead> Lines<R> {
         }
         if ended && last == Some(b'\r') {
             length -= 1;
-            bytes.truncate(length);
+            self.buffer.truncate(length);
         }
         Ok(Some(Line {
-            long: length > bytes.len(),
-            bytes,
+            long: length > self.buffer.len(),
+            bytes: &self.buffer,
         }))
     }
 }
 
-impl Line {
+impl<'a> Line<'a> {
     /// The line as text: invalid UTF-8 as U+FFFD when `lossy`, else `None`.
     /// A line cut short keeps a partial character at its end out.
-    pub(super) fn text(&self, lossy: bool) -> Option<Cow<'_, str>> {
+    pub(super) fn text(&self, lossy: bool) -> Option<Cow<'a, str>> {
         if lossy {
-            return Some(String::from_utf8_lossy(&self.bytes));
+            return Some(String::from_utf8_lossy(self.bytes));
         }
-        match std::str::from_utf8(&self.bytes) {
+        match std::str::from_utf8(self.bytes) {
             Ok(text) => Some(Cow::Borrowed(text)),
             Err(error) if self.long && error.error_len().is_none() => Some(Cow::Borrowed(
                 std::str::from_utf8(&self.bytes[..error.valid_up_to()]).ok()?,
@@ -228,6 +234,38 @@ pub(super) async fn read_utf8(path: &Path, tool: &str) -> CoreResult<String> {
 /// Bytes of a line `grep` searches: a match further into a longer line is
 /// not found.
 const GREP_LINE_BYTES: usize = 1024 * 1024;
+/// Files up to this size `grep` reads whole, as before lines were read one
+/// at a time; larger ones it reads a line at a time.
+const GREP_WHOLE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// One file's matching lines as `grep` lists them.
+struct Matched<'a> {
+    regex: &'a regex::Regex,
+    path: &'a str,
+    /// Lines the files before this one already listed.
+    total: usize,
+}
+
+impl Matched<'_> {
+    /// Lists line `number` when it matches in its first
+    /// [`GREP_LINE_BYTES`], cut for showing (`long`: its bytes went on).
+    /// True when it matches but the limit is reached, so the search stops
+    /// only when there is more than the limit to show.
+    fn take(&self, number: usize, text: &str, long: bool, listed: &mut Vec<String>) -> bool {
+        let mut end = text.len().min(GREP_LINE_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if !self.regex.is_match(&text[..end]) {
+            return false;
+        }
+        if self.total + listed.len() == GREP_MAX_MATCHES {
+            return true;
+        }
+        listed.push(format!("{}:{number}:{}", self.path, shown(text, long)));
+        false
+    }
+}
 /// The most files one `grep` searches, and the most lines it returns.
 pub(super) const GREP_MAX_FILES: usize = 20_000;
 pub(super) const GREP_MAX_MATCHES: usize = 10_000;
@@ -300,35 +338,68 @@ pub(super) fn grep_walk(
             .unwrap_or(entry.path())
             .display()
             .to_string();
-        let Ok((reader, _)) = open_text(entry.path()) else {
-            continue;
-        };
-        let mut lines = Lines::new(reader, GREP_LINE_BYTES);
         let mut in_file = Vec::new();
-        let mut number = 0_usize;
-        let text_file = loop {
-            let line = match lines.next_line(cancel) {
-                Ok(Some(line)) => line,
-                Ok(None) => break true,
-                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
-                Err(_) => break false,
+        let total = found.matches.len();
+        // A file of ordinary size is read whole and checked as UTF-8 once;
+        // a larger one a line at a time, so memory stays bounded.
+        let whole = entry
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() <= GREP_WHOLE_FILE_BYTES);
+        let (text_file, passed) = if whole {
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
             };
-            number += 1;
-            let Some(text) = line.text(false) else {
-                break false;
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                continue;
             };
-            if regex.is_match(&text) {
-                in_file.push(format!("{shown_path}:{number}:{}", shown(&text, line.long)));
-                if found.matches.len() + in_file.len() == GREP_MAX_MATCHES {
-                    found.stopped = Some(GrepStop::Matches);
-                    break true;
+            let mut passed = false;
+            for (index, line) in text.lines().enumerate() {
+                if index % 4096 == 4095 && cancel.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let matched = Matched {
+                    regex,
+                    path: &shown_path,
+                    total,
+                };
+                if matched.take(index + 1, line, false, &mut in_file) {
+                    passed = true;
+                    break;
+                }
+            }
+            (true, passed)
+        } else {
+            let Ok((reader, _)) = open_text(entry.path()) else {
+                continue;
+            };
+            let mut lines = Lines::new(reader, GREP_LINE_BYTES);
+            let mut number = 0_usize;
+            loop {
+                let line = match lines.next_line(cancel) {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break (true, false),
+                    Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                    Err(_) => break (false, false),
+                };
+                number += 1;
+                let Some(text) = line.text(false) else {
+                    break (false, false);
+                };
+                let matched = Matched {
+                    regex,
+                    path: &shown_path,
+                    total,
+                };
+                if matched.take(number, &text, line.long, &mut in_file) {
+                    break (true, true);
                 }
             }
         };
         if text_file {
             found.matches.append(&mut in_file);
         }
-        if found.stopped.is_some() {
+        if passed {
+            found.stopped = Some(GrepStop::Matches);
             break;
         }
     }
@@ -370,7 +441,7 @@ mod tests {
         let mut lines = Lines::new(BufReader::with_capacity(3, text), keep);
         let mut found = Vec::new();
         while let Some(line) = lines.next_line(&cancel).unwrap() {
-            found.push((line.bytes, line.long));
+            found.push((line.bytes.to_vec(), line.long));
         }
         found
     }
@@ -393,6 +464,57 @@ mod tests {
             grep_walk(&regex, &root, &root, &secrets, &cancel),
             Err(CoreError::Cancelled)
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn grep_fixture(files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        for (name, body) in files {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        root
+    }
+
+    fn grep(root: &Path, pattern: &str) -> GrepFound {
+        let secrets = super::super::SecretFilter::new(root, ".", root, None);
+        let regex = regex::Regex::new(pattern).unwrap();
+        grep_walk(&regex, root, root, &secrets, &CancellationToken::new()).unwrap()
+    }
+
+    #[test]
+    fn grep_says_it_stopped_only_when_there_were_more_matches_than_its_limit() {
+        let six = "hit\n".repeat(6_000);
+        let four = "hit\n".repeat(4_000);
+        let root = grep_fixture(&[("a.txt", six.as_bytes()), ("b.txt", four.as_bytes())]);
+        let exact = grep(&root, "hit");
+        assert_eq!(exact.matches.len(), GREP_MAX_MATCHES);
+        assert_eq!(exact.stopped, None);
+        std::fs::write(root.join("c.txt"), "hit\n").unwrap();
+        let more = grep(&root, "hit");
+        assert_eq!(more.matches.len(), GREP_MAX_MATCHES);
+        assert_eq!(more.stopped, Some(GrepStop::Matches));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_large_file_is_searched_a_line_at_a_time_and_a_line_in_its_first_mib() {
+        // Over the size read whole: line numbers and cut lines as for any file.
+        let mut large = "filler line\n".repeat(800_000).into_bytes();
+        large.extend_from_slice(format!("needle{}\n", "q".repeat(3_000)).as_bytes());
+        // A match past a line's first MiB is not found, in a file of any size.
+        let far = format!("{}needle\n", "p".repeat(GREP_LINE_BYTES + 10));
+        let root = grep_fixture(&[("large.log", &large), ("far.js", far.as_bytes())]);
+        assert!(std::fs::metadata(root.join("large.log")).unwrap().len() > GREP_WHOLE_FILE_BYTES);
+        let found = grep(&root, "needle");
+        assert_eq!(
+            found.matches,
+            vec![format!(
+                "large.log:800001:needle{}{LINE_CUT}",
+                "q".repeat(LINE_CHARS - 6)
+            )]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -460,12 +582,12 @@ mod tests {
     #[test]
     fn strict_text_keeps_a_cut_character_out_but_refuses_bad_bytes() {
         let cut = Line {
-            bytes: "aé".as_bytes()[..2].to_vec(),
+            bytes: &"aé".as_bytes()[..2],
             long: true,
         };
         assert_eq!(cut.text(false).unwrap(), "a");
         let bad = Line {
-            bytes: vec![b'a', 0xff, b'b'],
+            bytes: &[b'a', 0xff, b'b'],
             long: false,
         };
         assert!(bad.text(false).is_none());
