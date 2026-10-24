@@ -116,6 +116,12 @@ impl ModelProvider for Children {
                     finish("tool_use"),
                 ],
                 "answer beside a call" => vec![finish("end_turn")],
+                // The answer, then more reasoning in the same last step.
+                "answer then think" => vec![
+                    ProviderEvent::TextDelta("the answer".into()),
+                    ProviderEvent::ReasoningDelta("afterthought".into()),
+                    finish("stop"),
+                ],
                 "block" => vec![
                     ProviderEvent::TextDelta("partial".into()),
                     finish("refusal"),
@@ -272,6 +278,24 @@ async fn an_answer_written_beside_a_last_call_reaches_the_parent_with_what_happe
     );
     assert!(
         !output.contains("ended without writing a reply"),
+        "{output}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_followed_by_reasoning_in_the_last_step_is_returned_unchanged() {
+    let (directory, runtime) = runtime();
+    let thread = echo_thread(&runtime).await;
+    let (turn, items) = delegate(
+        &runtime,
+        thread.id,
+        &serde_json::json!({"prompt":"answer then think"}),
+    )
+    .await;
+    let (output, _) = task_result(&items, turn);
+    assert!(
+        output.contains("<task_result>\nthe answer\n</task_result>"),
         "{output}"
     );
     std::fs::remove_dir_all(directory).unwrap();
